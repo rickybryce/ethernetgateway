@@ -20,6 +20,9 @@ up.
 Run IMP8, then hit T for terminal mode on the Altairduino.  
 Example:  ATDT <host>:2323
 For gateway options:  ATDT xmodem-gateway
+Note:  For the Altairduino, I simply connected my USB to RS232 adapter to the 9 pin RS232 connector.
+
+For other machines, you may need to use a NULL modem adapter (Cross RX and TX).
 
 
 This should also work with the RC2014 / SC126, etc as well.
