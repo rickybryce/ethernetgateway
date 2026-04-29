@@ -163,6 +163,21 @@ enum InputMode {
     Password,
 }
 
+/// Outcome of `TelnetSession::save_received_file`.  Used by every
+/// batch-upload save loop (ZMODEM autostart, Kermit server, ZMODEM /
+/// Kermit batch upload) so each site can map the result to its own
+/// "skipped: already exists" / "skipped: write failed" wording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveError {
+    /// A file with the target name already exists.  Caller decides
+    /// whether that's a hard error (interactive single-file upload)
+    /// or a per-file skip (batch / autostart / server).
+    AlreadyExists,
+    /// I/O error other than `AlreadyExists` — disk full, permission
+    /// denied, mid-write failure.  Best treated as "skip this file."
+    WriteFailed,
+}
+
 // ─── Menu ───────────────────────────────────────────────────
 #[derive(Clone, Debug, PartialEq)]
 enum Menu {
@@ -2368,7 +2383,7 @@ impl TelnetSession {
 
         self.ensure_transfer_dir().await?;
         if Self::is_disk_full() {
-            self.show_error("Disk is full. Cannot accept upload.")
+            self.show_error("Disk space is low. Uploads disabled.")
                 .await?;
             return Ok(());
         }
@@ -2430,21 +2445,22 @@ impl TelnetSession {
                 continue;
             }
             let filepath = target_dir.join(&rx.filename);
-            if filepath.exists() {
-                skipped.push((rx.filename.clone(), "already exists"));
-                continue;
-            }
-            match std::fs::write(&filepath, &rx.data) {
-                Ok(()) => {
-                    let meta = crate::xmodem::YmodemReceiveMeta {
-                        size: None,
-                        modtime: rx.modtime,
-                        mode: rx.mode,
-                    };
-                    Self::apply_ymodem_meta(&filepath, Some(&meta));
-                    saved.push((rx.filename.clone(), rx.data.len()));
+            // Atomic create-only open — closes the TOCTOU window
+            // between an `exists()` check and the write that
+            // `std::fs::write` would leave open, and async lets the
+            // 8 MB cap not block the tokio executor.
+            let meta = (rx.modtime.is_some() || rx.mode.is_some())
+                .then_some(crate::xmodem::YmodemReceiveMeta {
+                    size: None,
+                    modtime: rx.modtime,
+                    mode: rx.mode,
+                });
+            match Self::save_received_file(&filepath, &rx.data, meta.as_ref()).await {
+                Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
+                Err(SaveError::AlreadyExists) => {
+                    skipped.push((rx.filename.clone(), "already exists"));
                 }
-                Err(_) => {
+                Err(SaveError::WriteFailed) => {
                     skipped.push((rx.filename.clone(), "write failed"));
                 }
             }
@@ -3444,6 +3460,48 @@ impl TelnetSession {
 
     async fn ensure_transfer_dir(&mut self) -> Result<(), std::io::Error> {
         tokio::fs::create_dir_all(self.transfer_path()).await
+    }
+
+    /// Atomic write of a freshly received file to the transfer dir,
+    /// shared by every batch-receive save site (ZMODEM autostart,
+    /// ZMODEM/Kermit menu-initiated upload's per-batch-file path,
+    /// Kermit server-mode dispatch).  `create_new` closes the TOCTOU
+    /// window between an `exists()` check and the actual write that a
+    /// plain `std::fs::write` would leave open; `tokio::fs` keeps the
+    /// 8 MB cap from blocking the executor.
+    ///
+    /// Returns `SaveError::AlreadyExists` if a file with the same name
+    /// is already present (caller decides whether that's "skip" or a
+    /// fatal upload error), or `SaveError::WriteFailed` for any other
+    /// I/O failure.
+    async fn save_received_file(
+        path: &std::path::Path,
+        data: &[u8],
+        meta: Option<&crate::xmodem::YmodemReceiveMeta>,
+    ) -> Result<(), SaveError> {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                if file.write_all(data).await.is_err() {
+                    return Err(SaveError::WriteFailed);
+                }
+                if file.flush().await.is_err() {
+                    return Err(SaveError::WriteFailed);
+                }
+                drop(file);
+                Self::apply_ymodem_meta(path, meta);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(SaveError::AlreadyExists)
+            }
+            Err(_) => Err(SaveError::WriteFailed),
+        }
     }
 
     /// Apply YMODEM block-0 metadata to a freshly saved file.  Both
@@ -4641,21 +4699,19 @@ impl TelnetSession {
                 continue;
             }
             let filepath = target_dir.join(&rx.filename);
-            if filepath.exists() {
-                skipped.push((rx.filename.clone(), "already exists"));
-                continue;
-            }
-            match std::fs::write(&filepath, &rx.data) {
+            let meta = crate::xmodem::YmodemReceiveMeta {
+                size: rx.declared_size,
+                modtime: rx.modtime,
+                mode: rx.mode,
+            };
+            match Self::save_received_file(&filepath, &rx.data, Some(&meta)).await {
                 Ok(()) => {
-                    let meta = crate::xmodem::YmodemReceiveMeta {
-                        size: rx.declared_size,
-                        modtime: rx.modtime,
-                        mode: rx.mode,
-                    };
-                    Self::apply_ymodem_meta(&filepath, Some(&meta));
                     saved.push((rx.filename.clone(), rx.data.len()));
                 }
-                Err(_) => {
+                Err(SaveError::AlreadyExists) => {
+                    skipped.push((rx.filename.clone(), "already exists"));
+                }
+                Err(SaveError::WriteFailed) => {
                     skipped.push((rx.filename.clone(), "write failed"));
                 }
             }
@@ -15149,6 +15205,75 @@ mod tests {
             "received unexpected WONT ECHO reply (Q-method violation), out={:?}",
             out
         );
+    }
+
+    // ─── save_received_file ───────────────────────────────────
+
+    /// Fresh path → write succeeds, file contains the data, meta
+    /// (when supplied) gets applied.  Smoke test of the happy path.
+    #[tokio::test]
+    async fn test_save_received_file_fresh_path() {
+        let tmp = std::env::temp_dir()
+            .join(format!("save_fresh_{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let result = TelnetSession::save_received_file(&tmp, b"hello", None).await;
+        assert!(result.is_ok(), "fresh path should save");
+        let read_back = std::fs::read(&tmp).unwrap();
+        assert_eq!(read_back, b"hello");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Existing path → AlreadyExists (TOCTOU-tight: even between the
+    /// caller's intent to save and our `create_new` call, no write
+    /// happens to the existing file).  Locks in the create-new
+    /// guarantee that motivated lifting this helper out of the
+    /// per-protocol save loops.
+    #[tokio::test]
+    async fn test_save_received_file_already_exists_is_atomic() {
+        let tmp = std::env::temp_dir()
+            .join(format!("save_exists_{}", std::process::id()));
+        std::fs::write(&tmp, b"original").unwrap();
+        let result =
+            TelnetSession::save_received_file(&tmp, b"NEW DATA", None).await;
+        assert_eq!(
+            result.unwrap_err(),
+            SaveError::AlreadyExists,
+            "must reject pre-existing file with AlreadyExists",
+        );
+        let read_back = std::fs::read(&tmp).unwrap();
+        assert_eq!(
+            read_back, b"original",
+            "existing file's bytes must not be touched",
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Meta is applied iff supplied; otherwise the saved file keeps
+    /// the OS-default mtime / mode.  Confirms the helper plumbs meta
+    /// through to apply_ymodem_meta correctly.
+    #[tokio::test]
+    async fn test_save_received_file_applies_meta() {
+        let tmp = std::env::temp_dir()
+            .join(format!("save_meta_{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let target_secs: u64 = 1_400_000_000; // 2014-05-13
+        let meta = crate::xmodem::YmodemReceiveMeta {
+            size: None,
+            modtime: Some(target_secs),
+            mode: None,
+        };
+        TelnetSession::save_received_file(&tmp, b"x", Some(&meta))
+            .await
+            .unwrap();
+        let actual = std::fs::metadata(&tmp)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(actual, target_secs, "save_received_file must apply meta");
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ─── YMODEM block-0 metadata application ─────────────────
