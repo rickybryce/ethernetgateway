@@ -1043,6 +1043,14 @@ where
 /// the time the contents of the file were last changed measured in
 /// seconds from Jan 1 1970 UTC").  All metadata fields after filename
 /// are optional — minimal senders may omit them.
+///
+/// `modtime == 0` and `mode == 0` are treated as "no info" rather
+/// than literal values: lrzsz, our own sender, and most other ZMODEM
+/// implementations write `0` for either field when they don't have a
+/// real value to send (the spec doesn't reserve a sentinel, but `0`
+/// is the de-facto convention — epoch and "no permissions" aren't
+/// useful values for the receiver to apply, and applying mode=0
+/// would actively make the saved file unreadable).
 fn parse_zfile_info(data: &[u8]) -> Result<ZfileInfo, String> {
     let nul = data
         .iter()
@@ -1059,8 +1067,14 @@ fn parse_zfile_info(data: &[u8]) -> Result<ZfileInfo, String> {
         .filter(|s| !s.is_empty())
         .filter_map(|s| std::str::from_utf8(s).ok());
     let length = tokens.next().and_then(|s| s.parse::<u64>().ok());
-    let modtime = tokens.next().and_then(|s| u64::from_str_radix(s, 8).ok());
-    let mode = tokens.next().and_then(|s| u32::from_str_radix(s, 8).ok());
+    let modtime = tokens
+        .next()
+        .and_then(|s| u64::from_str_radix(s, 8).ok())
+        .filter(|&v| v != 0);
+    let mode = tokens
+        .next()
+        .and_then(|s| u32::from_str_radix(s, 8).ok())
+        .filter(|&v| v != 0);
     Ok(ZfileInfo {
         filename,
         length,
@@ -1925,6 +1939,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_zfile_zero_modtime_and_mode_treated_as_no_info() {
+        // Our own sender, lrzsz, and most other ZMODEM implementations
+        // write "0" when they don't have a real mtime / mode to send
+        // (the spec doesn't reserve a sentinel, but 0 is de-facto).
+        // The parser must filter those out so apply_ymodem_meta
+        // doesn't receive epoch / mode=0 and clobber the saved file's
+        // metadata.
+        let blob = b"sample.bin\x00100 0 0 0 0 100\x00";
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.length, Some(100));
+        assert_eq!(info.modtime, None, "modtime=0 should be filtered to None");
+        assert_eq!(info.mode, None, "mode=0 should be filtered to None");
+    }
+
+    #[test]
+    fn test_parse_zfile_non_octal_digit_rejected() {
+        // Spec calls modtime/mode octal — a sender that writes a
+        // decimal "9" is malformed.  Parser should return None
+        // rather than silently treat it as some valid value.
+        let blob = b"x\x00100 9 9 0 0 100\x00";
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.length, Some(100));
+        assert_eq!(info.modtime, None, "non-octal '9' must not parse");
+        assert_eq!(info.mode, None, "non-octal '9' must not parse");
+    }
+
+    #[test]
     fn test_parse_zfile_missing_nul() {
         let blob = b"nonul";
         assert!(parse_zfile_info(blob).is_err());
@@ -1966,6 +2007,25 @@ mod tests {
         let got = zmodem_round_trip(original, "hello.txt").await;
         assert_eq!(got.filename, "hello.txt");
         assert_eq!(got.data, original);
+    }
+
+    #[tokio::test]
+    async fn test_zmodem_round_trip_modtime_mode_default_to_none() {
+        // Our own zmodem_send writes "0 0" for modtime / mode in the
+        // ZFILE info string (no real value to transmit).  Receiver
+        // must filter those zeros to None so apply_ymodem_meta in
+        // telnet.rs doesn't clobber the saved file with epoch mtime /
+        // mode=0 (no permissions).  Regression guard for the parse_
+        // zfile_info "0 = no info" filter.
+        let got = zmodem_round_trip(b"payload", "default_meta.bin").await;
+        assert_eq!(
+            got.modtime, None,
+            "sender writes 0 modtime → receiver must surface None"
+        );
+        assert_eq!(
+            got.mode, None,
+            "sender writes 0 mode → receiver must surface None"
+        );
     }
 
     #[tokio::test]
