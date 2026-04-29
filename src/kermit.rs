@@ -5885,10 +5885,12 @@ mod tests {
         let dir = resume_scratch_dir("tooold");
         let path = dir.join("stale.bin");
         std::fs::write(&path, b"stale partial").unwrap();
-        // Set mtime to 2 hours ago.
+        // Set mtime to 2 hours ago.  Open with write access — Windows'
+        // set_modified requires FILE_WRITE_ATTRIBUTES, which a read-
+        // only File::open doesn't grant.
         let two_hours_ago = std::time::SystemTime::now()
             - std::time::Duration::from_secs(2 * 3600);
-        let f = std::fs::File::open(&path).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_modified(two_hours_ago).unwrap();
         drop(f);
         let off = compute_resume_offset("stale.bin", dir.to_str().unwrap(), 1);
@@ -5905,9 +5907,10 @@ mod tests {
         let path = dir.join("recent.bin");
         std::fs::write(&path, b"recent partial").unwrap();
         // Backdate to 30 minutes ago, max_age_hours = 1 → eligible.
+        // See "tooold" test for why OpenOptions over File::open.
         let thirty_min_ago = std::time::SystemTime::now()
             - std::time::Duration::from_secs(1800);
-        let f = std::fs::File::open(&path).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_modified(thirty_min_ago).unwrap();
         drop(f);
         let off = compute_resume_offset("recent.bin", dir.to_str().unwrap(), 1);
@@ -5920,12 +5923,13 @@ mod tests {
         // Clock-skew defense: a file timestamped in the future could
         // wrap around our age math (now - mtime is Err) and silently
         // become "always eligible".  Treat as ineligible instead.
+        // See "tooold" test for why OpenOptions over File::open.
         let dir = resume_scratch_dir("future_mtime");
         let path = dir.join("future.bin");
         std::fs::write(&path, b"clock skew payload").unwrap();
         let one_hour_ahead = std::time::SystemTime::now()
             + std::time::Duration::from_secs(3600);
-        let f = std::fs::File::open(&path).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_modified(one_hour_ahead).unwrap();
         drop(f);
         let off = compute_resume_offset("future.bin", dir.to_str().unwrap(), 168);
