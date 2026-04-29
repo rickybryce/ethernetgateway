@@ -1800,15 +1800,11 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Attributes {
                     a.system_id = Some(s.to_string());
                 }
             }
-            b'"' => {
-                if !val.is_empty() {
-                    a.file_type = Some(val[0]);
-                }
+            b'"' if !val.is_empty() => {
+                a.file_type = Some(val[0]);
             }
-            b'@' => {
-                if !val.is_empty() {
-                    a.disposition = Some(val[0]);
-                }
+            b'@' if !val.is_empty() => {
+                a.disposition = Some(val[0]);
             }
             b'&' => {
                 // Long-form length, decimal string.  Same parser as
@@ -1819,20 +1815,14 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Attributes {
                     a.long_length = Some(v);
                 }
             }
-            b'1' => {
-                if !val.is_empty() {
-                    a.charset = Some(val[0]);
-                }
+            b'1' if !val.is_empty() => {
+                a.charset = Some(val[0]);
             }
-            b'*' => {
-                if !val.is_empty() {
-                    a.encoding = Some(val[0]);
-                }
+            b'*' if !val.is_empty() => {
+                a.encoding = Some(val[0]);
             }
-            b',' => {
-                if !val.is_empty() {
-                    a.record_format = Some(val[0]);
-                }
+            b',' if !val.is_empty() => {
+                a.record_format = Some(val[0]);
             }
             b'-' => {
                 if let Ok(s) = std::str::from_utf8(val)
@@ -1858,15 +1848,11 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Attributes {
                     a.block_size = Some(v);
                 }
             }
-            b'(' => {
-                if !val.is_empty() {
-                    a.access_mode = Some(val[0]);
-                }
+            b'(' if !val.is_empty() => {
+                a.access_mode = Some(val[0]);
             }
-            b')' => {
-                if !val.is_empty() {
-                    a.encoding_alt = Some(val[0]);
-                }
+            b')' if !val.is_empty() => {
+                a.encoding_alt = Some(val[0]);
             }
             _ => {}
         }
