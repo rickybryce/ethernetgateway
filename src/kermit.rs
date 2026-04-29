@@ -4074,14 +4074,25 @@ pub(crate) async fn kermit_server(
         {
             Ok(p) => p,
             Err(e) => {
-                // Peer-disconnect (EOF) and idle-timeout are both
-                // legitimate end-of-session signals — many real Kermit
-                // clients (including C-Kermit -s) just exit after a
-                // transfer rather than sending G F.  Returning the
-                // accumulated files lets the caller surface a
-                // success-shaped summary instead of an error toast.
-                // We still surface the read failure in the verbose
-                // log so a wedged session is debuggable.
+                // Idle-timeout: notify the peer with an E-packet so
+                // their client logs a real reason rather than a dead
+                // socket.  Peer-disconnect (EOF) we leave silent — the
+                // connection's already gone.  Either way we return
+                // Ok so the caller surfaces a success-shaped summary
+                // for any files received earlier in the session.
+                if e == "Kermit: read timeout" {
+                    let _ = send_error(
+                        writer,
+                        0,
+                        "Server idle timeout",
+                        b'1',
+                        0,
+                        0,
+                        CR,
+                        is_tcp,
+                    )
+                    .await;
+                }
                 if verbose {
                     glog!(
                         "Kermit server: dispatch read ended ({}) — closing with {} file(s) received",

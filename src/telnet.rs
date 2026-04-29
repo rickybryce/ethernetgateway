@@ -4641,12 +4641,23 @@ impl TelnetSession {
             TerminalType::Petscii => "<-",
             _ => "ESC",
         };
+        let idle_secs = config::get_config().kermit_negotiation_timeout;
+        let idle_display = if idle_secs >= 60 && idle_secs.is_multiple_of(60) {
+            format!("{} min", idle_secs / 60)
+        } else {
+            format!("{}s", idle_secs)
+        };
         self.send_line(&format!(
-            "  {} aborts. Idle timeout: {}s.",
-            self.cyan(esc_label),
-            config::get_config().kermit_negotiation_timeout
+            "  {} returns to the File Transfer menu.",
+            self.cyan(esc_label)
         ))
         .await?;
+        self.send_line(&format!(
+            "  After {} idle, we send the client an error packet",
+            self.amber(&idle_display)
+        ))
+        .await?;
+        self.send_line("  and return you here.").await?;
         self.send_line("  See kermit.html for full client setup.").await?;
         self.send_line("").await?;
         self.flush().await?;

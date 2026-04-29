@@ -76,7 +76,7 @@ const DEFAULT_ZMODEM_MAX_RETRIES: u32 = 10;
 const DEFAULT_ZMODEM_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// Kermit negotiation timeout: how long the sender/receiver keeps
 /// retrying the Send-Init handshake before giving up.
-const DEFAULT_KERMIT_NEGOTIATION_TIMEOUT: u64 = 45;
+const DEFAULT_KERMIT_NEGOTIATION_TIMEOUT: u64 = 300;
 /// Kermit per-packet read timeout in seconds — bounds how long we
 /// wait for the next response after sending a packet.
 const DEFAULT_KERMIT_PACKET_TIMEOUT: u64 = 10;
@@ -1376,7 +1376,7 @@ mod tests {
         assert_eq!(cfg.zmodem_frame_timeout, 30);
         assert_eq!(cfg.zmodem_max_retries, 10);
         assert_eq!(cfg.zmodem_negotiation_retry_interval, 5);
-        assert_eq!(cfg.kermit_negotiation_timeout, 45);
+        assert_eq!(cfg.kermit_negotiation_timeout, 300);
         assert_eq!(cfg.kermit_packet_timeout, 10);
         assert_eq!(cfg.kermit_max_retries, 5);
         assert_eq!(cfg.kermit_max_packet_length, 4096);
