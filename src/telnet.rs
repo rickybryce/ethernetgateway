@@ -4054,7 +4054,10 @@ impl TelnetSession {
             } else {
                 // Batch file 2..N: save under sender's name.  Only ZMODEM
                 // can produce these (XMODEM/YMODEM always yields a single
-                // entry), so `sender_name` will be Some here.
+                // entry), so `sender_name` will be Some here.  Routes
+                // through the same atomic save_received_file helper as
+                // the autostart and Kermit-server batch paths so the
+                // create_new + tokio::fs guarantees stay symmetric.
                 let name = match sender_name {
                     Some(n) => n.clone(),
                     None => continue,
@@ -4064,24 +4067,13 @@ impl TelnetSession {
                     continue;
                 }
                 let batch_path = self.transfer_path().join(&name);
-                let mut opts = tokio::fs::OpenOptions::new();
-                opts.write(true).create_new(true);
-                match opts.open(&batch_path).await {
-                    Ok(mut file) => {
-                        if file.write_all(data).await.is_err() {
-                            skipped.push((name, "write error"));
-                            continue;
-                        }
-                        let _ = file.flush().await;
-                        drop(file);
-                        Self::apply_ymodem_meta(&batch_path, ymeta.as_ref());
-                        saved.push((name, data.len()));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                match Self::save_received_file(&batch_path, data, ymeta.as_ref()).await {
+                    Ok(()) => saved.push((name, data.len())),
+                    Err(SaveError::AlreadyExists) => {
                         skipped.push((name, "already exists"));
                     }
-                    Err(_) => {
-                        skipped.push((name, "I/O error"));
+                    Err(SaveError::WriteFailed) => {
+                        skipped.push((name, "write failed"));
                     }
                 }
             }
