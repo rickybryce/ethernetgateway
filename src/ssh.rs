@@ -85,6 +85,42 @@ pub fn start_ssh_server(
 
 // ─── Host key management ───────────────────────────────────
 
+/// Write a private-key PEM atomically with owner-only permissions
+/// from the start.  Without this the naïve sequence
+///   `fs::write(...)` → `set_permissions(0o600)`
+/// briefly leaves the file at its final path with default-umask
+/// permissions (typically 0o644), giving any concurrent reader on
+/// the same multi-user host a race to grab the private key.
+///
+/// Pattern matches the egateway.conf write in `config.rs:992-1002`:
+/// write to `<path>.<pid>.<seq>.tmp`, chmod 0o600, then rename.  The
+/// per-process counter prevents two threads in the same process
+/// from clobbering each other's tmp file (e.g. host key + client
+/// key both being generated on first run).
+fn atomic_write_private_key(path: &str, contents: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
+    std::fs::write(&tmp, contents).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(
+            &tmp,
+            std::fs::Permissions::from_mode(0o600),
+        ) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     use russh::keys::ssh_key::LineEnding;
 
@@ -115,21 +151,12 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     let pem = key
         .to_openssh(LineEnding::LF)
         .map_err(|e| format!("key encoding failed: {}", e))?;
-    if let Err(e) = std::fs::write(SSH_HOST_KEY_FILE, pem.as_bytes()) {
+    if let Err(e) = atomic_write_private_key(SSH_HOST_KEY_FILE, pem.as_bytes()) {
         glog!(
             "SSH server: warning: could not save host key to {}: {}",
             SSH_HOST_KEY_FILE, e
         );
     } else {
-        // Restrict permissions on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                SSH_HOST_KEY_FILE,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
         glog!(
             "SSH server: generated new host key, saved to {}",
             SSH_HOST_KEY_FILE
@@ -173,20 +200,12 @@ pub(crate) fn load_or_generate_client_key() -> Result<russh::keys::PrivateKey, S
     let pem = key
         .to_openssh(LineEnding::LF)
         .map_err(|e| format!("client key encoding failed: {}", e))?;
-    if let Err(e) = std::fs::write(GATEWAY_CLIENT_KEY_FILE, pem.as_bytes()) {
+    if let Err(e) = atomic_write_private_key(GATEWAY_CLIENT_KEY_FILE, pem.as_bytes()) {
         glog!(
             "SSH gateway: warning: could not save client key to {}: {}",
             GATEWAY_CLIENT_KEY_FILE, e,
         );
     } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                GATEWAY_CLIENT_KEY_FILE,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
         glog!(
             "SSH gateway: generated new client key, saved to {}",
             GATEWAY_CLIENT_KEY_FILE,

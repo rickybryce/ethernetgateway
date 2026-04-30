@@ -194,20 +194,20 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
 /// authentication.
 fn prepend_tls_downgrade_notice(page: &mut WebPage, width: usize) {
     let notice = "[!] HTTPS failed (TLS error) — page fetched over plain HTTP.";
-    let separator = "-".repeat(notice.len().min(width));
+    // Use char count (not byte length) so the separator width matches
+    // the rendered notice on terminals that count visual columns —
+    // the notice contains a 3-byte UTF-8 em-dash.
+    let separator = "-".repeat(notice.chars().count().min(width));
     let mut header: Vec<String> = Vec::new();
     header.extend(wrap_line(notice, width));
     header.push(separator);
     header.push(String::new());
     // Prepend (cap total to MAX_RENDERED_LINES so we don't blow past
-    // the rendering budget).
-    let header_len = header.len();
+    // the rendering budget).  Link indices live in page.links and
+    // don't address into page.lines, so prepending plain rendered
+    // lines doesn't disturb link selection.
     header.append(&mut page.lines);
     page.lines = header.into_iter().take(MAX_RENDERED_LINES).collect();
-    // Track that the notice was prepended so caller link offsets stay
-    // aligned — link indices are derived from page.links separately
-    // and don't index into page.lines, so no adjustment needed.
-    let _ = header_len;
 }
 
 /// Submit a form (GET or POST) and return the resulting page.

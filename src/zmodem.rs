@@ -488,6 +488,47 @@ struct Subpacket {
     end_marker: u8,
 }
 
+/// Best-effort drain of the rest of an in-progress subpacket after a
+/// size-cap or unrecoverable error.  Reads forward until ZDLE+end-
+/// marker followed by the CRC bytes (so the wire is positioned at the
+/// next header), bounded by `MAX_SUBPACKET_DATA` extra bytes so a
+/// pathological peer can't tar-pit us indefinitely.  Errors during
+/// drain are swallowed — the caller is already returning Err and the
+/// outer receive loop will MARK-hunt to resync.
+async fn drain_to_subpacket_end(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    state: &mut ReadState,
+    crc_kind: CrcKind,
+) {
+    for _ in 0..MAX_SUBPACKET_DATA {
+        let Ok(b) = nvt_read_byte(reader, is_tcp, state).await else {
+            return;
+        };
+        if b != ZDLE {
+            continue;
+        }
+        let Ok(e) = nvt_read_byte(reader, is_tcp, state).await else {
+            return;
+        };
+        if matches!(e, ZCRCE | ZCRCG | ZCRCQ | ZCRCW) {
+            // Consume the trailing CRC bytes so the next header read
+            // doesn't see them as line noise.
+            let crc_bytes = match crc_kind {
+                CrcKind::Crc16 => 2,
+                CrcKind::Crc32 => 4,
+            };
+            for _ in 0..crc_bytes {
+                if read_escaped_byte(reader, is_tcp, state).await.is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+        // ZDLE-escaped data byte — keep scanning.
+    }
+}
+
 /// Read one data subpacket that follows a binary header.  Unescapes
 /// bytes as they arrive, stopping at the first ZDLE+end-marker.  CRC is
 /// validated against the width declared by the enclosing header.
@@ -501,6 +542,16 @@ async fn read_subpacket(
     let mut data = Vec::with_capacity(SUBPACKET_DATA_SIZE);
     loop {
         if data.len() > max_len {
+            // Drain ahead to the next ZDLE+end-marker (plus its CRC
+            // bytes) so the wire stays in sync for subsequent header
+            // reads.  Without this, an oversize subpacket leaves
+            // arbitrary bytes on the wire and the next read_header
+            // call has to MARK-hunt past them — recoverable but noisy.
+            // Drain bound: MAX_SUBPACKET_DATA more bytes; if no end-
+            // marker is found in that window the peer is so far out
+            // of spec that letting MARK-hunt take over is the right
+            // recovery anyway.
+            drain_to_subpacket_end(reader, is_tcp, state, crc_kind).await;
             return Err("ZMODEM: subpacket exceeds size limit".into());
         }
         let b = nvt_read_byte(reader, is_tcp, state).await?;

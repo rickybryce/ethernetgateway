@@ -989,7 +989,13 @@ fn write_config_file(path: &str, cfg: &Config) {
     // password, Groq API key).  Windows users on multi-user systems
     // should place the binary in a per-user folder to get equivalent
     // NTFS ACL protection.
-    let tmp = format!("{}.{}.tmp", path, std::process::id());
+    // Per-process atomic counter prevents two threads in the same
+    // process from clobbering each other's tmp file (e.g. a SIGHUP-
+    // driven reload firing concurrently with a GUI-driven save).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
     let write_result = std::fs::write(&tmp, &content).and_then(|()| {
         #[cfg(unix)]
         {
