@@ -1102,8 +1102,9 @@
                         <tr><th>Key</th><th>Default</th><th>Effect</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>kermit_negotiation_timeout</code></td><td>300</td><td>Seconds for the Send-Init handshake (and per-command idle in server mode).</td></tr>
+                        <tr><td><code>kermit_negotiation_timeout</code></td><td>300</td><td>Seconds for the Send-Init handshake.</td></tr>
                         <tr><td><code>kermit_packet_timeout</code></td><td>10</td><td>Per-packet read deadline after Send-Init.</td></tr>
+                        <tr><td><code>kermit_idle_timeout</code></td><td>300</td><td>Seconds the gateway's <em>server-mode</em> dispatch waits between commands from the peer before sending an "idle timeout" E-packet and disconnecting.  Set to <code>0</code> to disable — server idles indefinitely.</td></tr>
                         <tr><td><code>kermit_max_retries</code></td><td>5</td><td>Maximum NAK / timeout retries per packet before giving up.</td></tr>
                         <tr><td><code>kermit_max_packet_length</code></td><td>4096</td><td>MAXL we advertise (10..=9024). Higher = more throughput, more retransmit cost on a flaky line.</td></tr>
                         <tr><td><code>kermit_window_size</code></td><td>4</td><td>Sliding-window depth (1..=31). 1 = stop-and-wait.</td></tr>

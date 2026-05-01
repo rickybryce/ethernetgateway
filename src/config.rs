@@ -80,6 +80,14 @@ const DEFAULT_KERMIT_NEGOTIATION_TIMEOUT: u64 = 300;
 /// Kermit per-packet read timeout in seconds — bounds how long we
 /// wait for the next response after sending a packet.
 const DEFAULT_KERMIT_PACKET_TIMEOUT: u64 = 10;
+/// Kermit server-mode idle timeout: how long `kermit_server` waits
+/// between commands from the peer before declaring the session
+/// stalled, sending an "idle timeout" E-packet, and disconnecting.
+/// Defaults to the negotiation-timeout default (300 s) since the two
+/// were historically the same value before they were split.  A value
+/// of `0` disables the idle deadline — the server will wait
+/// indefinitely for the peer's next command.
+const DEFAULT_KERMIT_IDLE_TIMEOUT: u64 = DEFAULT_KERMIT_NEGOTIATION_TIMEOUT;
 /// Kermit max retries per packet (NAK / timeout retransmits).
 const DEFAULT_KERMIT_MAX_RETRIES: u32 = 5;
 /// Kermit advertised max packet length (10..=9024).  4096 strikes a
@@ -211,6 +219,12 @@ pub struct Config {
     pub kermit_negotiation_timeout: u64,
     /// Kermit per-packet read timeout in seconds.
     pub kermit_packet_timeout: u64,
+    /// Kermit server-mode idle timeout in seconds.  How long the
+    /// gateway's Kermit server waits between commands from the peer
+    /// before sending "Server idle timeout" and disconnecting.  A
+    /// value of `0` disables the deadline — the server idles
+    /// indefinitely.
+    pub kermit_idle_timeout: u64,
     /// Kermit max retries per packet.
     pub kermit_max_retries: u32,
     /// Advertised max packet length in our Send-Init (10..=9024).
@@ -318,6 +332,7 @@ impl Default for Config {
             zmodem_negotiation_retry_interval: DEFAULT_ZMODEM_NEGOTIATION_RETRY_INTERVAL,
             kermit_negotiation_timeout: DEFAULT_KERMIT_NEGOTIATION_TIMEOUT,
             kermit_packet_timeout: DEFAULT_KERMIT_PACKET_TIMEOUT,
+            kermit_idle_timeout: DEFAULT_KERMIT_IDLE_TIMEOUT,
             kermit_max_retries: DEFAULT_KERMIT_MAX_RETRIES,
             kermit_max_packet_length: DEFAULT_KERMIT_MAX_PACKET_LENGTH,
             kermit_window_size: DEFAULT_KERMIT_WINDOW_SIZE,
@@ -527,6 +542,17 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u64| v >= 1)
             .unwrap_or(DEFAULT_KERMIT_PACKET_TIMEOUT),
+        // No `>= 1` filter on the idle timeout — `0` is the explicit
+        // "disable idle deadline" sentinel.  The server-mode dispatch
+        // loop in `kermit_server_with_outcome` checks for 0 and skips
+        // the read deadline entirely when set, so the peer can hold a
+        // Kermit-server session open indefinitely without typing for
+        // hours (useful when driving the gateway from a long-running
+        // C-Kermit session that idles between commands).
+        kermit_idle_timeout: map
+            .get("kermit_idle_timeout")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_KERMIT_IDLE_TIMEOUT),
         kermit_max_retries: map
             .get("kermit_max_retries")
             .and_then(|v| v.parse().ok())
@@ -854,6 +880,13 @@ fn write_config_file(path: &str, cfg: &Config) {
 # Kermit protocol tunables.
 # kermit_negotiation_timeout:  seconds to wait for the Send-Init handshake.
 # kermit_packet_timeout:       seconds to wait for each packet response.
+# kermit_idle_timeout:         seconds the gateway's Kermit *server* waits
+#                              between commands from the peer before sending
+#                              an idle-timeout error and disconnecting.  Set
+#                              to 0 to disable the deadline entirely (server
+#                              waits indefinitely for the peer's next command).
+#                              Distinct from kermit_negotiation_timeout, which
+#                              bounds the handshake itself.
 # kermit_max_retries:          retry limit per packet on NAK / timeout.
 # kermit_max_packet_length:    advertised MAXL (10..=9024).  Long packets are
 #                              negotiated separately; values >94 require the
@@ -885,6 +918,7 @@ fn write_config_file(path: &str, cfg: &Config) {
 ");
     write_kv(&mut content, "kermit_negotiation_timeout", cfg.kermit_negotiation_timeout);
     write_kv(&mut content, "kermit_packet_timeout", cfg.kermit_packet_timeout);
+    write_kv(&mut content, "kermit_idle_timeout", cfg.kermit_idle_timeout);
     write_kv(&mut content, "kermit_max_retries", cfg.kermit_max_retries);
     write_kv(&mut content, "kermit_max_packet_length", cfg.kermit_max_packet_length);
     write_kv(&mut content, "kermit_window_size", cfg.kermit_window_size);
@@ -1127,6 +1161,13 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_packet_timeout" => {
             if let Ok(v) = value.parse::<u64>() && v >= 1 {
                 cfg.kermit_packet_timeout = v;
+            }
+        }
+        "kermit_idle_timeout" => {
+            // No `>= 1` floor — `0` is the explicit "disable" sentinel
+            // matching the loader's filter at `read_config_file`.
+            if let Ok(v) = value.parse::<u64>() {
+                cfg.kermit_idle_timeout = v;
             }
         }
         "kermit_max_retries" => {
@@ -1610,6 +1651,7 @@ mod tests {
             zmodem_negotiation_retry_interval: 8,
             kermit_negotiation_timeout: 60,
             kermit_packet_timeout: 12,
+            kermit_idle_timeout: 120,
             kermit_max_retries: 8,
             kermit_max_packet_length: 2048,
             kermit_window_size: 8,
@@ -1826,6 +1868,7 @@ mod tests {
             "zmodem_negotiation_retry_interval",
             "kermit_negotiation_timeout",
             "kermit_packet_timeout",
+            "kermit_idle_timeout",
             "kermit_max_retries",
             "kermit_max_packet_length",
             "kermit_window_size",

@@ -3360,8 +3360,20 @@ impl TelnetSession {
                 self.file_transfer_chdir().await?;
             }
             "k" => {
-                if let Err(e) = self.file_transfer_kermit_server().await {
-                    self.show_error(&format!("Server error: {}", e)).await?;
+                match self.file_transfer_kermit_server().await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        // Kermit idle-timeout: propagate up so the
+                        // session ends and the peer's TCP socket gets
+                        // an immediate EOF on top of the E-packet we
+                        // just sent.  Without this the peer's next
+                        // `remote ...` lands on the file-transfer
+                        // menu and surfaces as "too many retries".
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        self.show_error(&format!("Server error: {}", e)).await?;
+                    }
                 }
             }
             "i" => {
@@ -4737,23 +4749,31 @@ impl TelnetSession {
             TerminalType::Petscii => "<-",
             _ => "ESC",
         };
-        let idle_secs = config::get_config().kermit_negotiation_timeout;
-        let idle_display = if idle_secs >= 60 && idle_secs.is_multiple_of(60) {
-            format!("{} min", idle_secs / 60)
-        } else {
-            format!("{}s", idle_secs)
-        };
+        let idle_secs = config::get_config().kermit_idle_timeout;
         self.send_line(&format!(
             "  {} returns to the File Transfer menu.",
             self.cyan(esc_label)
         ))
         .await?;
-        self.send_line(&format!(
-            "  After {} idle, we send the client an error packet",
-            self.amber(&idle_display)
-        ))
-        .await?;
-        self.send_line("  and return you here.").await?;
+        if idle_secs == 0 {
+            self.send_line(
+                "  Idle timeout disabled — server holds the session",
+            )
+            .await?;
+            self.send_line("  open until the peer sends finish/bye.").await?;
+        } else {
+            let idle_display = if idle_secs >= 60 && idle_secs.is_multiple_of(60) {
+                format!("{} min", idle_secs / 60)
+            } else {
+                format!("{}s", idle_secs)
+            };
+            self.send_line(&format!(
+                "  After {} idle, we send the client an error packet",
+                self.amber(&idle_display)
+            ))
+            .await?;
+            self.send_line("  and disconnect.").await?;
+        }
         self.send_line("  See kermit.html for full client setup.").await?;
         self.send_line("").await?;
         self.flush().await?;
@@ -4772,7 +4792,7 @@ impl TelnetSession {
         let start = std::time::Instant::now();
         let result = {
             let mut writer_guard = self.writer.lock().await;
-            crate::kermit::kermit_server(
+            crate::kermit::kermit_server_with_outcome(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -4832,8 +4852,29 @@ impl TelnetSession {
         // the user sees which ones landed, with the error shown
         // alongside.  Early-returning here would silently drop
         // saved/skipped, which is the bug the audit caught.
-        let error_msg = result.err().map(|e| format!("Server session failed: {}", e));
+        let (error_msg, idle_timeout) = match &result {
+            Ok(outcome) => (None, outcome.idle_timeout),
+            Err(e) => (Some(format!("Server session failed: {}", e)), false),
+        };
         let total = saved.len() + skipped.len();
+
+        // On idle-timeout the gateway has just written an E-packet
+        // ("Server idle timeout") to the socket and we MUST return
+        // before sending any more bytes.  The peer's protocol parser
+        // is queued to read that E-packet on its next request — if we
+        // mix in summary text first, the peer reads the text as
+        // garbage, doesn't surface the E-packet message, and the
+        // operator sees "too many retries" instead of a clean
+        // "connection closed" with the timeout reason.
+        // Returning ErrorKind::TimedOut here propagates up through
+        // `?` in the menu loop and ends the telnet session, which
+        // is what gives the peer a clean EOF on its socket.
+        if idle_timeout {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Kermit server idle timeout — disconnecting",
+            ));
+        }
 
         // Summary screen.
         self.post_transfer_settle().await;
@@ -9496,6 +9537,18 @@ impl TelnetSession {
                 self.amber(&cfg.kermit_max_retries.to_string()),
             ))
             .await?;
+            // Idle timeout: 0 reads as "off"/disabled in the UI so the
+            // operator doesn't have to remember the sentinel meaning.
+            let idle_display = if cfg.kermit_idle_timeout == 0 {
+                "off".to_string()
+            } else {
+                format!("{} s", cfg.kermit_idle_timeout)
+            };
+            self.send_line(&format!(
+                "  Idle (server-mode): {}",
+                self.amber(&idle_display)
+            ))
+            .await?;
             self.send_line(&format!(
                 "  Max packet: {}    Window: {}    Check: {}",
                 self.amber(&cfg.kermit_max_packet_length.to_string()),
@@ -9554,8 +9607,9 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle repeat",
+                "  {}  Toggle repeat       {}  Idle timeout",
                 self.cyan("E"),
+                self.cyan("I"),
             ))
             .await?;
             self.send_line(&format!(
@@ -9688,6 +9742,21 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "i" => {
+                    // 0 disables; 86400 (1 day) is a generous upper
+                    // bound that still bounds memory growth from any
+                    // peer-supplied state we might accumulate per
+                    // session.
+                    self.xmodem_set_numeric(
+                        "Idle timeout",
+                        "kermit_idle_timeout",
+                        cfg.kermit_idle_timeout,
+                        0,
+                        86400,
+                        "seconds (0 = disabled)",
+                    )
+                    .await?;
+                }
                 "8" => {
                     let next = match cfg.kermit_8bit_quote.as_str() {
                         "auto" => "on",
@@ -9720,7 +9789,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press a listed key, R, H, or Q.")
+                    self.show_error("Press a listed key, I, R, H, or Q.")
                         .await?;
                 }
             }

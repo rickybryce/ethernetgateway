@@ -231,6 +231,7 @@ struct App {
     zmodem_negotiation_retry_interval_buf: String,
     kermit_negotiation_timeout_buf: String,
     kermit_packet_timeout_buf: String,
+    kermit_idle_timeout_buf: String,
     kermit_max_retries_buf: String,
     kermit_max_packet_length_buf: String,
     kermit_window_size_buf: String,
@@ -273,6 +274,7 @@ impl App {
             cfg.zmodem_negotiation_retry_interval.to_string();
         let kermit_negotiation_timeout_buf = cfg.kermit_negotiation_timeout.to_string();
         let kermit_packet_timeout_buf = cfg.kermit_packet_timeout.to_string();
+        let kermit_idle_timeout_buf = cfg.kermit_idle_timeout.to_string();
         let kermit_max_retries_buf = cfg.kermit_max_retries.to_string();
         let kermit_max_packet_length_buf = cfg.kermit_max_packet_length.to_string();
         let kermit_window_size_buf = cfg.kermit_window_size.to_string();
@@ -302,6 +304,7 @@ impl App {
             zmodem_negotiation_retry_interval_buf,
             kermit_negotiation_timeout_buf,
             kermit_packet_timeout_buf,
+            kermit_idle_timeout_buf,
             kermit_max_retries_buf,
             kermit_max_packet_length_buf,
             kermit_window_size_buf,
@@ -331,6 +334,9 @@ impl App {
         if let Ok(v) = self.zmodem_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.zmodem_negotiation_retry_interval = v; }
         if let Ok(v) = self.kermit_negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.kermit_negotiation_timeout = v; }
         if let Ok(v) = self.kermit_packet_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.kermit_packet_timeout = v; }
+        // No `>= 1` floor on idle timeout — `0` is the explicit
+        // "disable" sentinel matching the config-file loader.
+        if let Ok(v) = self.kermit_idle_timeout_buf.parse::<u64>() { self.cfg.kermit_idle_timeout = v; }
         if let Ok(v) = self.kermit_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.kermit_max_retries = v; }
         if let Ok(v) = self.kermit_max_packet_length_buf.parse::<u16>() && (10..=9024).contains(&v) { self.cfg.kermit_max_packet_length = v; }
         if let Ok(v) = self.kermit_window_size_buf.parse::<u8>() && (1..=31).contains(&v) { self.cfg.kermit_window_size = v; }
@@ -762,6 +768,14 @@ impl App {
                 50.0,
             );
             labeled_field(ui, "Retries:", &mut self.kermit_max_retries_buf, 50.0);
+        });
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Idle timeout (s, 0=disabled):",
+                &mut self.kermit_idle_timeout_buf,
+                50.0,
+            );
         });
         ui.horizontal(|ui| {
             labeled_field(

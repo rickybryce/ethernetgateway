@@ -4254,14 +4254,62 @@ fn kermit_g_help_text() -> &'static str {
 /// possible across a single server-mode session).  Returns `Err` only
 /// on protocol-level I/O failures; clean exits (E-packet, B, G F/L/B,
 /// completed S/R/G commands) return `Ok` with whatever was accumulated.
+///
+/// Backward-compat shim around [`kermit_server_with_outcome`] that
+/// drops the timeout-detection flag — used by tests that don't care
+/// why the session ended, only what was received.  Production callers
+/// in `telnet.rs` use the richer API so they can disconnect the
+/// underlying transport on idle-timeout.
+#[cfg(test)]
 pub(crate) async fn kermit_server(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     is_petscii: bool,
     verbose: bool,
-    mut on_file: impl FnMut(&KermitReceive),
+    on_file: impl FnMut(&KermitReceive),
 ) -> Result<Vec<KermitReceive>, String> {
+    kermit_server_with_outcome(reader, writer, is_tcp, is_petscii, verbose, on_file)
+        .await
+        .map(|outcome| outcome.files)
+}
+
+/// Outcome of a Kermit server-mode session, distinguishing the clean
+/// exit paths (peer-driven F/L/B/I/X/EOF) from idle-timeout.  The
+/// telnet layer uses `idle_timeout` to decide whether to disconnect
+/// the underlying TCP/SSH session — without that, the peer's next
+/// `remote ...` command after a timeout hits a non-protocol menu,
+/// hangs, and eventually surfaces as "too many retries" in the
+/// peer's UI instead of a clean "connection closed".
+#[derive(Debug)]
+pub(crate) struct KermitServerOutcome {
+    /// Files received during the session (one entry per S-batch).
+    /// In server mode the telnet layer commits files via the on_file
+    /// callback rather than reading this Vec, so production code
+    /// doesn't touch it — the field is kept for test ergonomics and
+    /// for future callers that prefer batch return over streaming.
+    #[allow(dead_code)]
+    pub files: Vec<KermitReceive>,
+    /// True iff the dispatch loop exited because the per-command
+    /// idle deadline elapsed without the peer sending another packet.
+    /// The E-packet "Server idle timeout" has already been written to
+    /// the wire when this is set; the caller should flush + close the
+    /// transport so the peer receives both the E-packet and EOF
+    /// without any non-protocol bytes mixed in between.
+    pub idle_timeout: bool,
+}
+
+/// Same as [`kermit_server`] but returns a [`KermitServerOutcome`]
+/// so the caller can distinguish idle-timeout from clean exits.  See
+/// the struct doc for what the flag means and why it matters.
+pub(crate) async fn kermit_server_with_outcome(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    mut on_file: impl FnMut(&KermitReceive),
+) -> Result<KermitServerOutcome, String> {
     let cfg = config::get_config();
     if verbose {
         glog!(
@@ -4276,12 +4324,22 @@ pub(crate) async fn kermit_server(
     // S-receives (via the R/S handlers below), and G D / G $ replies
     // resolve paths relative to `cfg.transfer_dir / subdir`.
     let mut subdir: String = String::new();
-    // Server idles indefinitely on the first command from the peer;
-    // re-uses kermit_negotiation_timeout as the inactivity bound so
-    // a wedged peer can't pin us forever.  Re-armed per command.
+    // Server idles between commands with `kermit_idle_timeout` as the
+    // inactivity bound so a wedged peer can't pin us forever.  Re-armed
+    // per command.  A configured value of 0 disables the deadline
+    // entirely (pass `None` to `read_packet`) — operators driving the
+    // gateway from a long-running C-Kermit session that idles for
+    // hours between commands set this when the default 5-minute
+    // disconnect is too aggressive.
     loop {
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout);
+        let deadline = if cfg.kermit_idle_timeout == 0 {
+            None
+        } else {
+            Some(
+                tokio::time::Instant::now()
+                    + tokio::time::Duration::from_secs(cfg.kermit_idle_timeout),
+            )
+        };
         let pkt = match read_packet(
             reader,
             is_tcp,
@@ -4290,7 +4348,7 @@ pub(crate) async fn kermit_server(
             CR,
             verbose,
             &mut state,
-            Some(deadline),
+            deadline,
         )
         .await
         {
@@ -4298,11 +4356,16 @@ pub(crate) async fn kermit_server(
             Err(e) => {
                 // Idle-timeout: notify the peer with an E-packet so
                 // their client logs a real reason rather than a dead
-                // socket.  Peer-disconnect (EOF) we leave silent — the
-                // connection's already gone.  Either way we return
-                // Ok so the caller surfaces a success-shaped summary
-                // for any files received earlier in the session.
-                if e == "Kermit: read timeout" {
+                // socket, and tag the outcome so the caller knows to
+                // close the underlying transport.  If we left the
+                // socket open, the peer's next `remote ...` would land
+                // on whatever menu we returned to and look like a hung
+                // server until the peer's retry budget exhausts.
+                // Peer-disconnect (EOF) we leave silent — the
+                // connection's already gone — but it still ends the
+                // session cleanly (no idle_timeout flag).
+                let was_timeout = e == "Kermit: read timeout";
+                if was_timeout {
                     let _ = send_error(
                         writer,
                         0,
@@ -4314,6 +4377,14 @@ pub(crate) async fn kermit_server(
                         is_tcp,
                     )
                     .await;
+                    // Flush so the E-packet hits the wire before the
+                    // caller closes the transport.  Without this, a
+                    // tokio write buffer can swallow the bytes when
+                    // the underlying socket is shut down right after.
+                    {
+                        use tokio::io::AsyncWriteExt;
+                        let _ = writer.flush().await;
+                    }
                 }
                 if verbose {
                     glog!(
@@ -4322,7 +4393,10 @@ pub(crate) async fn kermit_server(
                         all_received.len()
                     );
                 }
-                return Ok(all_received);
+                return Ok(KermitServerOutcome {
+                    files: all_received,
+                    idle_timeout: was_timeout,
+                });
             }
         };
         if verbose {
@@ -4391,7 +4465,7 @@ pub(crate) async fn kermit_server(
                     let msg = decode_error_message(&pkt.payload, q);
                     glog!("Kermit server: peer E-packet: {}", msg);
                 }
-                return Ok(all_received);
+                return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
             }
             TYPE_EOT => {
                 // Clean session-end signal.  ACK and exit.
@@ -4399,7 +4473,7 @@ pub(crate) async fn kermit_server(
                 if verbose {
                     glog!("Kermit server: B-packet → clean exit");
                 }
-                return Ok(all_received);
+                return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
             }
             TYPE_GENERIC => {
                 // Generic-command dispatch.  Per Frank da Cruz spec §6:
@@ -4435,7 +4509,7 @@ pub(crate) async fn kermit_server(
                         if verbose {
                             glog!("Kermit server: G '{}' → exit", action as char);
                         }
-                        return Ok(all_received);
+                        return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
                     }
                     b'C' => {
                         // Per Kermit Protocol Manual §6.7, the CWD argument
@@ -8289,6 +8363,120 @@ mod tests {
         })
         .await;
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_idle_timeout_sets_outcome_flag_and_sends_e_packet() {
+        // When the per-command idle deadline elapses, kermit_server
+        // must (a) emit an E-packet "Server idle timeout" so the peer
+        // gets a real reason rather than a dead socket, and (b) tag
+        // the returned outcome with `idle_timeout: true` so the telnet
+        // layer knows to disconnect the underlying transport.  The
+        // pre-2026-05 build set neither: the dispatch loop just exited
+        // Ok and control returned to the file-transfer menu, so the
+        // peer's next `remote ...` landed on a non-protocol menu and
+        // surfaced as "too many retries" in the peer's UI.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        // Force a near-zero deadline so the test doesn't actually idle
+        // for the production default.  1 second is short but well above
+        // any timer-resolution jitter we'd expect locally.
+        config::update_config_value("kermit_idle_timeout", "1");
+
+        let (server_side, client_side) = duplex(65536);
+        let (mut s_read, mut s_write) = split(server_side);
+        let (mut c_read, c_write) = split(client_side);
+
+        // Drive kermit_server_with_outcome and capture the result.
+        // The client side never writes anything — we want the server
+        // to hit its idle deadline and exit on its own.
+        let server_task = tokio::spawn(async move {
+            kermit_server_with_outcome(
+                &mut s_read,
+                &mut s_write,
+                false,
+                false,
+                false,
+                |_| {},
+            )
+            .await
+        });
+
+        // The server should send an E-packet within ~1 second; read it.
+        let e_pkt = read_server_packet(&mut c_read).await;
+        assert_eq!(e_pkt.kind, TYPE_ERROR, "expected E-packet on idle timeout");
+        let q = Quoting::default();
+        let msg = decode_error_message(&e_pkt.payload, q);
+        assert!(
+            msg.contains("idle"),
+            "E-packet should mention idle timeout, got: {}",
+            msg
+        );
+        // Drop the client write half so the server's read returns
+        // (in case it's still polling), then await its return.
+        drop(c_write);
+        let outcome = server_task.await.unwrap().unwrap();
+        assert!(
+            outcome.idle_timeout,
+            "outcome.idle_timeout must be set on dispatch read timeout"
+        );
+        assert!(outcome.files.is_empty());
+
+        // Restore the production-ish default for any tests that run
+        // after this in the same process.
+        config::update_config_value("kermit_idle_timeout", "30");
+    }
+
+    #[tokio::test]
+    async fn test_server_idle_timeout_zero_disables_deadline() {
+        // `kermit_idle_timeout = 0` is the explicit "disable" sentinel:
+        // the server idles indefinitely waiting for the peer's next
+        // command instead of sending an E-packet and disconnecting.
+        // Verify by setting timeout=0, waiting longer than any
+        // reasonable idle deadline would have been (1 second here),
+        // and confirming no E-packet has shown up.  Then close cleanly
+        // with G F to prove the dispatch loop is still alive and
+        // returns Ok with `idle_timeout: false`.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        config::update_config_value("kermit_idle_timeout", "0");
+
+        let (server_side, client_side) = duplex(65536);
+        let (mut s_read, mut s_write) = split(server_side);
+        let (mut c_read, mut c_write) = split(client_side);
+
+        let server_task = tokio::spawn(async move {
+            kermit_server_with_outcome(
+                &mut s_read,
+                &mut s_write,
+                false,
+                false,
+                false,
+                |_| {},
+            )
+            .await
+        });
+
+        // Wait a full second.  If the disable sentinel were ignored,
+        // the previous test's 1-second config would have fired by now
+        // and the read below would unblock with an E-packet.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        // Server should still be idling — close cleanly.
+        c_write
+            .write_all(&wire_packet(TYPE_GENERIC, 0, b"F"))
+            .await
+            .unwrap();
+        let ack = read_server_packet(&mut c_read).await;
+        assert_eq!(ack.kind, TYPE_ACK, "G F should ACK after a long idle when timeout disabled");
+
+        let outcome = server_task.await.unwrap().unwrap();
+        assert!(
+            !outcome.idle_timeout,
+            "idle_timeout flag must NOT be set when the deadline is disabled"
+        );
+
+        config::update_config_value("kermit_idle_timeout", "30");
     }
 
     #[tokio::test]

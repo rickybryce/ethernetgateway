@@ -125,6 +125,21 @@ fn main() {
             });
 
             glog!("Server stopped.");
+
+            // Cap runtime teardown at 2s so a stuck spawn_blocking task
+            // (sync serialport read, slow filesystem flush, peer that
+            // never closes its socket) can't wedge the process.  The
+            // runtime's default Drop implementation waits indefinitely
+            // for blocking tasks to complete — fine for clean exit, but
+            // exactly the path that hangs the shell after Ctrl-C when a
+            // long-lived blocking call is parked.  shutdown_timeout
+            // gives the runtime a chance to finish work tidily and then
+            // proceeds whether or not it did, so the spawned thread
+            // always exits and `server_handle.join()` below always
+            // returns.  Symptom we're closing: user hits Ctrl-C, sees
+            // "Server stopped." once (this print) but never gets a
+            // shell prompt because the join blocks on runtime drop.
+            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
         });
 
         if gui_cfg.enable_console {
@@ -195,11 +210,35 @@ fn register_signal_handlers(
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             notify.notify_waiters();
-            // Force the GUI event loop to repaint so it picks up the
-            // shutdown flag immediately.  Otherwise winit can sit idle
-            // waiting for a platform event and the close command queued
-            // by `update()` never gets a chance to fire.
+            // Force the GUI event loop to repaint AND queue the Close
+            // command directly.  Two prior bugs we've hit here:
+            //
+            // 1. winit can sit idle waiting for a platform event and
+            //    the close command queued by `update()` never gets a
+            //    chance to fire — `request_repaint()` posts a wakeup
+            //    UserEvent that drains the queue.
+            // 2. When the window is minimized to the taskbar, some
+            //    window managers throttle or pause repaint delivery
+            //    entirely.  `update()` never runs, so even though the
+            //    shutdown flag is set, the close command queued
+            //    inside `update()` never lands.  The user's symptom:
+            //    `Ctrl-C`, "Server stopped." prints once (from the
+            //    server thread), no shell prompt, no GUI on screen
+            //    until the user restores the window from the taskbar
+            //    — only then does winit wake up, run `update()`,
+            //    notice the flag, and finally exit.
+            //
+            // Calling `send_viewport_cmd_to(ROOT, Close)` from this
+            // signal-watcher thread enqueues the close command in
+            // egui's command buffer directly.  Combined with the
+            // repaint nudge, the GUI exits as soon as winit drains
+            // its queue once — which it does promptly even when
+            // minimized, because the UserEvent itself is the wakeup.
             if let Some(ctx) = gui_ctx.lock().unwrap().as_ref() {
+                ctx.send_viewport_cmd_to(
+                    eframe::egui::ViewportId::ROOT,
+                    eframe::egui::ViewportCommand::Close,
+                );
                 ctx.request_repaint();
             }
             // Wait for the flag to be reset (restart) before watching again
