@@ -979,34 +979,42 @@ fn write_config_file(path: &str, cfg: &Config) {
 ");
     write_kv_str(&mut content, "ssh_gateway_auth", &cfg.ssh_gateway_auth);
 
-    // Write to a per-PID temporary file, chmod it to owner-only, then
-    // rename into place.  The PID suffix avoids clobbering another
-    // instance's tmp file in the same working directory and closes a
-    // small TOCTOU window against symlink tricks on a shared path.
-    // Setting the mode *before* the rename means the file is never
-    // visible at its final path with default-umask permissions — the
+    // Write to a per-PID + per-thread tmp file with owner-only mode
+    // from the moment of creation, then rename into place.  On Unix
+    // we open with `O_CREAT|O_EXCL` and mode 0o600 in one syscall so
+    // the file is never visible at default-umask permissions — the
     // config holds plaintext credentials (telnet password, SSH
-    // password, Groq API key).  Windows users on multi-user systems
-    // should place the binary in a per-user folder to get equivalent
-    // NTFS ACL protection.
-    // Per-process atomic counter prevents two threads in the same
-    // process from clobbering each other's tmp file (e.g. a SIGHUP-
-    // driven reload firing concurrently with a GUI-driven save).
+    // password, Groq API key) and a post-write `chmod` would leave
+    // a brief 0o644 window on a shared host.  Windows users on
+    // multi-user systems should place the binary in a per-user
+    // folder to get equivalent NTFS ACL protection.
+    //
+    // The PID suffix prevents two instances in the same working
+    // directory from clobbering each other's tmp; the per-process
+    // atomic counter prevents two threads in the same process from
+    // doing the same (e.g. a SIGHUP-driven reload firing concurrently
+    // with a GUI-driven save).
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
-    let write_result = std::fs::write(&tmp, &content).and_then(|()| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &tmp,
-                std::fs::Permissions::from_mode(0o600),
-            )?;
-        }
-        std::fs::rename(&tmp, path)
-    });
+
+    #[cfg(unix)]
+    let write_result = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(content.as_bytes()))
+            .and_then(|()| std::fs::rename(&tmp, path))
+    };
+    #[cfg(not(unix))]
+    let write_result = std::fs::write(&tmp, &content)
+        .and_then(|()| std::fs::rename(&tmp, path));
+
     if let Err(e) = write_result {
         glog!("Warning: could not write {}: {}", path, e);
         let _ = std::fs::remove_file(&tmp);
@@ -1322,22 +1330,36 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
     for entry in entries {
         content.push_str(&format!("{} = {}:{}\n", entry.number, entry.host, entry.port));
     }
-    let tmp = format!("{}.{}.tmp", DIALUP_FILE, std::process::id());
-    if let Err(e) = std::fs::write(&tmp, &content).and_then(|()| std::fs::rename(&tmp, DIALUP_FILE)) {
+    // Same atomic + owner-only-from-creation pattern as
+    // `write_config_file` above.  Setting mode 0o600 *before* rename
+    // means the final path is never visible at default-umask
+    // permissions; the dialup mapping file reveals host/port pairs
+    // the operator has configured, which is a privacy signal other
+    // local users shouldn't have.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    let tmp = format!("{}.{}.{}.tmp", DIALUP_FILE, std::process::id(), seq);
+
+    #[cfg(unix)]
+    let write_result = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(content.as_bytes()))
+            .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE))
+    };
+    #[cfg(not(unix))]
+    let write_result = std::fs::write(&tmp, &content)
+        .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE));
+
+    if let Err(e) = write_result {
         glog!("Warning: could not write {}: {}", DIALUP_FILE, e);
         let _ = std::fs::remove_file(&tmp);
-    } else {
-        // Restrict to owner-only on Unix — the mapping file reveals
-        // the host/port pairs the operator has configured, which is a
-        // meaningful privacy signal other local users shouldn't have.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                DIALUP_FILE,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
     }
 }
 

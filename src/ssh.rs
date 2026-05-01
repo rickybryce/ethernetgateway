@@ -86,35 +86,42 @@ pub fn start_ssh_server(
 // ─── Host key management ───────────────────────────────────
 
 /// Write a private-key PEM atomically with owner-only permissions
-/// from the start.  Without this the naïve sequence
-///   `fs::write(...)` → `set_permissions(0o600)`
-/// briefly leaves the file at its final path with default-umask
-/// permissions (typically 0o644), giving any concurrent reader on
-/// the same multi-user host a race to grab the private key.
+/// from the moment of creation.  On Unix we open the tmp file with
+/// `O_CREAT|O_EXCL` and mode `0o600` in a single syscall — the file
+/// is never visible at default-umask permissions, even briefly, so
+/// a concurrent reader on a multi-user host cannot race the
+/// post-write `chmod` window that `fs::write` + `set_permissions`
+/// would leave.  On non-Unix targets we fall back to plain
+/// `fs::write` since file modes don't apply.
 ///
-/// Pattern matches the egateway.conf write in `config.rs:992-1002`:
-/// write to `<path>.<pid>.<seq>.tmp`, chmod 0o600, then rename.  The
-/// per-process counter prevents two threads in the same process
-/// from clobbering each other's tmp file (e.g. host key + client
-/// key both being generated on first run).
+/// The per-process atomic counter in the tmp filename prevents two
+/// threads in the same process from clobbering each other's tmp
+/// file (e.g. host key + client key both generated on first run);
+/// the PID component prevents two instances in the same working
+/// directory from doing the same.
 fn atomic_write_private_key(path: &str, contents: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
-    std::fs::write(&tmp, contents).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
+
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(
-            &tmp,
-            std::fs::Permissions::from_mode(0o600),
-        ) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
+    let write_result = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(contents))
+    };
+    #[cfg(not(unix))]
+    let write_result = std::fs::write(&tmp, contents);
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
