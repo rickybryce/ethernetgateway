@@ -4789,7 +4789,19 @@ impl TelnetSession {
                         skipped.push((rx.filename.clone(), "invalid filename"));
                         return;
                     }
-                    let filepath = target_dir.join(&rx.filename);
+                    // Honor any `remote cwd <subdir>` the peer set —
+                    // server-mode stamps `rx.subdir` with its current
+                    // working subdir at the moment of receipt.  Without
+                    // this, `remote cd assembly` followed by `put hello.txt`
+                    // silently landed hello.txt in the base transfer_dir
+                    // instead of transfer_dir/assembly, and a follow-up
+                    // `remote dir` would show an empty assembly directory.
+                    let dir = if rx.subdir.is_empty() {
+                        target_dir.clone()
+                    } else {
+                        target_dir.join(&rx.subdir)
+                    };
+                    let filepath = dir.join(&rx.filename);
                     let meta = crate::xmodem::YmodemReceiveMeta {
                         size: rx.declared_size,
                         modtime: rx.modtime,

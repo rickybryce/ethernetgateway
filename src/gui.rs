@@ -1404,8 +1404,17 @@ impl eframe::App for App {
                 });
                 ui.add_space(20.0);
                 // ── Scripture (left) + Logo (right) ──────────
-                let logo_h = 432.0 * 0.4235;
-                let logo_w = logo_h * 2.0;
+                // The PNG ships at exactly the logical-pixel display
+                // size (366x183) so on a 1.0x-DPI display the GPU does
+                // a 1:1 blit — no minification, no filtering artifacts.
+                // Earlier builds resized 1024x512 down to ~366x183 and
+                // that minification (even at Linear with mipmaps off)
+                // had a faint mauve cast on the dark-blue gradients.
+                // On HiDPI displays the GPU still magnifies to physical
+                // pixels; Linear filtering keeps the magnified result
+                // smooth without introducing the mipmap-bleed problem.
+                let logo_w = 366.0_f32;
+                let logo_h = 183.0_f32;
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(half, logo_h),
@@ -1437,17 +1446,8 @@ impl eframe::App for App {
                         egui::Layout::top_down(egui::Align::Max),
                         |ui| {
                             ui.add_space(-32.0);
-                            // Texture-options note: the source PNG is now
-                            // pre-resized to 1024x512 (Lanczos) which is
-                            // a small minification ratio versus our
-                            // ~366x183 display size — so mipmaps add
-                            // little and Linear-mipmap-Linear filtering
-                            // was contributing a faint mauve cast on
-                            // dark-blue gradients via pre-filtered level
-                            // bleeding.  Plain Linear minification with
-                            // mipmaps disabled is sharp and clean here.
                             ui.add(
-                                egui::Image::new(egui::include_image!("../ethernetgatewaylogo.png"))
+                                egui::Image::new(egui::include_image!("../ethernetgatewaylogo_small.png"))
                                     .texture_options(egui::TextureOptions {
                                         magnification: egui::TextureFilter::Linear,
                                         minification: egui::TextureFilter::Linear,
@@ -1984,13 +1984,17 @@ mod tests {
     // ── Logo sizing constants ────────────────────────────────
 
     #[test]
-    fn test_logo_dimensions_are_reasonable() {
-        let logo_h = 432.0_f32 * 0.4235;
-        let logo_w = logo_h * 2.0;
-        // Logo should fit within a reasonable GUI panel
+    fn test_logo_dimensions_match_source_png() {
+        // The display size must match the source PNG exactly so the
+        // GPU does a 1:1 blit on a 1.0x-DPI display, avoiding the
+        // mauve-cast gradient issue we hit when minifying a larger
+        // source.  ethernetgatewaylogo_small.png is 366x183.
+        let logo_w = 366.0_f32;
+        let logo_h = 183.0_f32;
+        // Logo should fit within a reasonable GUI panel.
         assert!(logo_h > 50.0 && logo_h < 400.0);
         assert!(logo_w > 80.0 && logo_w < 600.0);
-        // Landscape orientation
-        assert!(logo_w > logo_h);
+        // Landscape, 2:1 aspect ratio.
+        assert_eq!(logo_w, logo_h * 2.0);
     }
 }

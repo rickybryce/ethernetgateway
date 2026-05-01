@@ -625,7 +625,7 @@
                         <tr>
                             <td><code>remote cwd &lt;subdir&gt;</code><br><span class="dim-text">aka <code>remote cd</code></span></td>
                             <td>G C</td>
-                            <td>Change the gateway's working sub-directory for the rest of this session. Resolved relative to <code>transfer_dir</code>; path-traversal (<code>..</code>, leading dot, separators, NUL) is refused with an E-packet. Empty argument resets back to the <code>transfer_dir</code> root.</td>
+                            <td>Change the gateway's working sub-directory for the rest of this session. Resolved relative to <code>transfer_dir</code>. Three special cases: <code>remote cd</code> with <em>no argument</em> resets back to the <code>transfer_dir</code> root; <code>remote cd ..</code> (or <code>remote cdup</code>) pops one component (no-op at the root); a target that doesn't exist on disk is refused with an E-packet so a typo'd <code>remote cd asembly</code> fails fast instead of silently dropping uploads into a bogus path. Path-traversal (<code>..</code> as a component anywhere except as the bare argument, leading dot, backslash, NUL) is refused.</td>
                         </tr>
                         <tr>
                             <td><code>remote space</code></td>
@@ -985,7 +985,7 @@
                         <tr><td><code>F</code></td><td>Finish</td><td>ACK, exit</td><td>End the protocol session. Most polite end-of-session signal.</td></tr>
                         <tr><td><code>L</code></td><td>Logout</td><td>ACK, exit</td><td>Same as F at the protocol level.</td></tr>
                         <tr><td><code>B</code></td><td>BYE</td><td>ACK, exit</td><td>Same as F. Some clients use BYE to also signal "drop the connection".</td></tr>
-                        <tr><td><code>C</code></td><td>CWD</td><td>ACK</td><td>Argument is a relative subdir. Empty argument resets to <code>transfer_dir</code> root. Validates against path-traversal.</td></tr>
+                        <tr><td><code>C</code></td><td>CWD</td><td>ACK on success, E on failure</td><td>Field-encoded argument is a relative subdir. Special cases: empty argument resets to <code>transfer_dir</code> root; bare <code>..</code> pops one component (cdup, no-op at root). Other path-traversal forms (<code>foo/..</code>, leading dot, backslash, NUL) are refused. Targets that don't exist on disk are refused so typo'd cd fails fast.</td></tr>
                         <tr><td><code>D</code></td><td>Directory</td><td>ACK + X+ + Z</td><td>Returns one entry per line: <code>name &lt;TAB&gt; size|&lt;dir&gt;</code>, sorted, hidden files skipped. Paginated across multiple X-packets when needed.</td></tr>
                         <tr><td><code>$</code></td><td>SPACE</td><td>ACK + X + Z</td><td>Returns free-bytes count as a decimal string, or <code>unknown</code> on platforms without <code>statvfs</code>.</td></tr>
                         <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>

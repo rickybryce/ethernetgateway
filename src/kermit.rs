@@ -1512,6 +1512,13 @@ pub(crate) struct KermitReceive {
     /// to atomically replace the partial file (tmp + rename) instead
     /// of refusing the write with `AlreadyExists`.
     pub resumed: bool,
+    /// Per-session working sub-directory at the moment of receipt,
+    /// relative to `transfer_dir`.  Empty string = root.  In server
+    /// mode, the peer changes this with `remote cwd <subdir>` (G C);
+    /// the saver must join it onto `transfer_dir` so uploads land in
+    /// the directory the peer asked for instead of the base.  Plain
+    /// (non-server) `kermit_receive_with_init` callers leave it empty.
+    pub subdir: String,
 }
 
 /// Single source-file payload accepted by `kermit_send`.
@@ -3639,6 +3646,10 @@ pub(crate) async fn kermit_receive_with_init(
                     mode: None,
                     flavor: flavor.clone(),
                     resumed: false,
+                    // Receiver path doesn't know about per-session
+                    // subdir state; server-mode S-dispatch fills this
+                    // in below before invoking the on_file callback.
+                    subdir: String::new(),
                 });
                 send_ack(
                     writer,
@@ -4435,9 +4446,27 @@ pub(crate) async fn kermit_server(
                         // byte, or an explicit length of zero, means
                         // "reset to home" (we map that to the configured
                         // transfer_dir root).
-                        let new_subdir = parse_g_field_argument(&raw[1..])
+                        let raw_arg = parse_g_field_argument(&raw[1..])
                             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
                             .unwrap_or_default();
+                        // CDUP: real C-Kermit's `remote cdup` sends
+                        // `setgen('C', "..", ...)` (ckuus7.c:7762), so
+                        // `..` must mean "go up one component" rather
+                        // than fail the path-traversal check.  We resolve
+                        // it locally by popping the last component from
+                        // the current subdir; popping at root stays at
+                        // root rather than escaping the sandbox.  This
+                        // is the only relative-path special case — any
+                        // other `..` (e.g. `foo/..`, `../etc`) still hits
+                        // is_safe_relative_subdir and gets refused.
+                        let new_subdir = if raw_arg == ".." {
+                            match subdir.rsplit_once('/') {
+                                Some((rest, _last)) => rest.to_string(),
+                                None => String::new(),
+                            }
+                        } else {
+                            raw_arg
+                        };
                         if !is_safe_relative_subdir(&new_subdir) {
                             send_error(
                                 writer,
@@ -4459,6 +4488,38 @@ pub(crate) async fn kermit_server(
                             // Spec §6.7: keep the server idle so the
                             // peer can retry with a valid subdir.
                             continue;
+                        }
+                        // Refuse non-existent directories so a typo'd
+                        // `remote cd asembly` fails fast instead of
+                        // silently ACKing and then dropping every
+                        // subsequent upload into a directory that
+                        // doesn't exist (the user's confused-bug
+                        // report from 2026-05-01 was caused by exactly
+                        // this footgun).  Empty subdir = root, which
+                        // we trust to exist (ensure_transfer_dir runs
+                        // before kermit_server in the telnet layer).
+                        if !new_subdir.is_empty() {
+                            let resolved = effective_transfer_path(&cfg, &new_subdir);
+                            if !resolved.is_dir() {
+                                send_error(
+                                    writer,
+                                    pkt.seq,
+                                    "Directory not found",
+                                    b'1',
+                                    0,
+                                    0,
+                                    CR,
+                                    is_tcp,
+                                )
+                                .await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G C '{}' refused (no such dir)",
+                                        new_subdir
+                                    );
+                                }
+                                continue;
+                            }
                         }
                         subdir = new_subdir;
                         send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
@@ -4873,7 +4934,7 @@ pub(crate) async fn kermit_server(
                 // accumulate whatever it returns; then loop back for
                 // the next command.  A read failure inside the receive
                 // (timeout, malformed packet, etc.) propagates up.
-                let received = kermit_receive_with_init(
+                let mut received = kermit_receive_with_init(
                     reader,
                     writer,
                     is_tcp,
@@ -4887,6 +4948,17 @@ pub(crate) async fn kermit_server(
                         "Kermit server: S-dispatch returned {} file(s)",
                         received.len()
                     );
+                }
+                // Stamp every received file with the current per-session
+                // subdir so the saver knows where to land it.  The
+                // receiver state machine itself is subdir-oblivious —
+                // it just collects bytes — so without this step the
+                // telnet `on_file` callback would join the filename
+                // onto the base `transfer_dir` and a `remote cd assembly`
+                // followed by `put hello.txt` would silently land in
+                // the wrong directory.
+                for rx in &mut received {
+                    rx.subdir = subdir.clone();
                 }
                 // Commit each file via the caller's hook before the
                 // next dispatch.  Doing this here (instead of after
@@ -7674,6 +7746,185 @@ mod tests {
         })
         .await;
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_cwd_dotdot_pops_one_level() {
+        // `remote cdup` sends G C with arg "..".  We special-case bare
+        // ".." as "pop one component from subdir" rather than rejecting
+        // it as path-traversal.  Verify the round-trip: cd into a
+        // 2-level subdir, cd .. once, expect to be at the parent.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_cwd_dotdot_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("alpha").join("beta")).unwrap();
+        std::fs::write(dir.join("alpha").join("a-file.txt"), b"alpha-mark").unwrap();
+        std::fs::write(dir.join("alpha").join("beta").join("b-file.txt"), b"beta-mark").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            // Drop into alpha/beta.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_cwd_body(b"alpha/beta"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK);
+            // Pop up one — should land at alpha.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_cwd_body(b".."))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK,
+                "remote cd .. must ACK and pop one component");
+            // Verify by GET'ing alpha/a-file.txt — succeeds only if
+            // subdir is currently "alpha".
+            w.write_all(&wire_packet(TYPE_R, 0, b"a-file.txt")).await.unwrap();
+            let r_ack = read_server_packet(r).await;
+            assert_eq!(r_ack.kind, TYPE_ACK, "GET should succeed in alpha");
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received[0].data, b"alpha-mark");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_cwd_dotdot_at_root_stays_at_root() {
+        // ".." at the root must be a no-op, not an underflow that
+        // somehow escapes the sandbox.  Verifying via GET of a
+        // root-level file confirms subdir is still empty.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_cwd_dotdot_root_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("at-root.txt"), b"root-mark").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            // ".." while already at root.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_cwd_body(b".."))).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "cd .. at root should ACK as no-op");
+            // GET still resolves under root.
+            w.write_all(&wire_packet(TYPE_R, 0, b"at-root.txt")).await.unwrap();
+            let r_ack = read_server_packet(r).await;
+            assert_eq!(r_ack.kind, TYPE_ACK);
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received[0].data, b"root-mark");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_cwd_nonexistent_dir_refused() {
+        // `remote cd typo` should fail fast with E-packet, not silently
+        // ACK and leave the user dropping uploads into a directory that
+        // doesn't exist.  Closes the user's confused-bug report from
+        // 2026-05-01: cd assembly (no such dir), put hello.txt,
+        // hello.txt vanished without trace.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_cwd_missing_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_cwd_body(b"does-not-exist"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR,
+                "missing target directory must refuse with E-packet");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_kermit_receive_carries_current_subdir() {
+        // After `remote cd <subdir>`, an upload that the receiver
+        // returns must carry the per-session subdir on each
+        // KermitReceive — that's how the telnet save layer knows to
+        // join the file under the right directory.  Plain non-server
+        // receives leave it empty.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_subdir_stamp_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("inbox")).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        // Run kermit_server with an on_file callback that captures
+        // the subdir each KermitReceive landed with.  Drive an upload
+        // after CWD'ing into "inbox".
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured_for_cb = captured.clone();
+
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        config::update_config_value("transfer_dir", &dir_str);
+
+        let (server_side, client_side) = duplex(65536);
+        let (mut s_read, mut s_write) = split(server_side);
+        let (mut c_read, mut c_write) = split(client_side);
+
+        let server_task = tokio::spawn(async move {
+            kermit_server(&mut s_read, &mut s_write, false, false, false, move |rx| {
+                captured_for_cb.lock().unwrap().push(rx.subdir.clone());
+            }).await
+        });
+
+        // CWD into inbox.
+        c_write.write_all(&wire_packet(TYPE_GENERIC, 0,
+            &g_cwd_body(b"inbox"))).await.unwrap();
+        assert_eq!(read_server_packet(&mut c_read).await.kind, TYPE_ACK);
+
+        // Upload one file.
+        let file = KermitSendFile {
+            name: "stamped.txt",
+            data: b"hi from sender",
+            modtime: None,
+            mode: None,
+        };
+        kermit_send(&mut c_read, &mut c_write, &[file], false, false, false)
+            .await
+            .unwrap();
+
+        // Close session.
+        c_write.write_all(&wire_packet(TYPE_GENERIC, 0, b"F")).await.unwrap();
+        let _ = read_server_packet(&mut c_read).await;
+
+        let server_result = server_task.await.unwrap();
+        let snapshot = captured.lock().unwrap().clone();
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+
+        server_result.unwrap();
+        assert_eq!(snapshot, vec!["inbox".to_string()],
+            "callback should see subdir='inbox' for the upload taken after CWD");
     }
 
     /// Build a single-arg field-encoded G-command body for E / T:

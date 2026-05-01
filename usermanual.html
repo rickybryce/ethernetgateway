@@ -1303,7 +1303,7 @@ disconnects, control returns to the File Transfer menu with a per-file
         <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory).</td></tr>
         <tr><td><code>get &lt;file&gt;</code></td><td>R, then we send</td><td>Download a file from the gateway to the peer.</td></tr>
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
-        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7.</td></tr>
+        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
         <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
