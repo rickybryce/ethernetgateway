@@ -4204,6 +4204,40 @@ async fn send_g_inverse_file_response(
     .await
 }
 
+/// Wrap a short status reply with a trailing CRLF before handing it to
+/// `send_g_inverse_file_response`.
+///
+/// C-Kermit displays X-packet content via `puttrm` (terminal output)
+/// and then redraws the next prompt with a leading `\r` rather than a
+/// fresh `\n`.  If our body has no trailing line terminator the redraw
+/// lands on the same line as our reply and overwrites the first N
+/// characters of what we sent, where N is the prompt width.  Symptom:
+/// short replies (`remote space` returning a 12-byte byte count)
+/// "do nothing" because the prompt exactly covers them, and longer
+/// replies (`remote kermit test` returning a 29-byte identity string)
+/// show only their tail.  Adding CRLF lets the prompt redraw on a
+/// fresh line.  Applied only at status-reply call sites — DIR / HELP
+/// / TYPE either already end with newlines or carry caller-controlled
+/// file bytes that mustn't be modified.
+fn ensure_crlf_terminator(body: &[u8]) -> Vec<u8> {
+    if body.ends_with(b"\r\n") {
+        body.to_vec()
+    } else if body.ends_with(b"\n") {
+        // Promote bare LF to CRLF — without the CR, classic terminal
+        // emulators leave the cursor at the rightmost column and the
+        // next CR-only prompt redraw still overlays our content.
+        let mut out = Vec::with_capacity(body.len() + 1);
+        out.extend_from_slice(&body[..body.len() - 1]);
+        out.extend_from_slice(b"\r\n");
+        out
+    } else {
+        let mut out = Vec::with_capacity(body.len() + 2);
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+}
+
 /// Multi-line help text sent in response to `G H` (or `G ?`).  Lists
 /// every G subcommand we recognise so a peer doing `remote help`
 /// gets a useful answer instead of a no-op ACK.  Kept ASCII-only —
@@ -4217,7 +4251,7 @@ fn kermit_g_help_text() -> &'static str {
                                 (Finish / BYE / Logout / Exit)\n\
        C  CWD <dir>          - change working subdir\n\
        D  DIRectory          - list current dir\n\
-       $  SPACE              - free disk bytes\n\
+       U  SPACE              - free disk bytes\n\
        K  KERMIT             - server identity\n\
        E  Erase <file>       - delete a file\n\
        R  Rename <old> <new> - rename a file\n\
@@ -4628,17 +4662,29 @@ pub(crate) async fn kermit_server_with_outcome(
                         .await?;
                         continue;
                     }
-                    b'$' => {
+                    b'U' | b'$' => {
+                        // SPACE — Frank da Cruz's Generic Command Letter
+                        // for "disk Usage" is 'U' (Kermit Protocol Manual
+                        // §6 Table 6-2), and that's what real C-Kermit
+                        // emits for `remote space` (ckuus7.c:7969 calls
+                        // `setgen('U', ...)`, ckcpro.w:1383 dispatches
+                        // <generic>U to REMOTE SPACE).  We additionally
+                        // accept '$' for backward compatibility with our
+                        // own `kermit_client_space` helper, which sent
+                        // '$' before this server was taught the standard
+                        // letter; any peer that follows the spec will hit
+                        // the 'U' arm.
                         let dir_path = effective_transfer_path(&cfg, &subdir);
                         let body = match fs_free_bytes(&dir_path) {
                             Some(b) => b.to_string(),
                             None => "unknown".to_string(),
                         };
+                        let payload = ensure_crlf_terminator(body.as_bytes());
                         send_g_inverse_file_response(
                             reader,
                             writer,
                             "SPACE",
-                            body.as_bytes(),
+                            &payload,
                             is_tcp,
                             is_petscii,
                             verbose,
@@ -4651,11 +4697,12 @@ pub(crate) async fn kermit_server_with_outcome(
                             "Ethernet Gateway Kermit {}",
                             env!("CARGO_PKG_VERSION")
                         );
+                        let payload = ensure_crlf_terminator(body.as_bytes());
                         send_g_inverse_file_response(
                             reader,
                             writer,
                             "KERMIT",
-                            body.as_bytes(),
+                            &payload,
                             is_tcp,
                             is_petscii,
                             verbose,
@@ -5171,6 +5218,58 @@ pub(crate) async fn kermit_server_with_outcome(
                     verbose,
                     starting_seq,
                     false,
+                )
+                .await?;
+                continue;
+            }
+            b'K' => {
+                // `remote kermit <command>` ships a *top-level* K-packet
+                // (not a G-K subcommand — see ckcpro.w `k { ... vcmd='K';
+                // ... scmd('K', cmarg) }` and the XZKER handler at
+                // ckuus7.c:7898).  The payload is the literal text the
+                // user typed after `remote kermit` (e.g. "set file type
+                // binary"), encoded with the standard control-quote
+                // layer.  C-Kermit's own server treats unknown top-level
+                // packets via `<serve>.` (ckcpro.w:871) which replies
+                // "Unimplemented server function" — so even C-Kermit
+                // against C-Kermit gives no useful answer.
+                //
+                // We instead return the gateway's identity + version
+                // regardless of the requested command, surfaced via the
+                // same X+Z inverse-file-transfer pattern used by
+                // `remote help` / `remote dir` / `remote space`.  That
+                // gives the operator a deterministic "yes, I'm an
+                // Ethernet Gateway, here's my version" answer for any
+                // `remote kermit <anything>` invocation.  C-Kermit
+                // silently no-ops on `remote kermit` with *no*
+                // argument (ckuus7.c:7903), so the user must supply
+                // some text — `remote kermit version` is conventional.
+                let recv_q = Quoting {
+                    qctl: DEFAULT_QCTL,
+                    qbin: None,
+                    rept: None,
+                    locking_shifts: false,
+                };
+                let cmd = decode_data(&pkt.payload, recv_q).unwrap_or_default();
+                if verbose {
+                    glog!(
+                        "Kermit server: K-packet '{}' → identity reply",
+                        String::from_utf8_lossy(&cmd)
+                    );
+                }
+                let body = format!(
+                    "Ethernet Gateway Kermit {}",
+                    env!("CARGO_PKG_VERSION")
+                );
+                let payload = ensure_crlf_terminator(body.as_bytes());
+                send_g_inverse_file_response(
+                    reader,
+                    writer,
+                    "KERMIT",
+                    &payload,
+                    is_tcp,
+                    is_petscii,
+                    verbose,
                 )
                 .await?;
                 continue;
@@ -7410,7 +7509,7 @@ mod tests {
         // `remote help` user sees what works.
         let ((), result) = run_server_with_client(async |w, r| {
             let body = run_g_text_command(w, r, b'H', &[]).await;
-            for letter in &["F", "L", "B", "C", "D", "$", "K", "H", "E", "T", "I", "X"] {
+            for letter in &["F", "L", "B", "C", "D", "U", "K", "H", "E", "T", "I", "X"] {
                 assert!(
                     body.contains(letter),
                     "help text missing subcommand '{}'; got: {:?}",
@@ -7694,6 +7793,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_server_top_level_k_packet_returns_identity() {
+        // Real C-Kermit's `remote kermit <cmd>` ships a top-level
+        // K-packet (NOT G-K) — see ckcpro.w `k { vcmd='K'; ... scmd('K',
+        // cmarg); }` and ckuus7.c:7898.  Our server replies with the
+        // gateway identity via X+Z inverse transfer, regardless of the
+        // command text in the payload.  Locks in the 2026-05 fix that
+        // taught the server about K-packets after a user reported
+        // `remote kermit version` returning "Unexpected packet type".
+        let ((), result) = run_server_with_client(async |w, r| {
+            // Encode "version" as the K-packet payload, mirroring what
+            // C-Kermit's encstr does to the cmarg.
+            let payload = encode_data(b"version", Quoting::default());
+            w.write_all(&wire_packet(b'K', 0, &payload))
+                .await
+                .unwrap();
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(
+                s_pkt.kind, TYPE_SEND_INIT,
+                "expected S after K-packet, got '{}'",
+                s_pkt.kind as char
+            );
+            let received =
+                kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                    .await
+                    .expect("inverse file receive failed");
+            let body = String::from_utf8(received.into_iter().next().unwrap().data).unwrap();
+            assert!(
+                body.contains("Ethernet Gateway Kermit"),
+                "K-packet reply missing identity: {:?}",
+                body
+            );
+            assert!(
+                body.contains(env!("CARGO_PKG_VERSION")),
+                "K-packet reply missing version: {:?}",
+                body
+            );
+            close_server_session(w, r).await;
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_server_g_kermit_returns_version() {
         // G K reports our identity + version via X-packet.
         let ((), result) = run_server_with_client(async |w, r| {
@@ -7722,10 +7864,36 @@ mod tests {
         let ((), result) = run_server_with_client(async |w, r| {
             let body = run_g_text_command(w, r, b'$', &[]).await;
             assert!(!body.is_empty(), "SPACE response must not be empty");
-            // Body must parse as a u64 OR equal "unknown".
+            // Body must parse as a u64 OR equal "unknown" (after trim:
+            // server appends CRLF so the C-Kermit prompt redraws on a
+            // fresh line instead of overwriting our content).
+            let trimmed = body.trim();
             assert!(
-                body.parse::<u64>().is_ok() || body == "unknown",
+                trimmed.parse::<u64>().is_ok() || trimmed == "unknown",
                 "SPACE response must be numeric or 'unknown', got: {:?}",
+                body
+            );
+            close_server_session(w, r).await;
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_space_accepts_spec_letter_u() {
+        // Real C-Kermit's `remote space` sends G with letter 'U' (per
+        // Frank da Cruz Generic Command Letters §6, ckcpro.w:1383
+        // <generic>U).  Our pre-2026-05 server only matched '$' and
+        // refused 'U' with E "Command not supported", which C-Kermit
+        // displayed as "?command not supported".  Lock in that 'U'
+        // now resolves to the same SPACE response shape as '$'.
+        let ((), result) = run_server_with_client(async |w, r| {
+            let body = run_g_text_command(w, r, b'U', &[]).await;
+            assert!(!body.is_empty(), "G U SPACE response must not be empty");
+            let trimmed = body.trim();
+            assert!(
+                trimmed.parse::<u64>().is_ok() || trimmed == "unknown",
+                "G U SPACE response must be numeric or 'unknown', got: {:?}",
                 body
             );
             close_server_session(w, r).await;
@@ -9181,6 +9349,8 @@ mod tests {
     async fn test_client_space_returns_text() {
         // SPACE returns either a numeric byte-count (Unix) or
         // "unknown" (other platforms).  Body must be non-empty.
+        // Server appends CRLF so the C-Kermit prompt redraws on a
+        // fresh line — trim before parsing the numeric.
         let (client_result, _) = run_client_against_server(async |r, w| {
             let s = kermit_client_space(r, w, false, false, false).await;
             let _ = kermit_client_finish(r, w, false, false, false).await;
@@ -9189,7 +9359,8 @@ mod tests {
         .await;
         let body = client_result.unwrap();
         assert!(!body.is_empty());
-        assert!(body.parse::<u64>().is_ok() || body == "unknown");
+        let trimmed = body.trim();
+        assert!(trimmed.parse::<u64>().is_ok() || trimmed == "unknown");
     }
 
     #[tokio::test]

@@ -629,13 +629,21 @@
                         </tr>
                         <tr>
                             <td><code>remote space</code></td>
-                            <td>G $</td>
-                            <td>Report free disk space, in bytes, at the current effective directory. Returns <code>unknown</code> on platforms without <code>statvfs</code>.</td>
+                            <td>G U</td>
+                            <td>Report free disk space, in bytes, at the current effective directory. Returns <code>unknown</code> on platforms without <code>statvfs</code>. The wire letter is <code>U</code> (Frank da Cruz Generic Command Letters §6 Table 6-2: "disk Usage") — that's what real C-Kermit emits via <code>setgen('U', …)</code>. The gateway also accepts the legacy <code>$</code> letter for backward compatibility with our own client helper.</td>
                         </tr>
                         <tr>
-                            <td><code>remote kermit</code></td>
-                            <td>G K</td>
-                            <td>Ask the server to identify itself. Replies with <code>Ethernet Gateway Kermit 0.5.2</code>.</td>
+                            <td><code>remote kermit &lt;text&gt;</code></td>
+                            <td>K</td>
+                            <td>
+                                Ask the gateway to identify itself. Replies with <code>Ethernet Gateway Kermit 0.5.2</code> regardless of the text you supply, delivered via the same X+Z inverse-transfer pattern as <code>remote dir</code>.
+                                <p style="margin: 8px 0 0 0;"><strong>Argument is required.</strong> If you type <code>remote kermit</code> with <em>no</em> text after it, C-Kermit silently does nothing and never sends a packet — that's the client's behavior, not the server's. Type any non-empty argument to actually invoke the command. Conventional choices:</p>
+                                <pre style="margin-top: 6px;"><code><span class="output-text">C-Kermit&gt;</span> remote kermit version
+<span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
+<span class="output-text">C-Kermit&gt;</span> remote kermit info
+<span class="output-text">Ethernet Gateway Kermit 0.5.2</span></code></pre>
+                                <p style="margin: 8px 0 0 0; color: #888;">Wire shape note: this is a <em>top-level</em> K-packet (the user's command rides in the payload), not a G-K subcommand. C-Kermit builds the packet via <code>scmd('K', cmarg)</code>; G-K is reserved for <code>remote copy</code> in the spec. A separate <code>G K</code> path is preserved internally for our own client helpers but real Kermit clients never emit it.</p>
+                            </td>
                         </tr>
                         <tr>
                             <td><code>remote help</code></td>
@@ -1158,7 +1166,7 @@
                 <pre><code><span class="prompt-char">$</span> kermit
 <span class="output-text">C-Kermit&gt;</span> set host 192.168.1.160:2323 /telnet
 <span class="output-text">C-Kermit&gt;</span> set file names literal
-<span class="output-text">C-Kermit&gt;</span> remote kermit
+<span class="output-text">C-Kermit&gt;</span> remote kermit version
 <span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
 <span class="output-text">C-Kermit&gt;</span> remote dir
 <span class="output-text">alpha.bin    1024
