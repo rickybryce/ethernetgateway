@@ -4002,6 +4002,39 @@ pub(crate) async fn kermit_receive_with_init(
 /// empty string (root of `transfer_dir`), single names, and multi-
 /// component relative paths separated by `/`.  Refuses anything that
 /// could escape the transfer dir: leading `/`, embedded `\`, NUL,
+/// Decode one field-encoded argument from a Generic-command body.
+///
+/// Kermit Protocol Manual §6 specifies that arguments to Generic
+/// commands (notably `G C` for CWD) are *field-encoded*: a single
+/// length byte (`tochar(N)` = N + 0x20) followed by exactly N bytes
+/// of payload.  Real C-Kermit (`remote cwd <path>`) emits this on
+/// the wire — without the length prefix the path bytes appear
+/// glued to a `(` (0x28 = `tochar(8)`) or similar punctuation,
+/// which then trips path-validation as an unsafe path.
+///
+/// Returns `Some(bytes)` for a present argument (possibly empty),
+/// or `None` when the tail is empty or shorter than the declared
+/// length.  The `None` cases are treated as "no argument given"
+/// by callers — typically meaning "reset to default" for CWD.
+pub(crate) fn parse_g_field_argument(tail: &[u8]) -> Option<&[u8]> {
+    if tail.is_empty() {
+        return None;
+    }
+    let declared_len = unchar(tail[0]) as usize;
+    if declared_len == 0 {
+        return Some(&[]);
+    }
+    if tail.len() < 1 + declared_len {
+        // Under-length payload — peer is malformed.  Caller treats
+        // None as "no argument".  We deliberately do not return a
+        // partial slice: silently truncating a short field would
+        // mask sender bugs and could let an attacker land arbitrary
+        // bytes by setting the length byte higher than the body.
+        return None;
+    }
+    Some(&tail[1..1 + declared_len])
+}
+
 /// any `..` component, per-component leading dots, or an over-cap
 /// length.  The matching `effective_transfer_path` joins the result
 /// onto `cfg.transfer_dir`.
@@ -4360,7 +4393,6 @@ pub(crate) async fn kermit_server(
                 };
                 let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
                 let action = raw.first().copied().unwrap_or(0);
-                let arg: &[u8] = if raw.len() > 1 { &raw[1..] } else { &[] };
                 match action {
                     b'F' | b'L' | b'B' => {
                         send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
@@ -4370,7 +4402,17 @@ pub(crate) async fn kermit_server(
                         return Ok(all_received);
                     }
                     b'C' => {
-                        let new_subdir = String::from_utf8_lossy(arg).into_owned();
+                        // Per Kermit Protocol Manual §6.7, the CWD argument
+                        // is a *field-encoded* item — one length byte
+                        // (tochar(N)) followed by N bytes of path.  Real
+                        // C-Kermit (`remote cwd <path>`) sends exactly
+                        // this on the wire.  A bare `C` with no length
+                        // byte, or an explicit length of zero, means
+                        // "reset to home" (we map that to the configured
+                        // transfer_dir root).
+                        let new_subdir = parse_g_field_argument(&raw[1..])
+                            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                            .unwrap_or_default();
                         if !is_safe_relative_subdir(&new_subdir) {
                             send_error(
                                 writer,
@@ -4825,7 +4867,10 @@ pub(crate) async fn kermit_client_get(
 /// Send a Generic-command packet that expects a single-ACK reply
 /// (F=Finish, L=Logout, B=BYE, C=CWD).  The peer's E-packet reply
 /// surfaces as `Err`.  Caller assembles the action byte + optional
-/// argument bytes (e.g. CWD's subdir name).
+/// field-encoded argument bytes (e.g. CWD's tochar(N)+path); we
+/// control-quote the resulting payload via `encode_data` so any
+/// QCTL byte the field-encoding introduces (e.g. `tochar(3) = '#'`)
+/// arrives intact at the peer's `decode_data`.
 async fn kermit_client_send_g_simple(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -4837,9 +4882,10 @@ async fn kermit_client_send_g_simple(
 ) -> Result<(), String> {
     let cfg = config::get_config();
     let mut state = ReadState::default();
-    let mut payload = Vec::with_capacity(1 + arg.len());
-    payload.push(action);
-    payload.extend_from_slice(arg);
+    let mut raw = Vec::with_capacity(1 + arg.len());
+    raw.push(action);
+    raw.extend_from_slice(arg);
+    let payload = encode_data(&raw, Quoting::default());
     let _ack_payload = send_and_await_ack(
         reader,
         writer,
@@ -4882,9 +4928,17 @@ async fn kermit_client_send_g_text(
 ) -> Result<String, String> {
     let cfg = config::get_config();
     let mut state = ReadState::default();
-    let mut payload = Vec::with_capacity(1 + arg.len());
-    payload.push(action);
-    payload.extend_from_slice(arg);
+    let mut raw = Vec::with_capacity(1 + arg.len());
+    raw.push(action);
+    raw.extend_from_slice(arg);
+    // Control-quote the payload so any QCTL bytes in the
+    // field-encoded argument (e.g. CWD's tochar(N) length byte)
+    // survive `decode_data` on the peer.  The current commands
+    // (D / $ / K / H / ?) all pass empty `arg`, so the encoded form
+    // is currently identical to the raw form — but new callers
+    // (e.g. a future `remote help <topic>`) get correct behavior
+    // without having to re-discover this requirement.
+    let payload = encode_data(&raw, Quoting::default());
     // 1. Send G — no Y-ACK from the server for long replies.  Per
     //    C-Kermit's ckcpro.w protocol comment ("packet number stays at
     //    zero through I-G-S sequence") and the rgen-state Y handler,
@@ -5006,11 +5060,34 @@ pub(crate) async fn kermit_client_cwd(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<(), String> {
+    // Field-encode the subdir per Kermit Protocol Manual §6.7:
+    // tochar(N) length byte + N bytes of path.  Required for
+    // real-Kermit interop; without it our C-Kermit peer reads the
+    // first path byte as a length and then refuses the rest as
+    // garbage (or, worse, walks a different directory than asked).
+    // Empty subdir → no length byte at all (signals "reset to home"
+    // on both sides).
+    let subdir_bytes = subdir.as_bytes();
+    let mut field_encoded = Vec::with_capacity(1 + subdir_bytes.len());
+    if !subdir_bytes.is_empty() {
+        if subdir_bytes.len() > 94 {
+            // tochar(N) only encodes N up to 94 (95 + 0x20 = 0x7F /
+            // DEL, the one printable boundary the spec excludes).
+            // Refuse over-long names here so we don't ship a body
+            // the peer will reject as malformed.
+            return Err(format!(
+                "Kermit client: CWD path {} bytes exceeds field-encoding cap of 94",
+                subdir_bytes.len()
+            ));
+        }
+        field_encoded.push(tochar(subdir_bytes.len() as u8));
+        field_encoded.extend_from_slice(subdir_bytes);
+    }
     kermit_client_send_g_simple(
         reader,
         writer,
         b'C',
-        subdir.as_bytes(),
+        &field_encoded,
         is_tcp,
         is_petscii,
         verbose,
@@ -6250,6 +6327,24 @@ mod tests {
         build_packet(kind, seq, payload, b'1', 0, 0, CR)
     }
 
+    /// Build the body of a Generic CWD command (`G C <path>`) the way
+    /// real C-Kermit puts it on the wire: the action letter `C`, then
+    /// — if the path is non-empty — a `tochar(N)` length byte followed
+    /// by the N path bytes, the whole thing then run through
+    /// `encode_data` so QCTL bytes (notably `tochar(3) = '#'`) are
+    /// quoted and survive the receiver's `decode_data`.  An empty
+    /// path yields just `C`, which the server treats as "reset to
+    /// home".
+    fn g_cwd_body(path: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(2 + path.len());
+        raw.push(b'C');
+        if !path.is_empty() {
+            raw.push(tochar(path.len() as u8));
+            raw.extend_from_slice(path);
+        }
+        encode_data(&raw, Quoting::default())
+    }
+
     /// Read one packet from the server's response stream using the
     /// same protocol the receiver does at default settings.
     async fn read_server_packet(
@@ -6583,19 +6678,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_server_g_cwd_oversized_subdir_refused_and_session_alive() {
-        // Peer sends G C with a path well past the subdir cap.
-        // Refused without modifying the subdir; session continues.
-        let huge: Vec<u8> = std::iter::once(b'C')
-            .chain(std::iter::repeat_n(b'a', MAX_KERMIT_SUBDIR_LEN + 1))
-            .collect();
+    async fn test_server_g_cwd_malformed_field_payload_session_alive() {
+        // Peer sends a G C with a length byte that declares more
+        // bytes than are actually present (length=50, no body bytes).
+        // Per spec §6.7 we treat any malformed/short field as
+        // "no argument" — the server silently resets to root and
+        // ACKs.  The point of this test is that the server doesn't
+        // panic on adversarial input and the session stays alive
+        // for the next command.  Replaces an earlier "oversized
+        // subdir" test that pre-dated field encoding: with
+        // tochar-encoded length bytes, paths > 94 are not
+        // representable on the wire, so the cap-exceedance case
+        // is unreachable through valid protocol — defense-in-depth
+        // in `is_safe_relative_subdir` still holds it.
+        let malformed: Vec<u8> = vec![b'C', tochar(50)];
         let ((), result) = run_server_with_client(async move |w, r| {
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, &huge))
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &malformed))
                 .await
                 .unwrap();
             let resp = read_server_packet(r).await;
-            assert_eq!(resp.kind, TYPE_ERROR);
-            // Drive a follow-up command.
+            assert_eq!(resp.kind, TYPE_ACK, "malformed CWD field should silent-reset (ACK)");
+            // Session still alive — follow-up command works.
             let body = run_g_text_command(w, r, b'K', &[]).await;
             assert!(body.contains("Kermit"));
             close_server_session(w, r).await;
@@ -6991,8 +7094,8 @@ mod tests {
 
         let ((), result) = run_server_with_client(async move |w, r| {
             config::update_config_value("transfer_dir", &dir_str);
-            // CWD into "sub"
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"Csub")).await.unwrap();
+            // CWD into "sub" — field-encoded per spec §6.7
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"sub"))).await.unwrap();
             let cwd_ack = read_server_packet(r).await;
             assert_eq!(cwd_ack.kind, TYPE_ACK);
             // Pull file.bin — must resolve under <transfer_dir>/sub.
@@ -7023,13 +7126,109 @@ mod tests {
         // stays idle without modifying the subdir.  Server keeps
         // running per spec §6.7 so a peer can retry with a valid path.
         let ((), result) = run_server_with_client(async |w, r| {
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"C../etc")).await.unwrap();
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"../etc"))).await.unwrap();
             let resp = read_server_packet(r).await;
             assert_eq!(resp.kind, TYPE_ERROR, "expected E for CWD ../etc");
             close_server_session(w, r).await;
         })
         .await;
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_cwd_ckermit_field_encoding_succeeds() {
+        // Real C-Kermit's `remote cwd assembly` sends the path
+        // field-encoded per spec §6.7: action `C`, then `tochar(8)` =
+        // 0x28 = `(`, then the 8 bytes "assembly".  Without field-
+        // decoding the server reads `(assembly` as the path and
+        // refuses it as unsafe (the leading `(` fails
+        // is_safe_relative_subdir).  This regression locks in the
+        // decode and asserts a real-Kermit-shaped payload is ACKed.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_server_cwd_ckermit_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assembly")).unwrap();
+        let probe = b"asm contents".to_vec();
+        std::fs::write(dir.join("assembly").join("hello.s"), &probe).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let probe_clone = probe.clone();
+
+        // Hand-construct the payload to mirror what C-Kermit puts on
+        // the wire — a literal `tochar(8)` byte (0x28 = `(`), not the
+        // `g_cwd_body` helper, so this test would catch a regression
+        // in the helper itself.  `(` (0x28) is a printable, non-QCTL
+        // byte, so encode_data is a no-op for this specific length —
+        // we still pipe through it so future length values that hit
+        // QCTL (e.g. tochar(3) = `#`) keep working.
+        let mut raw = vec![b'C', b'(' /* tochar(8) */];
+        raw.extend_from_slice(b"assembly");
+        let body = encode_data(&raw, Quoting::default());
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &body)).await.unwrap();
+            let cwd_ack = read_server_packet(r).await;
+            assert_eq!(
+                cwd_ack.kind, TYPE_ACK,
+                "C-Kermit field-encoded CWD must be ACKed, not refused as unsafe path"
+            );
+            // Pull the file from the new working dir to confirm the
+            // CWD actually applied (rather than being silently reset).
+            w.write_all(&wire_packet(TYPE_R, 0, b"hello.s")).await.unwrap();
+            let r_ack = read_server_packet(r).await;
+            assert_eq!(r_ack.kind, TYPE_ACK);
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].data, probe_clone);
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[test]
+    fn test_parse_g_field_argument_decodes_ckermit_remote_cwd() {
+        // Unit-level coverage of the field-decoder.  The byte sequence
+        // `(assembly` (10 bytes after the `C` action letter) is exactly
+        // what `remote cwd assembly` emits.
+        let tail = b"(assembly";
+        let arg = parse_g_field_argument(tail).expect("present");
+        assert_eq!(arg, b"assembly");
+    }
+
+    #[test]
+    fn test_parse_g_field_argument_zero_length_is_empty() {
+        // tochar(0) = ' ' (0x20).  Means "argument present but empty"
+        // — peers might use this to request a reset to home.
+        let tail = b" ";
+        let arg = parse_g_field_argument(tail).expect("present");
+        assert!(arg.is_empty());
+    }
+
+    #[test]
+    fn test_parse_g_field_argument_empty_tail_is_none() {
+        // No length byte at all — bare `C`.  Caller treats None as
+        // "no argument given" → reset to home.
+        assert!(parse_g_field_argument(&[]).is_none());
+    }
+
+    #[test]
+    fn test_parse_g_field_argument_under_length_is_none() {
+        // Length byte declares 50 bytes but only 5 follow.  Adversarial
+        // / malformed input: refuse to silently truncate so peer bugs
+        // surface and we don't accidentally accept arbitrary trailing
+        // bytes if the peer extends the body in future.
+        let mut tail = vec![tochar(50)];
+        tail.extend_from_slice(b"abcde");
+        assert!(parse_g_field_argument(&tail).is_none());
     }
 
     #[tokio::test]
@@ -7118,7 +7317,7 @@ mod tests {
         // 1. Bad CWD — server refuses, stays idle, subdir unchanged
         //    (still at "" = root).
         c_write
-            .write_all(&wire_packet(TYPE_GENERIC, 0, b"C../escape"))
+            .write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"../escape")))
             .await
             .unwrap();
         let e = read_server_packet(&mut c_read).await;
@@ -7132,7 +7331,7 @@ mod tests {
         );
         // 3. Good CWD into ok/.
         c_write
-            .write_all(&wire_packet(TYPE_GENERIC, 0, b"Cok"))
+            .write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"ok")))
             .await
             .unwrap();
         let ack = read_server_packet(&mut c_read).await;
@@ -7200,7 +7399,7 @@ mod tests {
         config::update_config_value("transfer_dir", &dir_str);
         // CWD into nested
         c_write
-            .write_all(&wire_packet(TYPE_GENERIC, 0, b"Cnested"))
+            .write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"nested")))
             .await
             .unwrap();
         let _ = read_server_packet(&mut c_read).await;
