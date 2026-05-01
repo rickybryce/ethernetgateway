@@ -4906,7 +4906,23 @@ pub(crate) async fn kermit_server(
                 // disk, then hand off to the sender state machine
                 // starting at seq+1 (so its S follows our just-received
                 // R in the same monotonic stream).
-                let fname = String::from_utf8_lossy(&pkt.payload).into_owned();
+                //
+                // The filename arrives control-quoted on the wire — real
+                // C-Kermit calls `encstr` on the GET argument before
+                // transmission (see ckcfn2.c:2474 in the C-Kermit source).
+                // Without `decode_data` here, a filename containing `#`
+                // (the default QCTL) arrives doubled and the lookup
+                // fails as "File not found".  ASCII filenames without
+                // QCTL or control bytes are unaffected, which is why
+                // pre-2026-05 builds passed every interop test we ran.
+                let recv_q = Quoting {
+                    qctl: DEFAULT_QCTL,
+                    qbin: None,
+                    rept: None,
+                    locking_shifts: false,
+                };
+                let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
+                let fname = String::from_utf8_lossy(&raw).into_owned();
                 if !is_safe_resume_filename(&fname) {
                     send_error(
                         writer,
@@ -5085,13 +5101,16 @@ pub(crate) async fn kermit_client_get(
         );
     }
 
-    // 1. Send R-packet.  Filename goes in the payload as raw bytes —
-    //    matches the convention the server's R handler reads (see
-    //    `String::from_utf8_lossy(&pkt.payload)` in kermit_server).
-    //    Quoting filenames here would force a corresponding decode
-    //    branch on the server side; spec is loose either way and the
-    //    raw form is what every Kermit we've seen on the wire uses.
-    let r_pkt = build_packet(TYPE_R, 0, filename.as_bytes(), b'1', 0, 0, CR);
+    // 1. Send R-packet.  Filename goes through `encode_data` first so
+    //    QCTL bytes (notably `#` in a filename like `temp#1.bin`) are
+    //    control-quoted on the wire.  Real C-Kermit's GET sender does
+    //    the same — see `encstr((CHAR *)cmarg)` at ckcfn2.c:2474 in
+    //    the C-Kermit source.  The earlier "raw bytes" comment here
+    //    was wrong; we just hadn't exercised QCTL-bearing names in
+    //    interop tests.  The server's R handler now mirrors with
+    //    `decode_data`.
+    let payload = encode_data(filename.as_bytes(), Quoting::default());
+    let r_pkt = build_packet(TYPE_R, 0, &payload, b'1', 0, 0, CR);
     raw_write_bytes(writer, &r_pkt, is_tcp).await?;
 
     // 2. Read the server's response.  Per spec §6 / C-Kermit interop
@@ -7017,6 +7036,60 @@ mod tests {
 
         result.unwrap();
         assert_eq!(recv_data, payload);
+    }
+
+    #[tokio::test]
+    async fn test_server_r_filename_with_qctl_byte_decodes() {
+        // Real C-Kermit's GET (`get filename`) ships the filename
+        // through `encstr` before transmission (ckcfn2.c:2474), so a
+        // filename containing `#` (the default QCTL byte) arrives on
+        // the wire as `##`.  Without `decode_data` on our R-handler,
+        // we'd look up `temp##1.bin` on disk and report "File not
+        // found" while the file actually saved as `temp#1.bin`.
+        //
+        // This test sends an R-packet with the encoded form on the
+        // wire (mirroring real C-Kermit) and asserts the server finds
+        // the unencoded filename on disk.  Locks in the
+        // encode_data/decode_data symmetry across the R round-trip.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_server_r_qctl_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let on_disk_name = "temp#1.bin";
+        let payload: Vec<u8> = b"contents of #1".to_vec();
+        std::fs::write(dir.join(on_disk_name), &payload).unwrap();
+
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let payload_clone = payload.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            // Encode the filename the way real C-Kermit does.  For
+            // "temp#1.bin" the QCTL `#` becomes `##`, so the wire body
+            // is `temp##1.bin` (12 bytes vs the 10-byte real name).
+            let encoded = encode_data(on_disk_name.as_bytes(), Quoting::default());
+            assert_eq!(encoded, b"temp##1.bin", "encode_data should double the QCTL");
+            w.write_all(&wire_packet(TYPE_R, 0, &encoded)).await.unwrap();
+            let r_ack = read_server_packet(r).await;
+            assert_eq!(
+                r_ack.kind, TYPE_ACK,
+                "encoded filename must decode to the on-disk name and ACK"
+            );
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].data, payload_clone);
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
     }
 
     #[tokio::test]
