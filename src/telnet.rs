@@ -186,6 +186,16 @@ enum Menu {
     Browser,
 }
 
+/// Result of one Kermit-settings page render.  `Switch` means the user
+/// pressed the cross-page nav key (M from Status → menu, V from Menu →
+/// status); `Back` returns to the calling File Transfer menu.  Used by
+/// `kermit_settings` to drive the two-page split that keeps each screen
+/// within the 22-row × 40-col PETSCII budget.
+enum KermitPageNav {
+    Switch,
+    Back,
+}
+
 impl Menu {
     fn path(&self) -> &'static str {
         match self {
@@ -8546,6 +8556,16 @@ impl TelnetSession {
                 kermit_status, cfg.kermit_server_port
             ))
             .await?;
+            let ip_safety_status = if cfg.disable_ip_safety {
+                self.red("DISABLED")
+            } else {
+                self.green("Enabled")
+            };
+            self.send_line(&format!(
+                "  IP safety: {}",
+                ip_safety_status
+            ))
+            .await?;
             self.send_line("").await?;
 
             // Show server IP addresses and ATD example
@@ -8598,7 +8618,8 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Restart server",
+                "  {}  IP safety        {}  Restart server",
+                self.cyan("I"),
                 self.cyan("R")
             ))
             .await?;
@@ -8657,6 +8678,9 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "i" => {
+                    self.disable_ip_safety_toggle(cfg.disable_ip_safety).await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -8665,10 +8689,146 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, P, S, O, K, J, R, H, or Q.").await?;
+                    self.show_error("Press T, P, S, O, K, J, I, R, H, or Q.").await?;
                 }
             }
         }
+    }
+
+    /// Toggle `disable_ip_safety`.  Off→on shows a full-screen security
+    /// warning (the listener will accept connections from any source IP,
+    /// including public addresses, while `security_enabled` is false)
+    /// and prompts Y/N — same posture as `kermit_server_toggle`.  On→off
+    /// is one-click safe (re-tightens the allowlist).  Either outcome
+    /// falls through and returns to the Server Configuration screen via
+    /// the surrounding `loop` in `server_configuration`.  The change is
+    /// effective immediately because the accept loop reads the live
+    /// config on each connection.
+    async fn disable_ip_safety_toggle(
+        &mut self,
+        currently_disabled: bool,
+    ) -> Result<(), std::io::Error> {
+        if currently_disabled {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("disable_ip_safety", "false");
+            })
+            .await
+            .ok();
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.green("IP-safety allowlist re-enabled.")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("DISABLE IP SAFETY — SECURITY WARNING")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.amber("This removes the private-IP allowlist.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  When Require Login is off, the telnet listener",
+        )
+        .await?;
+        self.send_line(
+            "  normally accepts only private/loopback/link-local",
+        )
+        .await?;
+        self.send_line(
+            "  addresses, and rejects gateway-style *.*.*.1",
+        )
+        .await?;
+        self.send_line(
+            "  addresses. That allowlist is the only thing",
+        )
+        .await?;
+        self.send_line(
+            "  standing between a public IP and an unauthenticated",
+        )
+        .await?;
+        self.send_line("  session.").await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Disabling it accepts every source IP. Anyone who",
+        )
+        .await?;
+        self.send_line(
+            "  can reach your telnet port will be able to connect.",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Disable only when a firewall, VPN, or other network",
+        )
+        .await?;
+        self.send_line(
+            "  control sits in front of the listener, or when you",
+        )
+        .await?;
+        self.send_line(
+            "  are about to enable Require Login. The change takes",
+        )
+        .await?;
+        self.send_line(
+            "  effect on the next inbound connection.",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  Disable IP safety? ({}/{}): ",
+            self.cyan("Y"),
+            self.cyan("N")
+        ))
+        .await?;
+        self.flush().await?;
+
+        let answer = self.get_menu_input(false).await?;
+        let confirmed = matches!(
+            answer.as_deref().map(|s| s.trim()),
+            Some("y") | Some("Y")
+        );
+
+        self.send_line("").await?;
+        if confirmed {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("disable_ip_safety", "true");
+            })
+            .await
+            .ok();
+            self.send_line(&format!(
+                "  {}",
+                self.green("IP-safety allowlist disabled.")
+            ))
+            .await?;
+        } else {
+            self.send_line(&format!(
+                "  {}",
+                self.dim("IP safety left enabled.")
+            ))
+            .await?;
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
     }
 
     /// Toggle `kermit_server_enabled`.  Off→on shows a full-screen
@@ -9134,10 +9294,15 @@ impl TelnetSession {
                 "     server listener (bypasses",
                 "     auth and private-IP filter)",
                 "  J  Change the Kermit server port",
+                "  I  Toggle IP safety. When OFF,",
+                "     telnet accepts every source",
+                "     IP (no private-IP filter).",
+                "     Effective immediately.",
                 "  R  Restart the server",
                 "",
-                "  Changes are saved immediately",
-                "  but require a server restart.",
+                "  Most changes are saved at once",
+                "  but require a server restart;",
+                "  IP safety applies immediately.",
             ]
         } else {
             &[
@@ -9150,11 +9315,18 @@ impl TelnetSession {
                 "  K  Toggle the standalone Kermit server",
                 "     (bypasses auth and the private-IP filter)",
                 "  J  Change the Kermit server listening port",
+                "  I  Toggle IP safety. When ON (default), and",
+                "     login is not required, the telnet listener",
+                "     only accepts private/loopback addresses",
+                "     and rejects *.*.*.1 gateways. When OFF, every",
+                "     source IP is accepted. Takes effect on the",
+                "     next inbound connection (no restart needed).",
                 "  R  Restart the server now",
                 "",
-                "  Changes are saved to the config file",
-                "  immediately but require a server restart",
-                "  to take effect.",
+                "  Most changes are saved to the config file",
+                "  immediately but require a server restart to",
+                "  take effect; IP safety is the exception and",
+                "  applies on the next connection.",
             ]
         };
         self.show_help_page("SERVER CONFIGURATION HELP", lines).await
@@ -9661,54 +9833,83 @@ impl TelnetSession {
     // status (timeouts/retries, packet/window/check, capability bits)
     // since not all of it fits in PETSCII's 22 rows.
 
+    /// Top-level Kermit settings entry point.  The screen is split into
+    /// two pages so each fits within the PETSCII 22-row × 40-col budget:
+    /// a read-only Status page and an editable Settings menu.  `M` on
+    /// the Status page jumps to Settings; `V` on the Settings menu jumps
+    /// back to Status; `Q` on either exits to File Transfer.
     async fn kermit_settings(&mut self) -> Result<(), std::io::Error> {
+        let mut on_status = true;
+        loop {
+            let nav = if on_status {
+                self.kermit_status_page().await?
+            } else {
+                self.kermit_settings_menu_page().await?
+            };
+            match nav {
+                KermitPageNav::Switch => on_status = !on_status,
+                KermitPageNav::Back => return Ok(()),
+            }
+        }
+    }
+
+    /// Render the read-only Kermit status page.  Returns `Switch` when
+    /// the operator presses `M` (jump to the editable Settings menu),
+    /// `Back` on `Q`.  `H` shows help and re-renders.  Designed to fit
+    /// PETSCII 22×40 with all values at their realistic max widths
+    /// (5-digit timeouts, 4-digit max-packet, 2-digit window, etc.).
+    async fn kermit_status_page(&mut self) -> Result<KermitPageNav, std::io::Error> {
         loop {
             let cfg = config::get_config();
-
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("KERMIT SETTINGS")))
+            self.send_line(&format!("  {}", self.yellow("KERMIT STATUS")))
                 .await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
-            // Compact status block — one line per field.
-            self.send_line(&format!(
-                "  Negotiate:  {} s    Packet: {} s    Retries: {}",
-                self.amber(&cfg.kermit_negotiation_timeout.to_string()),
-                self.amber(&cfg.kermit_packet_timeout.to_string()),
-                self.amber(&cfg.kermit_max_retries.to_string()),
-            ))
-            .await?;
-            // Idle timeout: 0 reads as "off"/disabled in the UI so the
-            // operator doesn't have to remember the sentinel meaning.
             let idle_display = if cfg.kermit_idle_timeout == 0 {
                 "off".to_string()
             } else {
                 format!("{} s", cfg.kermit_idle_timeout)
             };
             self.send_line(&format!(
-                "  Idle (server-mode): {}",
+                "  Negotiate: {} s",
+                self.amber(&cfg.kermit_negotiation_timeout.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Packet: {} s    Retries: {}",
+                self.amber(&cfg.kermit_packet_timeout.to_string()),
+                self.amber(&cfg.kermit_max_retries.to_string()),
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Idle: {}",
                 self.amber(&idle_display)
             ))
             .await?;
             self.send_line(&format!(
-                "  Max packet: {}    Window: {}    Check: {}",
+                "  Max packet: {}   Window: {}",
                 self.amber(&cfg.kermit_max_packet_length.to_string()),
                 self.amber(&cfg.kermit_window_size.to_string()),
-                self.amber(&cfg.kermit_block_check_type.to_string()),
             ))
             .await?;
             self.send_line(&format!(
-                "  Long: {}  Sliding: {}  Stream: {}",
+                "  Block check: {}    Long: {}",
+                self.amber(&cfg.kermit_block_check_type.to_string()),
                 self.amber(if cfg.kermit_long_packets { "on" } else { "off" }),
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Sliding: {}    Streaming: {}",
                 self.amber(if cfg.kermit_sliding_windows { "on" } else { "off" }),
                 self.amber(if cfg.kermit_streaming { "on" } else { "off" }),
             ))
             .await?;
             self.send_line(&format!(
-                "  Attrs: {}  Repeat: {}",
+                "  Attributes: {}    Repeat: {}",
                 self.amber(if cfg.kermit_attribute_packets { "on" } else { "off" }),
                 self.amber(if cfg.kermit_repeat_compression { "on" } else { "off" }),
             ))
@@ -9719,62 +9920,14 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  ATDT KERMIT (serial direct-to-Kermit): {}",
+                "  ATDT KERMIT: {}",
                 self.amber(if cfg.allow_atdt_kermit { "enabled" } else { "disabled" })
             ))
             .await?;
             self.send_line("").await?;
-
             self.send_line(&format!(
-                "  {}  Negotiate timeout   {}  Packet timeout",
-                self.cyan("N"),
-                self.cyan("P")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Max retries         {}  Max packet length",
-                self.cyan("X"),
-                self.cyan("M")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Window size         {}  Block check type",
-                self.cyan("W"),
-                self.cyan("C")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Toggle long pkts    {}  Toggle sliding win",
-                self.cyan("L"),
-                self.cyan("S")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Toggle streaming    {}  Toggle attributes",
-                self.cyan("T"),
-                self.cyan("A")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Toggle repeat       {}  Idle timeout",
-                self.cyan("E"),
-                self.cyan("I"),
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Cycle 8-bit quote   {}  Restart server",
-                self.cyan("8"),
-                self.cyan("R")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Toggle ATDT KERMIT (serial; bypasses security)",
-                self.cyan("K"),
-            ))
-            .await?;
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}  {}",
+                "  {}  Settings   {}  {}",
+                self.cyan("M"),
                 self.action_prompt("Q", "Back"),
                 self.action_prompt("H", "Help")
             ))
@@ -9786,10 +9939,105 @@ impl TelnetSession {
 
             let input = match self.get_menu_input(false).await? {
                 Some(s) if !s.is_empty() => s,
-                _ => return Ok(()),
+                _ => return Ok(KermitPageNav::Back),
             };
 
             match input.as_str() {
+                "m" => return Ok(KermitPageNav::Switch),
+                "q" => return Ok(KermitPageNav::Back),
+                "h" => self.kermit_show_help().await?,
+                _ => self.show_error("Press M, Q, or H.").await?,
+            }
+        }
+    }
+
+    /// Render the editable Kermit settings menu.  Returns `Switch` when
+    /// the operator presses `V` (jump back to the Status page), `Back`
+    /// on `Q`.  Action keys (N/P/X/M/W/C/L/S/T/A/E/I/8/R/K) dispatch to
+    /// the same setters the original combined screen used.  Labels are
+    /// abbreviated to fit PETSCII 40-col with the standard column-22
+    /// two-keys-per-row alignment.
+    async fn kermit_settings_menu_page(
+        &mut self,
+    ) -> Result<KermitPageNav, std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("KERMIT SETTINGS")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}  Negotiate        {}  Packet timeout",
+                self.cyan("N"),
+                self.cyan("P")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Max retries      {}  Max length",
+                self.cyan("X"),
+                self.cyan("M")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Window size      {}  Block check",
+                self.cyan("W"),
+                self.cyan("C")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Long packets     {}  Sliding wins",
+                self.cyan("L"),
+                self.cyan("S")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Streaming        {}  Attributes",
+                self.cyan("T"),
+                self.cyan("A")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Repeat compr     {}  Idle timeout",
+                self.cyan("E"),
+                self.cyan("I"),
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  8-bit quote      {}  Restart server",
+                self.cyan("8"),
+                self.cyan("R")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle ATDT KERMIT",
+                self.cyan("K"),
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}  Status   {}  {}",
+                self.cyan("V"),
+                self.action_prompt("Q", "Back"),
+                self.action_prompt("H", "Help")
+            ))
+            .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/kermit"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(KermitPageNav::Back),
+            };
+
+            match input.as_str() {
+                "v" => return Ok(KermitPageNav::Switch),
+                "q" => return Ok(KermitPageNav::Back),
                 "n" => {
                     self.xmodem_set_numeric(
                         "Negotiation timeout",
@@ -9944,9 +10192,8 @@ impl TelnetSession {
                 "h" => {
                     self.kermit_show_help().await?;
                 }
-                "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press a listed key, I, R, K, H, or Q.")
+                    self.show_error("Press a listed key, V, R, K, H, or Q.")
                         .await?;
                 }
             }
@@ -11324,7 +11571,10 @@ pub fn start_server(
     }
     let port = cfg.telnet_port;
     let max_sessions = cfg.max_sessions;
-    let security_enabled = cfg.security_enabled;
+    // Note: `security_enabled` and `disable_ip_safety` are NOT captured
+    // here.  Both are read fresh on each accept so the GUI / telnet-menu
+    // toggles take effect immediately on the next inbound connection
+    // without requiring a server restart.
 
     tokio::spawn(async move {
         let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
@@ -11383,7 +11633,17 @@ pub fn start_server(
                                 ));
                                 continue;
                             }
-                            if !security_enabled
+                            // Re-read each accept so toggles in the
+                            // GUI / telnet menu apply immediately.
+                            // `get_security_flags` reads only the two
+                            // booleans without cloning the full Config,
+                            // keeping accept-flood cost down to a
+                            // single Mutex acquisition with no String
+                            // allocations.
+                            let (live_security, live_disable_safety) =
+                                config::get_security_flags();
+                            if !live_security
+                                && !live_disable_safety
                                 && let Some(reason) = reject_insecure_ip(addr.ip())
                             {
                                 session_count.fetch_sub(1, Ordering::SeqCst);

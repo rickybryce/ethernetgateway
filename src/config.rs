@@ -32,6 +32,14 @@ const DEFAULT_TELNET_GATEWAY_NEGOTIATE: bool = false;
 const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
 const DEFAULT_ENABLE_CONSOLE: bool = true;
 const DEFAULT_SECURITY_ENABLED: bool = false;
+/// When `security_enabled` is false, the telnet listener restricts
+/// inbound connections to RFC 1918 / loopback / link-local / ULA
+/// addresses and rejects gateway-style `*.*.*.1` addresses.  This
+/// flag, when true, disables that allowlist entirely and accepts
+/// every connection regardless of source.  Off by default because
+/// the allowlist is the only thing standing between a public IP
+/// and an unauthenticated telnet session.
+const DEFAULT_DISABLE_IP_SAFETY: bool = false;
 const DEFAULT_USERNAME: &str = "admin";
 const DEFAULT_PASSWORD: &str = "changeme";
 const DEFAULT_TRANSFER_DIR: &str = "transfer";
@@ -199,6 +207,13 @@ pub struct Config {
     /// Show the GUI configuration/console window on startup.
     pub enable_console: bool,
     pub security_enabled: bool,
+    /// When true, the telnet listener accepts connections from every
+    /// source IP, including public addresses and `*.*.*.1` gateway
+    /// addresses, even when `security_enabled` is false.  Off by
+    /// default; opt-in only via the GUI / telnet-menu confirmation
+    /// popup that explains the risk.  Has no effect when
+    /// `security_enabled` is true (auth runs regardless).
+    pub disable_ip_safety: bool,
     pub username: String,
     pub password: String,
     pub transfer_dir: String,
@@ -348,6 +363,7 @@ impl Default for Config {
             telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
             enable_console: DEFAULT_ENABLE_CONSOLE,
             security_enabled: DEFAULT_SECURITY_ENABLED,
+            disable_ip_safety: DEFAULT_DISABLE_IP_SAFETY,
             username: DEFAULT_USERNAME.into(),
             password: DEFAULT_PASSWORD.into(),
             transfer_dir: DEFAULT_TRANSFER_DIR.into(),
@@ -424,6 +440,19 @@ pub fn get_config() -> Config {
     guard.clone().unwrap_or_default()
 }
 
+/// Read the two boolean flags the telnet accept loop consults on every
+/// inbound connection without cloning the full Config (which allocates
+/// ~20 owned Strings per call).  Returned as a `(security_enabled,
+/// disable_ip_safety)` tuple so the gating expression in the listener
+/// stays a single live read under one Mutex acquisition.
+pub fn get_security_flags() -> (bool, bool) {
+    let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(cfg) => (cfg.security_enabled, cfg.disable_ip_safety),
+        None => (DEFAULT_SECURITY_ENABLED, DEFAULT_DISABLE_IP_SAFETY),
+    }
+}
+
 /// Load (or create) the configuration file and store it in the global singleton.
 pub fn load_or_create_config() -> Config {
     let cfg = if Path::new(CONFIG_FILE).exists() {
@@ -490,6 +519,10 @@ fn read_config_file(path: &str) -> Config {
             .get("security_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_SECURITY_ENABLED),
+        disable_ip_safety: map
+            .get("disable_ip_safety")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_DISABLE_IP_SAFETY),
         username: map
             .get("username")
             .filter(|v| !v.is_empty())
@@ -859,6 +892,20 @@ fn write_config_file(path: &str, cfg: &Config) {
     write_kv(&mut content, "security_enabled", cfg.security_enabled);
     content.push('\n');
 
+    content.push_str("\
+# Disable IP-safety allowlist.  When security_enabled is false, the telnet
+# listener normally rejects every non-private source IP and every
+# gateway-style *.*.*.1 address — that allowlist is the only thing
+# standing between a public IP and an unauthenticated session.  Set this
+# to true to accept connections from every source regardless.  Has no
+# effect when security_enabled is true (auth runs in either case).
+# Toggleable from the GUI Security frame and the telnet Server
+# Configuration menu — both gate the off→on transition behind a
+# security-warning confirmation.
+");
+    write_kv(&mut content, "disable_ip_safety", cfg.disable_ip_safety);
+    content.push('\n');
+
     content.push_str("# Credentials (only used when security_enabled = true)\n");
     write_kv_str(&mut content, "username", &cfg.username);
     write_kv_str(&mut content, "password", &cfg.password);
@@ -1170,6 +1217,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "enable_console" => cfg.enable_console = value.eq_ignore_ascii_case("true"),
         "security_enabled" => cfg.security_enabled = value.eq_ignore_ascii_case("true"),
+        "disable_ip_safety" => cfg.disable_ip_safety = value.eq_ignore_ascii_case("true"),
         "username" => cfg.username = value.to_string(),
         "password" => cfg.password = value.to_string(),
         "transfer_dir" => cfg.transfer_dir = value.to_string(),
@@ -1718,6 +1766,7 @@ mod tests {
             telnet_gateway_raw: true,
             enable_console: true,
             security_enabled: true,
+            disable_ip_safety: true,
             username: "bob".into(),
             password: "secret".into(),
             transfer_dir: "myfiles".into(),
@@ -1941,6 +1990,7 @@ mod tests {
             "telnet_gateway_raw",
             "enable_console",
             "security_enabled",
+            "disable_ip_safety",
             "username",
             "password",
             "transfer_dir",
@@ -2165,6 +2215,14 @@ mod tests {
         assert!(cfg.security_enabled);
         apply_config_key(&mut cfg, "security_enabled", "false");
         assert!(!cfg.security_enabled);
+
+        apply_config_key(&mut cfg, "disable_ip_safety", "true");
+        assert!(cfg.disable_ip_safety);
+        apply_config_key(&mut cfg, "disable_ip_safety", "false");
+        assert!(!cfg.disable_ip_safety);
+        // Case-insensitive parse, mirroring the read_config_file path.
+        apply_config_key(&mut cfg, "disable_ip_safety", "TRUE");
+        assert!(cfg.disable_ip_safety);
 
         apply_config_key(&mut cfg, "username", "myuser");
         assert_eq!(cfg.username, "myuser");

@@ -260,6 +260,12 @@ struct App {
     /// popup.  Confirming flips `kermit_server_enabled`; cancelling
     /// leaves it false because the click never reached `cfg`.
     kermit_server_warn_open: bool,
+    /// Whether the security-warning popup for `Disable IP Safety` is
+    /// open.  Same posture as `kermit_server_warn_open` — off→on opens
+    /// the popup, the visible checkbox stays unchecked until the
+    /// operator clicks Enable.  Cancel leaves `disable_ip_safety` at
+    /// its prior false value.
+    disable_ip_safety_warn_open: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -331,6 +337,7 @@ impl App {
             file_transfer_popup_open: false,
             atdt_kermit_warn_open: false,
             kermit_server_warn_open: false,
+            disable_ip_safety_warn_open: false,
             pending_dir_pick: None,
         }
     }
@@ -1379,6 +1386,25 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new("Security").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.security_enabled, "Require Login");
+                                    ui.add_space(12.0);
+                                    // Disable-IP-safety binds to a local
+                                    // copy so the off→on transition can
+                                    // be intercepted by the
+                                    // confirmation popup.  On→off is
+                                    // safe (re-tightens the allowlist).
+                                    let mut local_dis = self.cfg.disable_ip_safety;
+                                    let prev_dis = local_dis;
+                                    let resp = ui.checkbox(&mut local_dis, "Disable IP Safety");
+                                    if resp.changed() && !self.disable_ip_safety_warn_open {
+                                        if local_dis && !prev_dis {
+                                            self.disable_ip_safety_warn_open = true;
+                                        } else if !local_dis && prev_dis {
+                                            self.cfg.disable_ip_safety = false;
+                                            self.last_synced_cfg.disable_ip_safety = false;
+                                            config::update_config_value("disable_ip_safety", "false");
+                                            logger::log("IP-safety allowlist re-enabled.".into());
+                                        }
+                                    }
                                     if right_aligned_small_button(ui, "Save") {
                                         self.save_config_now();
                                     }
@@ -1853,6 +1879,92 @@ impl eframe::App for App {
             ks_warn_open = false;
         }
         self.kermit_server_warn_open = ks_warn_open;
+
+        // Disable-IP-safety enable-confirmation popup.  Off→on arms the
+        // popup; the checkbox visible state stays false until the
+        // operator clicks Enable.  Cancel leaves `disable_ip_safety`
+        // unchanged (the change never reached `cfg`).  Removing the
+        // private-IP allowlist is the riskiest single toggle the GUI
+        // exposes when `security_enabled` is off, so the operator's
+        // intent goes on record before the listener accepts public-IP
+        // connections.
+        let mut dis_warn_open = self.disable_ip_safety_warn_open;
+        let mut dis_close = false;
+        let mut dis_commit = false;
+        egui::Window::new(
+            egui::RichText::new("Disable IP safety?")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut dis_warn_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(440.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                egui::RichText::new("Security warning")
+                    .strong()
+                    .color(AMBER),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                "When Require Login is off, the telnet listener accepts \
+                 connections only from private/loopback/link-local \
+                 addresses, and rejects gateway-style *.*.*.1 \
+                 addresses. That allowlist is the only thing standing \
+                 between a public IP and an unauthenticated session.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "Enabling this checkbox removes the allowlist entirely. \
+                 Anyone on the public internet who can reach your \
+                 telnet port will be able to connect — and without \
+                 Require Login, they will not need a password.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "Enable only when you have a different control in front \
+                 of the listener (LAN-only firewall rule, VPN, port \
+                 not exposed to the internet) or when you are about to \
+                 turn Require Login on. The change takes effect on the \
+                 next inbound connection.",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Enable")
+                            .strong()
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    dis_commit = true;
+                    dis_close = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Cancel").strong(),
+                    ))
+                    .clicked()
+                {
+                    dis_close = true;
+                }
+            });
+        });
+        if dis_commit {
+            self.cfg.disable_ip_safety = true;
+            self.last_synced_cfg.disable_ip_safety = true;
+            config::update_config_value("disable_ip_safety", "true");
+            logger::log("IP-safety allowlist disabled.".into());
+        }
+        if dis_close {
+            dis_warn_open = false;
+        }
+        self.disable_ip_safety_warn_open = dis_warn_open;
 
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that
