@@ -110,6 +110,10 @@ fn main() {
                     lockouts,
                 );
                 serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
+                telnet::start_kermit_server(
+                    shutdown_rt.clone(),
+                    notify_rt.clone(),
+                );
 
                 // Wait for shutdown signal
                 loop {

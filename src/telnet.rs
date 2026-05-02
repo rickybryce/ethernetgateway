@@ -168,7 +168,7 @@ enum InputMode {
 /// Kermit batch upload) so each site can map the result to its own
 /// "skipped: already exists" / "skipped: write failed" wording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SaveError {
+pub(crate) enum SaveError {
     /// A file with the target name already exists.  Caller decides
     /// whether that's a hard error (interactive single-file upload)
     /// or a per-file skip (batch / autostart / server).
@@ -3548,7 +3548,7 @@ impl TelnetSession {
     /// corrupting both versions.  `false` keeps the create-new
     /// "refuse to clobber" semantics that every other save site
     /// uses.
-    fn save_received_file_sync(
+    pub(crate) fn save_received_file_sync(
         path: &std::path::Path,
         data: &[u8],
         meta: Option<&crate::xmodem::YmodemReceiveMeta>,
@@ -8536,6 +8536,16 @@ impl TelnetSession {
                 ssh_status, cfg.ssh_port
             ))
             .await?;
+            let kermit_status = if cfg.kermit_server_enabled {
+                self.green("ENABLED")
+            } else {
+                self.red("Disabled")
+            };
+            self.send_line(&format!(
+                "  Kermit: {} (port {})",
+                kermit_status, cfg.kermit_server_port
+            ))
+            .await?;
             self.send_line("").await?;
 
             // Show server IP addresses and ATD example
@@ -8570,23 +8580,21 @@ impl TelnetSession {
             }
 
             self.send_line(&format!(
-                "  {}  Toggle telnet",
-                self.cyan("T")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Set telnet port",
+                "  {}  Toggle telnet    {}  Set telnet port",
+                self.cyan("T"),
                 self.cyan("P")
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle SSH",
-                self.cyan("S")
+                "  {}  Toggle SSH       {}  Set SSH port",
+                self.cyan("S"),
+                self.cyan("O")
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Set SSH port",
-                self.cyan("O")
+                "  {}  Toggle Kermit    {}  Set Kermit port",
+                self.cyan("K"),
+                self.cyan("J")
             ))
             .await?;
             self.send_line(&format!(
@@ -8638,6 +8646,17 @@ impl TelnetSession {
                 "o" => {
                     self.config_set_port("SSH", "ssh_port", cfg.ssh_port).await?;
                 }
+                "k" => {
+                    self.kermit_server_toggle(cfg.kermit_server_enabled).await?;
+                }
+                "j" => {
+                    self.config_set_port(
+                        "Kermit server",
+                        "kermit_server_port",
+                        cfg.kermit_server_port,
+                    )
+                    .await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -8646,10 +8665,128 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, P, S, O, R, H, or Q.").await?;
+                    self.show_error("Press T, P, S, O, K, J, R, H, or Q.").await?;
                 }
             }
         }
+    }
+
+    /// Toggle `kermit_server_enabled`.  Off→on shows a full-screen
+    /// security warning (the listener bypasses authentication AND the
+    /// private-IP allowlist) and prompts Y/N — same posture as
+    /// `kermit_toggle_atdt_kermit`.  On→off is one-click safe.  Either
+    /// outcome falls through and returns to the Server Configuration
+    /// screen via the surrounding `loop` in `server_configuration`.
+    async fn kermit_server_toggle(
+        &mut self,
+        currently_enabled: bool,
+    ) -> Result<(), std::io::Error> {
+        if currently_enabled {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("kermit_server_enabled", "false");
+            })
+            .await
+            .ok();
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.green("Kermit server disabled.")
+            ))
+            .await?;
+            self.config_restart_notice().await?;
+            return Ok(());
+        }
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("ENABLE KERMIT SERVER — SECURITY WARNING")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.amber("This bypasses ALL gateway security.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  When enabled, the gateway opens a dedicated TCP",
+        )
+        .await?;
+        self.send_line(
+            "  listener that drops every accepted connection",
+        )
+        .await?;
+        self.send_line(
+            "  straight into Kermit server mode — no telnet menu,",
+        )
+        .await?;
+        self.send_line(
+            "  no username, no password, no private-IP filter.",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Anyone who can reach the listener can read and",
+        )
+        .await?;
+        self.send_line(
+            "  write files in your transfer directory.",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Enable only when the network path is trusted",
+        )
+        .await?;
+        self.send_line(
+            "  (LAN you control, isolated lab, single-user setup).",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  Enable Kermit server? ({}/{}): ",
+            self.cyan("Y"),
+            self.cyan("N")
+        ))
+        .await?;
+        self.flush().await?;
+
+        let answer = self.get_menu_input(false).await?;
+        let confirmed = matches!(
+            answer.as_deref().map(|s| s.trim()),
+            Some("y") | Some("Y")
+        );
+
+        self.send_line("").await?;
+        if confirmed {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("kermit_server_enabled", "true");
+            })
+            .await
+            .ok();
+            self.send_line(&format!(
+                "  {}",
+                self.green("Kermit server enabled.")
+            ))
+            .await?;
+            self.config_restart_notice().await?;
+        } else {
+            self.send_line(&format!(
+                "  {}",
+                self.dim("Kermit server left disabled.")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+        }
+        Ok(())
     }
 
     // ─── GATEWAY CONFIGURATION ──────────────────────────────
@@ -8993,6 +9130,10 @@ impl TelnetSession {
                 "  S  Enable or disable the SSH",
                 "     server listener",
                 "  O  Change the SSH port",
+                "  K  Toggle the standalone Kermit",
+                "     server listener (bypasses",
+                "     auth and private-IP filter)",
+                "  J  Change the Kermit server port",
                 "  R  Restart the server",
                 "",
                 "  Changes are saved immediately",
@@ -9006,6 +9147,9 @@ impl TelnetSession {
                 "  P  Change the telnet listening port",
                 "  S  Enable or disable the SSH server",
                 "  O  Change the SSH listening port",
+                "  K  Toggle the standalone Kermit server",
+                "     (bypasses auth and the private-IP filter)",
+                "  J  Change the Kermit server listening port",
                 "  R  Restart the server now",
                 "",
                 "  Changes are saved to the config file",
@@ -11317,6 +11461,162 @@ pub fn start_server(
                         }
                         Err(e) => {
                             glog!("Telnet: accept error: {}", e);
+                        }
+                    }
+                }
+                _ = shutdown_notify.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            }
+        }
+    });
+}
+
+/// Standalone Kermit-server TCP listener.  When the operator enables
+/// `kermit_server_enabled` (GUI Server frame or telnet Server
+/// Configuration menu), this binds `kermit_server_port` and drops every
+/// accepted connection straight into Kermit server mode — no telnet
+/// menu, no terminal detection, no auth gate, no private-IP filter.
+/// The bypass is deliberate and gated by the GUI / menu confirmation
+/// popup; same posture as `allow_atdt_kermit`.
+///
+/// Spec compliance posture: every accepted socket is handed to
+/// `kermit::kermit_server_with_outcome`, the same entry point the
+/// in-band telnet path (`F → K`) uses.  All Kermit-protocol behavior
+/// — Send-Init handshake, capability negotiation (long packets,
+/// sliding window, streaming, attribute packets, repeat compression,
+/// 8-bit quoting, locking shifts), CHK1/CHK2/CRC-16, R/S/G command
+/// dispatch, ZCRCQ/ZCRCE flow control, NAK retries, idle-timeout
+/// E-packet, batch transfers — is identical to the in-band path.
+/// Differences are confined to transport flags:
+///
+/// - `is_tcp = false` so the protocol layer doesn't apply telnet
+///   IAC escaping (raw TCP is 8-bit clean, which is what real
+///   Kermit clients connecting to `kermit -j host:port` expect).
+/// - `is_petscii = false` because there's no terminal on the other
+///   end — peers are Kermit clients, not interactive terminals.
+///
+/// Files received are saved into `cfg.transfer_dir` using the same
+/// validation + AlreadyExists/WriteFailed handling as the in-band
+/// kermit-server path; unsafe filenames and collisions are skipped,
+/// not clobbered.
+pub fn start_kermit_server(
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) {
+    let cfg = config::get_config();
+    if !cfg.kermit_server_enabled {
+        return;
+    }
+    let port = cfg.kermit_server_port;
+
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                glog!("Kermit server: failed to bind port {}: {}", port, e);
+                return;
+            }
+        };
+        glog!(
+            "Kermit server listening on port {} (auth + IP filter bypassed)",
+            port
+        );
+
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            glog!("Kermit server: connection from {}", addr);
+                            tokio::spawn(async move {
+                                let _ = stream.set_nodelay(true);
+                                let (mut read_half, mut write_half) = stream.into_split();
+                                // Single snapshot of the config for this
+                                // session — verbose flag and transfer_dir
+                                // are stable for the duration of one
+                                // connection, and folding the two
+                                // independent get_config() calls into one
+                                // avoids re-locking the global mutex
+                                // mid-session-setup.
+                                let session_cfg = config::get_config();
+                                let verbose = session_cfg.verbose;
+                                let target_dir =
+                                    std::path::PathBuf::from(&session_cfg.transfer_dir);
+                                if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+                                    glog!(
+                                        "Kermit server: cannot create transfer dir {:?}: {}",
+                                        target_dir,
+                                        e
+                                    );
+                                    return;
+                                }
+                                let mut saved: Vec<(String, usize)> = Vec::new();
+                                let mut skipped: Vec<(String, &'static str)> = Vec::new();
+                                let result = crate::kermit::kermit_server_with_outcome(
+                                    &mut read_half,
+                                    &mut write_half,
+                                    false, // not telnet — no IAC escaping on the wire
+                                    false, // not PETSCII
+                                    verbose,
+                                    |rx| {
+                                        if TelnetSession::validate_filename(&rx.filename).is_err() {
+                                            skipped.push((rx.filename.clone(), "invalid filename"));
+                                            return;
+                                        }
+                                        let dir = if rx.subdir.is_empty() {
+                                            target_dir.clone()
+                                        } else {
+                                            target_dir.join(&rx.subdir)
+                                        };
+                                        if let Err(e) = std::fs::create_dir_all(&dir) {
+                                            glog!(
+                                                "Kermit server: cannot create subdir {:?}: {}",
+                                                dir,
+                                                e
+                                            );
+                                            skipped.push((rx.filename.clone(), "subdir create failed"));
+                                            return;
+                                        }
+                                        let filepath = dir.join(&rx.filename);
+                                        let meta = crate::xmodem::YmodemReceiveMeta {
+                                            size: rx.declared_size,
+                                            modtime: rx.modtime,
+                                            mode: rx.mode,
+                                        };
+                                        match TelnetSession::save_received_file_sync(
+                                            &filepath,
+                                            &rx.data,
+                                            Some(&meta),
+                                            rx.resumed,
+                                        ) {
+                                            Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
+                                            Err(SaveError::AlreadyExists) => {
+                                                skipped.push((rx.filename.clone(), "already exists"));
+                                            }
+                                            Err(SaveError::WriteFailed) => {
+                                                skipped.push((rx.filename.clone(), "write failed"));
+                                            }
+                                        }
+                                    },
+                                )
+                                .await;
+                                let _ = write_half.shutdown().await;
+                                match result {
+                                    Ok(_) => glog!(
+                                        "Kermit server: {} closed — saved {}, skipped {}",
+                                        addr,
+                                        saved.len(),
+                                        skipped.len()
+                                    ),
+                                    Err(e) => glog!("Kermit server: {} session error: {}", addr, e),
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            glog!("Kermit server: accept error: {}", e);
                         }
                     }
                 }

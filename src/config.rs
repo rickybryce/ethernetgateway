@@ -136,6 +136,17 @@ const DEFAULT_KERMIT_LOCKING_SHIFTS: bool = false;
 /// keep this off and have callers go through the regular telnet
 /// menu (F → K) instead.
 const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
+/// Standalone Kermit-server TCP listener.  When `true`, the gateway
+/// binds `kermit_server_port` and drops every connection straight into
+/// Kermit server mode — no telnet menu, no auth gate, no private-IP
+/// allowlist.  Off by default because, like `allow_atdt_kermit`, it
+/// bypasses every security check the gateway has; the operator opts in
+/// after seeing the GUI / telnet-menu confirmation popup that explains
+/// the risk.  Default port 2424 is unassigned by IANA and high enough
+/// to avoid the `<1024 needs root` trap, while still being mnemonic
+/// (24 ≈ "kermit").
+const DEFAULT_KERMIT_SERVER_ENABLED: bool = false;
+const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -269,6 +280,17 @@ pub struct Config {
     /// mode from the serial modem emulator, bypassing any telnet-menu
     /// auth gate.  Off by default.
     pub allow_atdt_kermit: bool,
+    /// Run a standalone Kermit-server TCP listener on
+    /// `kermit_server_port`.  Bypasses authentication AND the
+    /// private-IP allowlist — every accepted connection drops straight
+    /// into Kermit server mode.  Off by default; opt-in via the GUI
+    /// Server frame or the telnet menu's Server Configuration screen,
+    /// each of which gates the off→on transition behind the same
+    /// security warning popup as `allow_atdt_kermit`.
+    pub kermit_server_enabled: bool,
+    /// Port for the standalone Kermit server listener.  Only consulted
+    /// when `kermit_server_enabled` is true.
+    pub kermit_server_port: u16,
     /// Enable serial modem emulation.
     pub serial_enabled: bool,
     /// Serial port device (e.g. /dev/ttyUSB0, COM3). Empty = not configured.
@@ -360,6 +382,8 @@ impl Default for Config {
             kermit_resume_max_age_hours: DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS,
             kermit_locking_shifts: DEFAULT_KERMIT_LOCKING_SHIFTS,
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
+            kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
+            kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
             serial_enabled: DEFAULT_SERIAL_ENABLED,
             serial_port: DEFAULT_SERIAL_PORT.into(),
             serial_baud: DEFAULT_SERIAL_BAUD,
@@ -629,6 +653,15 @@ fn read_config_file(path: &str) -> Config {
             .get("allow_atdt_kermit")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_ALLOW_ATDT_KERMIT),
+        kermit_server_enabled: map
+            .get("kermit_server_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_KERMIT_SERVER_ENABLED),
+        kermit_server_port: map
+            .get("kermit_server_port")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
+            .unwrap_or(DEFAULT_KERMIT_SERVER_PORT),
         serial_enabled: map
             .get("serial_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -962,6 +995,20 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
+# Standalone Kermit server listener.
+# kermit_server_enabled:  bind a dedicated TCP port that drops every accepted
+#                         connection straight into Kermit server mode — no
+#                         telnet menu, no auth gate, no private-IP allowlist.
+#                         Off by default; enabling it bypasses every security
+#                         check the gateway has, so opt in only when the
+#                         network path itself is trusted.
+# kermit_server_port:     TCP port for the listener (default 2424).
+");
+    write_kv(&mut content, "kermit_server_enabled", cfg.kermit_server_enabled);
+    write_kv(&mut content, "kermit_server_port", cfg.kermit_server_port);
+    content.push('\n');
+
+    content.push_str("\
 # Serial modem emulation (Hayes AT commands)
 # Set serial_enabled = true and configure the port to activate.
 ");
@@ -1251,6 +1298,14 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "allow_atdt_kermit" => {
             cfg.allow_atdt_kermit = value.eq_ignore_ascii_case("true");
+        }
+        "kermit_server_enabled" => {
+            cfg.kermit_server_enabled = value.eq_ignore_ascii_case("true");
+        }
+        "kermit_server_port" => {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
+                cfg.kermit_server_port = v;
+            }
         }
         "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
         "serial_port" => cfg.serial_port = value.to_string(),
@@ -1697,6 +1752,8 @@ mod tests {
             kermit_resume_max_age_hours: 72,
             kermit_locking_shifts: true,
             allow_atdt_kermit: true,
+            kermit_server_enabled: true,
+            kermit_server_port: 2525,
             serial_enabled: true,
             serial_port: "/dev/ttyUSB0".into(),
             serial_baud: 115200,
@@ -1802,6 +1859,8 @@ mod tests {
             original.kermit_locking_shifts
         );
         assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
+        assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
+        assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
         assert_eq!(loaded.serial_enabled, original.serial_enabled);
         assert_eq!(loaded.serial_port, original.serial_port);
         assert_eq!(loaded.serial_baud, original.serial_baud);
@@ -2073,6 +2132,29 @@ mod tests {
 
         apply_config_key(&mut cfg, "enable_console", "true");
         assert!(cfg.enable_console);
+    }
+
+    #[test]
+    fn test_apply_config_key_kermit_server_fields() {
+        let mut cfg = Config::default();
+        // Defaults: disabled, port 2424.
+        assert!(!cfg.kermit_server_enabled);
+        assert_eq!(cfg.kermit_server_port, 2424);
+
+        apply_config_key(&mut cfg, "kermit_server_enabled", "true");
+        assert!(cfg.kermit_server_enabled);
+        apply_config_key(&mut cfg, "kermit_server_enabled", "false");
+        assert!(!cfg.kermit_server_enabled);
+
+        apply_config_key(&mut cfg, "kermit_server_port", "2525");
+        assert_eq!(cfg.kermit_server_port, 2525);
+
+        // Invalid (non-numeric) ignored.
+        apply_config_key(&mut cfg, "kermit_server_port", "notanumber");
+        assert_eq!(cfg.kermit_server_port, 2525);
+        // Zero ignored (port must be ≥ 1).
+        apply_config_key(&mut cfg, "kermit_server_port", "0");
+        assert_eq!(cfg.kermit_server_port, 2525);
     }
 
     #[test]

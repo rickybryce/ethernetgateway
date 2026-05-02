@@ -219,6 +219,7 @@ struct App {
     // String buffers for numeric fields so the user can type freely
     telnet_port_buf: String,
     ssh_port_buf: String,
+    kermit_server_port_buf: String,
     max_sessions_buf: String,
     idle_timeout_buf: String,
     negotiation_timeout_buf: String,
@@ -253,6 +254,12 @@ struct App {
     /// behind explicit confirmation because enabling the feature
     /// bypasses the telnet menu's auth gate.
     atdt_kermit_warn_open: bool,
+    /// Whether the security-warning popup for the standalone Kermit
+    /// server listener is open.  Shown when the operator first ticks
+    /// the "Kermit Server" checkbox in the Server frame or its More
+    /// popup.  Confirming flips `kermit_server_enabled`; cancelling
+    /// leaves it false because the click never reached `cfg`.
+    kermit_server_warn_open: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -265,6 +272,7 @@ impl App {
     fn new(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
         let telnet_port_buf = cfg.telnet_port.to_string();
         let ssh_port_buf = cfg.ssh_port.to_string();
+        let kermit_server_port_buf = cfg.kermit_server_port.to_string();
         let max_sessions_buf = cfg.max_sessions.to_string();
         let idle_timeout_buf = cfg.idle_timeout_secs.to_string();
         let negotiation_timeout_buf = cfg.xmodem_negotiation_timeout.to_string();
@@ -297,6 +305,7 @@ impl App {
             restart,
             telnet_port_buf,
             ssh_port_buf,
+            kermit_server_port_buf,
             max_sessions_buf,
             idle_timeout_buf,
             negotiation_timeout_buf,
@@ -321,6 +330,7 @@ impl App {
             serial_popup_open: false,
             file_transfer_popup_open: false,
             atdt_kermit_warn_open: false,
+            kermit_server_warn_open: false,
             pending_dir_pick: None,
         }
     }
@@ -328,6 +338,7 @@ impl App {
     fn sync_numeric_fields(&mut self) {
         if let Ok(v) = self.telnet_port_buf.parse::<u16>() && v >= 1 { self.cfg.telnet_port = v; }
         if let Ok(v) = self.ssh_port_buf.parse::<u16>() && v >= 1 { self.cfg.ssh_port = v; }
+        if let Ok(v) = self.kermit_server_port_buf.parse::<u16>() && v >= 1 { self.cfg.kermit_server_port = v; }
         if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
         if let Ok(v) = self.idle_timeout_buf.parse() { self.cfg.idle_timeout_secs = v; }
         if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
@@ -378,27 +389,63 @@ impl App {
         }
     }
 
-    /// Render the Server frame's primary field rows (telnet/SSH ports,
-    /// session cap, idle timeout).  Shared between the main layout and
-    /// the Server popup.  When `with_more_button` is true, a right-aligned
-    /// "More..." button is appended to the SSH row; the popup passes false
-    /// since it's already the More view.
+    /// Render the Server frame's primary field rows (telnet, SSH, and
+    /// the standalone Kermit-server listener).  Shared between the main
+    /// layout and the Server popup.  When `with_more_button` is true, a
+    /// right-aligned "More..." button is appended to the Kermit row;
+    /// the popup passes false since it's already the More view.
+    ///
+    /// The Kermit checkbox is bound to a local copy so we can intercept
+    /// the off→on transition and gate it behind the security-warning
+    /// popup (the standalone listener bypasses authentication AND the
+    /// private-IP allowlist).  On→off is one-click safe — tightening
+    /// security never needs a confirmation; the change persists
+    /// immediately.
     fn draw_server_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
             labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
-            ui.add_space(8.0);
-            labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 40.0);
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
             ui.add_space(16.0);
             labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
-            ui.add_space(8.0);
-            labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
+        });
+        ui.horizontal(|ui| {
+            let mut local = self.cfg.kermit_server_enabled;
+            let prev = local;
+            let resp = ui.checkbox(&mut local, "Kermit Server");
+            labeled_field(ui, "Port:", &mut self.kermit_server_port_buf, 50.0);
+            if resp.changed() && !self.kermit_server_warn_open {
+                if local && !prev {
+                    // Off → on: revert visible state, open the
+                    // confirmation popup; the popup's Enable button
+                    // commits the change if the operator confirms.
+                    self.kermit_server_warn_open = true;
+                } else if !local && prev {
+                    // On → off: commit immediately, no popup.
+                    self.cfg.kermit_server_enabled = false;
+                    self.last_synced_cfg.kermit_server_enabled = false;
+                    config::update_config_value("kermit_server_enabled", "false");
+                    logger::log("Kermit server disabled.".into());
+                }
+            }
             if with_more_button && right_aligned_small_button(ui, "More...") {
                 self.server_popup_open = true;
             }
+        });
+    }
+
+    /// Server More-popup-only rows.  Holds settings that don't fit in
+    /// the main Server frame: the session cap and the per-session
+    /// idle-timeout.  The main frame surfaces only the listener
+    /// enable/port fields per the operator-facing layout decision; the
+    /// More popup keeps everything available for completeness.
+    fn draw_server_more_only(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 50.0);
+            ui.add_space(8.0);
+            labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
         });
     }
 
@@ -993,6 +1040,7 @@ impl App {
         // Rebuild the string buffers that back numeric text fields.
         self.telnet_port_buf = self.cfg.telnet_port.to_string();
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
+        self.kermit_server_port_buf = self.cfg.kermit_server_port.to_string();
         self.max_sessions_buf = self.cfg.max_sessions.to_string();
         self.idle_timeout_buf = self.cfg.idle_timeout_secs.to_string();
         self.negotiation_timeout_buf = self.cfg.xmodem_negotiation_timeout.to_string();
@@ -1548,20 +1596,24 @@ impl eframe::App for App {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
+                self.draw_server_more_only(ui);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
                 self.draw_server_advanced(ui);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
                 if ui
                     .add(egui::Button::new(
-                        egui::RichText::new("Save")
+                        egui::RichText::new("Save and Restart")
                             .strong()
                             .size(16.0)
                             .color(AMBER_BRIGHT),
                     ))
                     .clicked()
                 {
-                    self.save_config_now();
+                    self.save_and_restart_all();
                 }
             });
         self.server_popup_open = server_open;
@@ -1715,6 +1767,91 @@ impl eframe::App for App {
         }
         self.atdt_kermit_warn_open = warn_open;
 
+        // Kermit server enable-confirmation popup.  Same posture as
+        // the ATDT KERMIT popup: the off→on transition arms the popup;
+        // the visible checkbox state is left at false until the
+        // operator clicks Enable.  Cancelling (or closing the X) leaves
+        // `kermit_server_enabled` false because no commit ran.  The
+        // standalone listener bypasses both authentication AND the
+        // private-IP allowlist that the telnet/SSH listeners apply
+        // when `security_enabled` is off, so we want the operator's
+        // intent on record before binding the port.
+        let mut ks_warn_open = self.kermit_server_warn_open;
+        let mut ks_close = false;
+        let mut ks_commit = false;
+        egui::Window::new(
+            egui::RichText::new("Enable Kermit server?")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut ks_warn_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(440.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                egui::RichText::new("Security warning")
+                    .strong()
+                    .color(AMBER),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                "Enabling this opens a dedicated TCP port that drops \
+                 every accepted connection straight into Kermit \
+                 server mode — no telnet menu, no username, no \
+                 password, no private-IP filter.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "Anyone who can reach the listener can read and write \
+                 files in your transfer directory. The standalone \
+                 listener does not consult security_enabled or any \
+                 lockout state.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "Enable only when the network path itself is trusted \
+                 (LAN you control, isolated lab, single-user setup). \
+                 Restart the server after saving for the listener to \
+                 bind.",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Enable")
+                            .strong()
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    ks_commit = true;
+                    ks_close = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Cancel").strong(),
+                    ))
+                    .clicked()
+                {
+                    ks_close = true;
+                }
+            });
+        });
+        if ks_commit {
+            self.cfg.kermit_server_enabled = true;
+            self.last_synced_cfg.kermit_server_enabled = true;
+            config::update_config_value("kermit_server_enabled", "true");
+            logger::log("Kermit server enabled.".into());
+        }
+        if ks_close {
+            ks_warn_open = false;
+        }
+        self.kermit_server_warn_open = ks_warn_open;
+
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that
         // refresh_from_global will not overwrite in-progress changes.
@@ -1722,6 +1859,7 @@ impl eframe::App for App {
             self.dirty = self.cfg != self.last_synced_cfg
                 || self.telnet_port_buf != self.last_synced_cfg.telnet_port.to_string()
                 || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
+                || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
                 || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
                 || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
                 || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
@@ -1765,6 +1903,10 @@ mod tests {
         let app = test_app();
         assert_eq!(app.telnet_port_buf, app.cfg.telnet_port.to_string());
         assert_eq!(app.ssh_port_buf, app.cfg.ssh_port.to_string());
+        assert_eq!(
+            app.kermit_server_port_buf,
+            app.cfg.kermit_server_port.to_string()
+        );
         assert_eq!(app.max_sessions_buf, app.cfg.max_sessions.to_string());
         assert_eq!(app.idle_timeout_buf, app.cfg.idle_timeout_secs.to_string());
         assert_eq!(app.negotiation_timeout_buf, app.cfg.xmodem_negotiation_timeout.to_string());
@@ -1828,6 +1970,7 @@ mod tests {
         let mut app = test_app();
         app.telnet_port_buf = "8080".into();
         app.ssh_port_buf = "3333".into();
+        app.kermit_server_port_buf = "2525".into();
         app.max_sessions_buf = "100".into();
         app.idle_timeout_buf = "1800".into();
         app.negotiation_timeout_buf = "60".into();
@@ -1848,6 +1991,7 @@ mod tests {
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, 8080);
         assert_eq!(app.cfg.ssh_port, 3333);
+        assert_eq!(app.cfg.kermit_server_port, 2525);
         assert_eq!(app.cfg.max_sessions, 100);
         assert_eq!(app.cfg.idle_timeout_secs, 1800);
         assert_eq!(app.cfg.xmodem_negotiation_timeout, 60);
