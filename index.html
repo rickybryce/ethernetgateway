@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.5.2 &mdash; User Manual</title>
+    <title>Ethernet Gateway v0.5.3 &mdash; User Manual</title>
     <meta name="description" content="Complete user manual for Ethernet Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, and serial modem emulation.">
     <style>
         :root {
@@ -519,7 +519,7 @@
             </div>
             <h1>Ethernet Gateway</h1>
             <p class="hdr-tagline">User Manual</p>
-            <div class="hdr-version">v0.5.2</div>
+            <div class="hdr-version">v0.5.3</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Telnet</span>
                 <span class="hdr-badge">SSH</span>
@@ -659,7 +659,7 @@
                     automatically.
                 </p>
                 <pre><code><span class="prompt-char">$</span> ./ethernet-gateway
-<span class="output-text">Ethernet Gateway v0.5.2
+<span class="output-text">Ethernet Gateway v0.5.3
 Author: Ricky Bryce
 
 Created default configuration: egateway.conf
@@ -1332,6 +1332,8 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
                     <tr><td><code>ATDT host:port</code></td><td>Dial (tone) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATDP host:port</code></td><td>Dial (pulse) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATD host:port</code></td><td>Dial (generic) &mdash; TCP connect to host</td></tr>
+                    <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut to this gateway's main menu</td></tr>
+                    <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (requires <code>allow_atdt_kermit</code>; off by default)</td></tr>
                     <tr><td><code>ATDL</code></td><td>Redial last number</td></tr>
                     <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial stored number from slot <em>n</em> (0&ndash;3; default 0)</td></tr>
                     <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or host <em>s</em> in slot <em>n</em> (0&ndash;3). Persisted with <code>AT&amp;W</code>.</td></tr>
@@ -1627,7 +1629,7 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.5.2 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v0.5.3 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
         </footer>
 

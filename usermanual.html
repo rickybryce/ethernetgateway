@@ -226,7 +226,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <div class="cover">
     <div class="title">Ethernet Gateway</div>
     <div class="subtitle">User Manual</div>
-    <div class="version">Version 0.5.2</div>
+    <div class="version">Version 0.5.3</div>
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
@@ -391,7 +391,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernet-gateway-v0.5.2-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernet-gateway-v0.5.3-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -827,6 +827,17 @@ cannot accidentally bridge a telnet session through your router.
 <p>
 To accept connections from any IP address, enable security and configure a
 strong username and password.
+</p>
+
+<p>
+For lab and isolated-network setups where authentication is genuinely
+unwanted but the gateway still needs to listen on a non-private interface,
+the <code>disable_ip_safety</code> flag drops the allowlist entirely. The
+GUI Security frame and the in-session telnet menu both gate the toggle
+behind a confirmation popup that explains the risk before the change
+sticks; once enabled, <em>any</em> source address may connect with no
+credentials. Treat it as the explicit "I understand this is open" switch,
+not a default.
 </p>
 
 <h2>5.5 The Main Menu</h2>
@@ -1282,8 +1293,24 @@ the gnarly ones.
 <h3>Entering server mode</h3>
 
 <p>
-From the File Transfer menu, press <span class="kbd">K</span> to drop the
-session into Kermit Server Mode. The terminal displays a banner listing
+There are three entry paths into Kermit Server Mode:
+</p>
+
+<ul>
+    <li><strong>Telnet / SSH menu</strong> &mdash; from the File Transfer menu press <span class="kbd">K</span>. Honors authentication, the network gating allowlist, and the per-session sandbox the same as any other gateway feature.</li>
+    <li><strong>Standalone TCP listener</strong> &mdash; set <code>kermit_server_enabled&nbsp;=&nbsp;true</code> and the gateway binds <code>kermit_server_port</code> (default <code>2424</code>). Every accepted connection drops straight into protocol mode &mdash; no menu, no auth gate. Use it from C-Kermit with <code>kermit -j host:2424</code>.</li>
+    <li><strong>Serial dial</strong> &mdash; with <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>, dialing <code>ATDT KERMIT</code> from the modem emulator hands the serial caller to the Kermit dispatcher directly. See section&nbsp;9.2.</li>
+</ul>
+
+<p>
+The bottom two paths bypass <code>security_enabled</code> by design &mdash;
+they exist so vintage receivers that can't paint a menu still work.
+Both are off by default and have explicit GUI / telnet warnings before
+they enable.
+</p>
+
+<p>
+However the session enters server mode, the terminal displays a banner listing
 the supported peer commands (<code>send</code>, <code>get</code>,
 <code>remote dir</code>, <code>remote cwd</code>, <code>remote type</code>,
 <code>remote delete</code>, <code>remote rename</code>,
@@ -1291,8 +1318,11 @@ the supported peer commands (<code>send</code>, <code>get</code>,
 <code>remote kermit</code>, <code>remote help</code>, <code>finish</code>,
 <code>bye</code>). The gateway then idles waiting for protocol packets;
 when the peer sends <code>finish</code>, <code>bye</code>, or
-disconnects, control returns to the File Transfer menu with a per-file
-&check;/&times; summary of received files.
+disconnects, control returns to whatever surface launched the session:
+the File Transfer menu (telnet/SSH path), a closed TCP socket
+(standalone listener), or <code>NO CARRIER</code> (ATDT KERMIT). The
+File Transfer path also shows a per-file &check;/&times; summary of
+received files.
 </p>
 
 <h3>What the peer can do</h3>
@@ -1305,7 +1335,7 @@ disconnects, control returns to the File Transfer menu with a per-file
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
-        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
+        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.3</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
         <tr><td><code>remote delete &lt;file&gt;</code> / <code>remote era</code></td><td>G E</td><td>Delete a file in the current effective directory. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call &mdash; no wildcard expansion.</td></tr>
         <tr><td><code>remote rename &lt;old&gt; &lt;new&gt;</code></td><td>G R</td><td>Rename a file in place. Both names field-encoded per spec &sect;6.7. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -1439,6 +1469,7 @@ The emulator routes dial strings over TCP. There is no real phone line — the
     <tbody>
         <tr><td><code>ATDT host:port</code></td><td>Connect to a remote telnet server. <code>ATDT</code> and <code>ATDP</code> are equivalent (there is no audible difference over TCP).</td></tr>
         <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut — dials this gateway's own main menu, so the serial device can use all gateway features (file transfer, browser, AI chat, etc.) without a network detour.</td></tr>
+        <tr><td><code>ATDT KERMIT</code></td><td>Drop directly into Kermit server mode &mdash; no menu, no banner, indistinguishable on the wire from a real <code>kermit -j host</code> in <code>server</code> mode. Aliases: <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. Requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>; off by default because it bypasses the telnet menu's auth gate. Idle timeout still honors <code>kermit_idle_timeout</code>; on session end the modem emits <code>NO CARRIER</code>.</td></tr>
         <tr><td><code>ATDP host:port</code></td><td>Same as <code>ATDT</code> — pulse selector, ignored.</td></tr>
         <tr><td><code>ATDSn</code> (n = 0–3)</td><td>Dial stored number in slot <em>n</em>. Bare <code>ATDS</code> dials slot 0.</td></tr>
         <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
@@ -1511,7 +1542,7 @@ hit the same entry.
 <table>
     <thead><tr><th>Command</th><th>Response</th></tr></thead>
     <tbody>
-        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Ethernet Gateway Modem Emulator v0.5.2</code></td></tr>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Ethernet Gateway Modem Emulator v0.5.3</code></td></tr>
         <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
         <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
         <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway 0.3.3</code></td></tr>
@@ -2211,10 +2242,14 @@ numeric values fall back to the default.
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Range / validation</th><th>Description</th></tr>
     </thead>
     <tbody>
+        <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
+        <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist that normally gates the telnet server when <code>security_enabled</code> is <code>false</code>. Lets any source address connect without auth. Use only on isolated networks &mdash; for any internet-exposed deployment, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>0 = disabled</td><td>Per-session idle timeout. Applies to every prompt, including login.</td></tr>
+        <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Bind a dedicated TCP listener that drops every accepted connection straight into Kermit server mode. Bypasses the telnet menu and auth gate (same risk profile as <code>allow_atdt_kermit</code>). See chapter 8 and the standalone <code>kermit.html</code> reference. The full <code>kermit_*</code> family is documented in <code>kermit.html</code>.</td></tr>
+        <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>&ge; 1</td><td>TCP port for the standalone Kermit-server listener.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>&ge; 1</td><td>Concurrent telnet-session cap.</td></tr>
         <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Telnet password. Stored plaintext.</td></tr>
         <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Require login on telnet and SSH. Also required to accept public-IP telnet.</td></tr>
@@ -2349,6 +2384,7 @@ commands may be combined on a single <code>AT</code> line — see
         <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial. Default for all TCP dials.</td></tr>
         <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial (identical to <code>ATDT</code> over TCP).</td></tr>
         <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut: connect to this gateway's main menu.</td></tr>
+        <tr><td><code>ATDT KERMIT</code></td><td>Drop into Kermit server mode (requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>). Aliases: <code>kermit-server</code>, <code>kermit server</code>.</td></tr>
         <tr><td><code>ATDL</code></td><td>Redial last number.</td></tr>
         <tr><td><code>ATDS</code> / <code>ATDS0</code></td><td>Dial stored number in slot 0.</td></tr>
         <tr><td><code>ATDS1</code> … <code>ATDS3</code></td><td>Dial stored number in slots 1–3.</td></tr>
@@ -2397,7 +2433,7 @@ run to completion rather than halt mid-setup with <code>ERROR</code>.
 <hr>
 
 <p class="small" style="margin-top: 1.5em; text-align: center;">
-Ethernet Gateway v0.5.2 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Ethernet Gateway v0.5.3 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
 Licensed under GPL-3.0-or-later.
 </p>
 

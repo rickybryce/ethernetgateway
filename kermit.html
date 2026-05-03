@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.5.2 &mdash; Kermit Protocol Reference</title>
+    <title>Ethernet Gateway v0.5.3 &mdash; Kermit Protocol Reference</title>
     <meta name="description" content="Kermit file-transfer protocol reference for Ethernet Gateway: server-mode commands, client primitives, G subcommands, RESEND, locking shifts, and capability negotiation.">
     <style>
         :root {
@@ -429,7 +429,7 @@
             </div>
             <h1>Kermit Reference</h1>
             <p class="hdr-tagline">Ethernet Gateway &mdash; Protocol Commands</p>
-            <div class="hdr-version">v0.5.2</div>
+            <div class="hdr-version">v0.5.3</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Server Mode</span>
                 <span class="hdr-badge">Client Mode</span>
@@ -521,12 +521,28 @@
                 <div class="section-title">Server Mode</div>
 
                 <p>
-                    Pick <code>K</code> from the File Transfer menu to drop into Kermit
-                    server mode. The server then idles waiting for commands from your
-                    Kermit client. The peer drives the entire session by sending Kermit
-                    protocol commands; the server processes each one and returns to idle
-                    until the peer sends <code>finish</code>, <code>bye</code>, or
-                    disconnects.
+                    Three entry paths drop a session into Kermit server mode:
+                </p>
+
+                <ul>
+                    <li><strong>Telnet / SSH menu</strong> &mdash; from the File Transfer menu press <code>K</code>. Honors authentication, the network gating allowlist, and the per-session sandbox.</li>
+                    <li><strong>Standalone TCP listener</strong> &mdash; with <code>kermit_server_enabled&nbsp;=&nbsp;true</code>, the gateway binds a dedicated socket on <code>kermit_server_port</code> (default <code>2424</code>). Every accepted connection enters protocol mode immediately &mdash; no menu, no auth gate. Drive it with <code>kermit -j host:2424</code>.</li>
+                    <li><strong>Serial ATDT KERMIT</strong> &mdash; with <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>, dialing <code>ATDT KERMIT</code> from the modem emulator hands the serial caller straight to the dispatcher. Aliases: <code>kermit-server</code>, <code>kermit server</code>.</li>
+                </ul>
+
+                <p>
+                    The bottom two paths bypass <code>security_enabled</code> by design
+                    &mdash; they exist so vintage receivers that can't paint a menu still
+                    work. Both are off by default and have explicit GUI / telnet-menu
+                    warnings before they enable.
+                </p>
+
+                <p>
+                    However the session is launched, the server then idles waiting for
+                    commands from the Kermit client. The peer drives the entire session
+                    by sending Kermit protocol commands; the server processes each one
+                    and returns to idle until the peer sends <code>finish</code>,
+                    <code>bye</code>, or disconnects.
                 </p>
 
                 <div class="cat">Entering server mode</div>
@@ -644,12 +660,12 @@
                             <td><code>remote kermit &lt;text&gt;</code></td>
                             <td>K</td>
                             <td>
-                                Ask the gateway to identify itself. Replies with <code>Ethernet Gateway Kermit 0.5.2</code> regardless of the text you supply, delivered via the same X+Z inverse-transfer pattern as <code>remote dir</code>.
+                                Ask the gateway to identify itself. Replies with <code>Ethernet Gateway Kermit 0.5.3</code> regardless of the text you supply, delivered via the same X+Z inverse-transfer pattern as <code>remote dir</code>.
                                 <p style="margin: 8px 0 0 0;"><strong>Argument is required.</strong> If you type <code>remote kermit</code> with <em>no</em> text after it, C-Kermit silently does nothing and never sends a packet — that's the client's behavior, not the server's. Type any non-empty argument to actually invoke the command. Conventional choices:</p>
                                 <pre style="margin-top: 6px;"><code><span class="output-text">C-Kermit&gt;</span> remote kermit version
-<span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
+<span class="output-text">Ethernet Gateway Kermit 0.5.3</span>
 <span class="output-text">C-Kermit&gt;</span> remote kermit info
-<span class="output-text">Ethernet Gateway Kermit 0.5.2</span></code></pre>
+<span class="output-text">Ethernet Gateway Kermit 0.5.3</span></code></pre>
                                 <p style="margin: 8px 0 0 0; color: #888;">Wire shape note: this is a <em>top-level</em> K-packet (the user's command rides in the payload), not a G-K subcommand. C-Kermit builds the packet via <code>scmd('K', cmarg)</code>; G-K is reserved for <code>remote copy</code> in the spec. A separate <code>G K</code> path is preserved internally for our own client helpers but real Kermit clients never emit it.</p>
                             </td>
                         </tr>
@@ -1004,7 +1020,7 @@
                         <tr><td><code>C</code></td><td>CWD</td><td>ACK on success, E on failure</td><td>Field-encoded argument is a relative subdir. Special cases: empty argument resets to <code>transfer_dir</code> root; bare <code>..</code> pops one component (cdup, no-op at root). Other path-traversal forms (<code>foo/..</code>, leading dot, backslash, NUL) are refused. Targets that don't exist on disk are refused so typo'd cd fails fast.</td></tr>
                         <tr><td><code>D</code></td><td>Directory</td><td>ACK + X+ + Z</td><td>Returns one entry per line: <code>name &lt;TAB&gt; size|&lt;dir&gt;</code>, sorted, hidden files skipped. Paginated across multiple X-packets when needed.</td></tr>
                         <tr><td><code>$</code></td><td>SPACE</td><td>ACK + X + Z</td><td>Returns free-bytes count as a decimal string, or <code>unknown</code> on platforms without <code>statvfs</code>.</td></tr>
-                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
+                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.3</code>).</td></tr>
                         <tr><td><code>H</code> / <code>?</code></td><td>Help</td><td>ACK + X+ + Z</td><td>Returns the list of supported subcommands. Both <code>H</code> and <code>?</code> are accepted for compatibility.</td></tr>
                         <tr><td><code>E</code></td><td>Erase / Delete</td><td>ACK on success, E on failure</td><td>Field-encoded filename per spec §6.7. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call — no wildcard expansion.</td></tr>
                         <tr><td><code>R</code></td><td>Rename</td><td>ACK on success, E on failure</td><td>Two field-encoded names back-to-back: source then destination. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -1135,6 +1151,9 @@
                         <tr><td><code>kermit_resume_partial</code></td><td>false</td><td>Resume partial uploads via <code>disposition='R'</code> in the A-packet ACK.</td></tr>
                         <tr><td><code>kermit_resume_max_age_hours</code></td><td>168</td><td>Ignore on-disk partials older than this. 168 = one week.</td></tr>
                         <tr><td><code>kermit_locking_shifts</code></td><td>false</td><td>Advertise SO/SI region-shift quoting for 8-bit transit on 7-bit links.</td></tr>
+                        <tr><td><code>kermit_server_enabled</code></td><td>false</td><td>Bind a dedicated TCP listener on <code>kermit_server_port</code>. Every accepted connection drops straight into Kermit server mode &mdash; no telnet menu, no auth gate. Bypasses <code>security_enabled</code>; off by default.</td></tr>
+                        <tr><td><code>kermit_server_port</code></td><td>2424</td><td>TCP port for the standalone Kermit-server listener. Used only when <code>kermit_server_enabled = true</code>.</td></tr>
+                        <tr><td><code>allow_atdt_kermit</code></td><td>false</td><td>Permit the serial modem emulator to recognise <code>ATDT KERMIT</code> (alt: <code>kermit-server</code>, <code>kermit server</code>) as a dial target that drops the caller straight into the Kermit dispatcher. Bypasses <code>security_enabled</code>; off by default.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1175,7 +1194,7 @@
 <span class="output-text">C-Kermit&gt;</span> set host 192.168.1.160:2323 /telnet
 <span class="output-text">C-Kermit&gt;</span> set file names literal
 <span class="output-text">C-Kermit&gt;</span> remote kermit version
-<span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
+<span class="output-text">Ethernet Gateway Kermit 0.5.3</span>
 <span class="output-text">C-Kermit&gt;</span> remote dir
 <span class="output-text">alpha.bin    1024
 beta.bin     2048
@@ -1249,7 +1268,7 @@ docs         &lt;dir&gt;</span>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.5.2 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v0.5.3 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
             &mdash; <a href="index.html">Back to User Manual</a>
         </footer>
