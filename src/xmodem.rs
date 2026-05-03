@@ -1175,7 +1175,13 @@ async fn send_ymodem_block_zero(
         };
         match response {
             Some(ACK) => return Ok(()),
-            _ => {
+            Some(byte) => {
+                if verbose { glog!("XMODEM send: YMODEM block 0 got 0x{:02X} (retry {})", byte, retries + 1); }
+                retries += 1;
+                continue;
+            }
+            None => {
+                if verbose { glog!("XMODEM send: YMODEM block 0 timeout/read error (retry {})", retries + 1); }
                 retries += 1;
                 continue;
             }
@@ -1183,16 +1189,35 @@ async fn send_ymodem_block_zero(
     }
 }
 
+/// Hard-coded short budget for the YMODEM end-of-batch courtesy
+/// handshake (`send_ymodem_end_of_batch`).  3 s is plenty for any
+/// responsive receiver; 2 attempts is enough to cover a single CRC
+/// NAK without burning the user's time.  Hoisted to module scope so
+/// the budget contract is visible to tests — the user-visible stall
+/// after a failed EOT must stay bounded by these constants.
+const EOB_TIMEOUT_SECS: u64 = 3;
+const EOB_MAX_RETRIES: usize = 2;
+
 /// After the last data EOT is ACKed, the YMODEM receiver sends one more
 /// 'C' and expects an all-zero block 0 meaning "end of batch, no more
 /// files."  This keeps single-file YMODEM downloads semantically
 /// correct for receivers that enforce the full protocol.
+///
+/// This is a courtesy handshake — the file's bytes are already committed
+/// on the receiver side after the EOT ACK.  Some receivers (AnzioWin
+/// observed in practice) send the post-EOT 'C' but then drop straight
+/// back to terminal mode without waiting for the null block 0, leaving
+/// our retransmits to splatter binary noise (notably the IAC-doubled
+/// 0xFF complement byte rendering as `ÿ`) onto the user's terminal.
+/// We therefore use a short timeout and a tiny retry budget here, and
+/// bail immediately on the first timeout — once a receiver has gone
+/// silent on this exchange, further retries can't recover it.
 async fn send_ymodem_end_of_batch(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     block_timeout: u64,
-    max_retries: usize,
+    _max_retries: usize,
     verbose: bool,
     state: &mut ReadState,
 ) -> Result<(), String> {
@@ -1224,22 +1249,31 @@ async fn send_ymodem_end_of_batch(
     packet.push((crc & 0xFF) as u8);
 
     let mut retries = 0;
-    while retries < max_retries {
+    while retries < EOB_MAX_RETRIES {
         raw_write_bytes(writer, &packet, is_tcp).await?;
         match tokio::time::timeout(
-            std::time::Duration::from_secs(block_timeout),
+            std::time::Duration::from_secs(EOB_TIMEOUT_SECS),
             nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
             Ok(Ok(ACK)) => return Ok(()),
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+            Ok(Ok(byte)) => {
+                if verbose { glog!("XMODEM send: end-of-batch got 0x{:02X} (retry {})", byte, retries + 1); }
                 retries += 1;
                 continue;
             }
+            Ok(Err(e)) => {
+                if verbose { glog!("XMODEM send: end-of-batch read error: {} — abandoning handshake", e); }
+                return Ok(());
+            }
+            Err(_) => {
+                if verbose { glog!("XMODEM send: end-of-batch timeout — receiver not engaging, abandoning handshake"); }
+                return Ok(());
+            }
         }
     }
-    if verbose { glog!("XMODEM send: end-of-batch block 0 not ACKed, continuing"); }
+    if verbose { glog!("XMODEM send: end-of-batch block 0 not ACKed after {} attempts, continuing", EOB_MAX_RETRIES); }
     Ok(())
 }
 
@@ -3425,6 +3459,34 @@ mod tests {
         let emitted_mode = u32::from_str_radix(fields[2], 8).unwrap();
         assert_eq!(emitted_mode & 0o170000, 0, "file-type bits must be stripped");
         assert_eq!(emitted_mode, 0o0755, "permission bits must survive");
+    }
+
+    /// The YMODEM end-of-batch (null-block-0) handshake is a courtesy:
+    /// the file's bytes are already committed on the receiver after
+    /// the EOT ACK, so a receiver that ignores the post-EOT 'C' must
+    /// not stall the user for hundreds of seconds.  This test pins the
+    /// budget contract — total worst-case stall stays under 10 s even
+    /// if a future refactor changes the surrounding logic.
+    ///
+    /// Background: AnzioWin sends the post-EOT 'C' but then drops back
+    /// to terminal mode without ACKing the null block 0, so the old
+    /// (block_timeout × max_retries = 200 s) budget burned a couple of
+    /// minutes on every successful download and sprayed `ÿ` characters
+    /// onto the user's terminal on each retransmit.
+    #[test]
+    fn test_ymodem_end_of_batch_budget_bounded() {
+        // 3 s × 2 retries = 6 s worst-case.  Anything larger than 10 s
+        // would re-introduce the AnzioWin stall.  const-evaluated so a
+        // budget regression fails compilation, not just CI.
+        const _: () = assert!(
+            EOB_TIMEOUT_SECS * EOB_MAX_RETRIES as u64 <= 10,
+            "YMODEM end-of-batch worst-case stall must stay under 10 s",
+        );
+        const _: () = assert!(
+            EOB_MAX_RETRIES <= 3,
+            "more than 3 retries spams the receiver's terminal with binary noise \
+             (each retry sends a 132-byte SOH packet)",
+        );
     }
 
     #[test]

@@ -923,10 +923,36 @@ pub(crate) async fn read_packet(
         header_input.push(len_byte);
         let n = unchar(len_byte) as usize;
         if n < 3 {
-            return Err(format!("Kermit: packet length {} too small", n));
+            return Err(format!("Kermit: packet length {} too small (LEN byte {:#x})", n, len_byte));
         }
         let cklen = check_size(chkt);
         if n < 2 + cklen {
+            // Drain enough bytes to log a useful hex dump — at least
+            // SEQ + TYPE + however many bytes the peer's LEN says
+            // remain — then surface the original error.  Without this
+            // the user can't tell from logs whether the peer is using
+            // a different CHKT format, miscomputing LEN, or sending
+            // garbage.  Capped at 32 bytes so a wildly-wrong LEN can't
+            // wedge us draining forever.
+            let mut wire: Vec<u8> = header_input.clone();
+            // Peer's LEN claimed n bytes follow.  Drain exactly that
+            // many (capped at 32 so a wildly-wrong LEN can't wedge us)
+            // so the next SOH-hunt starts at a clean packet boundary
+            // instead of inside this bogus packet's tail.
+            let drain_n = n.min(32);
+            for _ in 0..drain_n {
+                match read_byte_with_deadline(reader, is_tcp, state, deadline).await {
+                    Ok(b) => wire.push(b),
+                    Err(_) => break,
+                }
+            }
+            if verbose {
+                let hex: String = wire.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                glog!(
+                    "Kermit recv: short-packet length n={} cklen={} chkt={} | wire={}",
+                    n, cklen, chkt as char, hex,
+                );
+            }
             return Err(format!(
                 "Kermit: packet length {} short for header+check (cklen {})",
                 n, cklen
@@ -958,11 +984,22 @@ pub(crate) async fn read_packet(
     check_input.extend_from_slice(&payload);
     if let Err(e) = verify_check(chkt, &check_input, &check_bytes) {
         if verbose {
+            // Hex-dump the whole packet (header bytes + payload + check
+            // bytes) so vintage-Kermit interop debugging can compare
+            // exactly what's on the wire vs what we expected.  Bounded
+            // to header_input.len() + payload.len() + check_bytes.len()
+            // bytes — same window we already buffered for the verify.
+            let mut wire: Vec<u8> = header_input.clone();
+            wire.extend_from_slice(&payload);
+            wire.extend_from_slice(&check_bytes);
+            let hex: String = wire.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
             glog!(
-                "Kermit recv: CHECK failed for type='{}' seq={}: {}",
+                "Kermit recv: CHECK failed for type='{}' seq={}: {} | wire={} chkt={}",
                 kind as char,
                 seq,
-                e
+                e,
+                hex,
+                chkt as char,
             );
         }
         return Err(e);
@@ -2100,7 +2137,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
         );
     }
 
-    let our_caps = config_capabilities();
+    let mut our_caps = config_capabilities();
     let mut state = ReadState::default();
     let neg_deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout);
@@ -2126,7 +2163,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
     }
     let mut seq: u8 = starting_seq & 0x3F;
 
-    let peer_caps = send_and_await_ack(
+    let peer_caps = match send_and_await_ack(
         reader,
         writer,
         TYPE_SEND_INIT,
@@ -2145,7 +2182,66 @@ pub(crate) async fn kermit_send_with_starting_seq(
         true,
     )
     .await
-    .map_err(|e| wrap_send_err("Send-Init", e))?;
+    {
+        Ok(p) => p,
+        Err(e) if e.starts_with("Kermit: too many timeouts") => {
+            // Peer never replied to our extended Send-Init.  Older
+            // Kermits (AnzioWin, original CP/M Kermit, MS-DOS Kermit
+            // before CAPAS support, embedded targets like a stock
+            // PIC/AVR Kermit, etc.) can fail to parse a Send-Init
+            // whose data field carries CAPAS bytes and extension
+            // fields they don't recognize, and NAK silently or
+            // compute a checksum that doesn't match ours.  Retry once
+            // with a classic Send-Init: 80-byte packets, CHKT=1,
+            // window=1, no long packets / streaming / attrs / RESEND
+            // / locking shifts.  Vintage receivers always handle
+            // this; modern ones still negotiate up to whatever they
+            // can on subsequent transfers.
+            if verbose {
+                glog!(
+                    "Kermit send: no response to extended Send-Init ({}) — retrying with classic capabilities for vintage-Kermit compatibility",
+                    e
+                );
+            }
+            our_caps = Capabilities {
+                // Stick with CHKT=1 per Capabilities::default(): AnzioWin
+                // and similar quirky peers advertise CHKT=3 in their SI
+                // ACK but actually emit CHKT=1-format packets on the
+                // wire post-SI, so intersecting upward to CHKT=3 makes
+                // their data packets unreadable.  Spec-compliant peers
+                // that genuinely use CHKT=3 negotiate it on attempt 1
+                // (the extended Send-Init), where our config_capabilities
+                // already proposes CHKT=3 — they never reach this
+                // legacy path.
+                peer_id: Some("Ethernet Gateway Kermit".into()),
+                ..Capabilities::default()
+            };
+            let legacy_payload = build_send_init_payload(&our_caps);
+            let legacy_deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout);
+            send_and_await_ack(
+                reader,
+                writer,
+                TYPE_SEND_INIT,
+                seq,
+                &legacy_payload,
+                b'1',
+                0,
+                0,
+                CR,
+                is_tcp,
+                is_petscii,
+                verbose,
+                &mut state,
+                Some(legacy_deadline),
+                max_retries,
+                true,
+            )
+            .await
+            .map_err(|e| wrap_send_err("Send-Init (classic)", e))?
+        }
+        Err(e) => return Err(wrap_send_err("Send-Init", e)),
+    };
 
     let peer_init = parse_send_init_payload(&peer_caps);
     let session = intersect_capabilities(&our_caps, &peer_init);
@@ -2653,6 +2749,22 @@ async fn send_and_await_ack(
                         );
                     }
                     return Ok(resp.payload);
+                }
+                if resp.kind == TYPE_ACK {
+                    // Stale ACK for an already-advanced seq.  Some peers
+                    // (AnzioWin observed) re-emit ACKs from earlier
+                    // packets after we've already moved on — typically
+                    // happens when our retransmits stack up in their
+                    // input buffer and they ACK each one in order.
+                    // Discard and keep waiting for the right ACK rather
+                    // than aborting the transfer.
+                    if verbose {
+                        glog!(
+                            "Kermit send: stale ACK seq={} (waiting for seq={}) — discarding and continuing",
+                            resp.seq, seq
+                        );
+                    }
+                    continue;
                 }
                 // Unexpected packet — surface as protocol error.
                 return Err(format!(
@@ -3306,10 +3418,20 @@ pub(crate) async fn kermit_receive_with_init(
         );
     }
 
-    // 2. Reply with our Send-Init capabilities echoed back as ACK
+    // 2. Reply with the negotiated capabilities echoed back as ACK
     // payload.  CHKT for the ACK is type-1 per spec (matches what the
     // peer used for the Send-Init).
-    let ack_payload = build_send_init_payload(&our_caps);
+    //
+    // We build the ACK from `session` (the intersection) rather than
+    // `our_caps` (our proposal) so we never advertise a CAPAS bit or
+    // extension field (long packets, windowing, streaming, attrs) that
+    // the peer didn't.  Strict-spec Kermits (C-Kermit, G-Kermit, K95)
+    // ignore-then-intersect, so either source produces the same final
+    // session — but older Kermits (AnzioWin, original CP/M Kermit, etc.)
+    // can't parse a Send-Init ACK whose data field carries fields they
+    // didn't propose, and silently NAK or compute a different checksum.
+    // Mirroring `session` is the safe-for-vintage choice.
+    let ack_payload = build_send_init_payload(&session);
     send_ack_with_payload(
         writer,
         s_pkt.seq,
@@ -11745,5 +11867,234 @@ mod tests {
             let decoded = decode_data(&encoded, q).expect("must decode our own encode");
             proptest::prop_assert_eq!(decoded, input);
         }
+    }
+
+    // =========================================================================
+    // Vintage-Kermit interop tests (added 2026-05-02)
+    //
+    // These pin down the four narrow logic branches the AnzioWin /
+    // legacy-Kermit work added to kermit_send / kermit_receive /
+    // send_and_await_ack — so a future refactor can't quietly break
+    // vintage compatibility.  Each test maps to one shipped behavior.
+    // =========================================================================
+
+    /// Legacy-fallback SI must produce a classic 10-byte data field
+    /// (MAXL TIME NPAD PADC EOL QCTL QBIN CHKT REPT CAPAS1) with the
+    /// CAPAS1 byte bare (no extension bits).  Older Kermits NAK on
+    /// extra bytes they don't recognise — this test pins the contract
+    /// so a change to `Capabilities::default()` that enables any
+    /// extension fails CI loudly.
+    #[test]
+    fn test_legacy_send_init_payload_is_classic_10_bytes() {
+        let legacy = Capabilities {
+            peer_id: Some("test".into()),
+            ..Capabilities::default()
+        };
+        // Sanity: Capabilities::default() must NOT advertise any
+        // CAPAS-gated extension, or the legacy fallback isn't legacy.
+        assert!(!legacy.long_packets, "legacy must not advertise long packets");
+        assert!(!legacy.streaming, "legacy must not advertise streaming");
+        assert!(!legacy.attribute_packets, "legacy must not advertise attrs");
+        assert!(!legacy.locking_shifts, "legacy must not advertise locking shifts");
+        assert!(!legacy.resend, "legacy must not advertise RESEND");
+        assert_eq!(legacy.window, 1, "legacy must use window=1 (stop-and-wait)");
+        assert_eq!(legacy.chkt, b'1', "legacy must propose CHKT=1");
+
+        let payload = build_send_init_payload(&legacy);
+        assert_eq!(
+            payload.len(),
+            10,
+            "classic SI payload must be 10 bytes (slots 1-10), got {} — \
+             did Capabilities::default() acquire a CAPAS extension?",
+            payload.len()
+        );
+        // CAPAS1 (slot 10) must have no extension bits set.
+        let capas1 = unchar(payload[9]);
+        assert_eq!(
+            capas1, 0,
+            "CAPAS1 byte must be bare for legacy fallback, got {:#x}", capas1
+        );
+    }
+
+    /// Receive-side SI-ACK must be built from the negotiated `session`,
+    /// not `our_caps`.  Older Kermits NAK on a Send-Init ACK whose data
+    /// field carries CAPAS bytes / extension fields they didn't propose
+    /// — `session` (the intersection) is the safe-for-vintage source.
+    #[test]
+    fn test_si_ack_built_from_session_drops_unilateral_extensions() {
+        // Our proposal: full extended set.
+        let our_caps = Capabilities {
+            long_packets: true,
+            streaming: true,
+            attribute_packets: true,
+            window: 4,
+            ..Capabilities::default()
+        };
+        // Peer's proposal: bare-bones (vintage Kermit).
+        let peer_basic = Capabilities::default();
+
+        let session = intersect_capabilities(&our_caps, &peer_basic);
+
+        // Sanity: the intersection drops everything the peer didn't ask
+        // for — this is what intersect_capabilities is documented to do.
+        assert!(!session.long_packets);
+        assert!(!session.streaming);
+        assert!(!session.attribute_packets);
+        assert_eq!(session.window, 1);
+
+        let ack_from_session = build_send_init_payload(&session);
+        assert_eq!(
+            ack_from_session.len(),
+            10,
+            "SI-ACK built from session must be classic-sized (10 bytes), got {} — \
+             did the receive path regress to building from our_caps?",
+            ack_from_session.len()
+        );
+
+        // Control: building from our_caps would produce 15 bytes
+        // (CAPAS continuation + WINDO + MAXLX).  Confirms this test
+        // would catch a regression.
+        let ack_from_ours = build_send_init_payload(&our_caps);
+        assert!(
+            ack_from_ours.len() > ack_from_session.len(),
+            "control: building from our_caps must produce a longer payload (got {} vs session {}) \
+             — if this fails, the test no longer distinguishes the two sources",
+            ack_from_ours.len(),
+            ack_from_session.len()
+        );
+    }
+
+    /// Pins the error-message contract that `kermit_send`'s legacy
+    /// fallback depends on.  The fallback fires when `send_and_await_ack`
+    /// returns an error starting with `"Kermit: too many timeouts"` —
+    /// if anyone reformats that error, the legacy fallback silently
+    /// dies and vintage Kermit downloads quietly regress.  This test
+    /// ensures a refactor of the timeout error message breaks CI.
+    #[tokio::test]
+    async fn test_send_and_await_ack_timeout_error_starts_with_known_prefix() {
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        // Tight timeout so the test finishes fast.
+        config::update_config_value("kermit_negotiation_timeout", "1");
+
+        let (peer_to_gw, gw_in) = tokio::io::duplex(64);
+        let (gw_out, _peer_from_gw) = tokio::io::duplex(64);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        // Drop the peer-write side so the gateway's reads time out
+        // (no bytes will ever arrive).
+        drop(peer_to_gw);
+
+        let mut state = ReadState::default();
+        let deadline = Some(
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(300),
+        );
+        let err = send_and_await_ack(
+            &mut gw_r,
+            &mut gw_w,
+            TYPE_SEND_INIT,
+            0,
+            b"junk",
+            b'1',
+            0,
+            0,
+            CR,
+            false,
+            false,
+            false,
+            &mut state,
+            deadline,
+            2,
+            true,
+        )
+        .await
+        .expect_err("read with no peer must time out");
+        assert!(
+            err.starts_with("Kermit: too many timeouts"),
+            "kermit_send legacy-fallback dispatch matches on this exact prefix \
+             (kermit.rs:~2181) — got {:?}",
+            err
+        );
+    }
+
+    /// `send_and_await_ack` must discard a stale ACK (peer ACKing an
+    /// older seq than we asked for) and keep reading rather than
+    /// aborting.  AnzioWin re-emits ACKs from prior packets after we
+    /// move on; without this branch the transfer aborts mid-flight.
+    #[tokio::test]
+    async fn test_send_and_await_ack_discards_stale_ack() {
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+
+        let (peer_to_gw, gw_in) = tokio::io::duplex(8192);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(8192);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) = (
+            tokio::io::split(peer_from_gw).0,
+            tokio::io::split(peer_to_gw).1,
+        );
+
+        // Peer task: drain the gateway's outbound F-packet, then send
+        // a stale ACK seq=0 followed by the proper ACK seq=1.  The
+        // gateway under test is asking for ACK seq=1.
+        //
+        // After writing both ACKs, keep draining peer_r — the gateway's
+        // retry loop re-sends the F-packet whenever the stale-ACK arm
+        // triggers `continue`, and dropping peer_r early would close
+        // gw_w's other end and surface as "broken pipe" before the
+        // gateway can read the proper ACK.
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut tmp = vec![0u8; 1024];
+            let _ = peer_r.read(&mut tmp).await;
+            // Stale ACK seq=0 (an "earlier" packet's ACK).
+            let stale = wire_packet(TYPE_ACK, 0, &[]);
+            peer_w.write_all(&stale).await.unwrap();
+            // The right ACK seq=1.
+            let proper = wire_packet(TYPE_ACK, 1, &[]);
+            peer_w.write_all(&proper).await.unwrap();
+            // Keep draining so the gateway's retransmit (after the
+            // stale-ACK `continue`) doesn't see a broken pipe.
+            loop {
+                match peer_r.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let mut state = ReadState::default();
+        let deadline = Some(
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(2),
+        );
+        let payload = send_and_await_ack(
+            &mut gw_r,
+            &mut gw_w,
+            TYPE_FILE,
+            1,
+            b"X.TXT",
+            b'1',
+            0,
+            0,
+            CR,
+            false,
+            false,
+            false,
+            &mut state,
+            deadline,
+            5,
+            false, // not Send-Init — that path has its own seq-mismatch arm
+        )
+        .await
+        .expect("stale-ACK arm must discard the seq=0 ACK and accept seq=1");
+        assert!(
+            payload.is_empty(),
+            "F-packet ACK from peer was empty payload"
+        );
+        // Drop gw_w so the peer task's drain loop sees EOF and the
+        // spawn terminates cleanly — otherwise the join below deadlocks.
+        drop(gw_w);
+        let _ = peer_task.await;
     }
 }
