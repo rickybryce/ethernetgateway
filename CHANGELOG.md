@@ -9,6 +9,354 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.5.3] - 2026-05-03
+
+### Added
+
+#### Kermit server expansion
+- **Standalone TCP listener** for Kermit server mode on its own port
+  (default `2424`, configurable via `kermit_server_port` and
+  `kermit_server_enabled`). Lets a peer connect directly to a server-mode
+  endpoint without going through the telnet menu — the way real
+  `kermit -j host` expects to talk to a remote server.
+- **`ATDT KERMIT` dial shortcut** (and aliases `ATDT kermit-server` /
+  `ATDT kermit server`) drops a serial-modem caller straight into Kermit
+  server mode, indistinguishable on the wire from a real `kermit -j host`
+  left in `server` mode. Off by default; enabled via the new
+  `allow_atdt_kermit` config flag — it bypasses the telnet menu's auth
+  gate, so the toggle is gated behind a security-warning modal in both
+  the GUI and the telnet menu.
+- **Direct Kermit-server entry** over telnet/SSH — connecting to the
+  gateway's Kermit listener drops straight into server-mode dispatch
+  with no menu.
+- **Additional Kermit server commands**: `remote space`,
+  `remote kermit version`, plus full `remote cwd` semantics (subdir-aware
+  uploads, `cdup` via bare `..`, refusal of non-existent targets), and
+  `remote dir` listing fixes.
+- **`AT` command chaining** in the Hayes modem emulator (e.g. `ATE0V1Q0`
+  parsed as a single line).
+
+#### Network safety toggles
+- **`disable_ip_safety` config flag** — when `security_enabled` is false,
+  telnet normally rejects non-private and `*.*.*.1` source IPs. This
+  flag opts out of the allowlist. Toggleable from the GUI Security frame
+  and the telnet Server Configuration menu, both gated behind a
+  security-warning confirmation. Read per connection so changes take
+  effect immediately without a restart.
+- **`kermit_idle_timeout` config key** (default 300 s, `0` disables).
+  Split out from `kermit_negotiation_timeout` so a long-running C-Kermit
+  session that idles for hours can suppress the default disconnect.
+  Surfaced in the GUI Kermit panel and the telnet Kermit settings menu.
+
+### Changed
+
+- **Kermit settings menu split** into Status and Settings pages,
+  navigable via `M`/`V`, so each fits the 22-row × 40-col PETSCII
+  budget.
+- **Server Configuration menu** combined `I` and `R` into one row to
+  keep the PETSCII budget at N=3 detected IPs.
+- **GUI logo** swapped from the 1024×512 source (downscaled at runtime)
+  to a pre-sized 366×183 asset for a 1:1 blit at standard DPI;
+  eliminates the faint mauve cast on dark-blue gradients we previously
+  worked around with `mipmap_mode: None`.
+- **`russh` updated** 0.60.0 → 0.60.2; RustCrypto transitive deps
+  realigned to the versions russh 0.60.2 tests against.
+- **Private-file writes** (SSH host key, outgoing client key,
+  `egateway.conf`, `dialup.conf`) now use `OpenOptions::create_new` +
+  `mode(0o600)` from inception rather than create-then-chmod, closing
+  the brief 0o644 window between the two calls. Per-process atomic
+  counter applied uniformly so two threads can't clobber each other's
+  tmp file.
+
+### Fixed
+
+#### Kermit vintage-receiver interop (AnzioWin canary)
+- **Vintage-receiver fallback**: `kermit_send` now retries with classic
+  80-byte / CHKT=1 / window=1 capabilities if the extended Send-Init
+  exhausts all retries with no response. Vintage Kermits (AnzioWin,
+  original CP/M Kermit, MS-DOS Kermit pre-CAPAS, embedded targets)
+  always handle classic; modern peers respond on attempt 1 and pay no
+  cost.
+- **Send-Init ACK** is now built from the negotiated session
+  intersection rather than our proposal, so quirky vintage receivers no
+  longer see CAPAS bytes / extension fields they didn't propose.
+- **Stale ACKs** (peer ACKing an older seq than we asked for) are now
+  discarded instead of aborting the transfer. AnzioWin re-emits ACKs
+  from prior packets after we've moved on.
+- **YMODEM end-of-batch** handshake is now bounded to ~6 s worst case
+  (3 s × 2 attempts) instead of the prior 200 s default. Fixes AnzioWin
+  (and any receiver that sends post-EOT `'C'` then drops to terminal
+  mode) showing the IAC-doubled `0xFF` complement byte rendered as `ÿ`
+  on every retry.
+
+#### Kermit server correctness
+- **Files save inline** per S-dispatch instead of buffering until
+  session end — closes the data-loss window where a peer disconnect or
+  idle timeout would strand received files in memory.
+- **F-packet** now refuses sender filenames that won't survive
+  `validate_filename` ([A-Za-z0-9._-]) before consuming any D-packet
+  body. Was silently dropping the whole upload at save time, so a
+  literal-mode `put My File.txt` looked successful on the wire but
+  vanished from disk.
+- **`kermit_resume_partial`** now actually writes back to disk; the
+  saver atomic-replaces via tmp+rename when a partial was pre-loaded.
+  Previously the create-new save hit `AlreadyExists`, dropped the
+  merged data, and left the partial untouched.
+- **GET filename round-trip with `#` (default QCTL)**: the server's
+  R-handler and `kermit_client_get` now control-quote per spec §6.4.
+  Real C-Kermit's GET sender encodes via `encstr` (ckcfn2.c:2474), so a
+  filename containing `#` arrived doubled — our server then looked up
+  `temp##1.bin` on disk while the file actually saved as `temp#1.bin`.
+- **`remote cwd <path>` (G-C)** field-decodes the argument per spec
+  §6.7 (a `tochar(N)` length byte + N path bytes); short paths whose
+  length byte lands on `tochar(3)='#'` are now control-quoted on the
+  wire.
+- **Uploads honor `remote cd`**: telnet save callback joins
+  `target_dir/<subdir>/<filename>` instead of dropping the per-session
+  subdir on the floor.
+- **`remote cd ..` (cdup)** is now special-cased — pops one component
+  from the per-session subdir, no-op at root, never escapes the
+  sandbox. Other `..` forms (`foo/..`, `../etc`) still hit
+  `is_safe_relative_subdir` and refuse.
+- **`remote cd <typo>`** is now refused with E-packet
+  "Directory not found" instead of being silently ACKed and dropping
+  subsequent uploads into a phantom path.
+- **Idle-timeout disconnect** now ends the telnet session cleanly.
+  Pre-fix the gateway sent an "idle timeout" E-packet then returned to
+  the file-transfer menu with the TCP socket still open; the next
+  `remote ...` from C-Kermit landed on a non-protocol menu and surfaced
+  as "too many retries" in the peer's UI. Server now flushes the writer
+  after the E-packet, returns `io::ErrorKind::TimedOut`, and the menu
+  handler ends the session.
+
+#### Stability
+- **GUI Ctrl-C hang when window is minimized**: signal-watcher now
+  sends `ViewportCommand::Close` directly instead of relying on
+  `request_repaint()` — some WMs throttled repaint delivery for
+  minimized windows so `update()` never ran. Plus
+  `runtime.shutdown_timeout(2 s)` after `block_on` returns as a
+  defensive cap on tokio runtime drop.
+- **Connection-rejection greetings** (max sessions, insecure-IP policy)
+  now actually reach the client. Replaced non-blocking `try_write` with
+  a bounded `write_all` + `flush` + `shutdown` capped at 2 seconds,
+  spawned as an independent task so the accept loop doesn't serialize
+  at ~0.5 conn/sec under flood.
+- **Telnet `session_count`** uses `fetch_add → check → fetch_sub`
+  instead of `load → fetch_add`, mirroring the SSH pattern; closes the
+  cap-bust TOCTOU.
+
+#### XMODEM / YMODEM / ZMODEM polish
+- **YMODEM block-0 CRC error** now NAK-and-retries within negotiation
+  instead of falling out and NAK-looping the retransmit as a
+  block-number mismatch.
+- **YMODEM empty-file** goes straight to EOT instead of emitting a
+  SUB-padded data block.
+- **XMODEM/YMODEM duplicate-block detection** now ACKs both expected-1
+  AND expected-2 per Forsberg's "any already-seen block" recommendation.
+- **XMODEM first-block mode auto-detect**: a trailer-format mismatch on
+  the very first block falls back to the alternate mode (CRC↔checksum)
+  and locks the session. Closes the negotiation timing race against
+  vintage Christensen 1977 / CP/M MODEM7 / C64 BBS senders that ignore
+  `'C'` until NAK'd, AND the modern slow-startup race where the
+  receiver flips to checksum mid-flight against a CRC-capable sender.
+- **ZMODEM inter-file header CRC mismatches** now ZNAK-and-retry
+  (bounded by `max_retries`) instead of silently truncating the rest of
+  a long batch on a single bit-flip.
+- **ZMODEM phase-1 negotiation** no longer counts stale ZRQINIT /
+  unexpected frames against the retry budget — chatty receivers were
+  burning retries on bytes that proved the link was alive.
+- **ZMODEM `0x98`** added to the ZDLE escape table (8-bit dual of
+  ZDLE/0x18 per Forsberg §10 Table 4).
+- **ZMODEM ZSINIT TESCCTL/TESC8** parsing per Forsberg §11.3; receiver
+  now ACKs ZSINIT instead of silently ignoring the flag.
+
+#### Web browser
+- **HTTPS→HTTP downgrade** is now signalled to the user with a
+  `[!] HTTPS failed — fetched over plain HTTP` banner instead of being
+  silent. Both `fetch_and_render` and the form-submit POST path were
+  transparently retrying over plain HTTP on TLS error.
+- **Gopher selector** filters CR/LF/NUL on user-supplied selectors to
+  prevent protocol-line injection in search queries (TAB preserved as
+  the legitimate item-type-7 separator).
+
+### Tests
+
+- **997 lib + 1 binary e2e tests** pass, 0 failed; clippy clean on
+  Linux + `x86_64-pc-windows-gnu`.
+
+## [0.5.2] - 2026-04-29
+
+### Fixed
+
+#### ZMODEM autostart actually works
+- The menu-input state machine detected the `** ZDLE [ABC]` prefix and
+  called `handle_zmodem_autostart`, which previously sent the spec'd
+  abort sequence and printed "ZMODEM is not yet supported" — even
+  though `zmodem.rs` has shipped full ZMODEM support. The handler now
+  drains the residual ZRQINIT bytes, validates the transfer dir, and
+  calls `zmodem_receive`, with a save flow + summary screen matching
+  the menu-initiated upload path.
+
+#### ZMODEM receive metadata
+- `parse_zfile_info` now returns a `ZfileInfo` struct (Forsberg §11 —
+  length is decimal, mtime + mode are octal). `ZmodemReceive` carries
+  the matching `modtime` + `mode` fields so the saved file gets the
+  correct mtime / permissions instead of the prior `None` / default.
+- `modtime=0` / `mode=0` are filtered to `None` in the parser. Our own
+  `zmodem_send` and most other senders (including `lrzsz`) write
+  `"<len> 0 0 0 0 <len>"` when they don't have those values;
+  propagating `Some(0)` would have driven `apply_ymodem_meta` to set
+  the saved file's mtime to epoch and mode to 0 (no permissions for
+  anyone) — worse than ignoring the field altogether.
+
+#### Atomic batch-receive saves
+- The ZMODEM-autostart, ZMODEM/Kermit-batch-upload, and Kermit-server
+  save loops all used a non-atomic `exists()` + `std::fs::write`
+  pattern with a TOCTOU window. New async `save_received_file` helper
+  opens with `create_new(true)` for atomic create-only semantics and
+  uses `tokio::fs` for non-blocking I/O. Returns
+  `SaveError::AlreadyExists` / `SaveError::WriteFailed` so each caller
+  maps to its own per-file skip wording. All four batch-receive save
+  sites now share one code path.
+- Sync `std::fs::write` of up to 8 MB was blocking the tokio executor
+  for tens of milliseconds on long telnet sessions — replaced with the
+  async helper above.
+
+#### Cross-platform CI
+- **Windows `compute_resume_offset` tests**: `set_modified` on Windows
+  requires the file handle to have write permission
+  (`FILE_WRITE_ATTRIBUTES`); `File::open` opens read-only so the call
+  was failing with permission denied. Replaced the three affected
+  mtime-mutation helpers with `OpenOptions::new().write(true).open(...)`.
+- **Windows symlink-resume test** unused-variable lint — moved
+  `link_path` declaration inside the `#[cfg(unix)]` block alongside the
+  symlink call.
+- **Rust 1.95 clippy `collapsible_match`** on the seven A-packet
+  single-byte sub-attribute arms in `parse_attributes` — converted to
+  match guards. Behavior unchanged.
+
+### Changed
+
+- **`MAX_FILE_SIZE` consolidated** to `crate::tnio::MAX_FILE_SIZE`
+  (single `u64` constant); xmodem / zmodem / kermit / telnet now
+  import it.
+- **IAC-escape control surface unified**: removed the vestigial
+  `kermit_iac_escape` config field everywhere (struct, parser, writer,
+  default, GUI checkbox, telnet menu toggle, settings screen,
+  `egateway.conf` docstring). The three Kermit call sites now read
+  `self.xmodem_iac` like XMODEM and ZMODEM already do — the menu
+  toggle is the single operator-visible source of truth.
+- **Kermit error strings** normalized from `"Kermit recv: ..."` to
+  `"Kermit: ..."` at six sites.
+- **Module docstrings** rewritten for the Ethernet Gateway scope;
+  stale "no batch mode" / "full server-mode is not implemented"
+  comments and self-referential commit/Gap markers cleaned out.
+
+### Tests
+
+- **935 lib + 1 binary e2e tests** pass; clippy clean on Linux +
+  `x86_64-pc-windows-gnu`.
+
+## [0.5.1] - 2026-04-28
+
+### Added
+
+#### Kermit protocol support
+- **Full Kermit send and receive** implemented in `src/kermit.rs` per
+  Frank da Cruz, "Kermit Protocol Manual" (1987) + C-Kermit extensions.
+  S/F/A/D/Z/B/E/C packet dispatch, CHKT 1/2/3 (single-byte / two-byte /
+  three-byte CRC), Send-Init capabilities negotiation, long packets,
+  eighth-bit prefix, repeat-count compression, and locking-shifts.
+- **Sliding window** (selective-repeat ARQ): D-packets ride a windowed
+  sender with per-seq retransmit timer and selective NAK retransmit;
+  receiver buffers out-of-order packets and NAKs the missing seq.
+  Window size 1–31 (spec max 31 < 32 = half of mod-64 seq space, so
+  forward/back disambiguation is unambiguous). Control packets
+  (S/F/A/Z/B) stay stop-and-wait.
+- **Streaming Kermit** (CAPAS byte 3 bit 2): D-packets pushed
+  back-to-back with no per-D ACK; receiver suppresses D-ACKs. Z-ACK
+  confirms the whole stream. Mid-stream NAKs trigger selective
+  retransmit, then resume.
+- **Peer TIME field** honored as our retransmit timeout (spec §3.2).
+  `TIME=0` falls back to `kermit_packet_timeout` config, floored at
+  1 second.
+- **Server mode** (S/R/G/I/B/E/C dispatch) — `remote dir`,
+  `remote cwd`, `remote help`, `get`, `send`, `bye`, `finish`.
+- **Five extended A-packet sub-attributes** per spec §5.1: `&`
+  long-form file length (decimal u64), `1` character set, `*` encoding,
+  `,` record format, `-` record length. Parsed and surfaced in verbose
+  logs; receiver uses `length.or(long_length)` for `declared_size`.
+  Encoder emits the existing six tags (`!` length, `#` date, `+` mode,
+  `.` system_id, `"` file_type, `@` disposition) plus the new four.
+- **Detected Kermit flavor** (C-Kermit, G-Kermit, Kermit-95, …)
+  surfaced in the upload-complete summary line.
+- **Telnet File Transfer menu** entry for Kermit alongside XMODEM /
+  XMODEM-1K / YMODEM / ZMODEM. The first-line hint is now generic
+  "(More for others)" since the popup covers every protocol.
+
+### Changed
+
+- **Shared raw I/O extracted** to `src/tnio.rs`: `ReadState`,
+  `is_can_abort`, `raw_read_byte`, `nvt_read_byte`,
+  `consume_telnet_command`, `raw_write_bytes` plus IAC/SB/SE/WILL/WONT/
+  DO/DONT/CAN constants. The byte-stream layer that handles telnet IAC
+  unescaping, NVT CR-NUL stripping, Forsberg's CAN×2 abort rule, and
+  the matching write-side escaping was duplicated near-verbatim across
+  `xmodem.rs` / `zmodem.rs` / `kermit.rs` (~140 lines per module). Net
+  delta: 583 lines removed, 289 added.
+
+### Fixed
+
+- **Send-Init `WINDO`/`MAXLX` fields** are now conditional per spec
+  §4.4: `WINDO` emitted iff `window > 1`, `MAXLX1`/`MAXLX2` emitted iff
+  `long_packets`. Parser reads `WINDO` iff the sliding bit is set in
+  CAPAS byte 1, reads `MAXLX` iff the long bit is set. Self-tests
+  passed because both sides used the same buggy layout, but a session
+  with `long_packets=true, sliding=false` would have advertised an
+  extra `WINDO=1` byte that a strict-spec G-Kermit / E-Kermit peer
+  would have misread as `MAXLX1=1`, collapsing our advertised MAXL
+  from ~4096 to ~138.
+- **C0/C1/DEL control range** in `is_kermit_control` was missing
+  `0x80..=0x9F` and `0xFF`. Per spec §6.4, these high-bit equivalents
+  must also be QCTL-prefixed. The encoder was emitting them raw; the
+  decoder now also unctls bodies in the high-bit ctl range when no
+  QBIN is active.
+- **Long-packet `extended_len`** was being encoded as
+  "5 + DATA + CHECK" (including the 5 header bytes after LEN); per
+  spec it's "the length of everything in the packet that follows the
+  HCHECK" — i.e., DATA + CHECK only. This is what real C-Kermit
+  emits, and the mismatch caused every long-packet CRC verification
+  to fail in interop.
+- **`peer_id` parser**: real C-Kermit's Send-Init buries vendor-specific
+  CAPAS extension bytes (CHECKPOINT, WHATAMI, …) in the trailing slot;
+  our parser accepted the binary bytes as a string and produced
+  garbage like `0___^"U1A`, defeating downstream flavor detection.
+  Tightened the heuristic to require a 4-character ASCII letter run
+  before treating the trailing bytes as an identifier; otherwise leave
+  `peer_id` as `None` and let `detect_flavor` classify by capability
+  bits.
+- **`record_lrzsz_fixtures`** is now gated behind
+  `ZMODEM_RECORD_FIXTURES=1`. The fixture-recorder was `#[ignore]`d
+  but `cargo test -- --ignored` was inadvertently running it and
+  silently rewriting the committed binary fixtures with timestamp-
+  bearing equivalents.
+
+### Documentation
+
+- README and user manual extended with Kermit coverage alongside the
+  existing XMODEM / YMODEM / ZMODEM sections.
+
+### Tests
+
+- **+218 tests** for Kermit (CRC + checksum vectors, packet
+  round-trips, Send-Init negotiation, sliding-window happy path +
+  lossy NAK recovery, streaming round-trips including 64 KB /
+  all-bytes / multi-file / lossy, A-packet sub-attribute round-trips,
+  server-mode dispatch). Three `#[ignore]` C-Kermit subprocess
+  interop tests (stop-and-wait, sliding-window, streaming) drive the
+  real `kermit` binary over TCP. Total: **930** unit + proptest
+  tests, all green.
+
 ## [0.4.0] - 2026-04-25
 
 ### Changed
@@ -362,7 +710,10 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3
+[0.5.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.2
+[0.5.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.1
 [0.4.0]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.4.0
 [0.3.5]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.5
 [0.3.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.4
