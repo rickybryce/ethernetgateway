@@ -1936,7 +1936,9 @@ fn online_mode_duplex(
     state.last_data_time = Instant::now();
 
     loop {
-        if state.shutdown.load(Ordering::SeqCst) {
+        if state.shutdown.load(Ordering::SeqCst)
+            || SERIAL_RESTART.load(Ordering::SeqCst)
+        {
             return OnlineExit::Disconnected;
         }
 
@@ -2000,7 +2002,9 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     state.last_data_time = Instant::now();
 
     loop {
-        if state.shutdown.load(Ordering::SeqCst) {
+        if state.shutdown.load(Ordering::SeqCst)
+            || SERIAL_RESTART.load(Ordering::SeqCst)
+        {
             return OnlineExit::Disconnected;
         }
 
