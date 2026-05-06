@@ -250,7 +250,7 @@ ships with:
 ### Verifying the checksum
 
 ```sh
-sha256sum -c ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -258,8 +258,8 @@ sha256sum -c ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.asc \
-    ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz.asc \
+    ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -269,11 +269,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz.sig \
     --certificate-identity-regexp "https://github.com/rickybryce/ethernet-gateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    ethernet-gateway-v0.5.2-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
@@ -416,9 +416,18 @@ Most settings can be changed from within a telnet or SSH session using the
 
 - **E** Security -- toggle login requirement, set telnet/SSH credentials
 - **G** Gateway Configuration -- outbound Telnet and SSH Gateway options
-- **M** Modem / Console -- serial port selection, framing, and the
-  Modem-vs-Console mode toggle (see Console Mode below)
-- **S** Server Configuration -- enable/disable telnet and SSH, set ports
+- **M** Modem Emulator / Serial Console -- serial port selection, framing,
+  and (in modem mode) the AT-state knobs. The label flips to *Serial
+  Console* when `serial_mode = console`. Does **not** include the mode
+  toggle itself — that lives on **T** below.
+- **T** Toggle Modem/Console mode -- flip `serial_mode` between `modem`
+  and `console`. The change is committed and the running serial thread
+  reconfigures within one manager-poll interval. Hidden from sessions
+  that arrived over the serial port itself (flipping would tear down
+  the caller's own connection).
+- **S** Server Configuration -- enable/disable telnet and SSH, set ports,
+  session cap, idle timeout, and the network-safety opt-out
+  (`disable_ip_safety`)
 - **F** File Transfer -- submenu with shared transfer directory and
   per-protocol settings pages:
   - **X** XMODEM settings -- negotiation timeout, retry interval
@@ -429,6 +438,13 @@ Most settings can be changed from within a telnet or SSH session using the
   - **Z** ZMODEM settings -- independent handshake timeout, retry
     interval (ZRINIT/ZRQINIT re-send cadence), per-frame read timeout,
     and ZRQINIT/ZRPOS/ZDATA retry cap
+  - **K** Kermit settings -- standalone-listener toggle and port,
+    `allow_atdt_kermit`, plus the protocol-tuning surface (negotiation
+    timeout, packet timeout, idle timeout, max retries, max packet
+    length, window size, block-check type, capability flags, resume,
+    locking shifts, 8-bit quoting). See the
+    [Kermit Reference](http://ethernetgateway.com/kermit.html) for
+    the full discussion of each tunable.
 - **O** Other Settings -- AI API key, browser homepage, weather zip, verbose
   logging, GUI on startup
 - **R** Reset Defaults -- restore all settings to factory defaults
@@ -484,7 +500,8 @@ browser_homepage = http://telnetbible.com
 # Last-used weather zip code (updated automatically when you check weather)
 weather_zip =
 
-# Verbose logging: set to true for detailed XMODEM/YMODEM/ZMODEM protocol diagnostics
+# Verbose logging: set to true for detailed per-block / per-subpacket
+# protocol diagnostics across XMODEM, YMODEM, ZMODEM, and Kermit.
 verbose = false
 
 # XMODEM-family protocol timeouts (apply to XMODEM, XMODEM-1K, and YMODEM —
@@ -628,8 +645,8 @@ Y or N to continue; no default is applied.
 
 ### Supported Protocols
 
-The gateway implements four members of the XMODEM family, selectable
-per-transfer from menus on the gateway side:
+The gateway implements five file-transfer protocols, selectable per-transfer
+from menus on the gateway side:
 
 | Protocol | Block size | CRC | Direction | Notes |
 |----------|------------|-----|-----------|-------|
@@ -637,9 +654,13 @@ per-transfer from menus on the gateway side:
 | **XMODEM-1K** | 1024 B (STX) | CRC-16 | up/down | Download option; on upload the XMODEM/YMODEM branch accepts STX blocks transparently. Opportunistically falls back to SOH if the peer NAKs the first STX. |
 | **YMODEM** | 1024 B + block-0 header | CRC-16 | up/down | Block 0 carries filename + size; the receive path auto-detects it. |
 | **ZMODEM** | variable subpackets (1 K default) | CRC-16 out, CRC-16 or CRC-32 in | up/down | Full Forsberg spec: ZRQINIT handshake, ZDLE escaping, ZSKIP, batch sends and receives. On upload the first file is saved under the name you entered; subsequent files in a batch use the sender's filename (validated, collisions skipped via ZSKIP). |
+| **Kermit** | configurable long packets (4096 default) | 6-bit / 12-bit checksum or CRC-16/KERMIT | up/down + server | Columbia spec — sliding windows, attribute packets, RESEND, locking shifts, 8-bit quoting. Both **client** (push/pull from the menu) and **server** (idle in the file-transfer menu's `K` slot, on the standalone TCP listener, or via `ATDT KERMIT`) modes. See the [Kermit Reference](http://ethernetgateway.com/kermit.html) for the full surface. |
 
-On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected) or
-**ZMODEM**. On download, you pick the specific variant you want.
+On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected),
+**ZMODEM**, or **Kermit**. On download, you pick the specific variant you
+want including Kermit. Kermit also has a dedicated server mode (press **K**
+on the File Transfer menu) and a standalone TCP listener (set
+`kermit_server_enabled = true` in `egateway.conf`).
 
 ### Uploading a File to the Server
 
@@ -649,16 +670,19 @@ On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected) or
    characters; cannot start with a dot, cannot contain `..`, must include at
    least one letter or digit)
 4. On the **SELECT UPLOAD PROTOCOL** screen, press **X** (XMODEM / YMODEM —
-   block size, CRC mode, and batch header are auto-detected) or **Z** (ZMODEM)
-5. The server displays "Start XMODEM/YMODEM send now" or "Start ZMODEM send
-   now" and waits up to 45 seconds
+   block size, CRC mode, and batch header are auto-detected), **Z** (ZMODEM),
+   or **K** (Kermit, any flavor — see the
+   [Kermit Reference](http://ethernetgateway.com/kermit.html))
+5. The server displays "Start XMODEM/YMODEM send now", "Start ZMODEM send
+   now", or "Start Kermit send now" and waits for the negotiation handshake
 6. In your terminal client, start the matching upload
    - Most terminal programs have a "Send File" or "Upload" option under a
      Transfer or File menu
-   - ExtraPutty: **File Transfer → Zmodem → Send**; SyncTerm: **Ctrl-PgUp**
+   - ExtraPutty: **File Transfer → Zmodem → Send**; SyncTerm: **Ctrl-PgUp**;
+     Kermit: `kermit -s file` or the equivalent client UI
 7. On completion, the server reports bytes, blocks, and elapsed time. For
-   ZMODEM batches, every file the sender transmits is listed (saved or
-   skipped)
+   ZMODEM and Kermit batches, every file the sender transmits is listed
+   (saved or skipped)
 
 ### Downloading a File from the Server
 
@@ -667,17 +691,22 @@ On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected) or
    page)
 3. Enter the number of the file to download
 4. On the **SELECT PROTOCOL** screen, choose **X** (XMODEM), **1** (XMODEM-1K),
-   **Y** (YMODEM), or **Z** (ZMODEM)
-5. The server prompts "Start XMODEM/YMODEM/ZMODEM receive now" and waits up
-   to 45 seconds
+   **Y** (YMODEM), **Z** (ZMODEM), or **K** (Kermit)
+5. The server prompts "Start *protocol* receive now" and waits for the peer
+   to begin
 6. In your terminal client, start the matching receive and choose where to
-   save the file locally (ZMODEM auto-starts in most modern terminals)
+   save the file locally (ZMODEM auto-starts in most modern terminals; for
+   Kermit, run `kermit -r` or the equivalent client UI)
 7. On completion, the server reports the transfer result
 
 ### Other File Operations
 
 - **X** -- Delete a file (with confirmation)
 - **C** -- Change to a subdirectory within the transfer directory
+- **K** -- Kermit server mode: idle and wait for a Kermit client's commands
+  (`get`, `send`, `dir`, `cwd`, `finish`, etc.). See the
+  [Kermit Reference](http://ethernetgateway.com/kermit.html) for the full
+  G-subcommand table.
 - **I** -- Toggle IAC escaping on/off (needed when transferring binary files
   over telnet that contain 0xFF bytes)
 
@@ -852,9 +881,12 @@ modes. The setting persists in `serial_mode` in `egateway.conf`.
 ### Setting Up
 
 1. From the main menu, press **C** (Configuration)
-2. Press **M** (Modem/Console)
-3. Press **E** to enable the port
-4. Press **M** to set the mode (default is **Modem**)
+2. Press **T** if needed to switch between **Modem** mode (default) and
+   **Console** mode. The Configuration menu's **M** label and submenu
+   contents follow the current mode.
+3. Press **M** (Modem Emulator / Serial Console) to open the port-settings
+   submenu
+4. Press **E** to enable the port
 5. Press **S** to select a serial port (auto-detected)
 6. Configure baud rate, data bits, parity, stop bits, and flow control as needed
 7. Press **Q** to apply -- settings take effect immediately (no restart needed)
@@ -881,7 +913,7 @@ Or edit `egateway.conf` directly and restart the server.
 | `ATX0`–`ATX4` | Result code verbosity (see table below) |
 | `AT&C0` / `AT&C1` | DCD always on / DCD reflects carrier (default) |
 | `AT&D0`–`AT&D3` | DTR handling (0 = ignore, default; 1 = cmd mode on drop; 2 = hang up; 3 = hang up + reset) |
-| `AT&K0`–`AT&K4` | Modem-layer flow control (0 = none, default; 1 = reserved; 3 = RTS/CTS; 4 = XON/XOFF) |
+| `AT&K0`–`AT&K4` | Modem-layer flow control (0 = none, default; 1 = auto-detect, stored only — no wire effect; 3 = RTS/CTS; 4 = XON/XOFF) |
 | `ATS?`  | Show S-register help |
 | `ATS`*n*`?` | Query S-register *n* (returns 3-digit value) |
 | `ATS`*n*`=`*v* | Set S-register *n* to value *v* (0–255). Range S0–S26 |
@@ -889,6 +921,7 @@ Or edit `egateway.conf` directly and restart the server.
 | `ATDS` / `ATDS`*n* | Dial stored number from slot *n* (0–3; default 0) |
 | `AT&Z`*n*`=`*s* | Store phone number or host *s* in slot *n* (0–3) |
 | `ATDT ethernet-gateway` | Connect to this gateway's menus |
+| `ATDT KERMIT` | Drop straight into Kermit server mode (aliases: `ATDT kermit`, `ATDT kermit-server`, `ATDT kermit server`). Requires `allow_atdt_kermit = true`; off by default because it bypasses the telnet auth gate. See the [Kermit Reference](http://ethernetgateway.com/kermit.html). |
 | `ATDT host:port` | Dial a remote telnet host |
 | `ATDP host:port` | Pulse dial (same as ATDT — no distinction for TCP) |
 | `A/`    | Repeat the last command (no `AT` prefix, no CR required) |
@@ -1086,11 +1119,14 @@ session becomes a transparent pipe to the wire in both directions.
 - **GUI:** in the **Console Mode** frame, set the dropdown beside the
   **Enabled** checkbox to **Telnet-Serial Mode**. The change is saved
   immediately and reconfigures the running serial thread.
-- **Telnet/SSH:** **Configuration > Modem/Console**, then press **M** to
-  toggle. The header changes from `MODEM EMULATOR` to `SERIAL CONSOLE`
-  and the Dialup Mapping / Ring Emulator items disappear (they only
-  apply to modem mode).
-- **`egateway.conf`:** set `serial_mode = console` and restart.
+- **Telnet/SSH:** **Configuration > T (Toggle Modem/Console mode)**.
+  The Configuration menu's **M** entry relabels from *Modem Emulator*
+  to *Serial Console* and its submenu drops the AT-state items (those
+  only apply to modem mode). The toggle is hidden from a session that
+  arrived over the serial port itself.
+- **`egateway.conf`:** set `serial_mode = console`. The change can be
+  picked up live (the serial manager reads it on its next poll), or
+  apply on next start.
 
 **Using the bridge:**
 

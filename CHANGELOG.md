@@ -9,6 +9,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.5.4] - 2026-05-06
+
+### Added
+
+#### Serial Console Mode
+- **Telnet-serial bridge** as a second role for the serial port,
+  alongside the existing Hayes AT modem emulator. Selectable via the
+  new `serial_mode` config key (`modem` / `console`). The existing
+  `G  Serial Gateway` main-menu item now bridges the telnet/SSH session
+  straight to the wire so an operator can drive a microcontroller,
+  RS-232 device, or other serial console remotely.
+- **Hot mode switch** — flipping `serial_mode` (from the GUI dropdown,
+  the new `T  Toggle Modem/Console mode` entry on the Configuration
+  menu, or `egateway.conf` directly) reconfigures the running serial
+  thread within one manager-poll interval. No restart required.
+
+### Changed
+
+- **Configuration menu** reorganized to surface the new mode toggle and
+  to relabel `M  Modem Emulator` ↔ `M  Serial Console` based on
+  current `serial_mode`. The new menu walkthrough is documented in
+  user-manual §5.6.
+- **Documentation pass**: §3.2 of the user manual gained 22 previously
+  undocumented config keys (the full `kermit_*` family,
+  `ssh_gateway_auth`, `disable_ip_safety`, `allow_atdt_kermit`,
+  `kermit_server_enabled` / `_port`); `index.html` grew a Kermit
+  subsection in the file-transfer config tables and added cross-links
+  to `kermit.html` from each protocol-prompt step; the chapter-8 intro
+  now correctly describes five protocols (the old "three related
+  protocols" framing predated the ZMODEM and Kermit chapters).
+
+### Fixed
+
+#### Console bridge hardening
+- **`run_console_bridge` could wedge** indefinitely when the telnet
+  peer's TCP write buffer was full: the spawned async task's
+  `duplex_write.write_all().await` would park with no wake-up source,
+  stranding the manager thread until process restart. Bounded with a
+  200 ms timeout then `abort()`.
+- **Orphaned bridge requests** on serial-mode flip: a request that
+  arrived in the slot just before `SERIAL_RESTART` fired could be
+  silently abandoned because `console_manager_tick` returned without
+  polling the slot, leaving the requester's `rx.await` blocked forever.
+  Slot is now drained with `Err("Serial mode changed")` on every exit
+  path.
+- **TOCTOU between request-eligibility check and slot insert**:
+  `request_console_bridge` now re-checks
+  `check_console_bridge_eligible` under the slot lock so an operator
+  flipping `serial_mode` (or disabling serial, or clearing the port
+  path) and calling `restart_serial()` in the narrow window between
+  the fast-path check and the slot insert can no longer leave a
+  request stuck until shutdown.
+- **Unbounded `session_to_port` channel** replaced with a bounded
+  `tokio::sync::mpsc::channel(64)`; a flow-controlled wire (CTS-low,
+  slow peer) plus a fast typist or paste can no longer balloon
+  in-memory queue depth. The async-side `.send().await` now
+  backpressures `duplex_read`, which backpressures the telnet peer.
+- **Slot-cleanup duplication** removed from the `Err(_)` arm of
+  `rx.await`; let `ConsoleSlotGuard`'s drop own slot teardown.
+
+#### Serial mode switch responsiveness
+- **Modem online loops** (`online_mode_tcp`, `online_mode_duplex`) now
+  honor `SERIAL_RESTART` on every iteration; previously a mode flip
+  could lag by one block-read interval before the loop noticed.
+
+#### Menu UX & doc-vs-code drift
+- **`G  Serial Gateway`** and **`T  Toggle Modem/Console mode`** are
+  now hidden from sessions that arrived over the serial port itself.
+  The handler-side rejections remain as defense in depth (a serial-side
+  caller can still type the letter blind), but the menu no longer
+  advertises items that always error.
+- **Manual cross-references** to "chapter 9.10" corrected to "9.13"
+  (Console Mode lives at 9.13; 9.10 is Chained Command Lines).
+- **`AT&K1`** redescribed as Auto-detect (stored, no wire effect)
+  instead of "Reserved"; the parser at `src/serial.rs:1140` accepts
+  `&K1` and emits `FlowSet(1)`. Missing `&K1` row added to Appendix
+  B.4.
+- **`AT&F`** entry now notes that it drops the active connection,
+  matching the `AtResult::Reset` return.
+- **Bare `kermit` alias** for `ATDT KERMIT` documented alongside the
+  existing `kermit-server` / `kermit server` aliases.
+
 ## [0.5.3] - 2026-05-03
 
 ### Added
@@ -710,7 +792,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
 [0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3
 [0.5.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.2
 [0.5.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.1
