@@ -6171,9 +6171,10 @@ impl TelnetSession {
             self.show_error_lines(&[
                 "Serial port is not enabled.",
                 "",
-                "Enable it under Configuration >",
-                "Modem Emulator (set Mode to",
-                "Console and pick a port).",
+                "Open Configuration, press T to",
+                "switch to Console mode if needed,",
+                "then M to enable the port and",
+                "select a device.",
             ])
             .await?;
             return Ok(());
@@ -6182,9 +6183,8 @@ impl TelnetSession {
             self.show_error_lines(&[
                 "Serial port is in modem mode.",
                 "",
-                "Switch to console mode under",
-                "Configuration > Modem Emulator",
-                "(M = toggle Mode).",
+                "Press T at the Configuration",
+                "menu to switch to Console mode.",
             ])
             .await?;
             return Ok(());
@@ -7250,11 +7250,6 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle Modem/Console mode",
-                self.cyan("M")
-            ))
-            .await?;
-            self.send_line(&format!(
                 "  {}  Select serial port",
                 self.cyan("S")
             ))
@@ -7325,24 +7320,6 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "m" => {
-                    let new_mode = if console_mode { "modem" } else { "console" };
-                    let v = new_mode.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_mode", &v);
-                    })
-                    .await
-                    .ok();
-                    // Do NOT restart the serial thread here.  The
-                    // serial-lockout protection in modem_apply_settings
-                    // (which fires on Q-back) gates restarts behind a
-                    // 60 s Y+Enter confirmation when the operator is
-                    // connected via the modem itself — calling
-                    // restart_serial directly here would sever a
-                    // serial-session caller mid-menu without that
-                    // protection.  Same convention as every other
-                    // setting on this menu (E, S, B, P, F).
-                }
                 "s" => {
                     self.modem_select_port().await?;
                 }
@@ -7370,9 +7347,9 @@ impl TelnetSession {
                 }
                 _ => {
                     let msg = match (console_mode, self.is_serial) {
-                        (true, _) => "Press E, M, S, B, P, F, H, or Q.",
-                        (false, true) => "Press E, M, S, B, P, D, F, H, or Q.",
-                        (false, false) => "Press E, M, S, B, P, D, F, I, H, or Q.",
+                        (true, _) => "Press E, S, B, P, F, H, or Q.",
+                        (false, true) => "Press E, S, B, P, D, F, H, or Q.",
+                        (false, false) => "Press E, S, B, P, D, F, I, H, or Q.",
                     };
                     self.show_error(msg).await?;
                 }
@@ -7498,6 +7475,46 @@ impl TelnetSession {
         Self::revert_serial_config(original_cfg).await;
         crate::serial::restart_serial();
         Ok(())
+    }
+
+    /// Toggle serial_mode between "modem" and "console" from the
+    /// configuration menu.  Refuses the toggle for a caller who came in
+    /// over the modem itself — switching to console mode would tear
+    /// down their own connection before they could acknowledge, and the
+    /// 60 s Y+Enter recovery in `modem_apply_settings` cannot be reached
+    /// once the modem session is gone.  Console-mode sessions are raw
+    /// passthroughs that don't run TelnetSession, so they never reach
+    /// this code.
+    async fn toggle_serial_mode(&mut self) -> Result<(), std::io::Error> {
+        if self.is_serial {
+            self.show_error_lines(&[
+                "Cannot toggle mode from a",
+                "modem-side session.  Switching",
+                "to Console would drop this",
+                "connection before it could",
+                "confirm.",
+                "",
+                "Connect via telnet, SSH, or the",
+                "system console and press T from",
+                "the Configuration menu there.",
+            ])
+            .await?;
+            return Ok(());
+        }
+
+        let original_cfg = config::get_config();
+        let new_mode = if original_cfg.serial_mode == "console" {
+            "modem"
+        } else {
+            "console"
+        };
+        let v = new_mode.to_string();
+        tokio::task::spawn_blocking(move || {
+            config::update_config_value("serial_mode", &v);
+        })
+        .await
+        .ok();
+        self.modem_apply_settings(&original_cfg).await
     }
 
     /// Revert serial config to a previous snapshot using a single batch write.
@@ -8021,6 +8038,10 @@ impl TelnetSession {
     }
 
     async fn modem_show_help(&mut self) -> Result<(), std::io::Error> {
+        let console_mode = config::get_config().serial_mode == "console";
+        if console_mode {
+            return self.console_show_help().await;
+        }
         let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
             &[
                 "  This server emulates a Hayes-",
@@ -8148,6 +8169,70 @@ impl TelnetSession {
         self.show_help_page("MODEM EMULATOR HELP", lines).await
     }
 
+    async fn console_show_help(&mut self) -> Result<(), std::io::Error> {
+        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+            &[
+                "  This menu configures the serial",
+                "  port as a raw telnet-serial",
+                "  bridge.  No AT commands, no",
+                "  dialing - just byte passthrough",
+                "  between the telnet session and",
+                "  the connected hardware.",
+                "",
+                "  Settings on this menu:",
+                "  E  Open or close the device",
+                "  S  Pick the serial device path",
+                "  B  Match the baud rate of the",
+                "     attached hardware",
+                "  P  Data bits, parity, stop bits",
+                "  F  Flow control: none, software",
+                "     (XON/XOFF), or hardware",
+                "     (RTS/CTS)",
+                "",
+                "  Using the bridge:",
+                "  Pick Serial Gateway from the",
+                "  main menu to enter the bridge.",
+                "  Press <- <- (PETSCII) or",
+                "  ESC ESC (ANSI/ASCII) to leave.",
+                "  A single ESC is forwarded so",
+                "  editors like vi keep working.",
+                "",
+                "  Switching modes:",
+                "  Press T at the Configuration",
+                "  menu to return to Modem mode.",
+            ]
+        } else {
+            &[
+                "  This menu configures the serial port as a",
+                "  raw telnet-serial bridge.  No AT commands,",
+                "  no dialing - just byte passthrough between",
+                "  the telnet session and the connected",
+                "  hardware.",
+                "",
+                "  Settings on this menu:",
+                "  E  Open or close the device file",
+                "  S  Pick the serial device (/dev/ttyUSB0,",
+                "     COM3, etc.)",
+                "  B  Match the baud rate of the attached",
+                "     hardware",
+                "  P  Data bits, parity, stop bits",
+                "  F  Flow control: none, software (XON/XOFF),",
+                "     or hardware (RTS/CTS)",
+                "",
+                "  Using the bridge:",
+                "  Pick \"Serial Gateway\" from the main menu",
+                "  to enter the bridge.  Press ESC ESC to",
+                "  disconnect (a single ESC is forwarded to",
+                "  the wire so editors like vi keep working).",
+                "",
+                "  Switching modes:",
+                "  Press T at the Configuration menu to",
+                "  return to Modem Emulator mode.",
+            ]
+        };
+        self.show_help_page("SERIAL CONSOLE HELP", lines).await
+    }
+
     // ─── CONFIGURATION ──────────────────────────────────────
 
     async fn configuration(&mut self) -> Result<(), std::io::Error> {
@@ -8160,6 +8245,24 @@ impl TelnetSession {
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
+            let cfg = config::get_config();
+            let console_mode = cfg.serial_mode == "console";
+            let serial_status = if !cfg.serial_enabled {
+                self.red("Disabled")
+            } else if console_mode {
+                self.green("Console mode")
+            } else {
+                self.amber("Modem mode")
+            };
+            self.send_line(&format!("  Serial port: {}", serial_status))
+                .await?;
+            self.send_line("").await?;
+
+            let modem_label = if console_mode {
+                "Serial Console"
+            } else {
+                "Modem Emulator"
+            };
             self.send_line(&format!(
                 "  {}  Security",
                 self.cyan("E")
@@ -8171,8 +8274,14 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Modem Emulator",
-                self.cyan("M")
+                "  {}  {}",
+                self.cyan("M"),
+                modem_label
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle Modem/Console mode",
+                self.cyan("T")
             ))
             .await?;
             self.send_line(&format!(
@@ -8222,6 +8331,9 @@ impl TelnetSession {
                 "m" => {
                     self.modem_settings().await?;
                 }
+                "t" => {
+                    self.toggle_serial_mode().await?;
+                }
                 "o" => {
                     self.other_settings().await?;
                 }
@@ -8245,9 +8357,15 @@ impl TelnetSession {
                             "  G  Gateway: configure outbound",
                             "     Telnet and SSH Gateway menus",
                             "",
-                            "  M  Modem/Console: configure the",
-                            "     serial port for modem emulation",
-                            "     or telnet-serial bridging",
+                            "  M  Modem Emulator or Serial",
+                            "     Console settings (port, baud,",
+                            "     dialup mappings).  The label",
+                            "     reflects the current mode.",
+                            "",
+                            "  T  Toggle the serial port mode",
+                            "     between Modem Emulator and",
+                            "     Serial Console without",
+                            "     entering the M submenu.",
                             "",
                             "  S  Server: enable/disable",
                             "     services, set ports, and",
@@ -8283,9 +8401,14 @@ impl TelnetSession {
                             "     Telnet and SSH Gateway menus",
                             "     (proxy to remote servers)",
                             "",
-                            "  M  Modem/Console: configure the serial",
-                            "     port for AT-command modem emulation",
-                            "     or telnet-serial console bridging",
+                            "  M  Modem Emulator / Serial Console",
+                            "     settings (port, baud, dialup).",
+                            "     The label reflects the current",
+                            "     mode shown above.",
+                            "",
+                            "  T  Toggle the serial port between",
+                            "     Modem Emulator and Serial Console",
+                            "     mode without entering the M submenu",
                             "",
                             "  S  Server: enable/disable services,",
                             "     set ports, and restart the server",
@@ -8316,7 +8439,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press E, F, G, M, O, S, R, H, or Q.").await?;
+                    self.show_error("Press E, F, G, M, O, R, S, T, H, or Q.").await?;
                 }
             }
         }
@@ -13205,7 +13328,7 @@ mod tests {
             "Mapping saved.",
             "No other mappings defined.",
             // Configuration
-            "Press E, F, G, M, O, S, R, H, or Q.",
+            "Press E, F, G, M, O, R, S, T, H, or Q.",
             // Other settings
             "Press A, B, W, V, G, R, H, or Q.",
             // Security
@@ -13219,9 +13342,9 @@ mod tests {
             "Press T, P, S, O, R, H, or Q.",
             "Invalid port number.",
             // Modem / console emulator menu
-            "Press E, M, S, B, P, F, H, or Q.",
-            "Press E, M, S, B, P, D, F, H, or Q.",
-            "Press E, M, S, B, P, D, F, I, H, or Q.",
+            "Press E, S, B, P, F, H, or Q.",
+            "Press E, S, B, P, D, F, H, or Q.",
+            "Press E, S, B, P, D, F, I, H, or Q.",
         ];
         for msg in &messages {
             // Error messages are displayed as "  {msg}" — 2-char indent
@@ -13253,7 +13376,6 @@ mod tests {
             "  X  Exit",
             // Modem emulator menu
             "  E  Toggle enabled/disabled",
-            "  M  Toggle Modem/Console mode",
             "  S  Select serial port",
             "  B  Set baud rate",
             "  P  Set data/parity/stop",
@@ -13266,6 +13388,8 @@ mod tests {
             // Configuration submenu
             "  E  Security",
             "  M  Modem Emulator",
+            "  M  Serial Console",
+            "  T  Toggle Modem/Console mode",
             "  S  Server Configuration",
             "  F  File Transfer",
             "  O  Other Settings",
@@ -13564,8 +13688,9 @@ mod tests {
     /// Typical machines have 1-3 addresses, fitting well within 22.
     #[test]
     fn test_config_menu_row_count() {
-        // Configuration submenu: header(3) + blank + 6 items + blank + Q/H + prompt = 13
-        let submenu_rows = 3 + 1 + 6 + 1 + 1 + 1; // 13
+        // Configuration submenu: header(3) + blank + serial-status(1) + blank
+        // + 8 items (E, G, M, T, S, F, O, R) + blank + Q/H + prompt = 17
+        let submenu_rows = 3 + 1 + 1 + 1 + 8 + 1 + 1 + 1; // 17
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
         // Server configuration: header(3) + blank + 2 status + blank + 5 items + blank + Q/H + prompt = 15
         let static_rows = 3 + 1 + 2 + 1 + 5 + 1 + 1 + 1; // 15
@@ -14088,25 +14213,26 @@ mod tests {
     }
 
     /// Modem/Console settings menu in console mode loses Dialup +
-    /// Ring rows but keeps the Mode toggle.  Item count must still
-    /// fit the 22-row budget for every combination.  Status + Mode
-    /// share one line so the modem-mode-enabled-non-serial case
-    /// stays at exactly 22 rows.
+    /// Ring rows.  The Modem/Console Mode toggle moved to the parent
+    /// configuration menu in v0.5.x, so this submenu now omits the M
+    /// row.  Item count must still fit the 22-row budget for every
+    /// combination.  Status + Mode share one line so the modem-mode-
+    /// enabled-non-serial case stays under 22 rows.
     #[test]
     fn test_modem_console_menu_row_counts() {
         // Status block: status_mode + Port + Baud + Data + Flow = 5.
         let status_block = 5;
         let chrome = 3 + 1 + 1 + 1 + 1; // sep+title+sep, blank, blank, footer, prompt = 7
-        let menu_console = 6; // E, M, S, B, P, F
-        let menu_modem_serial = 7; // + D
-        let menu_modem_full = 8; // + D + I
+        let menu_console = 5; // E, S, B, P, F
+        let menu_modem_serial = 6; // + D
+        let menu_modem_full = 7; // + D + I
 
         // Console mode: chrome + status_block + menu_console.
-        let console_rows = chrome + status_block + menu_console; // 18
+        let console_rows = chrome + status_block + menu_console; // 17
         assert!(console_rows <= 22, "console menu is {} rows", console_rows);
 
         // Modem mode + serial session + enabled: + ATD + D, no I.
-        let modem_serial_rows = chrome + status_block + 1 + menu_modem_serial; // 21
+        let modem_serial_rows = chrome + status_block + 1 + menu_modem_serial; // 20
         assert!(
             modem_serial_rows <= 22,
             "modem-serial menu is {} rows",
@@ -14114,7 +14240,7 @@ mod tests {
         );
 
         // Modem mode + non-serial + enabled (worst case): + ATD + D + I.
-        let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 22
+        let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 21
         assert!(
             modem_full_rows <= 22,
             "modem-full menu is {} rows",
@@ -14146,9 +14272,14 @@ mod tests {
             // Configuration submenu help
             "  E  Security: require login,",
             "     set usernames and passwords",
-            "  M  Modem/Console: configure the",
-            "     serial port for modem emulation",
-            "     or telnet-serial bridging",
+            "  M  Modem Emulator or Serial",
+            "     Console settings (port, baud,",
+            "     dialup mappings).  The label",
+            "     reflects the current mode.",
+            "  T  Toggle the serial port mode",
+            "     between Modem Emulator and",
+            "     Serial Console without",
+            "     entering the M submenu.",
             "  S  Server: enable/disable",
             "     services, set ports, and",
             "     restart the server",
@@ -14234,6 +14365,32 @@ mod tests {
             "  You can still dial host:port",
             "  directly - mappings are optional.",
             "  Mappings are saved in dialup.conf.",
+            // Serial console help (PETSCII variant)
+            "  This menu configures the serial",
+            "  port as a raw telnet-serial",
+            "  bridge.  No AT commands, no",
+            "  dialing - just byte passthrough",
+            "  between the telnet session and",
+            "  the connected hardware.",
+            "  Settings on this menu:",
+            "  E  Open or close the device",
+            "  S  Pick the serial device path",
+            "  B  Match the baud rate of the",
+            "     attached hardware",
+            "  P  Data bits, parity, stop bits",
+            "  F  Flow control: none, software",
+            "     (XON/XOFF), or hardware",
+            "     (RTS/CTS)",
+            "  Using the bridge:",
+            "  Pick Serial Gateway from the",
+            "  main menu to enter the bridge.",
+            "  Press <- <- (PETSCII) or",
+            "  ESC ESC (ANSI/ASCII) to leave.",
+            "  A single ESC is forwarded so",
+            "  editors like vi keep working.",
+            "  Switching modes:",
+            "  Press T at the Configuration",
+            "  menu to return to Modem mode.",
         ];
         for line in &help_lines {
             assert!(
