@@ -916,7 +916,7 @@ immediately to running services where possible.
     <dt><span class="kbd">M</span> Modem Emulator / Serial Console</dt>
     <dd>The label depends on <code>serial_mode</code>. In modem mode the submenu edits port, baud, framing, flow control, AT defaults, and stored numbers. In console mode the submenu edits the same wire-level settings minus the AT-state knobs.</dd>
     <dt><span class="kbd">T</span> Toggle Modem/Console mode</dt>
-    <dd>Flip <code>serial_mode</code> between <code>modem</code> and <code>console</code>. The change is committed and the running serial thread reconfigures within a couple of seconds — no restart required.</dd>
+    <dd>Flip <code>serial_mode</code> between <code>modem</code> and <code>console</code>. The change is committed and the running serial thread reconfigures within a couple of seconds — no restart required. The item is hidden from sessions that arrived over the serial port itself, because flipping to the other mode would tear down the caller's own connection before they could confirm.</dd>
     <dt><span class="kbd">S</span> Server Configuration</dt>
     <dd>Listen ports, telnet/SSH enable, max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
     <dt><span class="kbd">F</span> File Transfer</dt>

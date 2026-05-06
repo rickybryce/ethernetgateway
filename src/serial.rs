@@ -316,6 +316,17 @@ pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String>
         let mut slot = CONSOLE_REQUEST
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // Re-check eligibility under the slot lock to close the
+        // TOCTOU window between the fast-path check and the slot
+        // insert.  Without this, an operator who flipped serial_mode
+        // (or disabled serial, or cleared the port path) and called
+        // restart_serial() between those two points could land a
+        // request in the slot AFTER console_manager_tick had already
+        // drained on SERIAL_RESTART.  The next outer loop iteration
+        // would see modem mode and run serial_thread(), which never
+        // polls CONSOLE_REQUEST — the request would sit stuck until
+        // shutdown, blocking every subsequent bridge attempt.
+        check_console_bridge_eligible(&config::get_config())?;
         // Re-check BRIDGE_ACTIVE under the slot lock.
         // `claim_console_request` sets it under the same lock, so a
         // manager that has just claimed the previous request without

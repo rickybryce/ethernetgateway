@@ -3123,11 +3123,17 @@ impl TelnetSession {
             self.cyan("F")
         ))
         .await?;
-        self.send_line(&format!(
-            "  {}  Serial Gateway",
-            self.cyan("G")
-        ))
-        .await?;
+        // Bridging the modem-emulator's own port back into a session
+        // that arrived over that port would loop the user's terminal
+        // to itself.  gateway_serial() also rejects this with an
+        // explanation, but hiding the menu item is the cleaner UX.
+        if !self.is_serial {
+            self.send_line(&format!(
+                "  {}  Serial Gateway",
+                self.cyan("G")
+            ))
+            .await?;
+        }
         self.send_line(&format!(
             "  {}  Troubleshooting",
             self.cyan("R")
@@ -8279,11 +8285,17 @@ impl TelnetSession {
                 modem_label
             ))
             .await?;
-            self.send_line(&format!(
-                "  {}  Toggle Modem/Console mode",
-                self.cyan("T")
-            ))
-            .await?;
+            // Toggling to the other mode from a modem-side session
+            // would tear down the caller's own connection before they
+            // could confirm.  toggle_serial_mode() also rejects this
+            // path; hide the menu item to match.
+            if !self.is_serial {
+                self.send_line(&format!(
+                    "  {}  Toggle Modem/Console mode",
+                    self.cyan("T")
+                ))
+                .await?;
+            }
             self.send_line(&format!(
                 "  {}  Server Configuration",
                 self.cyan("S")
