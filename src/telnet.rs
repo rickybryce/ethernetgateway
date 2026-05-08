@@ -14645,6 +14645,40 @@ mod tests {
         }
     }
 
+    /// Non-serial constructors (`new_ssh`, the regular `new`) MUST
+    /// leave `serial_port_id = None`.  This is the load-bearing
+    /// invariant the per-port-scoped warn/revert/T/I gating relies on:
+    /// a stale `Some(...)` here would cause non-serial sessions to be
+    /// gated as if they were on a specific port.
+    #[test]
+    fn test_non_serial_sessions_have_no_port_id() {
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+        let (_w, reader) = tokio::io::duplex(1);
+        let (_, writer_inner) = tokio::io::duplex(1);
+        let writer: SharedWriter = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Box::new(writer_inner),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
+        let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+
+        let ssh_session = TelnetSession::new_ssh(
+            Box::new(reader),
+            writer,
+            shutdown,
+            restart,
+            None,
+            lockouts,
+        );
+        assert!(!ssh_session.is_serial, "SSH session must not be is_serial");
+        assert!(ssh_session.is_ssh, "SSH session must be is_ssh");
+        assert_eq!(
+            ssh_session.serial_port_id, None,
+            "SSH session must not carry a serial port id"
+        );
+    }
+
     /// `TelnetSession::new_serial` stores the caller's port id so
     /// `modem_apply_settings` can scope the warn-+-revert flow to
     /// the OWN port only.  Pin the constructor's behavior so a future
