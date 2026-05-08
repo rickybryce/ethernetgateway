@@ -23,7 +23,11 @@ _No unreleased changes._
 - **Hot mode switch** — flipping `serial_mode` (from the GUI dropdown,
   the new `T  Toggle Modem/Console mode` entry on the Configuration
   menu, or `egateway.conf` directly) reconfigures the running serial
-  thread within one manager-poll interval. No restart required.
+  thread within one manager-poll interval. No restart required. The
+  menu toggle is refused for callers connected over the modem itself,
+  since switching to console mode would tear down their own session
+  before they could acknowledge — flip the mode from a telnet, SSH, or
+  system-console session instead.
 
 ### Changed
 

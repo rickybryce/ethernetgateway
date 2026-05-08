@@ -1899,8 +1899,8 @@ want to drive it remotely.
 <span class="label">Switching modes</span>
 <ul>
     <li><strong>GUI:</strong> change the dropdown beside <em>Enabled</em> in the Console Mode frame from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change is persistent and immediate; the running serial thread reconfigures on the spot.</li>
-    <li><strong>Telnet/SSH menu:</strong> <em>Configuration</em> &rarr; <em>Modem/Console</em>, then press <span class="kbd">M</span> to toggle. The screen header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features).</li>
-    <li><strong>Config file:</strong> <code>serial_mode = console</code>, then restart.</li>
+    <li><strong>Telnet/SSH menu:</strong> from the <em>Configuration</em> menu, press <span class="kbd">T</span> (<em>Toggle Modem/Console mode</em>). The Modem/Console submenu's header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features). The <span class="kbd">T</span> entry is hidden from sessions connected over the modem itself, since flipping to console mode would tear down the caller's own connection before they could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
+    <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval &mdash; no restart required.</li>
 </ul>
 </aside>
 
