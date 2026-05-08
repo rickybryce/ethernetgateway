@@ -1,0 +1,2290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ethernet Gateway &mdash; Character Code Appendices</title>
+    <meta name="description" content="Reference tables for ASCII, ANSI escape sequences, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, and TRS-80 character sets — companion to the Ethernet Gateway user manual.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (matches index.html) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+            border: none;
+            padding: 0;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 24px 32px 36px;
+        }
+
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Section H2 styled like index.html section-title ---- */
+        h2 {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin: 32px 0 16px;
+        }
+
+        h3 {
+            color: var(--cyan);
+            font-size: 1em;
+            margin: 22px 0 10px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 4px;
+        }
+
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        /* ---- Note callouts ---- */
+        .note {
+            background: rgba(255, 204, 0, 0.05);
+            border: 1px solid var(--amber);
+            padding: 14px 22px;
+            margin: 14px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .note strong {
+            color: var(--amber);
+        }
+
+        /* ---- Tables ---- */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0 16px;
+            font-size: 0.9em;
+        }
+
+        th, td {
+            border: 1px solid rgba(51, 51, 170, 0.6);
+            padding: 8px 14px;
+            text-align: left;
+        }
+
+        th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        tr:nth-child(even) td {
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        tr:nth-child(odd) td {
+            background: rgba(0, 0, 0, 0.1);
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        hr {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 20px 0;
+        }
+
+        /* ---- Table of contents ---- */
+        .toc {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            padding: 20px 26px;
+            margin: 16px 0 20px;
+        }
+
+        .toc h2 {
+            border: none;
+            margin: 0 0 10px;
+            padding: 0;
+            text-align: left;
+            font-size: 1.05em;
+            letter-spacing: 2px;
+        }
+
+        .toc ul {
+            list-style-type: none;
+            padding-left: 0;
+            margin: 0;
+        }
+
+        .toc li {
+            margin: 8px 0;
+        }
+
+        /* ---- History disclosure (per-appendix) ---- */
+        details.history {
+            border: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.3);
+            margin: 18px 0 8px;
+            padding: 0;
+        }
+
+        details.history > summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 10px 18px;
+            color: var(--cyan);
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            user-select: none;
+            background: rgba(0, 255, 255, 0.04);
+            border-bottom: 1px dashed transparent;
+        }
+
+        details.history > summary::-webkit-details-marker { display: none; }
+
+        details.history > summary::before {
+            content: "\25B6";  /* ▶ */
+            display: inline-block;
+            margin-right: 10px;
+            transition: transform 0.15s ease;
+            color: var(--amber);
+        }
+
+        details.history[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        details.history[open] > summary {
+            border-bottom: 1px dashed var(--border);
+            color: var(--yellow);
+        }
+
+        details.history > summary:hover {
+            background: rgba(255, 255, 0, 0.06);
+            color: var(--yellow);
+        }
+
+        details.history .history-body {
+            padding: 14px 22px 16px;
+            color: var(--dim);
+            font-size: 0.95em;
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        details.history .history-body p {
+            color: var(--dim);
+            margin-bottom: 10px;
+        }
+
+        details.history .history-body p:last-child { margin-bottom: 0; }
+
+        details.history .history-body strong { color: var(--amber); }
+
+        /* ---- Tables that scroll horizontally on narrow viewports ---- */
+        .table-wrap {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 12px 0;
+        }
+
+        .table-wrap table {
+            margin: 0;
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 16px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            h2 { font-size: 1em; letter-spacing: 2px; }
+            h3 { font-size: 0.95em; }
+            th, td { padding: 4px 6px; font-size: 0.85em; }
+            .toc { padding: 12px 16px; }
+            .note { padding: 10px 14px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Character Code Appendices</p>
+            <div class="hdr-version">v0.5.4</div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&larr; User Manual</a>
+            <a href="#ascii-table">ASCII</a>
+            <a href="#ansi-table">ANSI</a>
+            <a href="#petscii-table">PETSCII</a>
+            <a href="#atascii-table">ATASCII</a>
+            <a href="#baudot-table">Baudot</a>
+            <a href="#zxspectrum-table">ZX Spectrum</a>
+            <a href="#trs80-table">TRS-80</a>
+        </nav>
+
+        <div class="body-content">
+
+            <p style="text-align: center; font-style: italic; color: var(--dim);">Reference tables for terminal character sets used by retro and modern hardware.</p>
+
+            <div class="toc">
+                <h2>Table of Contents</h2>
+                <ul>
+                    <li><a href="#ascii-table">Appendix A: ASCII Hex Table</a></li>
+                    <li><a href="#ansi-table">Appendix B: ANSI Escape Sequences</a></li>
+                    <li><a href="#petscii-table">Appendix C: PETSCII Hex Table</a></li>
+                    <li><a href="#atascii-table">Appendix D: ATASCII Hex Table</a></li>
+                    <li><a href="#baudot-table">Appendix E: Baudot (ITA2) Code Table</a></li>
+                    <li><a href="#zxspectrum-table">Appendix F: ZX Spectrum Character Set</a></li>
+                    <li><a href="#trs80-table">Appendix G: TRS-80 Character Set</a></li>
+                </ul>
+            </div>
+
+<h2 id="ascii-table">Appendix A: ASCII Hex Table</h2>
+
+<p>The complete 7-bit ASCII character set (0x00-0x7F). Control characters (0x00-0x1F) and DEL (0x7F) are non-printable.</p>
+
+<h3>Control Characters (0x00-0x1F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x00</td><td>0</td><td>NUL</td><td>Null</td></tr>
+    <tr><td>0x01</td><td>1</td><td>SOH</td><td>Start of Heading</td></tr>
+    <tr><td>0x02</td><td>2</td><td>STX</td><td>Start of Text</td></tr>
+    <tr><td>0x03</td><td>3</td><td>ETX</td><td>End of Text</td></tr>
+    <tr><td>0x04</td><td>4</td><td>EOT</td><td>End of Transmission</td></tr>
+    <tr><td>0x05</td><td>5</td><td>ENQ</td><td>Enquiry</td></tr>
+    <tr><td>0x06</td><td>6</td><td>ACK</td><td>Acknowledge</td></tr>
+    <tr><td>0x07</td><td>7</td><td>BEL</td><td>Bell</td></tr>
+    <tr><td>0x08</td><td>8</td><td>BS</td><td>Backspace</td></tr>
+    <tr><td>0x09</td><td>9</td><td>HT</td><td>Horizontal Tab</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>LF</td><td>Line Feed</td></tr>
+    <tr><td>0x0B</td><td>11</td><td>VT</td><td>Vertical Tab</td></tr>
+    <tr><td>0x0C</td><td>12</td><td>FF</td><td>Form Feed</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>CR</td><td>Carriage Return</td></tr>
+    <tr><td>0x0E</td><td>14</td><td>SO</td><td>Shift Out</td></tr>
+    <tr><td>0x0F</td><td>15</td><td>SI</td><td>Shift In</td></tr>
+    <tr><td>0x10</td><td>16</td><td>DLE</td><td>Data Link Escape</td></tr>
+    <tr><td>0x11</td><td>17</td><td>DC1</td><td>Device Control 1 (XON)</td></tr>
+    <tr><td>0x12</td><td>18</td><td>DC2</td><td>Device Control 2</td></tr>
+    <tr><td>0x13</td><td>19</td><td>DC3</td><td>Device Control 3 (XOFF)</td></tr>
+    <tr><td>0x14</td><td>20</td><td>DC4</td><td>Device Control 4</td></tr>
+    <tr><td>0x15</td><td>21</td><td>NAK</td><td>Negative Acknowledge</td></tr>
+    <tr><td>0x16</td><td>22</td><td>SYN</td><td>Synchronous Idle</td></tr>
+    <tr><td>0x17</td><td>23</td><td>ETB</td><td>End of Trans. Block</td></tr>
+    <tr><td>0x18</td><td>24</td><td>CAN</td><td>Cancel</td></tr>
+    <tr><td>0x19</td><td>25</td><td>EM</td><td>End of Medium</td></tr>
+    <tr><td>0x1A</td><td>26</td><td>SUB</td><td>Substitute</td></tr>
+    <tr><td>0x1B</td><td>27</td><td>ESC</td><td>Escape</td></tr>
+    <tr><td>0x1C</td><td>28</td><td>FS</td><td>File Separator</td></tr>
+    <tr><td>0x1D</td><td>29</td><td>GS</td><td>Group Separator</td></tr>
+    <tr><td>0x1E</td><td>30</td><td>RS</td><td>Record Separator</td></tr>
+    <tr><td>0x1F</td><td>31</td><td>US</td><td>Unit Separator</td></tr>
+</table>
+</div>
+
+<h3>Printable Characters (0x20-0x7E)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th></tr>
+    <tr><td>0x20</td><td>32</td><td>(space)</td><td>0x40</td><td>64</td><td>@</td><td>0x60</td><td>96</td><td>`</td></tr>
+    <tr><td>0x21</td><td>33</td><td>!</td><td>0x41</td><td>65</td><td>A</td><td>0x61</td><td>97</td><td>a</td></tr>
+    <tr><td>0x22</td><td>34</td><td>"</td><td>0x42</td><td>66</td><td>B</td><td>0x62</td><td>98</td><td>b</td></tr>
+    <tr><td>0x23</td><td>35</td><td>#</td><td>0x43</td><td>67</td><td>C</td><td>0x63</td><td>99</td><td>c</td></tr>
+    <tr><td>0x24</td><td>36</td><td>$</td><td>0x44</td><td>68</td><td>D</td><td>0x64</td><td>100</td><td>d</td></tr>
+    <tr><td>0x25</td><td>37</td><td>%</td><td>0x45</td><td>69</td><td>E</td><td>0x65</td><td>101</td><td>e</td></tr>
+    <tr><td>0x26</td><td>38</td><td>&amp;</td><td>0x46</td><td>70</td><td>F</td><td>0x66</td><td>102</td><td>f</td></tr>
+    <tr><td>0x27</td><td>39</td><td>'</td><td>0x47</td><td>71</td><td>G</td><td>0x67</td><td>103</td><td>g</td></tr>
+    <tr><td>0x28</td><td>40</td><td>(</td><td>0x48</td><td>72</td><td>H</td><td>0x68</td><td>104</td><td>h</td></tr>
+    <tr><td>0x29</td><td>41</td><td>)</td><td>0x49</td><td>73</td><td>I</td><td>0x69</td><td>105</td><td>i</td></tr>
+    <tr><td>0x2A</td><td>42</td><td>*</td><td>0x4A</td><td>74</td><td>J</td><td>0x6A</td><td>106</td><td>j</td></tr>
+    <tr><td>0x2B</td><td>43</td><td>+</td><td>0x4B</td><td>75</td><td>K</td><td>0x6B</td><td>107</td><td>k</td></tr>
+    <tr><td>0x2C</td><td>44</td><td>,</td><td>0x4C</td><td>76</td><td>L</td><td>0x6C</td><td>108</td><td>l</td></tr>
+    <tr><td>0x2D</td><td>45</td><td>-</td><td>0x4D</td><td>77</td><td>M</td><td>0x6D</td><td>109</td><td>m</td></tr>
+    <tr><td>0x2E</td><td>46</td><td>.</td><td>0x4E</td><td>78</td><td>N</td><td>0x6E</td><td>110</td><td>n</td></tr>
+    <tr><td>0x2F</td><td>47</td><td>/</td><td>0x4F</td><td>79</td><td>O</td><td>0x6F</td><td>111</td><td>o</td></tr>
+    <tr><td>0x30</td><td>48</td><td>0</td><td>0x50</td><td>80</td><td>P</td><td>0x70</td><td>112</td><td>p</td></tr>
+    <tr><td>0x31</td><td>49</td><td>1</td><td>0x51</td><td>81</td><td>Q</td><td>0x71</td><td>113</td><td>q</td></tr>
+    <tr><td>0x32</td><td>50</td><td>2</td><td>0x52</td><td>82</td><td>R</td><td>0x72</td><td>114</td><td>r</td></tr>
+    <tr><td>0x33</td><td>51</td><td>3</td><td>0x53</td><td>83</td><td>S</td><td>0x73</td><td>115</td><td>s</td></tr>
+    <tr><td>0x34</td><td>52</td><td>4</td><td>0x54</td><td>84</td><td>T</td><td>0x74</td><td>116</td><td>t</td></tr>
+    <tr><td>0x35</td><td>53</td><td>5</td><td>0x55</td><td>85</td><td>U</td><td>0x75</td><td>117</td><td>u</td></tr>
+    <tr><td>0x36</td><td>54</td><td>6</td><td>0x56</td><td>86</td><td>V</td><td>0x76</td><td>118</td><td>v</td></tr>
+    <tr><td>0x37</td><td>55</td><td>7</td><td>0x57</td><td>87</td><td>W</td><td>0x77</td><td>119</td><td>w</td></tr>
+    <tr><td>0x38</td><td>56</td><td>8</td><td>0x58</td><td>88</td><td>X</td><td>0x78</td><td>120</td><td>x</td></tr>
+    <tr><td>0x39</td><td>57</td><td>9</td><td>0x59</td><td>89</td><td>Y</td><td>0x79</td><td>121</td><td>y</td></tr>
+    <tr><td>0x3A</td><td>58</td><td>:</td><td>0x5A</td><td>90</td><td>Z</td><td>0x7A</td><td>122</td><td>z</td></tr>
+    <tr><td>0x3B</td><td>59</td><td>;</td><td>0x5B</td><td>91</td><td>[</td><td>0x7B</td><td>123</td><td>{</td></tr>
+    <tr><td>0x3C</td><td>60</td><td>&lt;</td><td>0x5C</td><td>92</td><td>\</td><td>0x7C</td><td>124</td><td>|</td></tr>
+    <tr><td>0x3D</td><td>61</td><td>=</td><td>0x5D</td><td>93</td><td>]</td><td>0x7D</td><td>125</td><td>}</td></tr>
+    <tr><td>0x3E</td><td>62</td><td>&gt;</td><td>0x5E</td><td>94</td><td>^</td><td>0x7E</td><td>126</td><td>~</td></tr>
+    <tr><td>0x3F</td><td>63</td><td>?</td><td>0x5F</td><td>95</td><td>_</td><td>0x7F</td><td>127</td><td>DEL</td></tr>
+</table>
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>1963 &mdash; ASA X3.4.</strong>
+            ASCII (American Standard Code for Information Interchange) was published in
+            1963 by the American Standards Association's X3.4 committee, with significant
+            design contributions from <strong>Bob Bemer</strong> at IBM &mdash; widely
+            credited as "the father of ASCII" for proposing the escape character, the
+            backslash, and the case-toggle bit alignment. The committee was a
+            cross-vendor effort (Teletype, IBM, AT&amp;T, Burroughs, RCA, and others) and
+            its task was to replace a patchwork of incompatible 5-bit teleprinter codes
+            (Baudot/ITA2), 6-bit military codes (FIELDATA), and IBM's own 6-bit BCDIC.
+            The first published version had only uppercase letters; lowercase was added
+            in the 1967 revision (USASCII), which is the table you see above.
+        </p>
+        <p>
+            <strong>The 7-bit choice.</strong>
+            Seven bits was a compromise: 6 bits couldn't fit upper- and lowercase plus
+            digits and punctuation, while 8 bits would have wasted a bit on serial
+            lines that already paid for a parity bit. The 8th bit (0x80-0xFF) was
+            originally a parity bit, which is why ASCII proper stops at 0x7F &mdash;
+            the upper half was reserved for transmission integrity, not characters.
+            This is also why so many later codepages (Latin-1, PETSCII, ATASCII) bolt
+            their additions onto 0x80-0xFF: that range was free real estate once
+            parity moved out of band.
+        </p>
+        <p>
+            <strong>Why DEL is at 0x7F.</strong>
+            DEL (delete) sits at 0x7F &mdash; all seven bits set &mdash; because on
+            paper tape you "deleted" a character by punching all seven holes through
+            it. There was no way to un-punch a hole, so the convention was to
+            over-punch the position to a known sentinel. 0x00 (NUL) and 0x7F (DEL)
+            are the two values that look "blank" on punched tape: NUL is no holes,
+            DEL is all holes.
+        </p>
+        <p>
+            <strong>Internationalization and the 1980s.</strong>
+            ISO 646 (first edition 1973) generalized ASCII as a national-variant
+            standard: countries could replace 12 specific positions (notably 0x23,
+            0x24, 0x40, 0x5B-0x5E, 0x60, 0x7B-0x7E) with their own letters. The
+            German variant (DIN 66003) put &Auml; at 0x5B (where [ is in ASCII) and
+            &auml; at 0x7B (where { is); the French variant (AFNOR NF Z 62-010) put
+            &agrave; at 0x40 (where @ is) and &eacute; at 0x7B (where { is); and so
+            on &mdash; which is why C source code from that era sometimes contains
+            alarming-looking accented characters in place of the punctuation the
+            language actually wanted. ISO 8859-1 (Latin-1, 1987) and finally
+            Unicode/UTF-8 (1992) ended the variant chaos by giving every script its
+            own codepoint.
+        </p>
+        <p>
+            <strong>Today.</strong>
+            ASCII is still the lingua franca: UTF-8 was deliberately designed so that
+            any 7-bit ASCII file is also a valid UTF-8 file with identical bytes.
+            Every modern text format &mdash; HTTP, email headers, JSON, source code
+            &mdash; is ASCII-compatible at the byte level. You're reading ASCII
+            right now.
+        </p>
+    </div>
+</details>
+
+<h2 id="ansi-table">Appendix B: ANSI Escape Sequences</h2>
+
+<p>ANSI escape sequences are used to control text formatting, colors, and cursor positioning on compatible terminals. All sequences begin with the escape character (0x1B) followed by a left bracket '[', known as the Control Sequence Introducer (CSI).</p>
+
+<h3>Sequence Format</h3>
+<p>The general format is: <code>ESC [ &lt;parameters&gt; &lt;command&gt;</code></p>
+<p>Where ESC is 0x1B (decimal 27), parameters are optional numbers separated by semicolons, and the command is a single letter.</p>
+
+<h3>Cursor Control</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Name</th><th>Description</th></tr>
+    <tr><td>ESC[H</td><td>CUP</td><td>Cursor Home - Move cursor to row 1, column 1</td></tr>
+    <tr><td>ESC[<em>n</em>;<em>m</em>H</td><td>CUP</td><td>Cursor Position - Move cursor to row n, column m</td></tr>
+    <tr><td>ESC[<em>n</em>;<em>m</em>f</td><td>HVP</td><td>Horizontal Vertical Position - Same as CUP</td></tr>
+    <tr><td>ESC[<em>n</em>A</td><td>CUU</td><td>Cursor Up - Move cursor up n rows (default 1)</td></tr>
+    <tr><td>ESC[<em>n</em>B</td><td>CUD</td><td>Cursor Down - Move cursor down n rows (default 1)</td></tr>
+    <tr><td>ESC[<em>n</em>C</td><td>CUF</td><td>Cursor Forward - Move cursor right n columns (default 1)</td></tr>
+    <tr><td>ESC[<em>n</em>D</td><td>CUB</td><td>Cursor Back - Move cursor left n columns (default 1)</td></tr>
+    <tr><td>ESC[<em>n</em>E</td><td>CNL</td><td>Cursor Next Line - Move to beginning of line n down</td></tr>
+    <tr><td>ESC[<em>n</em>F</td><td>CPL</td><td>Cursor Previous Line - Move to beginning of line n up</td></tr>
+    <tr><td>ESC[<em>n</em>G</td><td>CHA</td><td>Cursor Horizontal Absolute - Move to column n</td></tr>
+    <tr><td>ESC[6n</td><td>DSR</td><td>Device Status Report - Reports cursor position as ESC[n;mR</td></tr>
+    <tr><td>ESC[s</td><td>SCP</td><td>Save Cursor Position</td></tr>
+    <tr><td>ESC[u</td><td>RCP</td><td>Restore Cursor Position</td></tr>
+    <tr><td>ESC 7</td><td>DECSC</td><td>Save Cursor (DEC private)</td></tr>
+    <tr><td>ESC 8</td><td>DECRC</td><td>Restore Cursor (DEC private)</td></tr>
+</table>
+</div>
+
+<h3>Erase Functions</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Name</th><th>Description</th></tr>
+    <tr><td>ESC[J</td><td>ED</td><td>Erase Display - Clear from cursor to end of screen</td></tr>
+    <tr><td>ESC[0J</td><td>ED</td><td>Erase Display - Clear from cursor to end of screen</td></tr>
+    <tr><td>ESC[1J</td><td>ED</td><td>Erase Display - Clear from beginning of screen to cursor</td></tr>
+    <tr><td>ESC[2J</td><td>ED</td><td>Erase Display - Clear entire screen</td></tr>
+    <tr><td>ESC[3J</td><td>ED</td><td>Erase Display - Clear entire screen and scrollback buffer</td></tr>
+    <tr><td>ESC[K</td><td>EL</td><td>Erase Line - Clear from cursor to end of line</td></tr>
+    <tr><td>ESC[0K</td><td>EL</td><td>Erase Line - Clear from cursor to end of line</td></tr>
+    <tr><td>ESC[1K</td><td>EL</td><td>Erase Line - Clear from beginning of line to cursor</td></tr>
+    <tr><td>ESC[2K</td><td>EL</td><td>Erase Line - Clear entire line</td></tr>
+</table>
+</div>
+
+<h3>Text Attributes (SGR - Select Graphic Rendition)</h3>
+<p>Format: <code>ESC[<em>n</em>m</code> or <code>ESC[<em>n</em>;<em>n</em>;...m</code> for multiple attributes</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0</td><td>Reset</td><td>Reset all attributes to default</td></tr>
+    <tr><td>1</td><td>Bold</td><td>Bold or increased intensity</td></tr>
+    <tr><td>2</td><td>Dim</td><td>Faint or decreased intensity</td></tr>
+    <tr><td>3</td><td>Italic</td><td>Italic (not widely supported)</td></tr>
+    <tr><td>4</td><td>Underline</td><td>Underlined text</td></tr>
+    <tr><td>5</td><td>Blink</td><td>Slow blink (less than 150 per minute)</td></tr>
+    <tr><td>6</td><td>Rapid Blink</td><td>Rapid blink (150+ per minute, rarely supported)</td></tr>
+    <tr><td>7</td><td>Reverse</td><td>Swap foreground and background colors</td></tr>
+    <tr><td>8</td><td>Hidden</td><td>Concealed/invisible text</td></tr>
+    <tr><td>9</td><td>Strikethrough</td><td>Crossed-out text</td></tr>
+    <tr><td>21</td><td>Double Underline</td><td>Double underlined (or bold off on some terminals)</td></tr>
+    <tr><td>22</td><td>Normal Intensity</td><td>Neither bold nor dim</td></tr>
+    <tr><td>23</td><td>Not Italic</td><td>Disable italic</td></tr>
+    <tr><td>24</td><td>Not Underlined</td><td>Disable underline</td></tr>
+    <tr><td>25</td><td>Not Blinking</td><td>Disable blink</td></tr>
+    <tr><td>27</td><td>Not Reversed</td><td>Disable reverse video</td></tr>
+    <tr><td>28</td><td>Reveal</td><td>Disable hidden</td></tr>
+    <tr><td>29</td><td>Not Strikethrough</td><td>Disable strikethrough</td></tr>
+</table>
+</div>
+
+<h3>Standard Foreground Colors (30-37)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>Color</th><th>Code</th><th>Color (Bright/Bold)</th></tr>
+    <tr><td>30</td><td>Black</td><td>90</td><td>Bright Black (Gray)</td></tr>
+    <tr><td>31</td><td>Red</td><td>91</td><td>Bright Red</td></tr>
+    <tr><td>32</td><td>Green</td><td>92</td><td>Bright Green</td></tr>
+    <tr><td>33</td><td>Yellow</td><td>93</td><td>Bright Yellow</td></tr>
+    <tr><td>34</td><td>Blue</td><td>94</td><td>Bright Blue</td></tr>
+    <tr><td>35</td><td>Magenta</td><td>95</td><td>Bright Magenta</td></tr>
+    <tr><td>36</td><td>Cyan</td><td>96</td><td>Bright Cyan</td></tr>
+    <tr><td>37</td><td>White</td><td>97</td><td>Bright White</td></tr>
+    <tr><td>39</td><td>Default</td><td></td><td>Reset to default foreground</td></tr>
+</table>
+</div>
+
+<h3>Standard Background Colors (40-47)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>Color</th><th>Code</th><th>Color (Bright)</th></tr>
+    <tr><td>40</td><td>Black</td><td>100</td><td>Bright Black (Gray)</td></tr>
+    <tr><td>41</td><td>Red</td><td>101</td><td>Bright Red</td></tr>
+    <tr><td>42</td><td>Green</td><td>102</td><td>Bright Green</td></tr>
+    <tr><td>43</td><td>Yellow</td><td>103</td><td>Bright Yellow</td></tr>
+    <tr><td>44</td><td>Blue</td><td>104</td><td>Bright Blue</td></tr>
+    <tr><td>45</td><td>Magenta</td><td>105</td><td>Bright Magenta</td></tr>
+    <tr><td>46</td><td>Cyan</td><td>106</td><td>Bright Cyan</td></tr>
+    <tr><td>47</td><td>White</td><td>107</td><td>Bright White</td></tr>
+    <tr><td>49</td><td>Default</td><td></td><td>Reset to default background</td></tr>
+</table>
+</div>
+
+<h3>256-Color Mode</h3>
+<p>Extended color support using 256-color palette:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Description</th></tr>
+    <tr><td>ESC[38;5;<em>n</em>m</td><td>Set foreground to color n (0-255)</td></tr>
+    <tr><td>ESC[48;5;<em>n</em>m</td><td>Set background to color n (0-255)</td></tr>
+</table>
+</div>
+<p>Color ranges:</p>
+<ul>
+    <li><strong>0-7:</strong> Standard colors (same as 30-37)</li>
+    <li><strong>8-15:</strong> High-intensity colors (same as 90-97)</li>
+    <li><strong>16-231:</strong> 216 colors (6x6x6 color cube)</li>
+    <li><strong>232-255:</strong> Grayscale (24 shades from dark to light)</li>
+</ul>
+
+<h3>24-bit True Color Mode</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Description</th></tr>
+    <tr><td>ESC[38;2;<em>r</em>;<em>g</em>;<em>b</em>m</td><td>Set foreground to RGB color (0-255 each)</td></tr>
+    <tr><td>ESC[48;2;<em>r</em>;<em>g</em>;<em>b</em>m</td><td>Set background to RGB color (0-255 each)</td></tr>
+</table>
+</div>
+
+<h3>Screen Modes</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Description</th></tr>
+    <tr><td>ESC[?25h</td><td>Show cursor (DECTCEM)</td></tr>
+    <tr><td>ESC[?25l</td><td>Hide cursor (DECTCEM)</td></tr>
+    <tr><td>ESC[?47h</td><td>Save screen and switch to alternate buffer</td></tr>
+    <tr><td>ESC[?47l</td><td>Restore screen from alternate buffer</td></tr>
+    <tr><td>ESC[?1049h</td><td>Enable alternate screen buffer (saves cursor too)</td></tr>
+    <tr><td>ESC[?1049l</td><td>Disable alternate screen buffer (restores cursor)</td></tr>
+    <tr><td>ESC[?7h</td><td>Enable line wrapping</td></tr>
+    <tr><td>ESC[?7l</td><td>Disable line wrapping</td></tr>
+</table>
+</div>
+
+<h3>Scrolling</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Description</th></tr>
+    <tr><td>ESC[<em>n</em>S</td><td>Scroll up n lines (default 1)</td></tr>
+    <tr><td>ESC[<em>n</em>T</td><td>Scroll down n lines (default 1)</td></tr>
+    <tr><td>ESC[<em>t</em>;<em>b</em>r</td><td>Set scrolling region from line t to line b</td></tr>
+</table>
+</div>
+
+<h3>Line and Character Operations</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Description</th></tr>
+    <tr><td>ESC[<em>n</em>L</td><td>Insert n blank lines at cursor position</td></tr>
+    <tr><td>ESC[<em>n</em>M</td><td>Delete n lines starting at cursor position</td></tr>
+    <tr><td>ESC[<em>n</em>@</td><td>Insert n blank characters at cursor position</td></tr>
+    <tr><td>ESC[<em>n</em>P</td><td>Delete n characters at cursor position</td></tr>
+    <tr><td>ESC[<em>n</em>X</td><td>Erase n characters at cursor position</td></tr>
+</table>
+</div>
+
+<h3>Common Escape Sequences Quick Reference</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Sequence</th><th>Hex Bytes</th><th>Description</th></tr>
+    <tr><td>ESC[2J</td><td>1B 5B 32 4A</td><td>Clear entire screen</td></tr>
+    <tr><td>ESC[H</td><td>1B 5B 48</td><td>Move cursor to home (1,1)</td></tr>
+    <tr><td>ESC[2J ESC[H</td><td>1B 5B 32 4A 1B 5B 48</td><td>Clear screen and home cursor</td></tr>
+    <tr><td>ESC[0m</td><td>1B 5B 30 6D</td><td>Reset all attributes</td></tr>
+    <tr><td>ESC[1m</td><td>1B 5B 31 6D</td><td>Bold on</td></tr>
+    <tr><td>ESC[31m</td><td>1B 5B 33 31 6D</td><td>Red foreground</td></tr>
+    <tr><td>ESC[44m</td><td>1B 5B 34 34 6D</td><td>Blue background</td></tr>
+    <tr><td>ESC[1;31m</td><td>1B 5B 31 3B 33 31 6D</td><td>Bold red foreground</td></tr>
+    <tr><td>ESC[?25l</td><td>1B 5B 3F 32 35 6C</td><td>Hide cursor</td></tr>
+    <tr><td>ESC[?25h</td><td>1B 5B 3F 32 35 68</td><td>Show cursor</td></tr>
+</table>
+</div>
+
+<h3>C0 Control Characters Used with ANSI</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x07</td><td>7</td><td>BEL</td><td>Bell - Terminal bell/alert</td></tr>
+    <tr><td>0x08</td><td>8</td><td>BS</td><td>Backspace - Move cursor left one position</td></tr>
+    <tr><td>0x09</td><td>9</td><td>HT</td><td>Horizontal Tab - Move to next tab stop</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>LF</td><td>Line Feed - Move cursor down one line</td></tr>
+    <tr><td>0x0B</td><td>11</td><td>VT</td><td>Vertical Tab - Move cursor down (treated as LF)</td></tr>
+    <tr><td>0x0C</td><td>12</td><td>FF</td><td>Form Feed - Clear screen on some terminals</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>CR</td><td>Carriage Return - Move cursor to column 1</td></tr>
+    <tr><td>0x1B</td><td>27</td><td>ESC</td><td>Escape - Starts escape sequences</td></tr>
+</table>
+</div>
+
+<div class="note">
+    <strong>Note:</strong> "ANSI escape codes" is colloquial. The actual standard is <strong>ECMA-48</strong> (1976, fifth edition 1991) &mdash; later adopted as <strong>ISO/IEC 6429</strong> and as the now-withdrawn <strong>ANSI X3.64</strong>. Support varies between emulators; the de-facto reference is the DEC VT100 family. Ethernet Gateway uses a subset for screen clearing (ESC[2J ESC[H), cursor positioning, and color output on ANSI terminals.
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>Pre-history: ASCII control codes weren't enough.</strong>
+            The 33 ASCII control codes (0x00-0x1F plus 0x7F) cover the basics
+            &mdash; CR, LF, BEL, BS, TAB &mdash; but they have no way to say
+            "move the cursor to row 5 column 12" or "draw the next word in
+            red." Early CRT terminals (the ADM-3A, the Hazeltine 1500, the
+            Lear-Siegler) each invented their own escape sequences, and none
+            of them agreed. Software either had to ship a termcap database
+            with hundreds of entries or be limited to the lowest common
+            denominator.
+        </p>
+        <p>
+            <strong>1976 &mdash; ECMA-48.</strong>
+            The European Computer Manufacturers Association published
+            <strong>ECMA-48: Control Functions for Coded Character Sets</strong>
+            in 1976 to standardize the soup. It defined the Control Sequence
+            Introducer (CSI = ESC [), the parameter format, the cursor-motion
+            command set, and Select Graphic Rendition (SGR) for text
+            attributes. ANSI adopted it as <strong>X3.64</strong> in 1979,
+            and ISO as <strong>ISO/IEC 6429</strong> in 1983. ANSI X3.64 was
+            withdrawn in 1997, but the "ANSI" name stuck because that's what
+            U.S. terminal manuals called it.
+        </p>
+        <p>
+            <strong>1978 &mdash; the DEC VT100.</strong>
+            Digital Equipment Corporation shipped the VT100, an early
+            microprocessor-based terminal that implemented an ANSI-conformant
+            subset (with some DEC-private extensions like DECSC/DECRC and the
+            scrolling region). The VT100 became <em>so</em> dominant that
+            "VT100-compatible" became the practical definition of an ANSI
+            terminal. Its successors &mdash; VT102, VT220, VT320, VT420
+            &mdash; layered on more features (8-bit codes, soft fonts,
+            sixel graphics) but stayed compatible. To this day, when you
+            tell ssh or screen your terminal type, you're probably saying
+            <code>xterm</code> or <code>vt100</code>.
+        </p>
+        <p>
+            <strong>The xterm era.</strong>
+            xterm was originally written at MIT in 1984 by Mark Vandevoorde
+            (initially for the VS100 stand-alone terminal) and then ported
+            to the X Window System by Jim Gettys, who maintained and
+            extended it for decades. It implemented VT102 emulation
+            faithfully and then kept adding features: 256-color mode
+            (1999, via the <code>ESC[38;5;<em>n</em>m</code> extension),
+            24-bit truecolor
+            (<code>ESC[38;2;<em>r</em>;<em>g</em>;<em>b</em>m</code>),
+            mouse reporting, bracketed paste, OSC 52 clipboard. Modern
+            terminals (iTerm2, Alacritty, kitty, Windows Terminal, GNOME
+            Terminal) all implement the xterm extension set, often with
+            their own additions. There is no committee shepherding this
+            anymore &mdash; the de facto standard is "what xterm does."
+        </p>
+        <p>
+            <strong>Today.</strong>
+            ANSI escape sequences run the modern terminal: every TUI tool
+            (vim, htop, tmux, fzf), every CI log with colored output, every
+            progress bar, every <code>git diff</code>. Windows finally added
+            native ANSI/VT support to its console host in Windows 10
+            (Threshold 2, late 2015), opt-in via the
+            <code>ENABLE_VIRTUAL_TERMINAL_PROCESSING</code> mode flag, ending
+            decades of having to ship an ANSI-to-Win32-Console translator
+            like ANSICON; the modern Windows Terminal app (2019) made it the
+            default. The single biggest practical limitation is still
+            <strong>which</strong> extensions a given terminal implements
+            &mdash; truecolor support, in particular, varies wildly across
+            SSH-into-tmux-into-screen chains.
+        </p>
+    </div>
+</details>
+
+<h2 id="petscii-table">Appendix C: PETSCII Hex Table</h2>
+
+<p>The Commodore 64 PETSCII character set. PETSCII differs from ASCII in several ways: control codes, graphics characters, and case handling (uppercase/lowercase are swapped compared to standard ASCII).</p>
+
+<h3>PETSCII Control Characters (0x00-0x1F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x00</td><td>0</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x01</td><td>1</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x02</td><td>2</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x03</td><td>3</td><td>STOP</td><td>Run/Stop</td></tr>
+    <tr><td>0x04</td><td>4</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x05</td><td>5</td><td>WHT</td><td>White</td></tr>
+    <tr><td>0x06</td><td>6</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x07</td><td>7</td><td>BELL</td><td>Bell</td></tr>
+    <tr><td>0x08</td><td>8</td><td>DISH</td><td>Disable Shift+C=</td></tr>
+    <tr><td>0x09</td><td>9</td><td>ENSH</td><td>Enable Shift+C=</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x0B</td><td>11</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x0C</td><td>12</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>CR</td><td>Carriage Return</td></tr>
+    <tr><td>0x0E</td><td>14</td><td>LOWR</td><td>Switch to Lowercase</td></tr>
+    <tr><td>0x0F</td><td>15</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x10</td><td>16</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x11</td><td>17</td><td>DOWN</td><td>Cursor Down</td></tr>
+    <tr><td>0x12</td><td>18</td><td>RVON</td><td>Reverse On</td></tr>
+    <tr><td>0x13</td><td>19</td><td>HOME</td><td>Cursor Home</td></tr>
+    <tr><td>0x14</td><td>20</td><td>DEL</td><td>Delete (Backspace)</td></tr>
+    <tr><td>0x15</td><td>21</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x16</td><td>22</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x17</td><td>23</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x18</td><td>24</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x19</td><td>25</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x1A</td><td>26</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x1B</td><td>27</td><td>-</td><td>(Unused - no native ESC)</td></tr>
+    <tr><td>0x1C</td><td>28</td><td>RED</td><td>Red</td></tr>
+    <tr><td>0x1D</td><td>29</td><td>RIGHT</td><td>Cursor Right</td></tr>
+    <tr><td>0x1E</td><td>30</td><td>GRN</td><td>Green</td></tr>
+    <tr><td>0x1F</td><td>31</td><td>BLU</td><td>Blue</td></tr>
+</table>
+</div>
+
+<h3>PETSCII Printable Characters (0x20-0x3F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Description</th></tr>
+    <tr><td>0x20</td><td>32</td><td>(space)</td><td>Space</td></tr>
+    <tr><td>0x21</td><td>33</td><td>!</td><td>Exclamation Mark</td></tr>
+    <tr><td>0x22</td><td>34</td><td>"</td><td>Quotation Mark</td></tr>
+    <tr><td>0x23</td><td>35</td><td>#</td><td>Number Sign</td></tr>
+    <tr><td>0x24</td><td>36</td><td>$</td><td>Dollar Sign</td></tr>
+    <tr><td>0x25</td><td>37</td><td>%</td><td>Percent Sign</td></tr>
+    <tr><td>0x26</td><td>38</td><td>&amp;</td><td>Ampersand</td></tr>
+    <tr><td>0x27</td><td>39</td><td>'</td><td>Apostrophe</td></tr>
+    <tr><td>0x28</td><td>40</td><td>(</td><td>Left Parenthesis</td></tr>
+    <tr><td>0x29</td><td>41</td><td>)</td><td>Right Parenthesis</td></tr>
+    <tr><td>0x2A</td><td>42</td><td>*</td><td>Asterisk</td></tr>
+    <tr><td>0x2B</td><td>43</td><td>+</td><td>Plus Sign</td></tr>
+    <tr><td>0x2C</td><td>44</td><td>,</td><td>Comma</td></tr>
+    <tr><td>0x2D</td><td>45</td><td>-</td><td>Hyphen-Minus</td></tr>
+    <tr><td>0x2E</td><td>46</td><td>.</td><td>Full Stop</td></tr>
+    <tr><td>0x2F</td><td>47</td><td>/</td><td>Solidus (Slash)</td></tr>
+    <tr><td>0x30</td><td>48</td><td>0</td><td>Digit Zero</td></tr>
+    <tr><td>0x31</td><td>49</td><td>1</td><td>Digit One</td></tr>
+    <tr><td>0x32</td><td>50</td><td>2</td><td>Digit Two</td></tr>
+    <tr><td>0x33</td><td>51</td><td>3</td><td>Digit Three</td></tr>
+    <tr><td>0x34</td><td>52</td><td>4</td><td>Digit Four</td></tr>
+    <tr><td>0x35</td><td>53</td><td>5</td><td>Digit Five</td></tr>
+    <tr><td>0x36</td><td>54</td><td>6</td><td>Digit Six</td></tr>
+    <tr><td>0x37</td><td>55</td><td>7</td><td>Digit Seven</td></tr>
+    <tr><td>0x38</td><td>56</td><td>8</td><td>Digit Eight</td></tr>
+    <tr><td>0x39</td><td>57</td><td>9</td><td>Digit Nine</td></tr>
+    <tr><td>0x3A</td><td>58</td><td>:</td><td>Colon</td></tr>
+    <tr><td>0x3B</td><td>59</td><td>;</td><td>Semicolon</td></tr>
+    <tr><td>0x3C</td><td>60</td><td>&lt;</td><td>Less-Than Sign</td></tr>
+    <tr><td>0x3D</td><td>61</td><td>=</td><td>Equals Sign</td></tr>
+    <tr><td>0x3E</td><td>62</td><td>&gt;</td><td>Greater-Than Sign</td></tr>
+    <tr><td>0x3F</td><td>63</td><td>?</td><td>Question Mark</td></tr>
+</table>
+</div>
+
+<h3>PETSCII Uppercase Letters (0x40-0x5F)</h3>
+<p><em>Note: In PETSCII uppercase mode, these are uppercase letters. In lowercase mode, these become graphics characters.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Description</th></tr>
+    <tr><td>0x40</td><td>64</td><td>@</td><td>Commercial At</td></tr>
+    <tr><td>0x41</td><td>65</td><td>A</td><td>Latin Capital Letter A</td></tr>
+    <tr><td>0x42</td><td>66</td><td>B</td><td>Latin Capital Letter B</td></tr>
+    <tr><td>0x43</td><td>67</td><td>C</td><td>Latin Capital Letter C</td></tr>
+    <tr><td>0x44</td><td>68</td><td>D</td><td>Latin Capital Letter D</td></tr>
+    <tr><td>0x45</td><td>69</td><td>E</td><td>Latin Capital Letter E</td></tr>
+    <tr><td>0x46</td><td>70</td><td>F</td><td>Latin Capital Letter F</td></tr>
+    <tr><td>0x47</td><td>71</td><td>G</td><td>Latin Capital Letter G</td></tr>
+    <tr><td>0x48</td><td>72</td><td>H</td><td>Latin Capital Letter H</td></tr>
+    <tr><td>0x49</td><td>73</td><td>I</td><td>Latin Capital Letter I</td></tr>
+    <tr><td>0x4A</td><td>74</td><td>J</td><td>Latin Capital Letter J</td></tr>
+    <tr><td>0x4B</td><td>75</td><td>K</td><td>Latin Capital Letter K</td></tr>
+    <tr><td>0x4C</td><td>76</td><td>L</td><td>Latin Capital Letter L</td></tr>
+    <tr><td>0x4D</td><td>77</td><td>M</td><td>Latin Capital Letter M</td></tr>
+    <tr><td>0x4E</td><td>78</td><td>N</td><td>Latin Capital Letter N</td></tr>
+    <tr><td>0x4F</td><td>79</td><td>O</td><td>Latin Capital Letter O</td></tr>
+    <tr><td>0x50</td><td>80</td><td>P</td><td>Latin Capital Letter P</td></tr>
+    <tr><td>0x51</td><td>81</td><td>Q</td><td>Latin Capital Letter Q</td></tr>
+    <tr><td>0x52</td><td>82</td><td>R</td><td>Latin Capital Letter R</td></tr>
+    <tr><td>0x53</td><td>83</td><td>S</td><td>Latin Capital Letter S</td></tr>
+    <tr><td>0x54</td><td>84</td><td>T</td><td>Latin Capital Letter T</td></tr>
+    <tr><td>0x55</td><td>85</td><td>U</td><td>Latin Capital Letter U</td></tr>
+    <tr><td>0x56</td><td>86</td><td>V</td><td>Latin Capital Letter V</td></tr>
+    <tr><td>0x57</td><td>87</td><td>W</td><td>Latin Capital Letter W</td></tr>
+    <tr><td>0x58</td><td>88</td><td>X</td><td>Latin Capital Letter X</td></tr>
+    <tr><td>0x59</td><td>89</td><td>Y</td><td>Latin Capital Letter Y</td></tr>
+    <tr><td>0x5A</td><td>90</td><td>Z</td><td>Latin Capital Letter Z</td></tr>
+    <tr><td>0x5B</td><td>91</td><td>[</td><td>Left Square Bracket</td></tr>
+    <tr><td>0x5C</td><td>92</td><td>£</td><td>Pound Sign</td></tr>
+    <tr><td>0x5D</td><td>93</td><td>]</td><td>Right Square Bracket</td></tr>
+    <tr><td>0x5E</td><td>94</td><td>↑</td><td>Up Arrow</td></tr>
+    <tr><td>0x5F</td><td>95</td><td>←</td><td>Left Arrow (used as ESC equivalent)</td></tr>
+</table>
+</div>
+
+<h3>PETSCII Graphics/Lowercase (0x60-0x7F)</h3>
+<p><em>Note: In uppercase mode, these are graphics characters. In lowercase mode, 0x61-0x7A become lowercase letters.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Upper Mode</th><th>Lower Mode</th></tr>
+    <tr><td>0x60</td><td>96</td><td>Horizontal Line</td><td>Horizontal Line</td></tr>
+    <tr><td>0x61</td><td>97</td><td>Spade</td><td>a</td></tr>
+    <tr><td>0x62</td><td>98</td><td>Vertical Line Left</td><td>b</td></tr>
+    <tr><td>0x63</td><td>99</td><td>Horizontal Line Bottom</td><td>c</td></tr>
+    <tr><td>0x64</td><td>100</td><td>Horizontal Line Top/Bottom</td><td>d</td></tr>
+    <tr><td>0x65</td><td>101</td><td>Horizontal Line Top</td><td>e</td></tr>
+    <tr><td>0x66</td><td>102</td><td>Vertical Line Right Top</td><td>f</td></tr>
+    <tr><td>0x67</td><td>103</td><td>Vertical Line Right Bottom</td><td>g</td></tr>
+    <tr><td>0x68</td><td>104</td><td>Vertical Line Left Bottom</td><td>h</td></tr>
+    <tr><td>0x69</td><td>105</td><td>Corner Round Right Bottom</td><td>i</td></tr>
+    <tr><td>0x6A</td><td>106</td><td>Corner Round Right Top</td><td>j</td></tr>
+    <tr><td>0x6B</td><td>107</td><td>Corner Round Left Top</td><td>k</td></tr>
+    <tr><td>0x6C</td><td>108</td><td>Half Block Bottom Right</td><td>l</td></tr>
+    <tr><td>0x6D</td><td>109</td><td>Corner Round Left Bottom</td><td>m</td></tr>
+    <tr><td>0x6E</td><td>110</td><td>Half Block Upper Right</td><td>n</td></tr>
+    <tr><td>0x6F</td><td>111</td><td>Half Block Lower Left</td><td>o</td></tr>
+    <tr><td>0x70</td><td>112</td><td>Half Block Lower Right</td><td>p</td></tr>
+    <tr><td>0x71</td><td>113</td><td>Circle</td><td>q</td></tr>
+    <tr><td>0x72</td><td>114</td><td>Half Block Upper Left</td><td>r</td></tr>
+    <tr><td>0x73</td><td>115</td><td>Heart</td><td>s</td></tr>
+    <tr><td>0x74</td><td>116</td><td>Vertical Line Left Top</td><td>t</td></tr>
+    <tr><td>0x75</td><td>117</td><td>Cross</td><td>u</td></tr>
+    <tr><td>0x76</td><td>118</td><td>Diamond</td><td>v</td></tr>
+    <tr><td>0x77</td><td>119</td><td>Cross</td><td>w</td></tr>
+    <tr><td>0x78</td><td>120</td><td>Vertical Line</td><td>x</td></tr>
+    <tr><td>0x79</td><td>121</td><td>Club</td><td>y</td></tr>
+    <tr><td>0x7A</td><td>122</td><td>Vertical Line Right</td><td>z</td></tr>
+    <tr><td>0x7B</td><td>123</td><td>Cross</td><td>Cross</td></tr>
+    <tr><td>0x7C</td><td>124</td><td>Half Block Upper</td><td>Half Block Upper</td></tr>
+    <tr><td>0x7D</td><td>125</td><td>Pi Symbol</td><td>Pi Symbol</td></tr>
+    <tr><td>0x7E</td><td>126</td><td>Half Block Lower</td><td>Half Block Lower</td></tr>
+    <tr><td>0x7F</td><td>127</td><td>Half Block Left</td><td>Half Block Left</td></tr>
+</table>
+</div>
+
+<h3>PETSCII High Control Characters (0x80-0x9F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x80</td><td>128</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x81</td><td>129</td><td>ORG</td><td>Orange</td></tr>
+    <tr><td>0x82</td><td>130</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x83</td><td>131</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x84</td><td>132</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x85</td><td>133</td><td>F1</td><td>Function Key 1</td></tr>
+    <tr><td>0x86</td><td>134</td><td>F3</td><td>Function Key 3</td></tr>
+    <tr><td>0x87</td><td>135</td><td>F5</td><td>Function Key 5</td></tr>
+    <tr><td>0x88</td><td>136</td><td>F7</td><td>Function Key 7</td></tr>
+    <tr><td>0x89</td><td>137</td><td>F2</td><td>Function Key 2</td></tr>
+    <tr><td>0x8A</td><td>138</td><td>F4</td><td>Function Key 4</td></tr>
+    <tr><td>0x8B</td><td>139</td><td>F6</td><td>Function Key 6</td></tr>
+    <tr><td>0x8C</td><td>140</td><td>F8</td><td>Function Key 8</td></tr>
+    <tr><td>0x8D</td><td>141</td><td>SHRET</td><td>Shift+Return</td></tr>
+    <tr><td>0x8E</td><td>142</td><td>UPPR</td><td>Switch to Uppercase</td></tr>
+    <tr><td>0x8F</td><td>143</td><td>-</td><td>(Unused)</td></tr>
+    <tr><td>0x90</td><td>144</td><td>BLK</td><td>Black</td></tr>
+    <tr><td>0x91</td><td>145</td><td>UP</td><td>Cursor Up</td></tr>
+    <tr><td>0x92</td><td>146</td><td>RVOF</td><td>Reverse Off</td></tr>
+    <tr><td>0x93</td><td>147</td><td>CLR</td><td>Clear Screen</td></tr>
+    <tr><td>0x94</td><td>148</td><td>INST</td><td>Insert</td></tr>
+    <tr><td>0x95</td><td>149</td><td>BRN</td><td>Brown</td></tr>
+    <tr><td>0x96</td><td>150</td><td>LTRD</td><td>Light Red (Pink)</td></tr>
+    <tr><td>0x97</td><td>151</td><td>GRY1</td><td>Dark Gray</td></tr>
+    <tr><td>0x98</td><td>152</td><td>GRY2</td><td>Medium Gray</td></tr>
+    <tr><td>0x99</td><td>153</td><td>LTGR</td><td>Light Green</td></tr>
+    <tr><td>0x9A</td><td>154</td><td>LTBL</td><td>Light Blue</td></tr>
+    <tr><td>0x9B</td><td>155</td><td>GRY3</td><td>Light Gray</td></tr>
+    <tr><td>0x9C</td><td>156</td><td>PUR</td><td>Purple</td></tr>
+    <tr><td>0x9D</td><td>157</td><td>LEFT</td><td>Cursor Left</td></tr>
+    <tr><td>0x9E</td><td>158</td><td>YEL</td><td>Yellow</td></tr>
+    <tr><td>0x9F</td><td>159</td><td>CYN</td><td>Cyan</td></tr>
+</table>
+</div>
+
+<h3>PETSCII Shifted Graphics (0xA0-0xBF)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Description</th></tr>
+    <tr><td>0xA0</td><td>160</td><td>Shifted Space</td></tr>
+    <tr><td>0xA1</td><td>161</td><td>Vertical Bar Left</td></tr>
+    <tr><td>0xA2</td><td>162</td><td>Horizontal Bar Bottom</td></tr>
+    <tr><td>0xA3</td><td>163</td><td>Horizontal Bar Top</td></tr>
+    <tr><td>0xA4</td><td>164</td><td>Horizontal Bar</td></tr>
+    <tr><td>0xA5</td><td>165</td><td>Horizontal Bar Left</td></tr>
+    <tr><td>0xA6</td><td>166</td><td>Checkerboard</td></tr>
+    <tr><td>0xA7</td><td>167</td><td>Vertical Bar Right</td></tr>
+    <tr><td>0xA8</td><td>168</td><td>Vertical Bar Bottom</td></tr>
+    <tr><td>0xA9</td><td>169</td><td>Corner Lower Right</td></tr>
+    <tr><td>0xAA</td><td>170</td><td>Corner Upper Right</td></tr>
+    <tr><td>0xAB</td><td>171</td><td>Corner Upper Left</td></tr>
+    <tr><td>0xAC</td><td>172</td><td>Quarter Block Lower Right</td></tr>
+    <tr><td>0xAD</td><td>173</td><td>Corner Lower Left</td></tr>
+    <tr><td>0xAE</td><td>174</td><td>Quarter Block Upper Right</td></tr>
+    <tr><td>0xAF</td><td>175</td><td>Quarter Block Lower Left</td></tr>
+    <tr><td>0xB0</td><td>176</td><td>Quarter Block Lower Right</td></tr>
+    <tr><td>0xB1</td><td>177</td><td>Vertical Bar Left Bottom</td></tr>
+    <tr><td>0xB2</td><td>178</td><td>Quarter Block Upper Left</td></tr>
+    <tr><td>0xB3</td><td>179</td><td>Vertical Bar Top</td></tr>
+    <tr><td>0xB4</td><td>180</td><td>Vertical Bar Bottom</td></tr>
+    <tr><td>0xB5</td><td>181</td><td>T Junction Left</td></tr>
+    <tr><td>0xB6</td><td>182</td><td>Vertical Bar</td></tr>
+    <tr><td>0xB7</td><td>183</td><td>T Junction Top</td></tr>
+    <tr><td>0xB8</td><td>184</td><td>T Junction Bottom</td></tr>
+    <tr><td>0xB9</td><td>185</td><td>Half Block Right</td></tr>
+    <tr><td>0xBA</td><td>186</td><td>T Junction Right</td></tr>
+    <tr><td>0xBB</td><td>187</td><td>Cross Junction</td></tr>
+    <tr><td>0xBC</td><td>188</td><td>Upper Half Block</td></tr>
+    <tr><td>0xBD</td><td>189</td><td>Pi Symbol</td></tr>
+    <tr><td>0xBE</td><td>190</td><td>Lower Half Block</td></tr>
+    <tr><td>0xBF</td><td>191</td><td>Half Block Left</td></tr>
+</table>
+</div>
+
+<h3>PETSCII Shifted Letters/Graphics (0xC0-0xDF)</h3>
+<p><em>Note: In uppercase mode, these match 0x60-0x7F graphics. In lowercase mode, 0xC1-0xDA are uppercase letters.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Upper Mode</th><th>Lower Mode</th></tr>
+    <tr><td>0xC0</td><td>192</td><td>Horizontal Line</td><td>Horizontal Line</td></tr>
+    <tr><td>0xC1</td><td>193</td><td>Spade</td><td>A</td></tr>
+    <tr><td>0xC2</td><td>194</td><td>Vertical Line Left</td><td>B</td></tr>
+    <tr><td>0xC3</td><td>195</td><td>Horizontal Line Bottom</td><td>C</td></tr>
+    <tr><td>0xC4</td><td>196</td><td>Line Horizontal</td><td>D</td></tr>
+    <tr><td>0xC5</td><td>197</td><td>Horizontal Line Top</td><td>E</td></tr>
+    <tr><td>0xC6</td><td>198</td><td>Vertical Line Right Top</td><td>F</td></tr>
+    <tr><td>0xC7</td><td>199</td><td>Vertical Line Right Bottom</td><td>G</td></tr>
+    <tr><td>0xC8</td><td>200</td><td>Vertical Line Left Bottom</td><td>H</td></tr>
+    <tr><td>0xC9</td><td>201</td><td>Corner Round Right Bottom</td><td>I</td></tr>
+    <tr><td>0xCA</td><td>202</td><td>Corner Round Right Top</td><td>J</td></tr>
+    <tr><td>0xCB</td><td>203</td><td>Corner Round Left Top</td><td>K</td></tr>
+    <tr><td>0xCC</td><td>204</td><td>Half Block Bottom Right</td><td>L</td></tr>
+    <tr><td>0xCD</td><td>205</td><td>Corner Round Left Bottom</td><td>M</td></tr>
+    <tr><td>0xCE</td><td>206</td><td>Half Block Upper Right</td><td>N</td></tr>
+    <tr><td>0xCF</td><td>207</td><td>Half Block Lower Left</td><td>O</td></tr>
+    <tr><td>0xD0</td><td>208</td><td>Half Block Lower Right</td><td>P</td></tr>
+    <tr><td>0xD1</td><td>209</td><td>Circle</td><td>Q</td></tr>
+    <tr><td>0xD2</td><td>210</td><td>Half Block Upper Left</td><td>R</td></tr>
+    <tr><td>0xD3</td><td>211</td><td>Heart</td><td>S</td></tr>
+    <tr><td>0xD4</td><td>212</td><td>Vertical Line Left Top</td><td>T</td></tr>
+    <tr><td>0xD5</td><td>213</td><td>Cross</td><td>U</td></tr>
+    <tr><td>0xD6</td><td>214</td><td>Diamond</td><td>V</td></tr>
+    <tr><td>0xD7</td><td>215</td><td>Cross</td><td>W</td></tr>
+    <tr><td>0xD8</td><td>216</td><td>Vertical Line</td><td>X</td></tr>
+    <tr><td>0xD9</td><td>217</td><td>Club</td><td>Y</td></tr>
+    <tr><td>0xDA</td><td>218</td><td>Vertical Line Right</td><td>Z</td></tr>
+    <tr><td>0xDB</td><td>219</td><td>Cross</td><td>Cross</td></tr>
+    <tr><td>0xDC</td><td>220</td><td>Half Block Upper</td><td>Half Block Upper</td></tr>
+    <tr><td>0xDD</td><td>221</td><td>Pi Symbol</td><td>Pi Symbol</td></tr>
+    <tr><td>0xDE</td><td>222</td><td>Half Block Lower</td><td>Half Block Lower</td></tr>
+    <tr><td>0xDF</td><td>223</td><td>Half Block Left</td><td>Half Block Left</td></tr>
+</table>
+</div>
+
+<h3>PETSCII High Graphics (0xE0-0xFF)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Description</th></tr>
+    <tr><td>0xE0</td><td>224</td><td>Shifted Space</td></tr>
+    <tr><td>0xE1</td><td>225</td><td>Vertical Bar Left</td></tr>
+    <tr><td>0xE2</td><td>226</td><td>Horizontal Bar Bottom</td></tr>
+    <tr><td>0xE3</td><td>227</td><td>Horizontal Bar Top</td></tr>
+    <tr><td>0xE4</td><td>228</td><td>Horizontal Bar</td></tr>
+    <tr><td>0xE5</td><td>229</td><td>Horizontal Bar Left</td></tr>
+    <tr><td>0xE6</td><td>230</td><td>Checkerboard</td></tr>
+    <tr><td>0xE7</td><td>231</td><td>Vertical Bar Right</td></tr>
+    <tr><td>0xE8</td><td>232</td><td>Vertical Bar Bottom</td></tr>
+    <tr><td>0xE9</td><td>233</td><td>Corner Lower Right</td></tr>
+    <tr><td>0xEA</td><td>234</td><td>Corner Upper Right</td></tr>
+    <tr><td>0xEB</td><td>235</td><td>Corner Upper Left</td></tr>
+    <tr><td>0xEC</td><td>236</td><td>Quarter Block Lower Right</td></tr>
+    <tr><td>0xED</td><td>237</td><td>Corner Lower Left</td></tr>
+    <tr><td>0xEE</td><td>238</td><td>Quarter Block Upper Right</td></tr>
+    <tr><td>0xEF</td><td>239</td><td>Quarter Block Lower Left</td></tr>
+    <tr><td>0xF0</td><td>240</td><td>Quarter Block Lower Right</td></tr>
+    <tr><td>0xF1</td><td>241</td><td>Vertical Bar Left Bottom</td></tr>
+    <tr><td>0xF2</td><td>242</td><td>Quarter Block Upper Left</td></tr>
+    <tr><td>0xF3</td><td>243</td><td>Vertical Bar Top</td></tr>
+    <tr><td>0xF4</td><td>244</td><td>Vertical Bar Bottom</td></tr>
+    <tr><td>0xF5</td><td>245</td><td>T Junction Left</td></tr>
+    <tr><td>0xF6</td><td>246</td><td>Vertical Bar</td></tr>
+    <tr><td>0xF7</td><td>247</td><td>T Junction Top</td></tr>
+    <tr><td>0xF8</td><td>248</td><td>T Junction Bottom</td></tr>
+    <tr><td>0xF9</td><td>249</td><td>Half Block Right</td></tr>
+    <tr><td>0xFA</td><td>250</td><td>T Junction Right</td></tr>
+    <tr><td>0xFB</td><td>251</td><td>Cross Junction</td></tr>
+    <tr><td>0xFC</td><td>252</td><td>Upper Half Block</td></tr>
+    <tr><td>0xFD</td><td>253</td><td>Pi Symbol</td></tr>
+    <tr><td>0xFE</td><td>254</td><td>Lower Half Block</td></tr>
+    <tr><td>0xFF</td><td>255</td><td>Half Block Left</td></tr>
+</table>
+</div>
+
+<div class="note">
+    <strong>Note:</strong> PETSCII has two character modes controlled by codes 0x0E (lowercase mode) and 0x8E (uppercase mode). In uppercase mode, codes 0x41-0x5A display uppercase letters and codes 0x61-0x7A display graphics. In lowercase mode, 0x41-0x5A display lowercase letters and 0x61-0x7A display uppercase letters. Ethernet Gateway swaps case in software for PETSCII output (see <code>send()</code> / <code>send_line()</code>) so the same uppercase-by-default logic works on a C64 in either character mode.
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>1977 &mdash; the Commodore PET.</strong>
+            PETSCII (PET Standard Code of Information Interchange) was
+            designed for the Commodore PET 2001, unveiled at the Winter
+            CES in January 1977 and shipped in volume that October &mdash;
+            making it, alongside the Apple II and the TRS-80, one of the
+            "1977 Trinity" of consumer personal computers. Commodore
+            engineer <strong>Chuck Peddle</strong> &mdash; who had led the
+            6502 CPU design at MOS Technology before Commodore acquired
+            the chipmaker &mdash; was the architect of the PET. PETSCII
+            was based on ASCII but extended with a full set of monochrome
+            block-graphics characters, chosen so that the PET could draw
+            boxes, charts, and simple game graphics without a separate
+            graphics chip.
+        </p>
+        <p>
+            <strong>The case-swap quirk.</strong>
+            PETSCII has two display modes selected by sending 0x8E (uppercase
+            mode, the boot default) or 0x0E (lowercase mode). In
+            <em>uppercase mode</em>, codes 0x41-0x5A render as A-Z (matching
+            ASCII visually) and codes 0x61-0x7A render as graphics characters.
+            In <em>lowercase mode</em>, the same bytes flip: 0x41-0x5A render
+            as <em>lowercase</em> a-z, and 0x61-0x7A render as
+            <em>uppercase</em> A-Z &mdash; effectively swapped from ASCII.
+            The net effect is that any ASCII text printed verbatim on a C64
+            in lowercase mode comes out CASE-INVERTED. Every BBS terminal,
+            every cross-platform tool, every emulator handles this differently.
+            Ethernet Gateway swaps case in software so a telnet user on a C64
+            sees the right thing without configuration.
+        </p>
+        <p>
+            <strong>The shared-platform legacy.</strong>
+            PETSCII outlived the PET. It carried over with minor
+            adjustments to the VIC-20 (1980), the Commodore 64 (1982,
+            which sold ~17 million units &mdash; the best-selling single
+            computer model in history), the C128 (1985), and the Plus/4
+            and C16 (1984). Color codes (0x05, 0x1C-0x1F, 0x81, 0x90-0x9F)
+            were added on color-capable models; the PET itself was
+            monochrome and ignored them.
+        </p>
+        <p>
+            <strong>Reverse-video and cursor codes inline.</strong>
+            Unlike ANSI, PETSCII doesn't use multi-byte escape sequences:
+            every effect is a single byte. 0x12 turns reverse video on,
+            0x92 turns it off; 0x11/0x91/0x1D/0x9D are cursor down/up/
+            right/left; 0x93 clears the screen; 0x0E/0x8E switch case mode.
+            This made it trivial to print formatted text from BASIC
+            (<code>PRINT CHR$(147)</code> = clear screen) but means
+            PETSCII files are not portable to ANSI terminals without
+            translation.
+        </p>
+        <p>
+            <strong>Still alive in the BBS scene.</strong>
+            PETSCII never died. The Commodore BBS scene of the 1980s is
+            still active: dozens of PETSCII boards run today on real
+            hardware (via WiFi modem cartridges like the WiFi Modem 232 and
+            the Userport Hub) or in emulators, dialing each other up via
+            telnet. Modern PETSCII art has its own demoscene, and tools
+            like petmate and PETSCII Editor target both retro hardware and
+            modern displays. Ethernet Gateway's PETSCII support exists
+            specifically so a real C64 with a WiFi modem can use a modern
+            telnet/SSH gateway as if it were a 1985-era BBS.
+        </p>
+    </div>
+</details>
+
+<h2 id="atascii-table">Appendix D: ATASCII Hex Table</h2>
+
+<p>The ATASCII character set used by Atari 8-bit computers (400, 800, XL, XE series). ATASCII is similar to ASCII but has unique control codes and graphics characters. Codes 0x80-0xFF are inverse video versions of 0x00-0x7F.</p>
+
+<h3>ATASCII Control Characters (0x00-0x1F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x00</td><td>0</td><td>-</td><td>(Null/Heart graphics)</td></tr>
+    <tr><td>0x01</td><td>1</td><td>-</td><td>(Ctrl+A graphics)</td></tr>
+    <tr><td>0x02</td><td>2</td><td>-</td><td>(Ctrl+B graphics)</td></tr>
+    <tr><td>0x03</td><td>3</td><td>-</td><td>(Ctrl+C graphics)</td></tr>
+    <tr><td>0x04</td><td>4</td><td>-</td><td>(Ctrl+D graphics)</td></tr>
+    <tr><td>0x05</td><td>5</td><td>-</td><td>(Ctrl+E graphics)</td></tr>
+    <tr><td>0x06</td><td>6</td><td>-</td><td>(Ctrl+F graphics)</td></tr>
+    <tr><td>0x07</td><td>7</td><td>BELL</td><td>Bell (buzzer)</td></tr>
+    <tr><td>0x08</td><td>8</td><td>-</td><td>(Ctrl+H graphics)</td></tr>
+    <tr><td>0x09</td><td>9</td><td>-</td><td>(Ctrl+I graphics)</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>-</td><td>(Ctrl+J graphics)</td></tr>
+    <tr><td>0x0B</td><td>11</td><td>-</td><td>(Ctrl+K graphics)</td></tr>
+    <tr><td>0x0C</td><td>12</td><td>-</td><td>(Ctrl+L graphics)</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>-</td><td>(Ctrl+M graphics)</td></tr>
+    <tr><td>0x0E</td><td>14</td><td>-</td><td>(Ctrl+N graphics)</td></tr>
+    <tr><td>0x0F</td><td>15</td><td>-</td><td>(Ctrl+O graphics)</td></tr>
+    <tr><td>0x10</td><td>16</td><td>-</td><td>(Ctrl+P graphics)</td></tr>
+    <tr><td>0x11</td><td>17</td><td>-</td><td>(Ctrl+Q graphics)</td></tr>
+    <tr><td>0x12</td><td>18</td><td>-</td><td>(Ctrl+R graphics)</td></tr>
+    <tr><td>0x13</td><td>19</td><td>-</td><td>(Ctrl+S graphics)</td></tr>
+    <tr><td>0x14</td><td>20</td><td>-</td><td>(Ctrl+T graphics)</td></tr>
+    <tr><td>0x15</td><td>21</td><td>-</td><td>(Ctrl+U graphics)</td></tr>
+    <tr><td>0x16</td><td>22</td><td>-</td><td>(Ctrl+V graphics)</td></tr>
+    <tr><td>0x17</td><td>23</td><td>-</td><td>(Ctrl+W graphics)</td></tr>
+    <tr><td>0x18</td><td>24</td><td>-</td><td>(Ctrl+X graphics)</td></tr>
+    <tr><td>0x19</td><td>25</td><td>-</td><td>(Ctrl+Y graphics)</td></tr>
+    <tr><td>0x1A</td><td>26</td><td>-</td><td>(Ctrl+Z graphics)</td></tr>
+    <tr><td>0x1B</td><td>27</td><td>ESC</td><td>Escape</td></tr>
+    <tr><td>0x1C</td><td>28</td><td>UP</td><td>Cursor Up</td></tr>
+    <tr><td>0x1D</td><td>29</td><td>DOWN</td><td>Cursor Down</td></tr>
+    <tr><td>0x1E</td><td>30</td><td>LEFT</td><td>Cursor Left</td></tr>
+    <tr><td>0x1F</td><td>31</td><td>RIGHT</td><td>Cursor Right</td></tr>
+</table>
+</div>
+
+<h3>ATASCII Printable Characters (0x20-0x5F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th></tr>
+    <tr><td>0x20</td><td>32</td><td>(space)</td><td>0x40</td><td>64</td><td>@</td></tr>
+    <tr><td>0x21</td><td>33</td><td>!</td><td>0x41</td><td>65</td><td>A</td></tr>
+    <tr><td>0x22</td><td>34</td><td>"</td><td>0x42</td><td>66</td><td>B</td></tr>
+    <tr><td>0x23</td><td>35</td><td>#</td><td>0x43</td><td>67</td><td>C</td></tr>
+    <tr><td>0x24</td><td>36</td><td>$</td><td>0x44</td><td>68</td><td>D</td></tr>
+    <tr><td>0x25</td><td>37</td><td>%</td><td>0x45</td><td>69</td><td>E</td></tr>
+    <tr><td>0x26</td><td>38</td><td>&amp;</td><td>0x46</td><td>70</td><td>F</td></tr>
+    <tr><td>0x27</td><td>39</td><td>'</td><td>0x47</td><td>71</td><td>G</td></tr>
+    <tr><td>0x28</td><td>40</td><td>(</td><td>0x48</td><td>72</td><td>H</td></tr>
+    <tr><td>0x29</td><td>41</td><td>)</td><td>0x49</td><td>73</td><td>I</td></tr>
+    <tr><td>0x2A</td><td>42</td><td>*</td><td>0x4A</td><td>74</td><td>J</td></tr>
+    <tr><td>0x2B</td><td>43</td><td>+</td><td>0x4B</td><td>75</td><td>K</td></tr>
+    <tr><td>0x2C</td><td>44</td><td>,</td><td>0x4C</td><td>76</td><td>L</td></tr>
+    <tr><td>0x2D</td><td>45</td><td>-</td><td>0x4D</td><td>77</td><td>M</td></tr>
+    <tr><td>0x2E</td><td>46</td><td>.</td><td>0x4E</td><td>78</td><td>N</td></tr>
+    <tr><td>0x2F</td><td>47</td><td>/</td><td>0x4F</td><td>79</td><td>O</td></tr>
+    <tr><td>0x30</td><td>48</td><td>0</td><td>0x50</td><td>80</td><td>P</td></tr>
+    <tr><td>0x31</td><td>49</td><td>1</td><td>0x51</td><td>81</td><td>Q</td></tr>
+    <tr><td>0x32</td><td>50</td><td>2</td><td>0x52</td><td>82</td><td>R</td></tr>
+    <tr><td>0x33</td><td>51</td><td>3</td><td>0x53</td><td>83</td><td>S</td></tr>
+    <tr><td>0x34</td><td>52</td><td>4</td><td>0x54</td><td>84</td><td>T</td></tr>
+    <tr><td>0x35</td><td>53</td><td>5</td><td>0x55</td><td>85</td><td>U</td></tr>
+    <tr><td>0x36</td><td>54</td><td>6</td><td>0x56</td><td>86</td><td>V</td></tr>
+    <tr><td>0x37</td><td>55</td><td>7</td><td>0x57</td><td>87</td><td>W</td></tr>
+    <tr><td>0x38</td><td>56</td><td>8</td><td>0x58</td><td>88</td><td>X</td></tr>
+    <tr><td>0x39</td><td>57</td><td>9</td><td>0x59</td><td>89</td><td>Y</td></tr>
+    <tr><td>0x3A</td><td>58</td><td>:</td><td>0x5A</td><td>90</td><td>Z</td></tr>
+    <tr><td>0x3B</td><td>59</td><td>;</td><td>0x5B</td><td>91</td><td>[</td></tr>
+    <tr><td>0x3C</td><td>60</td><td>&lt;</td><td>0x5C</td><td>92</td><td>\</td></tr>
+    <tr><td>0x3D</td><td>61</td><td>=</td><td>0x5D</td><td>93</td><td>]</td></tr>
+    <tr><td>0x3E</td><td>62</td><td>&gt;</td><td>0x5E</td><td>94</td><td>^</td></tr>
+    <tr><td>0x3F</td><td>63</td><td>?</td><td>0x5F</td><td>95</td><td>_</td></tr>
+</table>
+</div>
+
+<h3>ATASCII Lowercase and Graphics (0x60-0x7F)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Description</th></tr>
+    <tr><td>0x60</td><td>96</td><td>♦</td><td>Diamond</td></tr>
+    <tr><td>0x61</td><td>97</td><td>a</td><td>Lowercase a</td></tr>
+    <tr><td>0x62</td><td>98</td><td>b</td><td>Lowercase b</td></tr>
+    <tr><td>0x63</td><td>99</td><td>c</td><td>Lowercase c</td></tr>
+    <tr><td>0x64</td><td>100</td><td>d</td><td>Lowercase d</td></tr>
+    <tr><td>0x65</td><td>101</td><td>e</td><td>Lowercase e</td></tr>
+    <tr><td>0x66</td><td>102</td><td>f</td><td>Lowercase f</td></tr>
+    <tr><td>0x67</td><td>103</td><td>g</td><td>Lowercase g</td></tr>
+    <tr><td>0x68</td><td>104</td><td>h</td><td>Lowercase h</td></tr>
+    <tr><td>0x69</td><td>105</td><td>i</td><td>Lowercase i</td></tr>
+    <tr><td>0x6A</td><td>106</td><td>j</td><td>Lowercase j</td></tr>
+    <tr><td>0x6B</td><td>107</td><td>k</td><td>Lowercase k</td></tr>
+    <tr><td>0x6C</td><td>108</td><td>l</td><td>Lowercase l</td></tr>
+    <tr><td>0x6D</td><td>109</td><td>m</td><td>Lowercase m</td></tr>
+    <tr><td>0x6E</td><td>110</td><td>n</td><td>Lowercase n</td></tr>
+    <tr><td>0x6F</td><td>111</td><td>o</td><td>Lowercase o</td></tr>
+    <tr><td>0x70</td><td>112</td><td>p</td><td>Lowercase p</td></tr>
+    <tr><td>0x71</td><td>113</td><td>q</td><td>Lowercase q</td></tr>
+    <tr><td>0x72</td><td>114</td><td>r</td><td>Lowercase r</td></tr>
+    <tr><td>0x73</td><td>115</td><td>s</td><td>Lowercase s</td></tr>
+    <tr><td>0x74</td><td>116</td><td>t</td><td>Lowercase t</td></tr>
+    <tr><td>0x75</td><td>117</td><td>u</td><td>Lowercase u</td></tr>
+    <tr><td>0x76</td><td>118</td><td>v</td><td>Lowercase v</td></tr>
+    <tr><td>0x77</td><td>119</td><td>w</td><td>Lowercase w</td></tr>
+    <tr><td>0x78</td><td>120</td><td>x</td><td>Lowercase x</td></tr>
+    <tr><td>0x79</td><td>121</td><td>y</td><td>Lowercase y</td></tr>
+    <tr><td>0x7A</td><td>122</td><td>z</td><td>Lowercase z</td></tr>
+    <tr><td>0x7B</td><td>123</td><td>♠</td><td>Spade</td></tr>
+    <tr><td>0x7C</td><td>124</td><td>|</td><td>Vertical Bar</td></tr>
+    <tr><td>0x7D</td><td>125</td><td>CLR</td><td>Clear Screen</td></tr>
+    <tr><td>0x7E</td><td>126</td><td>BS</td><td>Backspace</td></tr>
+    <tr><td>0x7F</td><td>127</td><td>TAB</td><td>Tab</td></tr>
+</table>
+</div>
+
+<h3>ATASCII Inverse Control Characters (0x80-0x9F)</h3>
+<p><em>These are inverse video versions of 0x00-0x1F graphics characters.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x80</td><td>128</td><td>-</td><td>Inverse Heart</td></tr>
+    <tr><td>0x81</td><td>129</td><td>-</td><td>Inverse Ctrl+A</td></tr>
+    <tr><td>0x82</td><td>130</td><td>-</td><td>Inverse Ctrl+B</td></tr>
+    <tr><td>0x83</td><td>131</td><td>-</td><td>Inverse Ctrl+C</td></tr>
+    <tr><td>0x84</td><td>132</td><td>-</td><td>Inverse Ctrl+D</td></tr>
+    <tr><td>0x85</td><td>133</td><td>-</td><td>Inverse Ctrl+E</td></tr>
+    <tr><td>0x86</td><td>134</td><td>-</td><td>Inverse Ctrl+F</td></tr>
+    <tr><td>0x87</td><td>135</td><td>-</td><td>Inverse Ctrl+G</td></tr>
+    <tr><td>0x88</td><td>136</td><td>-</td><td>Inverse Ctrl+H</td></tr>
+    <tr><td>0x89</td><td>137</td><td>-</td><td>Inverse Ctrl+I</td></tr>
+    <tr><td>0x8A</td><td>138</td><td>-</td><td>Inverse Ctrl+J</td></tr>
+    <tr><td>0x8B</td><td>139</td><td>-</td><td>Inverse Ctrl+K</td></tr>
+    <tr><td>0x8C</td><td>140</td><td>-</td><td>Inverse Ctrl+L</td></tr>
+    <tr><td>0x8D</td><td>141</td><td>-</td><td>Inverse Ctrl+M</td></tr>
+    <tr><td>0x8E</td><td>142</td><td>-</td><td>Inverse Ctrl+N</td></tr>
+    <tr><td>0x8F</td><td>143</td><td>-</td><td>Inverse Ctrl+O</td></tr>
+    <tr><td>0x90</td><td>144</td><td>-</td><td>Inverse Ctrl+P</td></tr>
+    <tr><td>0x91</td><td>145</td><td>-</td><td>Inverse Ctrl+Q</td></tr>
+    <tr><td>0x92</td><td>146</td><td>-</td><td>Inverse Ctrl+R</td></tr>
+    <tr><td>0x93</td><td>147</td><td>-</td><td>Inverse Ctrl+S</td></tr>
+    <tr><td>0x94</td><td>148</td><td>-</td><td>Inverse Ctrl+T</td></tr>
+    <tr><td>0x95</td><td>149</td><td>-</td><td>Inverse Ctrl+U</td></tr>
+    <tr><td>0x96</td><td>150</td><td>-</td><td>Inverse Ctrl+V</td></tr>
+    <tr><td>0x97</td><td>151</td><td>-</td><td>Inverse Ctrl+W</td></tr>
+    <tr><td>0x98</td><td>152</td><td>-</td><td>Inverse Ctrl+X</td></tr>
+    <tr><td>0x99</td><td>153</td><td>-</td><td>Inverse Ctrl+Y</td></tr>
+    <tr><td>0x9A</td><td>154</td><td>-</td><td>Inverse Ctrl+Z</td></tr>
+    <tr><td>0x9B</td><td>155</td><td>EOL</td><td>End of Line (Return)</td></tr>
+    <tr><td>0x9C</td><td>156</td><td>DELLN</td><td>Delete Line</td></tr>
+    <tr><td>0x9D</td><td>157</td><td>INSLN</td><td>Insert Line</td></tr>
+    <tr><td>0x9E</td><td>158</td><td>CLRTAB</td><td>Clear Tab Stop</td></tr>
+    <tr><td>0x9F</td><td>159</td><td>SETTAB</td><td>Set Tab Stop</td></tr>
+</table>
+</div>
+
+<h3>ATASCII Inverse Printable Characters (0xA0-0xDF)</h3>
+<p><em>These are inverse video versions of 0x20-0x5F.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th></tr>
+    <tr><td>0xA0</td><td>160</td><td>Inv (space)</td><td>0xC0</td><td>192</td><td>Inv @</td></tr>
+    <tr><td>0xA1</td><td>161</td><td>Inv !</td><td>0xC1</td><td>193</td><td>Inv A</td></tr>
+    <tr><td>0xA2</td><td>162</td><td>Inv "</td><td>0xC2</td><td>194</td><td>Inv B</td></tr>
+    <tr><td>0xA3</td><td>163</td><td>Inv #</td><td>0xC3</td><td>195</td><td>Inv C</td></tr>
+    <tr><td>0xA4</td><td>164</td><td>Inv $</td><td>0xC4</td><td>196</td><td>Inv D</td></tr>
+    <tr><td>0xA5</td><td>165</td><td>Inv %</td><td>0xC5</td><td>197</td><td>Inv E</td></tr>
+    <tr><td>0xA6</td><td>166</td><td>Inv &amp;</td><td>0xC6</td><td>198</td><td>Inv F</td></tr>
+    <tr><td>0xA7</td><td>167</td><td>Inv '</td><td>0xC7</td><td>199</td><td>Inv G</td></tr>
+    <tr><td>0xA8</td><td>168</td><td>Inv (</td><td>0xC8</td><td>200</td><td>Inv H</td></tr>
+    <tr><td>0xA9</td><td>169</td><td>Inv )</td><td>0xC9</td><td>201</td><td>Inv I</td></tr>
+    <tr><td>0xAA</td><td>170</td><td>Inv *</td><td>0xCA</td><td>202</td><td>Inv J</td></tr>
+    <tr><td>0xAB</td><td>171</td><td>Inv +</td><td>0xCB</td><td>203</td><td>Inv K</td></tr>
+    <tr><td>0xAC</td><td>172</td><td>Inv ,</td><td>0xCC</td><td>204</td><td>Inv L</td></tr>
+    <tr><td>0xAD</td><td>173</td><td>Inv -</td><td>0xCD</td><td>205</td><td>Inv M</td></tr>
+    <tr><td>0xAE</td><td>174</td><td>Inv .</td><td>0xCE</td><td>206</td><td>Inv N</td></tr>
+    <tr><td>0xAF</td><td>175</td><td>Inv /</td><td>0xCF</td><td>207</td><td>Inv O</td></tr>
+    <tr><td>0xB0</td><td>176</td><td>Inv 0</td><td>0xD0</td><td>208</td><td>Inv P</td></tr>
+    <tr><td>0xB1</td><td>177</td><td>Inv 1</td><td>0xD1</td><td>209</td><td>Inv Q</td></tr>
+    <tr><td>0xB2</td><td>178</td><td>Inv 2</td><td>0xD2</td><td>210</td><td>Inv R</td></tr>
+    <tr><td>0xB3</td><td>179</td><td>Inv 3</td><td>0xD3</td><td>211</td><td>Inv S</td></tr>
+    <tr><td>0xB4</td><td>180</td><td>Inv 4</td><td>0xD4</td><td>212</td><td>Inv T</td></tr>
+    <tr><td>0xB5</td><td>181</td><td>Inv 5</td><td>0xD5</td><td>213</td><td>Inv U</td></tr>
+    <tr><td>0xB6</td><td>182</td><td>Inv 6</td><td>0xD6</td><td>214</td><td>Inv V</td></tr>
+    <tr><td>0xB7</td><td>183</td><td>Inv 7</td><td>0xD7</td><td>215</td><td>Inv W</td></tr>
+    <tr><td>0xB8</td><td>184</td><td>Inv 8</td><td>0xD8</td><td>216</td><td>Inv X</td></tr>
+    <tr><td>0xB9</td><td>185</td><td>Inv 9</td><td>0xD9</td><td>217</td><td>Inv Y</td></tr>
+    <tr><td>0xBA</td><td>186</td><td>Inv :</td><td>0xDA</td><td>218</td><td>Inv Z</td></tr>
+    <tr><td>0xBB</td><td>187</td><td>Inv ;</td><td>0xDB</td><td>219</td><td>Inv [</td></tr>
+    <tr><td>0xBC</td><td>188</td><td>Inv &lt;</td><td>0xDC</td><td>220</td><td>Inv \</td></tr>
+    <tr><td>0xBD</td><td>189</td><td>Inv =</td><td>0xDD</td><td>221</td><td>Inv ]</td></tr>
+    <tr><td>0xBE</td><td>190</td><td>Inv &gt;</td><td>0xDE</td><td>222</td><td>Inv ^</td></tr>
+    <tr><td>0xBF</td><td>191</td><td>Inv ?</td><td>0xDF</td><td>223</td><td>Inv _</td></tr>
+</table>
+</div>
+
+<h3>ATASCII Inverse Lowercase and Graphics (0xE0-0xFF)</h3>
+<p><em>These are inverse video versions of 0x60-0x7F.</em></p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Description</th></tr>
+    <tr><td>0xE0</td><td>224</td><td>Inv ♦</td><td>Inverse Diamond</td></tr>
+    <tr><td>0xE1</td><td>225</td><td>Inv a</td><td>Inverse Lowercase a</td></tr>
+    <tr><td>0xE2</td><td>226</td><td>Inv b</td><td>Inverse Lowercase b</td></tr>
+    <tr><td>0xE3</td><td>227</td><td>Inv c</td><td>Inverse Lowercase c</td></tr>
+    <tr><td>0xE4</td><td>228</td><td>Inv d</td><td>Inverse Lowercase d</td></tr>
+    <tr><td>0xE5</td><td>229</td><td>Inv e</td><td>Inverse Lowercase e</td></tr>
+    <tr><td>0xE6</td><td>230</td><td>Inv f</td><td>Inverse Lowercase f</td></tr>
+    <tr><td>0xE7</td><td>231</td><td>Inv g</td><td>Inverse Lowercase g</td></tr>
+    <tr><td>0xE8</td><td>232</td><td>Inv h</td><td>Inverse Lowercase h</td></tr>
+    <tr><td>0xE9</td><td>233</td><td>Inv i</td><td>Inverse Lowercase i</td></tr>
+    <tr><td>0xEA</td><td>234</td><td>Inv j</td><td>Inverse Lowercase j</td></tr>
+    <tr><td>0xEB</td><td>235</td><td>Inv k</td><td>Inverse Lowercase k</td></tr>
+    <tr><td>0xEC</td><td>236</td><td>Inv l</td><td>Inverse Lowercase l</td></tr>
+    <tr><td>0xED</td><td>237</td><td>Inv m</td><td>Inverse Lowercase m</td></tr>
+    <tr><td>0xEE</td><td>238</td><td>Inv n</td><td>Inverse Lowercase n</td></tr>
+    <tr><td>0xEF</td><td>239</td><td>Inv o</td><td>Inverse Lowercase o</td></tr>
+    <tr><td>0xF0</td><td>240</td><td>Inv p</td><td>Inverse Lowercase p</td></tr>
+    <tr><td>0xF1</td><td>241</td><td>Inv q</td><td>Inverse Lowercase q</td></tr>
+    <tr><td>0xF2</td><td>242</td><td>Inv r</td><td>Inverse Lowercase r</td></tr>
+    <tr><td>0xF3</td><td>243</td><td>Inv s</td><td>Inverse Lowercase s</td></tr>
+    <tr><td>0xF4</td><td>244</td><td>Inv t</td><td>Inverse Lowercase t</td></tr>
+    <tr><td>0xF5</td><td>245</td><td>Inv u</td><td>Inverse Lowercase u</td></tr>
+    <tr><td>0xF6</td><td>246</td><td>Inv v</td><td>Inverse Lowercase v</td></tr>
+    <tr><td>0xF7</td><td>247</td><td>Inv w</td><td>Inverse Lowercase w</td></tr>
+    <tr><td>0xF8</td><td>248</td><td>Inv x</td><td>Inverse Lowercase x</td></tr>
+    <tr><td>0xF9</td><td>249</td><td>Inv y</td><td>Inverse Lowercase y</td></tr>
+    <tr><td>0xFA</td><td>250</td><td>Inv z</td><td>Inverse Lowercase z</td></tr>
+    <tr><td>0xFB</td><td>251</td><td>Inv ♠</td><td>Inverse Spade</td></tr>
+    <tr><td>0xFC</td><td>252</td><td>Inv |</td><td>Inverse Vertical Bar</td></tr>
+    <tr><td>0xFD</td><td>253</td><td>BELL</td><td>Bell (buzzer)</td></tr>
+    <tr><td>0xFE</td><td>254</td><td>DEL</td><td>Delete Character</td></tr>
+    <tr><td>0xFF</td><td>255</td><td>INS</td><td>Insert Character</td></tr>
+</table>
+</div>
+
+<h3>Key ATASCII Codes Reference</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Function</th><th>Hex</th><th>Dec</th><th>Notes</th></tr>
+    <tr><td>Escape</td><td>0x1B</td><td>27</td><td>Same as ASCII</td></tr>
+    <tr><td>Return/EOL</td><td>0x9B</td><td>155</td><td>End of logical line</td></tr>
+    <tr><td>Backspace</td><td>0x7E</td><td>126</td><td>Delete character left</td></tr>
+    <tr><td>Delete</td><td>0xFE</td><td>254</td><td>Delete character at cursor</td></tr>
+    <tr><td>Insert</td><td>0xFF</td><td>255</td><td>Insert mode toggle</td></tr>
+    <tr><td>Clear Screen</td><td>0x7D</td><td>125</td><td>Clear and home cursor</td></tr>
+    <tr><td>Cursor Up</td><td>0x1C</td><td>28</td><td></td></tr>
+    <tr><td>Cursor Down</td><td>0x1D</td><td>29</td><td></td></tr>
+    <tr><td>Cursor Left</td><td>0x1E</td><td>30</td><td></td></tr>
+    <tr><td>Cursor Right</td><td>0x1F</td><td>31</td><td></td></tr>
+    <tr><td>Tab</td><td>0x7F</td><td>127</td><td>Move to next tab stop</td></tr>
+    <tr><td>Bell</td><td>0xFD</td><td>253</td><td>Also 0x07</td></tr>
+    <tr><td>Delete Line</td><td>0x9C</td><td>156</td><td></td></tr>
+    <tr><td>Insert Line</td><td>0x9D</td><td>157</td><td></td></tr>
+</table>
+</div>
+
+<div class="note">
+    <strong>Note:</strong> ATASCII uses 0x9B (155) for end-of-line instead of the standard ASCII 0x0D (13). The upper 128 characters (0x80-0xFF) are inverse video versions of the lower 128 (0x00-0x7F), except for certain control codes in the 0x9B-0x9F and 0xFD-0xFF ranges which have special functions.
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>1979 &mdash; the Atari 400 and 800.</strong>
+            ATASCII (Atari Standard Code for Information Interchange) was
+            introduced with the Atari 400 and 800 in November 1979 &mdash;
+            the same year as the TI-99/4. The character set was designed
+            by Atari's Home Computer Division under Jay Miner, who would
+            later design the Amiga's custom chips. The Atari 8-bits
+            (400/800/1200XL/600XL/800XL/65XE/130XE/XEGS) all used
+            ATASCII unchanged from 1979 to the line's discontinuation in
+            1992 &mdash; an unusually long character-set lifetime for a
+            home-computer family.
+        </p>
+        <p>
+            <strong>The 0x9B EOL problem.</strong>
+            ATASCII's most infamous quirk is using <strong>0x9B</strong>
+            (155, "EOL") as end-of-line instead of CR/LF. This was a
+            deliberate choice &mdash; 0x9B is a single byte, doesn't
+            require pairing CR with LF, and falls in a range Atari
+            considered "safe" because they didn't use the 0x80-0xFF
+            inverse range for printable text. The downside was severe:
+            every cross-platform file transfer (ASCII mode FTP, BBS
+            uploads, modem terminal programs) had to translate 0x9B to
+            0x0D 0x0A on the way out and back on the way in. A
+            generation of Atari users learned what "ATASCII translation"
+            meant the hard way after losing line breaks on cross-platform
+            files. The Ethernet Gateway's terminal-detection logic
+            specifically watches for ATASCII-style line endings.
+        </p>
+        <p>
+            <strong>Inverse video as a parallel character set.</strong>
+            The Atari ANTIC graphics chip rendered character cells with a
+            hardware inverse-video bit (bit 7 of the screen-memory byte).
+            ATASCII exploits this directly: the upper 128 codes
+            (0x80-0xFF) are not new characters &mdash; they're the lower
+            128 with inverse video applied. This means an Atari programmer
+            could highlight a word in a status line by simply ORing 0x80
+            into each byte. Six positions (0x9B-0x9F, 0xFD-0xFF) were
+            stolen back as control codes (EOL, delete-line, insert-line,
+            tab-stop set/clear, bell, delete-char, insert-char), so those
+            don't have inverse equivalents.
+        </p>
+        <p>
+            <strong>The Atari BBS scene.</strong>
+            Atari BBSes (running software like AMIS, FoReM, BBS Express!)
+            were a parallel ecosystem to the Commodore boards. ATASCII
+            art and animations &mdash; using the cursor-control codes to
+            move around and the inverse-video range for color
+            &mdash; were a recognizable style, distinct from PETSCII or
+            ANSI art. Commercial online services that catered to Atari users
+            included <strong>The Source</strong> (a Reader's Digest
+            subsidiary, later acquired by CompuServe) and CompuServe itself,
+            both of which published Atari-specific terminal programs that
+            translated ATASCII to and from ASCII at the gateway.
+        </p>
+        <p>
+            <strong>Today.</strong>
+            ATASCII survives in emulators (Altirra, Atari800), in modern
+            cartridges and SD-based loaders that let real 8-bit hardware
+            connect to modern networks (FujiNet, SIO2PC), and in the
+            small but persistent Atari demoscene. The character set is
+            also still used by some specialty software for Atari ST and
+            Falcon machines that retained 8-bit-mode compatibility.
+        </p>
+    </div>
+</details>
+
+<h2 id="baudot-table">Appendix E: Baudot (ITA2) Code Table</h2>
+
+<p>Emile Baudot devised his 5-bit telegraph encoding in the 1870s. The CCITT adopted a refined version as International Telegraph Alphabet No. 2 (ITA2) in 1932, and it remained the standard teleprinter code worldwide until ASCII took over in the 1960s. The unit of signaling speed, the "baud," takes its name from Baudot.</p>
+
+<h3>How Baudot Works</h3>
+<p>With only 5 bits, Baudot can represent 32 unique codes (0-31). To encode letters, numbers, and punctuation, Baudot uses two "shift" states:</p>
+<ul>
+    <li><strong>Letters Shift (LTRS)</strong> - Codes produce uppercase letters A-Z</li>
+    <li><strong>Figures Shift (FIGS)</strong> - Codes produce numbers and punctuation</li>
+</ul>
+<p>The receiver maintains the current shift state. Sending LTRS (code 31) or FIGS (code 27) changes the state for all subsequent characters until another shift code is received.</p>
+
+<h3>ITA2 Code Table</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Binary</th><th>Dec</th><th>Hex</th><th>Letters (LTRS)</th><th>Figures (FIGS)</th></tr>
+    <tr><td>00000</td><td>0</td><td>0x00</td><td>NUL (Null)</td><td>NUL (Null)</td></tr>
+    <tr><td>00001</td><td>1</td><td>0x01</td><td>E</td><td>3</td></tr>
+    <tr><td>00010</td><td>2</td><td>0x02</td><td>LF (Line Feed)</td><td>LF (Line Feed)</td></tr>
+    <tr><td>00011</td><td>3</td><td>0x03</td><td>A</td><td>-</td></tr>
+    <tr><td>00100</td><td>4</td><td>0x04</td><td>SP (Space)</td><td>SP (Space)</td></tr>
+    <tr><td>00101</td><td>5</td><td>0x05</td><td>S</td><td>'</td></tr>
+    <tr><td>00110</td><td>6</td><td>0x06</td><td>I</td><td>8</td></tr>
+    <tr><td>00111</td><td>7</td><td>0x07</td><td>U</td><td>7</td></tr>
+    <tr><td>01000</td><td>8</td><td>0x08</td><td>CR (Carriage Return)</td><td>CR (Carriage Return)</td></tr>
+    <tr><td>01001</td><td>9</td><td>0x09</td><td>D</td><td>ENQ (Who Are You?)</td></tr>
+    <tr><td>01010</td><td>10</td><td>0x0A</td><td>R</td><td>4</td></tr>
+    <tr><td>01011</td><td>11</td><td>0x0B</td><td>J</td><td>BEL (Bell)</td></tr>
+    <tr><td>01100</td><td>12</td><td>0x0C</td><td>N</td><td>,</td></tr>
+    <tr><td>01101</td><td>13</td><td>0x0D</td><td>F</td><td>!</td></tr>
+    <tr><td>01110</td><td>14</td><td>0x0E</td><td>C</td><td>:</td></tr>
+    <tr><td>01111</td><td>15</td><td>0x0F</td><td>K</td><td>(</td></tr>
+    <tr><td>10000</td><td>16</td><td>0x10</td><td>T</td><td>5</td></tr>
+    <tr><td>10001</td><td>17</td><td>0x11</td><td>Z</td><td>+</td></tr>
+    <tr><td>10010</td><td>18</td><td>0x12</td><td>L</td><td>)</td></tr>
+    <tr><td>10011</td><td>19</td><td>0x13</td><td>W</td><td>2</td></tr>
+    <tr><td>10100</td><td>20</td><td>0x14</td><td>H</td><td>£</td></tr>
+    <tr><td>10101</td><td>21</td><td>0x15</td><td>Y</td><td>6</td></tr>
+    <tr><td>10110</td><td>22</td><td>0x16</td><td>P</td><td>0</td></tr>
+    <tr><td>10111</td><td>23</td><td>0x17</td><td>Q</td><td>1</td></tr>
+    <tr><td>11000</td><td>24</td><td>0x18</td><td>O</td><td>9</td></tr>
+    <tr><td>11001</td><td>25</td><td>0x19</td><td>B</td><td>?</td></tr>
+    <tr><td>11010</td><td>26</td><td>0x1A</td><td>G</td><td>&amp;</td></tr>
+    <tr><td>11011</td><td>27</td><td>0x1B</td><td>FIGS (Shift to Figures)</td><td>FIGS (Shift to Figures)</td></tr>
+    <tr><td>11100</td><td>28</td><td>0x1C</td><td>M</td><td>.</td></tr>
+    <tr><td>11101</td><td>29</td><td>0x1D</td><td>X</td><td>/</td></tr>
+    <tr><td>11110</td><td>30</td><td>0x1E</td><td>V</td><td>=</td></tr>
+    <tr><td>11111</td><td>31</td><td>0x1F</td><td>LTRS (Shift to Letters)</td><td>LTRS (Shift to Letters)</td></tr>
+</table>
+</div>
+
+<h3>Control Characters</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0 (00000)</td><td>NUL</td><td>Null - No operation, used for timing/padding</td></tr>
+    <tr><td>2 (00010)</td><td>LF</td><td>Line Feed - Move paper up one line</td></tr>
+    <tr><td>4 (00100)</td><td>SP</td><td>Space - Blank character, advances position</td></tr>
+    <tr><td>8 (01000)</td><td>CR</td><td>Carriage Return - Return print head to start of line</td></tr>
+    <tr><td>27 (11011)</td><td>FIGS</td><td>Figures Shift - Switch to figures mode</td></tr>
+    <tr><td>31 (11111)</td><td>LTRS</td><td>Letters Shift - Switch to letters mode</td></tr>
+</table>
+</div>
+
+<h3>Figures Mode Special Codes</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>Character</th><th>Notes</th></tr>
+    <tr><td>9 (01001)</td><td>ENQ</td><td>"Who Are You?" - Requests station identification</td></tr>
+    <tr><td>11 (01011)</td><td>BEL</td><td>Bell - Rings the teleprinter bell</td></tr>
+</table>
+</div>
+
+<h3>US TTY Variant</h3>
+<p>The United States used a variant called US TTY (Teletypewriter) with some different figure assignments:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Code</th><th>ITA2</th><th>US TTY</th></tr>
+    <tr><td>5 (00101)</td><td>' (apostrophe)</td><td>BEL (bell)</td></tr>
+    <tr><td>11 (01011)</td><td>BEL (bell)</td><td>' (apostrophe)</td></tr>
+    <tr><td>20 (10100)</td><td>£ (pound)</td><td>$ (dollar)</td></tr>
+</table>
+</div>
+
+<h3>Encoding Example</h3>
+<p>To send "HELLO 123":</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Character</th><th>Shift State</th><th>Code Sent</th><th>Binary</th></tr>
+    <tr><td>LTRS</td><td>-</td><td>31</td><td>11111</td></tr>
+    <tr><td>H</td><td>Letters</td><td>20</td><td>10100</td></tr>
+    <tr><td>E</td><td>Letters</td><td>1</td><td>00001</td></tr>
+    <tr><td>L</td><td>Letters</td><td>18</td><td>10010</td></tr>
+    <tr><td>L</td><td>Letters</td><td>18</td><td>10010</td></tr>
+    <tr><td>O</td><td>Letters</td><td>24</td><td>11000</td></tr>
+    <tr><td>SP</td><td>Letters</td><td>4</td><td>00100</td></tr>
+    <tr><td>FIGS</td><td>-</td><td>27</td><td>11011</td></tr>
+    <tr><td>1</td><td>Figures</td><td>23</td><td>10111</td></tr>
+    <tr><td>2</td><td>Figures</td><td>19</td><td>10011</td></tr>
+    <tr><td>3</td><td>Figures</td><td>1</td><td>00001</td></tr>
+</table>
+</div>
+
+<h3>Quick Reference: Letters Mode</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th><th>L</th><th>M</th></tr>
+    <tr><td>3</td><td>25</td><td>14</td><td>9</td><td>1</td><td>13</td><td>26</td><td>20</td><td>6</td><td>11</td><td>15</td><td>18</td><td>28</td></tr>
+</table>
+</div>
+<div class="table-wrap">
+<table>
+    <tr><th>N</th><th>O</th><th>P</th><th>Q</th><th>R</th><th>S</th><th>T</th><th>U</th><th>V</th><th>W</th><th>X</th><th>Y</th><th>Z</th></tr>
+    <tr><td>12</td><td>24</td><td>22</td><td>23</td><td>10</td><td>5</td><td>16</td><td>7</td><td>30</td><td>19</td><td>29</td><td>21</td><td>17</td></tr>
+</table>
+</div>
+
+<h3>Quick Reference: Figures Mode (Digits)</h3>
+<div class="table-wrap">
+<table>
+    <tr><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+    <tr><td>22</td><td>23</td><td>19</td><td>1</td><td>10</td><td>16</td><td>21</td><td>7</td><td>6</td><td>24</td></tr>
+</table>
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>1870s &mdash; &Eacute;mile Baudot.</strong>
+            French telegraph engineer <strong>&Eacute;mile Baudot</strong>
+            patented his 5-bit code in 1874 to replace the older Morse
+            code on multi-channel telegraph circuits. Morse was
+            variable-length and asynchronous, which made it impossible to
+            multiplex efficiently; Baudot's fixed-width code let multiple
+            operators share a single wire by time-division multiplexing,
+            dramatically increasing the throughput of telegraph offices.
+            Baudot also invented a five-key piano-like keyboard
+            specifically tuned to enter his code &mdash; the operator
+            played each character as a five-finger chord. The unit of
+            signaling speed, the "baud," is named for him.
+        </p>
+        <p>
+            <strong>1901-1932 &mdash; Donald Murray and ITA2.</strong>
+            New Zealand-born engineer <strong>Donald Murray</strong>
+            redesigned Baudot's code in 1901 to better suit
+            keyboard-driven typewriters: he reassigned codes so that
+            common letters required less mechanical wear on the
+            print mechanism, and added punctuation. The CCITT
+            (Consultative Committee on International Telephony and
+            Telegraphy, predecessor to the ITU-T) standardized Murray's
+            scheme as <strong>International Telegraph Alphabet No. 2
+            (ITA2)</strong> in 1932. ITA1 was the original Baudot;
+            ITA2 (Murray's revision) is what almost everyone calls
+            "Baudot" today, including this table.
+        </p>
+        <p>
+            <strong>The shift-state trick.</strong>
+            Five bits gives only 32 codes. To represent 26 letters, 10
+            digits, and punctuation, Baudot/ITA2 uses two
+            <strong>shift states</strong> &mdash; LTRS (code 31) and
+            FIGS (code 27). Each one switches the meaning of all
+            subsequent codes until the other shift is sent. This is
+            why a hardware glitch on a teleprinter line could turn an
+            entire message into nonsense: if the receiver missed an
+            LTRS or FIGS shift, every following character was
+            mis-decoded. Operators developed a habit of repeating
+            shifts every few words for resync.
+        </p>
+        <p>
+            <strong>Mechanical speeds.</strong>
+            Baudot ran at 45.45, 50, 56.9, 75, or 100 baud on
+            mechanical teleprinters &mdash; speeds chosen to match
+            the resonant frequency of the Teletype's spring-driven
+            type-bar mechanism. Each character was one start bit,
+            five data bits, and 1.5 stop bits (the half-bit stop was
+            a clever way to keep the receiver in sync without a
+            full-bit gap). At 50 baud, that gave roughly 6.7
+            characters per second &mdash; about 400 characters per
+            minute, fast enough for live typed conversation.
+        </p>
+        <p>
+            <strong>Telex and TWX.</strong>
+            From the 1930s through the 1980s, Baudot/ITA2 was the
+            backbone of the global <strong>Telex</strong> network
+            (international) and <strong>TWX</strong> (Teletypewriter
+            Exchange Service, North America). At its peak in the
+            1980s, Telex linked over 2 million machines worldwide
+            and was the primary medium for legally-binding
+            international business communication &mdash; faster than
+            mail, more durable than phone, and accepted in court as
+            documentary evidence. Telex didn't begin its decline
+            until fax (1980s) and email (1990s) took over.
+        </p>
+        <p>
+            <strong>TDD/TTY for the deaf.</strong>
+            After commercial Telex died, Baudot lived on in
+            telecommunication devices for the deaf. The
+            <strong>TDD/TTY</strong> (Telecommunication Device for
+            the Deaf, also called Teletypewriter) protocol used
+            ITA2 with US TTY variant figure assignments at 45.45
+            or 50 baud over the regular phone network, with
+            distinctive "warble" tones (1400/1800 Hz). TDD/TTY
+            usage held on into the 2000s before being replaced by
+            video relay services and SMS. Some emergency 911
+            systems still accept TDD calls today as a regulatory
+            accessibility requirement.
+        </p>
+        <p>
+            <strong>Why no lowercase?</strong>
+            Mechanical teleprinters had a single set of physical
+            type-bars per character position &mdash; adding
+            lowercase would have doubled the mechanism cost and
+            paper-tape width. By the time printing technology made
+            mixed case practical (the 1960s), 7-bit ASCII was
+            already taking over, so Baudot remained an uppercase-only
+            standard throughout its commercial life.
+        </p>
+    </div>
+</details>
+
+<h2 id="zxspectrum-table">Appendix F: ZX Spectrum Character Set</h2>
+
+<p>The Sinclair ZX Spectrum (1982) used a custom character set based on ASCII but with unique additions. It shared standard ASCII printable characters (0x20-0x7F) with two notable exceptions, and added block graphics characters and BASIC keyword tokens in the upper range.</p>
+
+<h3>Control Characters (0x00-0x1F)</h3>
+<p>The ZX Spectrum uses several custom control codes. Most codes below 0x06 are not used.</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x06</td><td>6</td><td>COMMA</td><td>PRINT comma control (move to next print zone)</td></tr>
+    <tr><td>0x08</td><td>8</td><td>LEFT</td><td>Cursor Left (Backspace)</td></tr>
+    <tr><td>0x09</td><td>9</td><td>RIGHT</td><td>Cursor Right</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>DOWN</td><td>Cursor Down</td></tr>
+    <tr><td>0x0B</td><td>11</td><td>UP</td><td>Cursor Up</td></tr>
+    <tr><td>0x0C</td><td>12</td><td>DELETE</td><td>Delete</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>ENTER</td><td>Enter / Newline</td></tr>
+    <tr><td>0x10</td><td>16</td><td>INK</td><td>Set ink (foreground) color (next byte = 0-7)</td></tr>
+    <tr><td>0x11</td><td>17</td><td>PAPER</td><td>Set paper (background) color (next byte = 0-7)</td></tr>
+    <tr><td>0x12</td><td>18</td><td>FLASH</td><td>Set flash attribute (next byte = 0 or 1)</td></tr>
+    <tr><td>0x13</td><td>19</td><td>BRIGHT</td><td>Set bright attribute (next byte = 0 or 1)</td></tr>
+    <tr><td>0x14</td><td>20</td><td>INVERSE</td><td>Set inverse attribute (next byte = 0 or 1)</td></tr>
+    <tr><td>0x15</td><td>21</td><td>OVER</td><td>Set overprint mode (next byte = 0 or 1)</td></tr>
+    <tr><td>0x16</td><td>22</td><td>AT</td><td>Position cursor (next 2 bytes = row, column)</td></tr>
+    <tr><td>0x17</td><td>23</td><td>TAB</td><td>Tab to column (next 2 bytes = column number)</td></tr>
+</table>
+</div>
+
+<h3>Character Set Differences from ASCII</h3>
+<p>The ZX Spectrum printable range (0x20-0x7F) matches standard ASCII except for two positions:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>ASCII</th><th>ZX Spectrum</th></tr>
+    <tr><td>0x60</td><td>96</td><td>` (backtick)</td><td>&pound; (pound sterling)</td></tr>
+    <tr><td>0x7F</td><td>127</td><td>DEL</td><td>&copy; (copyright symbol)</td></tr>
+</table>
+</div>
+
+<h3>ZX Spectrum Colors</h3>
+<p>Used with the INK (0x10) and PAPER (0x11) control codes:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Value</th><th>Color</th><th>Bright Color</th></tr>
+    <tr><td>0</td><td>Black</td><td>Black</td></tr>
+    <tr><td>1</td><td>Blue</td><td>Bright Blue</td></tr>
+    <tr><td>2</td><td>Red</td><td>Bright Red</td></tr>
+    <tr><td>3</td><td>Magenta</td><td>Bright Magenta</td></tr>
+    <tr><td>4</td><td>Green</td><td>Bright Green</td></tr>
+    <tr><td>5</td><td>Cyan</td><td>Bright Cyan</td></tr>
+    <tr><td>6</td><td>Yellow</td><td>Bright Yellow</td></tr>
+    <tr><td>7</td><td>White</td><td>Bright White</td></tr>
+</table>
+</div>
+
+<h3>Block Graphics Characters (0x80-0x8F)</h3>
+<p>The ZX Spectrum's distinctive block graphics divide each character cell into four quadrants (2&times;2 grid). Each of the 16 combinations represents a different pattern of filled and empty quadrants. These were widely used for games and UI elements.</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Pattern</th><th>Description</th></tr>
+    <tr><td>0x80</td><td>128</td><td>&nbsp;</td><td>All empty (space)</td></tr>
+    <tr><td>0x81</td><td>129</td><td>&#x2597;</td><td>Bottom-right quadrant</td></tr>
+    <tr><td>0x82</td><td>130</td><td>&#x2596;</td><td>Bottom-left quadrant</td></tr>
+    <tr><td>0x83</td><td>131</td><td>&#x2584;</td><td>Bottom half</td></tr>
+    <tr><td>0x84</td><td>132</td><td>&#x259D;</td><td>Top-right quadrant</td></tr>
+    <tr><td>0x85</td><td>133</td><td>&#x2590;</td><td>Right half</td></tr>
+    <tr><td>0x86</td><td>134</td><td>&#x259E;</td><td>Top-right + bottom-left (diagonal)</td></tr>
+    <tr><td>0x87</td><td>135</td><td>&#x259F;</td><td>Top-right + bottom half</td></tr>
+    <tr><td>0x88</td><td>136</td><td>&#x2598;</td><td>Top-left quadrant</td></tr>
+    <tr><td>0x89</td><td>137</td><td>&#x259A;</td><td>Top-left + bottom-right (diagonal)</td></tr>
+    <tr><td>0x8A</td><td>138</td><td>&#x258C;</td><td>Left half</td></tr>
+    <tr><td>0x8B</td><td>139</td><td>&#x2599;</td><td>Top-left + bottom half</td></tr>
+    <tr><td>0x8C</td><td>140</td><td>&#x2580;</td><td>Top half</td></tr>
+    <tr><td>0x8D</td><td>141</td><td>&#x259C;</td><td>Top half + bottom-right</td></tr>
+    <tr><td>0x8E</td><td>142</td><td>&#x259B;</td><td>Top half + bottom-left</td></tr>
+    <tr><td>0x8F</td><td>143</td><td>&#x2588;</td><td>Full block (all filled)</td></tr>
+</table>
+</div>
+
+<h3>User Defined Graphics (0x90-0xA4)</h3>
+<p>Characters 0x90-0xA4 (144-164) are User Defined Graphics (UDG) slots A through U. These are customizable 8&times;8 pixel characters that programs can redefine. By default, they display as letters A-U, but games and applications typically redefine them for custom sprites and icons.</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>UDG Letter</th><th>Hex</th><th>Dec</th><th>UDG Letter</th><th>Hex</th><th>Dec</th><th>UDG Letter</th></tr>
+    <tr><td>0x90</td><td>144</td><td>A</td><td>0x97</td><td>151</td><td>H</td><td>0x9E</td><td>158</td><td>O</td></tr>
+    <tr><td>0x91</td><td>145</td><td>B</td><td>0x98</td><td>152</td><td>I</td><td>0x9F</td><td>159</td><td>P</td></tr>
+    <tr><td>0x92</td><td>146</td><td>C</td><td>0x99</td><td>153</td><td>J</td><td>0xA0</td><td>160</td><td>Q</td></tr>
+    <tr><td>0x93</td><td>147</td><td>D</td><td>0x9A</td><td>154</td><td>K</td><td>0xA1</td><td>161</td><td>R</td></tr>
+    <tr><td>0x94</td><td>148</td><td>E</td><td>0x9B</td><td>155</td><td>L</td><td>0xA2</td><td>162</td><td>S</td></tr>
+    <tr><td>0x95</td><td>149</td><td>F</td><td>0x9C</td><td>156</td><td>M</td><td>0xA3</td><td>163</td><td>T</td></tr>
+    <tr><td>0x96</td><td>150</td><td>G</td><td>0x9D</td><td>157</td><td>N</td><td>0xA4</td><td>164</td><td>U</td></tr>
+</table>
+</div>
+
+<h3>BASIC Keyword Tokens (0xA5-0xFF)</h3>
+<p>The ZX Spectrum stored BASIC keywords as single-byte tokens to save memory. When listed, each token expands to the full keyword. This is a selection of the most commonly used tokens:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Keyword</th><th>Hex</th><th>Dec</th><th>Keyword</th></tr>
+    <tr><td>0xA5</td><td>165</td><td>RND</td><td>0xD7</td><td>215</td><td>BEEP</td></tr>
+    <tr><td>0xA6</td><td>166</td><td>INKEY$</td><td>0xD9</td><td>217</td><td>INK</td></tr>
+    <tr><td>0xA7</td><td>167</td><td>PI</td><td>0xDA</td><td>218</td><td>PAPER</td></tr>
+    <tr><td>0xAB</td><td>171</td><td>ATTR</td><td>0xE0</td><td>224</td><td>LPRINT</td></tr>
+    <tr><td>0xAC</td><td>172</td><td>AT</td><td>0xE1</td><td>225</td><td>LLIST</td></tr>
+    <tr><td>0xAF</td><td>175</td><td>CODE</td><td>0xE3</td><td>227</td><td>READ</td></tr>
+    <tr><td>0xB0</td><td>176</td><td>VAL</td><td>0xE7</td><td>231</td><td>BORDER</td></tr>
+    <tr><td>0xB1</td><td>177</td><td>LEN</td><td>0xEC</td><td>236</td><td>GO TO</td></tr>
+    <tr><td>0xBE</td><td>190</td><td>PEEK</td><td>0xED</td><td>237</td><td>GO SUB</td></tr>
+    <tr><td>0xC0</td><td>192</td><td>USR</td><td>0xEE</td><td>238</td><td>INPUT</td></tr>
+    <tr><td>0xC2</td><td>194</td><td>CHR$</td><td>0xEF</td><td>239</td><td>LOAD</td></tr>
+    <tr><td>0xCA</td><td>202</td><td>LINE</td><td>0xF4</td><td>244</td><td>POKE</td></tr>
+    <tr><td>0xCB</td><td>203</td><td>THEN</td><td>0xF5</td><td>245</td><td>PRINT</td></tr>
+    <tr><td>0xCC</td><td>204</td><td>TO</td><td>0xF9</td><td>249</td><td>RANDOMIZE</td></tr>
+    <tr><td>0xCD</td><td>205</td><td>STEP</td><td>0xFA</td><td>250</td><td>IF</td></tr>
+    <tr><td>0xD1</td><td>209</td><td>MOVE</td><td>0xFB</td><td>251</td><td>CLS</td></tr>
+</table>
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>1982 &mdash; Sinclair Research, Cambridge.</strong>
+            <strong>Sir Clive Sinclair</strong>'s Sinclair Research
+            launched the ZX Spectrum on April 23, 1982 at the Earls Court
+            Computer Fair in London. The 16K model cost &pound;125 and the
+            48K model &pound;175 &mdash; <em>roughly half</em> the price
+            of an Acorn BBC Micro and a third of an Apple II. This
+            aggressive pricing was Sinclair's signature move; he had
+            already shipped the calculator-style ZX80 (1980) and ZX81
+            (1981) on the same philosophy. The Spectrum's distinctive
+            grey-with-rainbow case was designed by industrial designer
+            Rick Dickinson, who also did the ZX81.
+        </p>
+        <p>
+            <strong>The dead-flesh keyboard.</strong>
+            The original Spectrum used a flat rubber membrane keyboard
+            &mdash; nicknamed "dead flesh" by the British computing press
+            &mdash; in which each key had up to <em>five</em> different
+            functions printed on it: the letter, a BASIC keyword, an
+            extended-mode command, and two symbols. Pressing K alone
+            entered the LIST keyword; SHIFT+K entered the symbol "+";
+            SYMBOL SHIFT+K entered "+"; EXTENDED MODE then K entered the
+            keyword TAN. This crowding was a memory-saving trick &mdash;
+            the BASIC interpreter could store entire keywords as
+            single-byte tokens (<code>0xFB</code> = CLS,
+            <code>0xF5</code> = PRINT) without a parser, because the user
+            literally couldn't type a keyword character-by-character.
+        </p>
+        <p>
+            <strong>Color attribute clash.</strong>
+            The Spectrum's display was 256x192 monochrome pixels overlaid
+            with a 32x24 grid of color attributes &mdash; each
+            <strong>character cell</strong> could pick its own ink and
+            paper from the 8-color palette, but only one ink/paper combo
+            per cell. This produced the infamous "attribute clash" where
+            two sprites overlapping in the same character cell forced
+            their colors to merge. Game programmers turned the limitation
+            into an aesthetic: classics like <em>Knight Lore</em>,
+            <em>Manic Miner</em>, and <em>Jet Set Willy</em> have an
+            unmistakable look that comes directly from working within (or
+            against) the attribute grid.
+        </p>
+        <p>
+            <strong>The block graphics range.</strong>
+            Codes <strong>0x80-0x8F</strong> are 16 block-graphics glyphs
+            covering every combination of a 2x2 quadrant grid. They
+            doubled the effective screen resolution to 512x384 "pixels"
+            for character-mode rendering &mdash; useful for charts, BASIC
+            graphics, and simple games that didn't need pixel-exact
+            sprites. The 21 User Defined Graphics slots (0x90-0xA4) let
+            programs install their own 8x8 glyphs into BASIC's character
+            set, which is how nearly every Spectrum game drew its sprites.
+        </p>
+        <p>
+            <strong>Sales and the British games industry.</strong>
+            The Spectrum sold roughly <strong>5 million units</strong>
+            worldwide, the bulk of them in the UK, where it dominated the
+            home-computer market through the mid-1980s. It birthed an
+            entire British games industry: Ultimate Play the Game (later
+            Rare), Ocean Software, Imagine, Codemasters, and dozens of
+            bedroom developers shipped games on cassette tapes that
+            loaded for five minutes from screeching audio over the
+            machine's EAR jack. Many of those developers are still active
+            in the modern industry. Sinclair sold the Spectrum business
+            to Amstrad in 1986, which kept producing it (the Spectrum
+            +2, +3) until 1992.
+        </p>
+        <p>
+            <strong>Modern revival.</strong>
+            The Spectrum has one of the most active retro communities of
+            any vintage platform. Modern hardware reproductions (the
+            ZX Spectrum Next, an FPGA-based reimplementation funded on
+            Kickstarter in 2017, and the ZX-Uno) sell in the tens of
+            thousands. The annual Crash Live and Spectrum demoscene
+            events still draw crowds, and new commercial games for the
+            original Spectrum still ship on cassette every year. The
+            machine's character set, including its block graphics and
+            keyword tokens, is still natively supported by emulators
+            like Fuse, ZEsarUX, and Spectaculator.
+        </p>
+    </div>
+</details>
+
+<h2 id="trs80-table">Appendix G: TRS-80 Character Set</h2>
+
+<p>The Tandy/Radio Shack TRS-80 (1977) used a custom character set. The lower range (0x00-0x7F) follows ASCII for standard characters. The upper range (0x80-0xFF) contains the TRS-80's distinctive semigraphics characters — block graphics formed by dividing each character cell into a 2&times;3 grid of six independently controllable pixels.</p>
+
+<h3>Control Characters (0x00-0x1F)</h3>
+<p>The TRS-80 uses standard ASCII control characters. Most are not printable. Key codes relevant to terminal operation:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Name</th><th>Description</th></tr>
+    <tr><td>0x08</td><td>8</td><td>BS</td><td>Backspace (cursor left)</td></tr>
+    <tr><td>0x09</td><td>9</td><td>HT</td><td>Horizontal Tab</td></tr>
+    <tr><td>0x0A</td><td>10</td><td>LF</td><td>Line Feed (cursor down)</td></tr>
+    <tr><td>0x0D</td><td>13</td><td>CR</td><td>Carriage Return (Enter)</td></tr>
+    <tr><td>0x0E</td><td>14</td><td>SO</td><td>Cursor On (Model III/4)</td></tr>
+    <tr><td>0x0F</td><td>15</td><td>SI</td><td>Cursor Off (Model III/4)</td></tr>
+    <tr><td>0x17</td><td>23</td><td>ETB</td><td>Cursor right (Model III/4)</td></tr>
+    <tr><td>0x18</td><td>24</td><td>CAN</td><td>Backspace and erase</td></tr>
+    <tr><td>0x1A</td><td>26</td><td>SUB</td><td>Cursor up (Model III/4)</td></tr>
+    <tr><td>0x1B</td><td>27</td><td>ESC</td><td>Escape (Model III/4 only)</td></tr>
+    <tr><td>0x1C</td><td>28</td><td>FS</td><td>Home cursor</td></tr>
+    <tr><td>0x1D</td><td>29</td><td>GS</td><td>Cursor right</td></tr>
+    <tr><td>0x1E</td><td>30</td><td>RS</td><td>Cursor down</td></tr>
+    <tr><td>0x1F</td><td>31</td><td>US</td><td>Clear screen and home (Model I: home only)</td></tr>
+</table>
+</div>
+
+<h3>Printable Characters (0x20-0x5F)</h3>
+<p>Standard ASCII digits, punctuation, and uppercase letters. The TRS-80 Model I did not have lowercase letters — positions 0x60-0x7F were unused or mapped to additional graphics. The Model III and Model 4 added lowercase in this range.</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th></tr>
+    <tr><td>0x20</td><td>32</td><td>(space)</td><td>0x30</td><td>48</td><td>0</td><td>0x40</td><td>64</td><td>@</td></tr>
+    <tr><td>0x21</td><td>33</td><td>!</td><td>0x31</td><td>49</td><td>1</td><td>0x41</td><td>65</td><td>A</td></tr>
+    <tr><td>0x22</td><td>34</td><td>"</td><td>0x32</td><td>50</td><td>2</td><td>0x42</td><td>66</td><td>B</td></tr>
+    <tr><td>0x23</td><td>35</td><td>#</td><td>0x33</td><td>51</td><td>3</td><td>0x43</td><td>67</td><td>C</td></tr>
+    <tr><td>0x24</td><td>36</td><td>$</td><td>0x34</td><td>52</td><td>4</td><td>0x44</td><td>68</td><td>D</td></tr>
+    <tr><td>0x25</td><td>37</td><td>%</td><td>0x35</td><td>53</td><td>5</td><td>0x45</td><td>69</td><td>E</td></tr>
+    <tr><td>0x26</td><td>38</td><td>&amp;</td><td>0x36</td><td>54</td><td>6</td><td>0x46</td><td>70</td><td>F</td></tr>
+    <tr><td>0x27</td><td>39</td><td>'</td><td>0x37</td><td>55</td><td>7</td><td>0x47</td><td>71</td><td>G</td></tr>
+    <tr><td>0x28</td><td>40</td><td>(</td><td>0x38</td><td>56</td><td>8</td><td>0x48</td><td>72</td><td>H</td></tr>
+    <tr><td>0x29</td><td>41</td><td>)</td><td>0x39</td><td>57</td><td>9</td><td>0x49</td><td>73</td><td>I</td></tr>
+    <tr><td>0x2A</td><td>42</td><td>*</td><td>0x3A</td><td>58</td><td>:</td><td>0x4A</td><td>74</td><td>J</td></tr>
+    <tr><td>0x2B</td><td>43</td><td>+</td><td>0x3B</td><td>59</td><td>;</td><td>0x4B</td><td>75</td><td>K</td></tr>
+    <tr><td>0x2C</td><td>44</td><td>,</td><td>0x3C</td><td>60</td><td>&lt;</td><td>0x4C</td><td>76</td><td>L</td></tr>
+    <tr><td>0x2D</td><td>45</td><td>-</td><td>0x3D</td><td>61</td><td>=</td><td>0x4D</td><td>77</td><td>M</td></tr>
+    <tr><td>0x2E</td><td>46</td><td>.</td><td>0x3E</td><td>62</td><td>&gt;</td><td>0x4E</td><td>78</td><td>N</td></tr>
+    <tr><td>0x2F</td><td>47</td><td>/</td><td>0x3F</td><td>63</td><td>?</td><td>0x4F</td><td>79</td><td>O</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x50</td><td>80</td><td>P</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x51</td><td>81</td><td>Q</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x52</td><td>82</td><td>R</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x53</td><td>83</td><td>S</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x54</td><td>84</td><td>T</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x55</td><td>85</td><td>U</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x56</td><td>86</td><td>V</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x57</td><td>87</td><td>W</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x58</td><td>88</td><td>X</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x59</td><td>89</td><td>Y</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5A</td><td>90</td><td>Z</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5B</td><td>91</td><td>[</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5C</td><td>92</td><td>\</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5D</td><td>93</td><td>]</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5E</td><td>94</td><td>^</td></tr>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td><td>0x5F</td><td>95</td><td>_</td></tr>
+</table>
+</div>
+
+<h3>Lowercase Characters (0x60-0x7F) &mdash; Model III/4 Only</h3>
+<p>The TRS-80 Model I lacked lowercase letters entirely. The Model III (1980) and Model 4 (1983) added lowercase in the 0x60-0x7F range, matching standard ASCII for 0x60-0x7E. Position 0x7F is non-printing and is treated as DEL in software but displays as a small block glyph (often used as a cursor) on the Model III/4 character generator ROMs.</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th><th>Hex</th><th>Dec</th><th>Char</th></tr>
+    <tr><td>0x60</td><td>96</td><td>`</td><td>0x6B</td><td>107</td><td>k</td><td>0x76</td><td>118</td><td>v</td></tr>
+    <tr><td>0x61</td><td>97</td><td>a</td><td>0x6C</td><td>108</td><td>l</td><td>0x77</td><td>119</td><td>w</td></tr>
+    <tr><td>0x62</td><td>98</td><td>b</td><td>0x6D</td><td>109</td><td>m</td><td>0x78</td><td>120</td><td>x</td></tr>
+    <tr><td>0x63</td><td>99</td><td>c</td><td>0x6E</td><td>110</td><td>n</td><td>0x79</td><td>121</td><td>y</td></tr>
+    <tr><td>0x64</td><td>100</td><td>d</td><td>0x6F</td><td>111</td><td>o</td><td>0x7A</td><td>122</td><td>z</td></tr>
+    <tr><td>0x65</td><td>101</td><td>e</td><td>0x70</td><td>112</td><td>p</td><td>0x7B</td><td>123</td><td>{</td></tr>
+    <tr><td>0x66</td><td>102</td><td>f</td><td>0x71</td><td>113</td><td>q</td><td>0x7C</td><td>124</td><td>|</td></tr>
+    <tr><td>0x67</td><td>103</td><td>g</td><td>0x72</td><td>114</td><td>r</td><td>0x7D</td><td>125</td><td>}</td></tr>
+    <tr><td>0x68</td><td>104</td><td>h</td><td>0x73</td><td>115</td><td>s</td><td>0x7E</td><td>126</td><td>~</td></tr>
+    <tr><td>0x69</td><td>105</td><td>i</td><td>0x74</td><td>116</td><td>t</td><td>0x7F</td><td>127</td><td>DEL / cursor block</td></tr>
+    <tr><td>0x6A</td><td>106</td><td>j</td><td>0x75</td><td>117</td><td>u</td><td></td><td></td><td></td></tr>
+</table>
+</div>
+
+<h3>Semigraphics Characters (0x80-0xBF)</h3>
+<p>The TRS-80's most distinctive feature: 64 block graphics characters formed by dividing each character cell into a 2&times;3 grid of six pixels. Each pixel can be on (white) or off (black), giving 2<sup>6</sup> = 64 possible patterns. The pixel positions are numbered as bits:</p>
+
+<div class="table-wrap">
+<table>
+    <tr><th colspan="2">Pixel Layout</th><th>Bit Weight</th></tr>
+    <tr><td>Top-left</td><td>Top-right</td><td>1, 2</td></tr>
+    <tr><td>Middle-left</td><td>Middle-right</td><td>4, 8</td></tr>
+    <tr><td>Bottom-left</td><td>Bottom-right</td><td>16, 32</td></tr>
+</table>
+</div>
+
+<p>The character code is calculated as: <strong>0x80 + (sum of active pixel bit weights)</strong></p>
+<p>For example: top-left (1) + middle-right (8) + bottom-left (16) = 0x80 + 25 = 0x99</p>
+
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Active Pixels</th><th>Description</th></tr>
+    <tr><td>0x80</td><td>128</td><td>(none)</td><td>Empty block (all pixels off)</td></tr>
+    <tr><td>0x81</td><td>129</td><td>1</td><td>Top-left only</td></tr>
+    <tr><td>0x82</td><td>130</td><td>2</td><td>Top-right only</td></tr>
+    <tr><td>0x83</td><td>131</td><td>1+2</td><td>Top row</td></tr>
+    <tr><td>0x84</td><td>132</td><td>4</td><td>Middle-left only</td></tr>
+    <tr><td>0x85</td><td>133</td><td>1+4</td><td>Left column top two</td></tr>
+    <tr><td>0x88</td><td>136</td><td>8</td><td>Middle-right only</td></tr>
+    <tr><td>0x8C</td><td>140</td><td>4+8</td><td>Middle row</td></tr>
+    <tr><td>0x90</td><td>144</td><td>16</td><td>Bottom-left only</td></tr>
+    <tr><td>0x93</td><td>147</td><td>1+2+16</td><td>Top row + bottom-left</td></tr>
+    <tr><td>0xA0</td><td>160</td><td>32</td><td>Bottom-right only</td></tr>
+    <tr><td>0xA1</td><td>161</td><td>1+32</td><td>Top-left + bottom-right (diagonal)</td></tr>
+    <tr><td>0xB0</td><td>176</td><td>16+32</td><td>Bottom row</td></tr>
+    <tr><td>0xB3</td><td>179</td><td>1+2+16+32</td><td>Top + bottom rows</td></tr>
+    <tr><td>0xBC</td><td>188</td><td>4+8+16+32</td><td>Middle + bottom rows</td></tr>
+    <tr><td>0xBF</td><td>191</td><td>1+2+4+8+16+32</td><td>Full block (all pixels on)</td></tr>
+</table>
+</div>
+
+<h3>Common Semigraphics Patterns</h3>
+<p>A quick reference for frequently used block patterns in TRS-80 programs:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Pattern</th><th>Hex</th><th>Bits</th><th>Use</th></tr>
+    <tr><td>Full block</td><td>0xBF</td><td>63</td><td>Solid fill, walls</td></tr>
+    <tr><td>Left half</td><td>0x95</td><td>1+4+16</td><td>Vertical dividers</td></tr>
+    <tr><td>Right half</td><td>0xAA</td><td>2+8+32</td><td>Vertical dividers</td></tr>
+    <tr><td>Top half</td><td>0x8F</td><td>1+2+4+8</td><td>Horizontal dividers</td></tr>
+    <tr><td>Bottom half</td><td>0xB0</td><td>16+32</td><td>Horizontal dividers, underlines</td></tr>
+    <tr><td>Checkerboard A</td><td>0x99</td><td>1+8+16</td><td>Shading, dithering</td></tr>
+    <tr><td>Checkerboard B</td><td>0xA6</td><td>2+4+32</td><td>Shading, dithering</td></tr>
+    <tr><td>Top row</td><td>0x83</td><td>1+2</td><td>Thin top border</td></tr>
+    <tr><td>Middle row</td><td>0x8C</td><td>4+8</td><td>Thin middle line</td></tr>
+    <tr><td>Bottom row</td><td>0xB0</td><td>16+32</td><td>Thin bottom border</td></tr>
+</table>
+</div>
+
+<h3>Extended Characters (0xC0-0xFF) &mdash; Model III/4</h3>
+<p>On the TRS-80 Model I, codes 0xC0-0xFF were mirrors of the semigraphics range (0x80-0xBF). On the Model III and Model 4, this range was repurposed for additional characters including international and special symbols. A selection of commonly used codes:</p>
+<div class="table-wrap">
+<table>
+    <tr><th>Hex</th><th>Dec</th><th>Char</th><th>Description</th></tr>
+    <tr><td>0xC0</td><td>192</td><td>&#x2660;</td><td>Spade</td></tr>
+    <tr><td>0xC1</td><td>193</td><td>&#x2665;</td><td>Heart</td></tr>
+    <tr><td>0xC2</td><td>194</td><td>&#x2666;</td><td>Diamond</td></tr>
+    <tr><td>0xC3</td><td>195</td><td>&#x2663;</td><td>Club</td></tr>
+    <tr><td>0xC4</td><td>196</td><td>&#x2191;</td><td>Up Arrow</td></tr>
+    <tr><td>0xC5</td><td>197</td><td>&#x2193;</td><td>Down Arrow</td></tr>
+    <tr><td>0xC6</td><td>198</td><td>&#x2190;</td><td>Left Arrow</td></tr>
+    <tr><td>0xC7</td><td>199</td><td>&#x2192;</td><td>Right Arrow</td></tr>
+    <tr><td>0xCB</td><td>203</td><td>&pound;</td><td>Pound Sterling</td></tr>
+    <tr><td>0xCC</td><td>204</td><td>&#x00A5;</td><td>Yen</td></tr>
+    <tr><td>0xCF</td><td>207</td><td>&#x00A9;</td><td>Copyright</td></tr>
+    <tr><td>0xD0</td><td>208</td><td>&#x00AE;</td><td>Registered</td></tr>
+    <tr><td>0xD3</td><td>211</td><td>&#x00BC;</td><td>One Quarter</td></tr>
+    <tr><td>0xD4</td><td>212</td><td>&#x00BD;</td><td>One Half</td></tr>
+    <tr><td>0xDB</td><td>219</td><td>&#x2500;</td><td>Horizontal Line</td></tr>
+    <tr><td>0xDC</td><td>220</td><td>&#x2502;</td><td>Vertical Line</td></tr>
+    <tr><td>0xDD</td><td>221</td><td>&#x250C;</td><td>Top-Left Corner</td></tr>
+    <tr><td>0xDE</td><td>222</td><td>&#x2510;</td><td>Top-Right Corner</td></tr>
+    <tr><td>0xDF</td><td>223</td><td>&#x2514;</td><td>Bottom-Left Corner</td></tr>
+    <tr><td>0xE0</td><td>224</td><td>&#x2518;</td><td>Bottom-Right Corner</td></tr>
+    <tr><td>0xE1</td><td>225</td><td>&#x253C;</td><td>Cross (intersection)</td></tr>
+    <tr><td>0xE2</td><td>226</td><td>&#x251C;</td><td>Left T-junction</td></tr>
+    <tr><td>0xE3</td><td>227</td><td>&#x2524;</td><td>Right T-junction</td></tr>
+    <tr><td>0xE4</td><td>228</td><td>&#x252C;</td><td>Top T-junction</td></tr>
+    <tr><td>0xE5</td><td>229</td><td>&#x2534;</td><td>Bottom T-junction</td></tr>
+</table>
+</div>
+
+<details class="history">
+    <summary>History</summary>
+    <div class="history-body">
+        <p>
+            <strong>August 1977 &mdash; Tandy/Radio Shack.</strong>
+            The TRS-80 Model I shipped on August 3, 1977 &mdash; about
+            two months after the Apple II began shipping and roughly two
+            months <em>before</em> the Commodore PET 2001 reached
+            customers (the PET had been announced in January 1977 but
+            didn't ship in volume until October). Tandy Corporation's
+            electronics chain <strong>Radio Shack</strong> already had
+            over 3,000 retail stores in the U.S., which gave the Model I
+            instant distribution that Apple and Commodore couldn't match.
+            It was designed by <strong>Steve Leininger</strong> in Fort
+            Worth, Texas, on the staff of Don French (the Radio Shack
+            buyer who championed the project). The "TRS" stood for Tandy
+            Radio Shack; "80" referenced the Z80 CPU.
+        </p>
+        <p>
+            <strong>The "1977 Trinity."</strong>
+            <em>Byte</em> magazine retroactively named the Apple II,
+            TRS-80 Model I, and Commodore PET the "1977 Trinity" &mdash;
+            the three machines that turned the personal computer from a
+            hobbyist kit (Altair 8800, IMSAI 8080, KIM-1) into a
+            consumer product you could plug in and use. Of the three,
+            the TRS-80 was by far the cheapest at $599 (Model I, 4K) and
+            had the most retail presence. From 1977 to 1981 it
+            outsold both rivals; estimates put the Model I and Model III
+            combined at roughly 250,000 units.
+        </p>
+        <p>
+            <strong>The 2x3 semigraphics trick.</strong>
+            The TRS-80's video hardware had no dedicated graphics chip
+            and no bitmap mode &mdash; just a character-cell display.
+            Leininger's solution was elegant: codes 0x80-0xBF in the
+            character set are <strong>64 block-graphics glyphs</strong>
+            covering every possible combination of six pixels arranged
+            in a 2x3 grid inside a single character cell. With a
+            64-column by 16-row text display, that gave an effective
+            <strong>128x48 "graphics" resolution</strong> for free,
+            using only the text-mode hardware. Every TRS-80 game, every
+            chart, every menu border was drawn this way. The technique
+            was so effective that the later CoCo (Color Computer)
+            inherited a similar scheme.
+        </p>
+        <p>
+            <strong>The "Trash-80" reputation.</strong>
+            Competitors and the computing press derisively nicknamed it
+            the "Trash-80" &mdash; partly because of the cheap-feeling
+            silver-and-black plastic case, partly because of the famous
+            silver-mylar keyboard reliability problems on the Model I,
+            and partly because Tandy's tape-loading was notoriously
+            unreliable (the cassette interface clipped at strange audio
+            levels). Despite that, it was solid-enough that an enormous
+            third-party market sprang up to fix or upgrade it: Percom
+            disk drives, Lobo controllers, lowercase-character
+            modification kits, and a thriving software market that
+            survived into the late 1980s.
+        </p>
+        <p>
+            <strong>Model I &rarr; III &rarr; 4.</strong>
+            The Model I was discontinued in 1981 because it failed FCC
+            radio-frequency emission rules &mdash; its bare-PCB-on-desk
+            design leaked Z80 clock harmonics across the AM radio band.
+            The <strong>Model III</strong> (1980) was a redesign in a
+            single integrated case that passed FCC, added lowercase
+            (the original Model I had no lowercase letters; positions
+            0x60-0x7F were unused or duplicated graphics), and bumped
+            RAM. The <strong>Model 4</strong> (1983) added an 80-column
+            mode, more RAM, and CP/M compatibility &mdash; a tacit
+            admission that the IBM PC had taken over the business
+            market. The 4P (1983) was a "luggable" portable variant.
+        </p>
+        <p>
+            <strong>Color Computer (CoCo) and after.</strong>
+            Tandy's <strong>TRS-80 Color Computer</strong> (1980) shared
+            the TRS-80 brand but was an entirely different machine
+            architecturally &mdash; a Motorola 6809 with a Motorola
+            graphics chip, no relation to the Model I/III/4 line. The
+            Z80-based TRS-80 Model 4 was the last machine in the
+            original lineage; Tandy quietly dropped the Z80 line in
+            1991 and focused on IBM-compatible PCs (the Tandy 1000
+            family). The Model 4 character set described in this
+            appendix is the most complete; the Model I was a strict
+            subset (no lowercase, semigraphics-only upper range).
+        </p>
+        <p>
+            <strong>Today.</strong>
+            The TRS-80 retro community is smaller than the C64 or
+            Spectrum scenes but very active. Emulators (TRS80gp, MAME,
+            sdltrs) cover all four models faithfully, and projects like
+            the <strong>Model 1 reproduction PCB</strong> and
+            <strong>FreHD</strong> (a CompactFlash-based hard-disk
+            replacement) keep real hardware running. The 1977
+            Computer History Museum exhibit in Mountain View
+            permanently displays a working Model I as part of its
+            personal-computer-revolution gallery.
+        </p>
+    </div>
+</details>
+
+            <hr>
+            <p style="text-align: center;"><a href="index.html">&larr; Back to User Manual</a></p>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.5.4 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later
+        </footer>
+
+    </div>
+</body>
+</html>

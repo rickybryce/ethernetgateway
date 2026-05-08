@@ -548,6 +548,7 @@
             <a href="#gui-console">GUI</a>
             <a href="#security">Security</a>
             <a href="#troubleshooting">Help</a>
+            <a href="#references">References</a>
         </nav>
 
         <div class="body-content">
@@ -1368,7 +1369,7 @@ ssh_gateway_auth = password</span></code></pre>
                     <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> main-menu option so a telnet/SSH user can talk directly to whatever's connected to the wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
                 </ul>
                 <p class="dim-text">
-                    Switch modes from <strong>Configuration &gt; Modem/Console</strong> (press <strong>M</strong> to toggle), from the GUI's <strong>Console Mode</strong> frame (dropdown beside the Enabled checkbox), or by setting <code>serial_mode = modem</code> or <code>serial_mode = console</code> in <code>egateway.conf</code>.
+                    Switch modes from the <strong>Configuration</strong> menu (press <strong>T</strong> for <em>Toggle Modem/Console mode</em>), from the GUI's <strong>Console Mode</strong> frame (dropdown beside the Enabled checkbox), or by setting <code>serial_mode = modem</code> or <code>serial_mode = console</code> in <code>egateway.conf</code>. All three paths hot-switch the running serial thread within one manager-poll interval &mdash; no restart required. The <strong>T</strong> menu entry is hidden from sessions connected over the modem itself, since switching to console mode would tear down the caller's own connection before they could acknowledge.
                 </p>
 
                 <div class="cat" id="at-commands">AT Command Reference</div>
@@ -1459,8 +1460,8 @@ ssh_gateway_auth = password</span></code></pre>
                     <h3>Switching to Console Mode</h3>
                     <ol>
                         <li><strong>GUI:</strong> in the <strong>Console Mode</strong> frame, change the dropdown beside the <strong>Enabled</strong> checkbox from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change saves immediately and reconfigures the running serial thread.</li>
-                        <li><strong>Telnet/SSH menu:</strong> <strong>Configuration &gt; Modem/Console</strong>, then press <strong>M</strong> to toggle. The header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features).</li>
-                        <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code> and restart.</li>
+                        <li><strong>Telnet/SSH menu:</strong> from the <strong>Configuration</strong> menu, press <strong>T</strong> (<em>Toggle Modem/Console mode</em>). The Modem/Console submenu's header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping to console mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
+                        <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
                     </ol>
 
                     <h3>Using the Bridge</h3>
@@ -1669,6 +1670,42 @@ ssh_gateway_auth = password</span></code></pre>
                     to see detailed XMODEM protocol diagnostics. Useful for debugging
                     file transfer issues.
                 </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- REFERENCES                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Companion documents that go deeper than this manual.</p>
+
+                <div class="compat-grid" style="grid-template-columns: 1fr 1fr;">
+                    <div class="compat-card">
+                        <h3><a href="kermit.html">Kermit Protocol Reference</a></h3>
+                        <p>
+                            A protocol-level walkthrough of the Kermit file transfer
+                            implementation: packet format, the 13 packet types, sliding
+                            windows, the SI capability negotiation, attribute (A) packets,
+                            and the legacy fallbacks for vintage receivers like AnzioWin.
+                            Use this when something on the wire isn't behaving the way
+                            you expect, or when you need to map an observed packet back
+                            to the Forsberg/da Cruz spec.
+                        </p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Appendices</a></h3>
+                        <p>
+                            Reference tables for every character set the gateway speaks
+                            to: ASCII (incl. control codes), ANSI escape sequences and
+                            SGR colors, PETSCII (Commodore 64), ATASCII (Atari 8-bit),
+                            Baudot/ITA2, ZX Spectrum, and TRS-80. Useful when decoding
+                            raw byte streams during debugging or when porting the
+                            gateway to talk to a new vintage terminal.
+                        </p>
+                    </div>
+                </div>
             </div>
 
             <hr class="divider">
