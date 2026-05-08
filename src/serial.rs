@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
 use crate::config;
+use crate::config::{SerialPortConfig, SerialPortId, SERIAL_PORT_IDS};
 use crate::logger::glog;
 
 // ─── Constants ─────────────────────────────────────────────
@@ -96,13 +97,21 @@ const DEFAULT_FLOW_MODE: u8 = 0;
 /// &C1 = DCD tracks carrier state.  Matches Hayes default.
 const DEFAULT_DCD_MODE: u8 = 1;
 
-/// Flag to signal the serial thread to restart with new config.
-static SERIAL_RESTART: AtomicBool = AtomicBool::new(false);
+/// Per-port restart flags.  Indexed by `SerialPortId::index()`.  The
+/// outer manager thread for each port watches its own slot — set by
+/// `restart_serial(id)` when settings for that port change.  The two
+/// flags are independent so reconfiguring Port A never disturbs an
+/// active Port B session.
+static SERIAL_RESTART: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// Slot for a ring emulator request from telnet/SSH.  The sender is used to
-/// report progress (0 = ring, 1 = answered) back to the requesting session.
-static RING_REQUEST: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<u8>>> =
-    std::sync::Mutex::new(None);
+/// Per-port ring-request slots.  Each port runs its own modem state,
+/// so a telnet user picking "Ring Emulator" must specify which port to
+/// ring.  Cleared by the serial thread when it picks up the request,
+/// or by `cancel_ring_request(id)` from the originating session.
+static RING_REQUEST: [std::sync::Mutex<Option<tokio::sync::mpsc::Sender<u8>>>; 2] = [
+    std::sync::Mutex::new(None),
+    std::sync::Mutex::new(None),
+];
 
 /// Ring interval: 2 seconds on, 4 seconds off = 6 seconds per cycle (US standard).
 const RING_INTERVAL: Duration = Duration::from_secs(6);
@@ -113,8 +122,14 @@ const RING_INTERVAL: Duration = Duration::from_secs(6);
 /// opened.  Set by `request_console_bridge`, picked up by the
 /// console-mode loop in the serial manager thread.
 type ConsoleReply = tokio::sync::oneshot::Sender<Result<tokio::io::DuplexStream, String>>;
-static CONSOLE_REQUEST: std::sync::Mutex<Option<ConsoleReply>> =
-    std::sync::Mutex::new(None);
+
+/// Per-port console-bridge request slots.  Each console-mode manager
+/// owns one slot; a Serial Gateway request from the telnet menu lands
+/// here and the manager picks it up on its next poll.
+static CONSOLE_REQUEST: [std::sync::Mutex<Option<ConsoleReply>>; 2] = [
+    std::sync::Mutex::new(None),
+    std::sync::Mutex::new(None),
+];
 
 /// Buffer size for the duplex pair connecting a telnet session to the
 /// serial port in console mode.  16 KiB is enough headroom that the
@@ -123,13 +138,13 @@ static CONSOLE_REQUEST: std::sync::Mutex<Option<ConsoleReply>> =
 /// amount of memory.
 const CONSOLE_DUPLEX_BUFSIZE: usize = 16 * 1024;
 
-/// Set while a console-mode bridge is actively pumping bytes between
-/// the serial port and a session.  Used by `request_console_bridge` to
-/// reject a second concurrent request immediately rather than queue it
-/// in `CONSOLE_REQUEST` (where it would block on the manager loop —
-/// which is itself blocked inside `run_console_bridge` — until the
-/// first session disconnects).
-static BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Per-port active-bridge flag.  `request_console_bridge(id)` rejects
+/// immediately if the slot for `id` is already in flight, rather than
+/// queuing in `CONSOLE_REQUEST[id]` (which would block until the
+/// current bridge ends, with no way for the user to know they're
+/// stuck).  Independent per port — Port A and Port B can each host
+/// their own concurrent bridge.
+static BRIDGE_ACTIVE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 // ─── Modem state ───────────────────────────────────────────
 
@@ -158,6 +173,12 @@ enum OnlineExit {
 }
 
 struct ModemState {
+    /// Which physical port this state machine drives.  Used by the
+    /// AT&W persistence path to write `serial_a_*` vs `serial_b_*`
+    /// keys, by ATZ to read the right slice on reset, and by every
+    /// `SERIAL_RESTART` / `BRIDGE_ACTIVE` lookup so a restart on one
+    /// port can't preempt the other.
+    port_id: SerialPortId,
     port: Box<dyn serialport::SerialPort>,
     mode: ModemMode,
     echo: bool,
@@ -203,27 +224,45 @@ struct ModemState {
 
 // ─── Public API ────────────────────────────────────────────
 
-/// Start the serial modem manager on a dedicated thread.
+/// Start the serial modem managers — one dedicated thread per port.
 ///
-/// Returns immediately.  The manager thread loops: if serial is enabled and
-/// configured it opens the port and runs the modem; when `restart_serial()`
-/// is called it re-reads config and re-opens the port (or stops if disabled).
+/// Returns immediately.  Each thread loops: if its port is enabled and
+/// configured it opens the wire and runs the modem (or console-bridge);
+/// when `restart_serial(id)` is called it re-reads config and re-opens
+/// the port (or stops if the port has been disabled).  The two threads
+/// are independent — restarts and bridge sessions on one port never
+/// disturb the other.
 pub fn start_serial(shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
     let handle = tokio::runtime::Handle::current();
-    let sd = shutdown;
-    let rs = restart;
 
-    std::thread::Builder::new()
-        .name("serial-modem".into())
-        .spawn(move || {
-            serial_manager(handle, sd, rs);
-        })
-        .expect("Failed to spawn serial modem thread");
+    for id in SERIAL_PORT_IDS {
+        let h = handle.clone();
+        let sd = shutdown.clone();
+        let rs = restart.clone();
+        std::thread::Builder::new()
+            .name(format!("serial-modem-{}", id.label().to_ascii_lowercase()))
+            .spawn(move || {
+                serial_manager(id, h, sd, rs);
+            })
+            .expect("Failed to spawn serial modem thread");
+    }
 }
 
-/// Signal the serial thread to restart with the current config.
-pub fn restart_serial() {
-    SERIAL_RESTART.store(true, Ordering::SeqCst);
+/// Signal one port's manager thread to restart with the current config.
+/// Does not affect the other port — this is what makes "save Port A
+/// settings" leave an in-flight Port B bridge alone.
+pub fn restart_serial(id: SerialPortId) {
+    SERIAL_RESTART[id.index()].store(true, Ordering::SeqCst);
+}
+
+/// Signal both ports' managers to restart.  Used by the GUI's "Save"
+/// button when the operator might have changed either or both ports —
+/// cheaper than diffing config slices and avoids a bug where a saved
+/// change is silently ignored because we restarted the wrong port.
+pub fn restart_all_serial() {
+    for id in SERIAL_PORT_IDS {
+        restart_serial(id);
+    }
 }
 
 /// List available serial ports (cross-platform).  Returns an empty vec on
@@ -235,11 +274,15 @@ pub fn list_serial_ports() -> Vec<String> {
     }
 }
 
-/// Request a ring emulator session.  The sender receives progress events:
-/// `0` for each RING, `1` when the modem answers.  Returns `false` if a
-/// ring request is already pending.
-pub fn request_ring(sender: tokio::sync::mpsc::Sender<u8>) -> bool {
-    let mut slot = RING_REQUEST.lock().unwrap_or_else(|e| e.into_inner());
+/// Request a ring emulator session on `id`.  The sender receives
+/// progress events: `0` for each RING, `1` when the modem answers.
+/// Returns `false` if a ring request is already pending on that port.
+/// (Each port has its own ring slot — Port A and Port B can ring
+/// simultaneously, just not twice on the same port.)
+pub fn request_ring(id: SerialPortId, sender: tokio::sync::mpsc::Sender<u8>) -> bool {
+    let mut slot = RING_REQUEST[id.index()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
         return false;
     }
@@ -247,30 +290,47 @@ pub fn request_ring(sender: tokio::sync::mpsc::Sender<u8>) -> bool {
     true
 }
 
-/// Cancel a pending ring request.  Clears the slot so a new request can
-/// be made.  This is safe to call even if the serial thread has already
-/// taken the request (the slot will already be None).
-pub fn cancel_ring_request() {
-    RING_REQUEST
+/// Cancel a pending ring request on `id`.  Clears the slot so a new
+/// request can be made.  Safe to call even if the serial thread has
+/// already taken the request (the slot will already be None).
+pub fn cancel_ring_request(id: SerialPortId) {
+    RING_REQUEST[id.index()]
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take();
 }
 
-/// Validate that the current config supports a console bridge request.
-/// Pure function — extracted so it can be unit-tested without touching
-/// the global CONFIG singleton.
-fn check_console_bridge_eligible(cfg: &config::Config) -> Result<(), String> {
-    if !cfg.serial_enabled {
-        return Err("Serial is not enabled".to_string());
+/// Validate that the named port's current config supports a console
+/// bridge request.  Pure function — extracted so it can be unit-tested
+/// without touching the global CONFIG singleton.
+pub fn check_console_bridge_eligible(
+    cfg: &config::Config,
+    id: SerialPortId,
+) -> Result<(), String> {
+    let port = cfg.port(id);
+    if !port.enabled {
+        return Err(format!("Port {} is not enabled", id.label()));
     }
-    if cfg.serial_mode != "console" {
-        return Err("Serial port is in modem mode, not console mode".to_string());
+    if port.mode != "console" {
+        return Err(format!(
+            "Port {} is in modem mode, not console mode",
+            id.label()
+        ));
     }
-    if cfg.serial_port.is_empty() {
-        return Err("No serial port configured".to_string());
+    if port.port.is_empty() {
+        return Err(format!("Port {} has no serial device configured", id.label()));
     }
     Ok(())
+}
+
+/// True if any configured port is eligible to host a console bridge.
+/// Used by the telnet main menu to decide whether to display the
+/// `Serial Gateway` entry at all — without this gate the menu would
+/// surface a dead-end choice on a single-port-only deployment.
+pub fn any_port_console_eligible(cfg: &config::Config) -> bool {
+    SERIAL_PORT_IDS
+        .iter()
+        .any(|&id| check_console_bridge_eligible(cfg, id).is_ok())
 }
 
 /// Combined gate for `request_console_bridge`: eligibility first
@@ -279,11 +339,15 @@ fn check_console_bridge_eligible(cfg: &config::Config) -> Result<(), String> {
 /// without needing to manipulate the global config singleton.
 fn check_bridge_request_admissible(
     cfg: &config::Config,
+    id: SerialPortId,
     bridge_active: bool,
 ) -> Result<(), String> {
-    check_console_bridge_eligible(cfg)?;
+    check_console_bridge_eligible(cfg, id)?;
     if bridge_active {
-        return Err("Another session is already using the serial port".to_string());
+        return Err(format!(
+            "Another session is already using Port {}",
+            id.label()
+        ));
     }
     Ok(())
 }
@@ -299,7 +363,10 @@ fn check_bridge_request_admissible(
 ///
 /// The bridge ends — and the port is released — as soon as the duplex
 /// stream returned to the caller is dropped.
-pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String> {
+pub async fn request_console_bridge(
+    id: SerialPortId,
+) -> Result<tokio::io::DuplexStream, String> {
+    let idx = id.index();
     // Fast-path gate — eligibility errors win first so a misconfigured
     // port produces a specific message; the bridge-active check would
     // otherwise mask it.  Without BRIDGE_ACTIVE the request would
@@ -308,36 +375,43 @@ pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String>
     // user would have no way to know whether they're queued or stuck.
     check_bridge_request_admissible(
         &config::get_config(),
-        BRIDGE_ACTIVE.load(Ordering::SeqCst),
+        id,
+        BRIDGE_ACTIVE[idx].load(Ordering::SeqCst),
     )?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
-        let mut slot = CONSOLE_REQUEST
+        let mut slot = CONSOLE_REQUEST[idx]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Re-check eligibility under the slot lock to close the
         // TOCTOU window between the fast-path check and the slot
-        // insert.  Without this, an operator who flipped serial_mode
-        // (or disabled serial, or cleared the port path) and called
-        // restart_serial() between those two points could land a
+        // insert.  Without this, an operator who flipped mode (or
+        // disabled the port, or cleared the device path) and called
+        // restart_serial(id) between those two points could land a
         // request in the slot AFTER console_manager_tick had already
         // drained on SERIAL_RESTART.  The next outer loop iteration
         // would see modem mode and run serial_thread(), which never
         // polls CONSOLE_REQUEST — the request would sit stuck until
         // shutdown, blocking every subsequent bridge attempt.
-        check_console_bridge_eligible(&config::get_config())?;
+        check_console_bridge_eligible(&config::get_config(), id)?;
         // Re-check BRIDGE_ACTIVE under the slot lock.
         // `claim_console_request` sets it under the same lock, so a
         // manager that has just claimed the previous request without
         // having returned to the BRIDGE_ACTIVE.load above is caught
         // here — closes the race window between claim and the
         // manager's run_console_bridge call.
-        if BRIDGE_ACTIVE.load(Ordering::SeqCst) {
-            return Err("Another session is already using the serial port".to_string());
+        if BRIDGE_ACTIVE[idx].load(Ordering::SeqCst) {
+            return Err(format!(
+                "Another session is already using Port {}",
+                id.label()
+            ));
         }
         if slot.is_some() {
-            return Err("Another session is already using the serial port".to_string());
+            return Err(format!(
+                "Another session is already using Port {}",
+                id.label()
+            ));
         }
         *slot = Some(tx);
     }
@@ -349,7 +423,7 @@ pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String>
     // manager has taken our sender — at that point the slot is
     // already empty and the take in the drop would be a no-op anyway,
     // but disarming makes the intent explicit.
-    let mut slot_guard = ConsoleSlotGuard { armed: true };
+    let mut slot_guard = ConsoleSlotGuard { id, armed: true };
 
     // The serial-manager loop polls CONSOLE_REQUEST on its idle tick;
     // it picks up the slot, opens the port, and replies on the oneshot.
@@ -376,13 +450,14 @@ pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String>
 /// legitimate retry attempts in that window to falsely report
 /// "Another session is already using…".
 struct ConsoleSlotGuard {
+    id: SerialPortId,
     armed: bool,
 }
 
 impl Drop for ConsoleSlotGuard {
     fn drop(&mut self) {
         if self.armed {
-            CONSOLE_REQUEST
+            CONSOLE_REQUEST[self.id.index()]
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
@@ -394,8 +469,8 @@ impl Drop for ConsoleSlotGuard {
 /// shutdown drainer (which intentionally does NOT activate the
 /// bridge) and by tests that inspect slot state.  The serial-manager
 /// loop's normal path goes through `claim_console_request` instead.
-fn take_console_request() -> Option<ConsoleReply> {
-    CONSOLE_REQUEST
+fn take_console_request(id: SerialPortId) -> Option<ConsoleReply> {
+    CONSOLE_REQUEST[id.index()]
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
@@ -407,13 +482,14 @@ fn take_console_request() -> Option<ConsoleReply> {
 /// `BRIDGE_ACTIVE` check between the manager's take and a separate
 /// store.  The caller is responsible for clearing `BRIDGE_ACTIVE`
 /// once the bridge is over (see `BridgeActiveGuard`).
-fn claim_console_request() -> Option<ConsoleReply> {
-    let mut slot = CONSOLE_REQUEST
+fn claim_console_request(id: SerialPortId) -> Option<ConsoleReply> {
+    let idx = id.index();
+    let mut slot = CONSOLE_REQUEST[idx]
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let result = slot.take();
     if result.is_some() {
-        BRIDGE_ACTIVE.store(true, Ordering::SeqCst);
+        BRIDGE_ACTIVE[idx].store(true, Ordering::SeqCst);
     }
     result
 }
@@ -422,33 +498,44 @@ fn claim_console_request() -> Option<ConsoleReply> {
 /// on every exit path (port-open failure, reply send failure, normal
 /// bridge end, and any future panic-unwind through here).  Pairs with
 /// `claim_console_request` which sets the flag.
-struct BridgeActiveGuard;
+struct BridgeActiveGuard {
+    id: SerialPortId,
+}
 
 impl Drop for BridgeActiveGuard {
     fn drop(&mut self) {
-        BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
+        BRIDGE_ACTIVE[self.id.index()].store(false, Ordering::SeqCst);
     }
 }
 
 // ─── Serial manager ────────────────────────────────────────
 
-/// Manager loop: starts/stops the serial modem when config changes.
-fn serial_manager(handle: tokio::runtime::Handle, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
+/// Manager loop for one port: starts/stops its modem or console
+/// bridge as the port's config changes.  Two of these run, one per
+/// port; their state is fully independent.
+fn serial_manager(
+    id: SerialPortId,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+) {
+    let idx = id.index();
     loop {
-        SERIAL_RESTART.store(false, Ordering::SeqCst);
+        SERIAL_RESTART[idx].store(false, Ordering::SeqCst);
         let cfg = config::get_config();
-        if cfg.serial_enabled && !cfg.serial_port.is_empty() {
-            if cfg.serial_mode == "console" {
-                console_manager_tick(cfg, handle.clone(), shutdown.clone());
+        let port = cfg.port(id).clone();
+        if port.enabled && !port.port.is_empty() {
+            if port.mode == "console" {
+                console_manager_tick(id, port, handle.clone(), shutdown.clone());
             } else {
-                serial_thread(cfg, handle.clone(), shutdown.clone(), restart.clone());
+                serial_thread(id, port, handle.clone(), shutdown.clone(), restart.clone());
             }
         }
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         // Wait for a restart signal or shutdown
-        while !SERIAL_RESTART.load(Ordering::SeqCst) && !shutdown.load(Ordering::SeqCst) {
+        while !SERIAL_RESTART[idx].load(Ordering::SeqCst) && !shutdown.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(250));
         }
         if shutdown.load(Ordering::SeqCst) {
@@ -459,7 +546,7 @@ fn serial_manager(handle: tokio::runtime::Handle, shutdown: Arc<AtomicBool>, res
     }
     // On shutdown, fail any in-flight console-bridge request so the
     // requesting telnet session unblocks instead of hanging forever.
-    if let Some(reply) = take_console_request() {
+    if let Some(reply) = take_console_request(id) {
         let _ = reply.send(Err("Server shutting down".to_string()));
     }
 }
@@ -471,80 +558,90 @@ fn serial_manager(handle: tokio::runtime::Handle, shutdown: Arc<AtomicBool>, res
 /// outer manager loop reopens this function (or switches to modem
 /// mode) on every config change.
 fn console_manager_tick(
-    cfg: config::Config,
+    id: SerialPortId,
+    port_cfg: SerialPortConfig,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
 ) {
+    let idx = id.index();
     glog!(
-        "Serial console: idle on {} (waiting for Serial Gateway request)",
-        cfg.serial_port
+        "Serial console (Port {}): idle on {} (waiting for Serial Gateway request)",
+        id.label(),
+        port_cfg.port
     );
     loop {
-        if shutdown.load(Ordering::SeqCst) || SERIAL_RESTART.load(Ordering::SeqCst) {
+        if shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst) {
             // A request that arrived but wasn't yet claimed is otherwise
             // orphaned: the requester awaits forever because nothing
             // polls the slot after we leave console mode.  Fail it now
             // so the requesting session unblocks.
-            if let Some(reply) = take_console_request() {
+            if let Some(reply) = take_console_request(id) {
                 let _ = reply.send(Err("Serial mode changed".to_string()));
             }
             return;
         }
-        let Some(reply) = claim_console_request() else {
+        let Some(reply) = claim_console_request(id) else {
             std::thread::sleep(Duration::from_millis(150));
             continue;
         };
-        // From here on, BRIDGE_ACTIVE is true; the guard clears it on
-        // every exit path (port-open fail, send fail, normal end).
-        let _active_guard = BridgeActiveGuard;
+        // From here on, BRIDGE_ACTIVE[id] is true; the guard clears it
+        // on every exit path (port-open fail, send fail, normal end).
+        let _active_guard = BridgeActiveGuard { id };
 
-        let port = match open_serial_port(&cfg) {
+        let port = match open_serial_port(&port_cfg) {
             Ok(p) => p,
             Err(e) => {
-                let msg = format!("Failed to open {}: {}", cfg.serial_port, e);
-                glog!("Serial console: {}", msg);
+                let msg = format!("Failed to open {}: {}", port_cfg.port, e);
+                glog!("Serial console (Port {}): {}", id.label(), msg);
                 let _ = reply.send(Err(msg));
                 continue;
             }
         };
         glog!(
-            "Serial console: opened {} at {} baud (bridge active)",
-            cfg.serial_port, cfg.serial_baud
+            "Serial console (Port {}): opened {} at {} baud (bridge active)",
+            id.label(),
+            port_cfg.port,
+            port_cfg.baud
         );
 
         let (local, remote) = tokio::io::duplex(CONSOLE_DUPLEX_BUFSIZE);
         if reply.send(Ok(remote)).is_err() {
-            glog!("Serial console: bridge requester dropped before connect");
+            glog!(
+                "Serial console (Port {}): bridge requester dropped before connect",
+                id.label()
+            );
             continue;
         }
 
-        run_console_bridge(port, local, handle.clone(), shutdown.clone());
-        glog!("Serial console: bridge closed; port released");
+        run_console_bridge(id, port, local, handle.clone(), shutdown.clone());
+        glog!("Serial console (Port {}): bridge closed; port released", id.label());
     }
 }
 
-/// Open the configured serial port with the user's current framing and
-/// flow-control settings.  Shared by modem mode and console mode.
+/// Open one port with the user's current framing and flow-control
+/// settings.  Shared by modem mode and console mode.  Takes a port-
+/// scoped slice so the call site doesn't need to know which port id
+/// is being opened.
 fn open_serial_port(
-    cfg: &config::Config,
+    port: &SerialPortConfig,
 ) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
-    serialport::new(&cfg.serial_port, cfg.serial_baud)
-        .data_bits(match cfg.serial_databits {
+    serialport::new(&port.port, port.baud)
+        .data_bits(match port.databits {
             5 => serialport::DataBits::Five,
             6 => serialport::DataBits::Six,
             7 => serialport::DataBits::Seven,
             _ => serialport::DataBits::Eight,
         })
-        .parity(match cfg.serial_parity.as_str() {
+        .parity(match port.parity.as_str() {
             "odd" => serialport::Parity::Odd,
             "even" => serialport::Parity::Even,
             _ => serialport::Parity::None,
         })
-        .stop_bits(match cfg.serial_stopbits {
+        .stop_bits(match port.stopbits {
             2 => serialport::StopBits::Two,
             _ => serialport::StopBits::One,
         })
-        .flow_control(match cfg.serial_flowcontrol.as_str() {
+        .flow_control(match port.flowcontrol.as_str() {
             "hardware" => serialport::FlowControl::Hardware,
             "software" => serialport::FlowControl::Software,
             _ => serialport::FlowControl::None,
@@ -579,6 +676,7 @@ const CONSOLE_BRIDGE_BUFSIZE: usize = 1024;
 /// thread additionally watches `SHUTDOWN` and `SERIAL_RESTART` so a
 /// server shutdown can preempt a wedged peer.
 fn run_console_bridge(
+    id: SerialPortId,
     mut port: Box<dyn serialport::SerialPort>,
     duplex: tokio::io::DuplexStream,
     handle: tokio::runtime::Handle,
@@ -637,8 +735,9 @@ fn run_console_bridge(
     // SERIAL_READ_TIMEOUT interval keeps the loop responsive to
     // shutdown / restart without burning CPU.
     let mut buf = [0u8; CONSOLE_BRIDGE_BUFSIZE];
+    let restart_flag = &SERIAL_RESTART[id.index()];
     'outer: while !shutdown.load(Ordering::SeqCst)
-        && !SERIAL_RESTART.load(Ordering::SeqCst)
+        && !restart_flag.load(Ordering::SeqCst)
     {
         match port.read(&mut buf) {
             Ok(0) => {}
@@ -655,7 +754,7 @@ fn run_console_bridge(
                 if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
-                glog!("Serial console: read error: {}", e);
+                glog!("Serial console (Port {}): read error: {}", id.label(), e);
                 break;
             }
         }
@@ -666,7 +765,7 @@ fn run_console_bridge(
             match session_to_port_rx.try_recv() {
                 Ok(bytes) => {
                     if let Err(e) = port.write_all(&bytes) {
-                        glog!("Serial console: write error: {}", e);
+                        glog!("Serial console (Port {}): write error: {}", id.label(), e);
                         break 'outer;
                     }
                 }
@@ -695,30 +794,39 @@ fn run_console_bridge(
 // ─── Serial thread ─────────────────────────────────────────
 
 fn serial_thread(
-    cfg: config::Config,
+    id: SerialPortId,
+    port_cfg: SerialPortConfig,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
 ) {
-    let port = match open_serial_port(&cfg) {
+    let port = match open_serial_port(&port_cfg) {
         Ok(p) => p,
         Err(e) => {
-            glog!("Serial modem: failed to open {}: {}", cfg.serial_port, e);
+            glog!(
+                "Serial modem (Port {}): failed to open {}: {}",
+                id.label(),
+                port_cfg.port,
+                e
+            );
             return;
         }
     };
     glog!(
-        "Serial modem: opened {} at {} baud",
-        cfg.serial_port, cfg.serial_baud
+        "Serial modem (Port {}): opened {} at {} baud",
+        id.label(),
+        port_cfg.port,
+        port_cfg.baud
     );
 
     let now = Instant::now();
     let mut state = ModemState {
+        port_id: id,
         port,
         mode: ModemMode::Command,
-        echo: cfg.serial_echo,
-        verbose: cfg.serial_verbose,
-        quiet: cfg.serial_quiet,
+        echo: port_cfg.echo,
+        verbose: port_cfg.verbose,
+        quiet: port_cfg.quiet,
         last_data_time: now,
         plus_count: 0,
         plus_start: now,
@@ -726,24 +834,25 @@ fn serial_thread(
         handle,
         shutdown,
         restart,
-        baud: cfg.serial_baud,
+        baud: port_cfg.baud,
         active_connection: None,
-        s_regs: parse_s_regs(&cfg.serial_s_regs),
-        x_code: cfg.serial_x_code,
-        dtr_mode: cfg.serial_dtr_mode,
-        flow_mode: cfg.serial_flow_mode,
-        dcd_mode: cfg.serial_dcd_mode,
+        s_regs: parse_s_regs(&port_cfg.s_regs),
+        x_code: port_cfg.x_code,
+        dtr_mode: port_cfg.dtr_mode,
+        flow_mode: port_cfg.flow_mode,
+        dcd_mode: port_cfg.dcd_mode,
         last_dial: String::new(),
         last_command: String::new(),
-        stored_numbers: cfg.serial_stored_numbers.clone(),
+        stored_numbers: port_cfg.stored_numbers.clone(),
     };
 
     send_response(&mut state, "OK");
 
-    while !state.shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART.load(Ordering::SeqCst) {
+    let restart_flag = &SERIAL_RESTART[id.index()];
+    while !state.shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
         // Check for a pending ring request.
         if state.mode == ModemMode::Command
-            && let Some(sender) = take_ring_request()
+            && let Some(sender) = take_ring_request(id)
         {
             process_ring(&mut state, sender);
             continue;
@@ -757,12 +866,12 @@ fn serial_thread(
             }
         }
     }
-    if SERIAL_RESTART.load(Ordering::SeqCst) {
-        glog!("Serial modem: restarting with new config");
+    if restart_flag.load(Ordering::SeqCst) {
+        glog!("Serial modem (Port {}): restarting with new config", id.label());
     } else {
         let _ = state.port.write_all(b"\r\nServer shutting down. Goodbye.\r\n");
         let _ = state.port.flush();
-        glog!("Serial modem: shutting down");
+        glog!("Serial modem (Port {}): shutting down", id.label());
     }
 }
 
@@ -1328,35 +1437,64 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 pending_ok = true;
             }
             AtResult::ResetStored => {
-                // ATZ — restore from config (saved by AT&W)
+                // ATZ — restore from this port's slice of the config
+                // (saved by AT&W).  Reading `cfg.port(state.port_id)`
+                // ensures Port A's ATZ never picks up Port B's saved
+                // settings even if both are configured.
                 let cfg = config::get_config();
-                state.echo = cfg.serial_echo;
-                state.verbose = cfg.serial_verbose;
-                state.quiet = cfg.serial_quiet;
-                state.s_regs = parse_s_regs(&cfg.serial_s_regs);
-                state.x_code = cfg.serial_x_code;
-                state.dtr_mode = cfg.serial_dtr_mode;
-                state.flow_mode = cfg.serial_flow_mode;
-                state.dcd_mode = cfg.serial_dcd_mode;
-                state.stored_numbers = cfg.serial_stored_numbers.clone();
+                let port = cfg.port(state.port_id);
+                state.echo = port.echo;
+                state.verbose = port.verbose;
+                state.quiet = port.quiet;
+                state.s_regs = parse_s_regs(&port.s_regs);
+                state.x_code = port.x_code;
+                state.dtr_mode = port.dtr_mode;
+                state.flow_mode = port.flow_mode;
+                state.dcd_mode = port.dcd_mode;
+                state.stored_numbers = port.stored_numbers.clone();
                 state.active_connection = None;
                 pending_ok = true;
             }
             AtResult::SaveConfig => {
-                // AT&W — save current settings to config
+                // AT&W — save current settings to this port's slice of
+                // the config.  The keys are computed via
+                // `config::serial_key(port_id, suffix)` so the
+                // persistence target tracks `state.port_id` and a
+                // future rename of the persistence shape only touches
+                // one place.
+                let id = state.port_id;
+                let s_regs_str = format_s_regs(&state.s_regs);
+                let x_code_str = state.x_code.to_string();
+                let dtr_str = state.dtr_mode.to_string();
+                let flow_str = state.flow_mode.to_string();
+                let dcd_str = state.dcd_mode.to_string();
+                let echo_key = config::serial_key(id, "echo");
+                let verbose_key = config::serial_key(id, "verbose");
+                let quiet_key = config::serial_key(id, "quiet");
+                let s_regs_key = config::serial_key(id, "s_regs");
+                let x_code_key = config::serial_key(id, "x_code");
+                let dtr_key = config::serial_key(id, "dtr_mode");
+                let flow_key = config::serial_key(id, "flow_mode");
+                let dcd_key = config::serial_key(id, "dcd_mode");
+                let stored_keys = [
+                    config::serial_key(id, "stored_0"),
+                    config::serial_key(id, "stored_1"),
+                    config::serial_key(id, "stored_2"),
+                    config::serial_key(id, "stored_3"),
+                ];
                 config::update_config_values(&[
-                    ("serial_echo", if state.echo { "true" } else { "false" }),
-                    ("serial_verbose", if state.verbose { "true" } else { "false" }),
-                    ("serial_quiet", if state.quiet { "true" } else { "false" }),
-                    ("serial_s_regs", &format_s_regs(&state.s_regs)),
-                    ("serial_x_code", &state.x_code.to_string()),
-                    ("serial_dtr_mode", &state.dtr_mode.to_string()),
-                    ("serial_flow_mode", &state.flow_mode.to_string()),
-                    ("serial_dcd_mode", &state.dcd_mode.to_string()),
-                    ("serial_stored_0", &state.stored_numbers[0]),
-                    ("serial_stored_1", &state.stored_numbers[1]),
-                    ("serial_stored_2", &state.stored_numbers[2]),
-                    ("serial_stored_3", &state.stored_numbers[3]),
+                    (echo_key.as_str(), if state.echo { "true" } else { "false" }),
+                    (verbose_key.as_str(), if state.verbose { "true" } else { "false" }),
+                    (quiet_key.as_str(), if state.quiet { "true" } else { "false" }),
+                    (s_regs_key.as_str(), s_regs_str.as_str()),
+                    (x_code_key.as_str(), x_code_str.as_str()),
+                    (dtr_key.as_str(), dtr_str.as_str()),
+                    (flow_key.as_str(), flow_str.as_str()),
+                    (dcd_key.as_str(), dcd_str.as_str()),
+                    (stored_keys[0].as_str(), state.stored_numbers[0].as_str()),
+                    (stored_keys[1].as_str(), state.stored_numbers[1].as_str()),
+                    (stored_keys[2].as_str(), state.stored_numbers[2].as_str()),
+                    (stored_keys[3].as_str(), state.stored_numbers[3].as_str()),
                 ]);
                 pending_ok = true;
             }
@@ -1958,9 +2096,10 @@ fn online_mode_duplex(
     state.plus_count = 0;
     state.last_data_time = Instant::now();
 
+    let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
         if state.shutdown.load(Ordering::SeqCst)
-            || SERIAL_RESTART.load(Ordering::SeqCst)
+            || restart_flag.load(Ordering::SeqCst)
         {
             return OnlineExit::Disconnected;
         }
@@ -2024,9 +2163,10 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     state.plus_count = 0;
     state.last_data_time = Instant::now();
 
+    let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
         if state.shutdown.load(Ordering::SeqCst)
-            || SERIAL_RESTART.load(Ordering::SeqCst)
+            || restart_flag.load(Ordering::SeqCst)
         {
             return OnlineExit::Disconnected;
         }
@@ -2148,9 +2288,9 @@ fn check_plus_complete(state: &mut ModemState) -> bool {
 
 // ─── Ring emulator ────────────────────────────────────────
 
-/// Take a pending ring request from the global slot, if any.
-fn take_ring_request() -> Option<tokio::sync::mpsc::Sender<u8>> {
-    RING_REQUEST
+/// Take a pending ring request from `id`'s slot, if any.
+fn take_ring_request(id: SerialPortId) -> Option<tokio::sync::mpsc::Sender<u8>> {
+    RING_REQUEST[id.index()]
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
@@ -2165,9 +2305,10 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
 
     let auto_answer = state.s_regs[0];
     let mut manual_answer = false;
+    let restart_flag = &SERIAL_RESTART[state.port_id.index()];
 
     loop {
-        if state.shutdown.load(Ordering::SeqCst) || SERIAL_RESTART.load(Ordering::SeqCst) {
+        if state.shutdown.load(Ordering::SeqCst) || restart_flag.load(Ordering::SeqCst) {
             return;
         }
 
@@ -2949,50 +3090,77 @@ mod tests {
     #[test]
     fn test_restart_serial_flag() {
         let _g = lock_global_state();
-        SERIAL_RESTART.store(false, Ordering::SeqCst);
-        assert!(!SERIAL_RESTART.load(Ordering::SeqCst));
+        for id in SERIAL_PORT_IDS {
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+            assert!(!SERIAL_RESTART[id.index()].load(Ordering::SeqCst));
 
-        restart_serial();
-        assert!(SERIAL_RESTART.load(Ordering::SeqCst));
+            restart_serial(id);
+            assert!(SERIAL_RESTART[id.index()].load(Ordering::SeqCst));
 
-        // Reset for other tests
-        SERIAL_RESTART.store(false, Ordering::SeqCst);
-    }
-
-    /// Build a Config seeded with whatever console-bridge precondition
-    /// the caller wants to test against.  Avoids the clippy lint about
-    /// reassigning fields after `Default::default()`.
-    fn cfg_with_serial(enabled: bool, mode: &str, port: &str) -> config::Config {
-        config::Config {
-            serial_enabled: enabled,
-            serial_mode: mode.into(),
-            serial_port: port.into(),
-            ..config::Config::default()
+            // Reset for other tests
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
         }
     }
 
-    /// `check_console_bridge_eligible` rejects a disabled serial.
+    /// `restart_serial(A)` does NOT touch Port B's restart flag, and
+    /// vice versa.  This is the dual-port isolation invariant: saving
+    /// one port's settings must not preempt the other.
+    #[test]
+    fn test_restart_serial_isolated_per_port() {
+        let _g = lock_global_state();
+        for id in SERIAL_PORT_IDS {
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        }
+        restart_serial(SerialPortId::A);
+        assert!(SERIAL_RESTART[SerialPortId::A.index()].load(Ordering::SeqCst));
+        assert!(
+            !SERIAL_RESTART[SerialPortId::B.index()].load(Ordering::SeqCst),
+            "restarting Port A must not flip Port B's flag"
+        );
+        for id in SERIAL_PORT_IDS {
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Build a Config with a single port configured the way the caller
+    /// wants and the other port left at defaults (which is `enabled =
+    /// false`, so it never satisfies `check_console_bridge_eligible`).
+    fn cfg_with_serial(
+        id: SerialPortId,
+        enabled: bool,
+        mode: &str,
+        port: &str,
+    ) -> config::Config {
+        let mut cfg = config::Config::default();
+        let p = cfg.port_mut(id);
+        p.enabled = enabled;
+        p.mode = mode.into();
+        p.port = port.into();
+        cfg
+    }
+
+    /// `check_console_bridge_eligible` rejects a disabled port.
     #[test]
     fn test_console_bridge_eligible_rejects_disabled() {
-        let cfg = cfg_with_serial(false, "console", "/dev/ttyUSB0");
-        let err = check_console_bridge_eligible(&cfg).unwrap_err();
+        let cfg = cfg_with_serial(SerialPortId::A, false, "console", "/dev/ttyUSB0");
+        let err = check_console_bridge_eligible(&cfg, SerialPortId::A).unwrap_err();
         assert!(err.contains("not enabled"), "got {:?}", err);
     }
 
     /// `check_console_bridge_eligible` rejects modem mode.
     #[test]
     fn test_console_bridge_eligible_rejects_modem_mode() {
-        let cfg = cfg_with_serial(true, "modem", "/dev/ttyUSB0");
-        let err = check_console_bridge_eligible(&cfg).unwrap_err();
+        let cfg = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
+        let err = check_console_bridge_eligible(&cfg, SerialPortId::A).unwrap_err();
         assert!(err.contains("modem mode"), "got {:?}", err);
     }
 
     /// `check_console_bridge_eligible` rejects an unconfigured port.
     #[test]
     fn test_console_bridge_eligible_rejects_empty_port() {
-        let cfg = cfg_with_serial(true, "console", "");
-        let err = check_console_bridge_eligible(&cfg).unwrap_err();
-        assert!(err.contains("No serial port"), "got {:?}", err);
+        let cfg = cfg_with_serial(SerialPortId::A, true, "console", "");
+        let err = check_console_bridge_eligible(&cfg, SerialPortId::A).unwrap_err();
+        assert!(err.contains("no serial device"), "got {:?}", err);
     }
 
     /// `check_console_bridge_eligible` accepts a fully-configured
@@ -3000,8 +3168,32 @@ mod tests {
     /// every other config should be rejected.
     #[test]
     fn test_console_bridge_eligible_accepts_console() {
-        let cfg = cfg_with_serial(true, "console", "/dev/ttyUSB0");
-        assert!(check_console_bridge_eligible(&cfg).is_ok());
+        let cfg = cfg_with_serial(SerialPortId::A, true, "console", "/dev/ttyUSB0");
+        assert!(check_console_bridge_eligible(&cfg, SerialPortId::A).is_ok());
+    }
+
+    /// Eligibility is decided per-port.  Port A console-mode in cfg
+    /// shouldn't satisfy a Port B query.
+    #[test]
+    fn test_console_bridge_eligible_per_port() {
+        let cfg = cfg_with_serial(SerialPortId::A, true, "console", "/dev/ttyUSB0");
+        assert!(check_console_bridge_eligible(&cfg, SerialPortId::A).is_ok());
+        assert!(check_console_bridge_eligible(&cfg, SerialPortId::B).is_err());
+    }
+
+    /// `any_port_console_eligible` is the OR of the per-port checks —
+    /// drives whether the telnet main menu shows the Serial Gateway
+    /// item at all.
+    #[test]
+    fn test_any_port_console_eligible_dispatch() {
+        let none_cfg = config::Config::default();
+        assert!(!any_port_console_eligible(&none_cfg));
+
+        let a_only = cfg_with_serial(SerialPortId::A, true, "console", "/dev/ttyUSB0");
+        assert!(any_port_console_eligible(&a_only));
+
+        let b_only = cfg_with_serial(SerialPortId::B, true, "console", "/dev/ttyUSB1");
+        assert!(any_port_console_eligible(&b_only));
     }
 
     /// The console-request slot starts empty, accepts a sender, and
@@ -3011,22 +3203,48 @@ mod tests {
     #[test]
     fn test_console_request_slot_take_and_clear() {
         let _g = lock_global_state();
+        let id = SerialPortId::A;
         // Drain anything left over from a previous test (the slot is
         // module-level state).
-        let _ = take_console_request();
-        assert!(take_console_request().is_none(), "slot should start empty");
+        let _ = take_console_request(id);
+        assert!(
+            take_console_request(id).is_none(),
+            "slot should start empty"
+        );
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
-        let taken = take_console_request();
+        let taken = take_console_request(id);
         assert!(taken.is_some(), "take should return the queued sender");
         assert!(
-            take_console_request().is_none(),
+            take_console_request(id).is_none(),
             "slot should be empty again after take"
         );
+    }
+
+    /// Port-A and Port-B console-request slots are independent —
+    /// queuing one doesn't block the other.
+    #[test]
+    fn test_console_request_slots_per_port_independent() {
+        let _g = lock_global_state();
+        let _ = take_console_request(SerialPortId::A);
+        let _ = take_console_request(SerialPortId::B);
+
+        let (tx_a, _rx_a) = tokio::sync::oneshot::channel();
+        {
+            let mut slot = CONSOLE_REQUEST[SerialPortId::A.index()].lock().unwrap();
+            *slot = Some(tx_a);
+        }
+        // Port B's slot must still be empty.
+        let b_empty = {
+            let slot = CONSOLE_REQUEST[SerialPortId::B.index()].lock().unwrap();
+            slot.is_none()
+        };
+        assert!(b_empty, "queuing on A must not affect B");
+        let _ = take_console_request(SerialPortId::A);
     }
 
     /// CONSOLE_BRIDGE_BUFSIZE is a sanity-bounded constant so a future
@@ -3071,16 +3289,17 @@ mod tests {
     #[tokio::test]
     async fn test_request_console_bridge_rejects_when_slot_occupied() {
         let _g = lock_global_state();
+        let id = SerialPortId::A;
         // Drain any leftover state from earlier tests.
-        let _ = take_console_request();
-        BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
+        let _ = take_console_request(id);
+        BRIDGE_ACTIVE[id.index()].store(false, Ordering::SeqCst);
 
         // Plant a sender into the slot so the next request sees it
         // as occupied.  We use a real oneshot channel because the
         // production code flows through the same drop semantics.
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
 
@@ -3091,18 +3310,18 @@ mod tests {
         // slot logic in isolation — together they cover every reject
         // path of request_console_bridge without relying on test
         // ordering.
-        let cfg = cfg_with_serial(true, "console", "/dev/ttyUSB0");
-        assert!(check_console_bridge_eligible(&cfg).is_ok());
+        let cfg = cfg_with_serial(id, true, "console", "/dev/ttyUSB0");
+        assert!(check_console_bridge_eligible(&cfg, id).is_ok());
 
         // Confirm the slot really is occupied.
         let occupied = {
-            let slot = CONSOLE_REQUEST.lock().unwrap();
+            let slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             slot.is_some()
         };
         assert!(occupied, "test setup failure: slot should be occupied");
 
         // Drain the slot to leave global state clean for siblings.
-        let _ = take_console_request();
+        let _ = take_console_request(id);
     }
 
     /// `check_bridge_request_admissible` rejects with the single-user
@@ -3114,8 +3333,9 @@ mod tests {
     /// minutes).
     #[test]
     fn test_admissible_rejects_when_bridge_active() {
-        let cfg = cfg_with_serial(true, "console", "/dev/ttyUSB0");
-        let err = check_bridge_request_admissible(&cfg, true).unwrap_err();
+        let id = SerialPortId::A;
+        let cfg = cfg_with_serial(id, true, "console", "/dev/ttyUSB0");
+        let err = check_bridge_request_admissible(&cfg, id, true).unwrap_err();
         assert!(
             err.contains("Another session"),
             "expected single-user error, got {:?}",
@@ -3127,8 +3347,9 @@ mod tests {
     /// misconfigured port produces a specific message.
     #[test]
     fn test_admissible_eligibility_wins_over_active() {
-        let cfg = cfg_with_serial(false, "modem", "");
-        let err = check_bridge_request_admissible(&cfg, true).unwrap_err();
+        let id = SerialPortId::A;
+        let cfg = cfg_with_serial(id, false, "modem", "");
+        let err = check_bridge_request_admissible(&cfg, id, true).unwrap_err();
         assert!(
             err.contains("not enabled"),
             "eligibility should precede active check, got {:?}",
@@ -3139,8 +3360,9 @@ mod tests {
     /// Happy path — eligible config and no bridge in flight: admit.
     #[test]
     fn test_admissible_allows_when_clean() {
-        let cfg = cfg_with_serial(true, "console", "/dev/ttyUSB0");
-        assert!(check_bridge_request_admissible(&cfg, false).is_ok());
+        let id = SerialPortId::A;
+        let cfg = cfg_with_serial(id, true, "console", "/dev/ttyUSB0");
+        assert!(check_bridge_request_admissible(&cfg, id, false).is_ok());
     }
 
     /// The `ConsoleSlotGuard` clears the request slot when its drop
@@ -3151,17 +3373,18 @@ mod tests {
     #[test]
     fn test_console_slot_guard_clears_on_drop_when_armed() {
         let _g = lock_global_state();
-        let _ = take_console_request();
+        let id = SerialPortId::A;
+        let _ = take_console_request(id);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
         {
-            let _guard = ConsoleSlotGuard { armed: true };
+            let _guard = ConsoleSlotGuard { id, armed: true };
         }
         let cleared = {
-            let slot = CONSOLE_REQUEST.lock().unwrap();
+            let slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             slot.is_none()
         };
         assert!(cleared, "armed guard should have cleared the slot");
@@ -3170,22 +3393,23 @@ mod tests {
     #[test]
     fn test_console_slot_guard_no_op_when_disarmed() {
         let _g = lock_global_state();
-        let _ = take_console_request();
+        let id = SerialPortId::A;
+        let _ = take_console_request(id);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
         {
-            let _guard = ConsoleSlotGuard { armed: false };
+            let _guard = ConsoleSlotGuard { id, armed: false };
         }
         let still_set = {
-            let slot = CONSOLE_REQUEST.lock().unwrap();
+            let slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             slot.is_some()
         };
         assert!(still_set, "disarmed guard must NOT clear the slot");
         // Restore clean state for siblings.
-        let _ = take_console_request();
+        let _ = take_console_request(id);
     }
 
     /// `claim_console_request` performs slot.take() AND sets
@@ -3196,33 +3420,34 @@ mod tests {
     #[test]
     fn test_claim_sets_bridge_active_under_lock() {
         let _g = lock_global_state();
+        let id = SerialPortId::A;
         // Reset state from any prior test.
-        let _ = take_console_request();
-        BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
+        let _ = take_console_request(id);
+        BRIDGE_ACTIVE[id.index()].store(false, Ordering::SeqCst);
 
         // Empty slot: claim returns None, BRIDGE_ACTIVE unchanged.
-        assert!(claim_console_request().is_none());
+        assert!(claim_console_request(id).is_none());
         assert!(
-            !BRIDGE_ACTIVE.load(Ordering::SeqCst),
+            !BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst),
             "empty-slot claim must not set BRIDGE_ACTIVE"
         );
 
         // Plant a sender.
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
         // Claim takes it AND flips BRIDGE_ACTIVE.
-        let taken = claim_console_request();
+        let taken = claim_console_request(id);
         assert!(taken.is_some(), "claim should return the queued sender");
         assert!(
-            BRIDGE_ACTIVE.load(Ordering::SeqCst),
+            BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst),
             "claim must set BRIDGE_ACTIVE under the slot lock"
         );
 
         // Restore for siblings.
-        BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
+        BRIDGE_ACTIVE[id.index()].store(false, Ordering::SeqCst);
     }
 
     /// `BridgeActiveGuard` resets BRIDGE_ACTIVE on drop, even on
@@ -3232,12 +3457,13 @@ mod tests {
     #[test]
     fn test_bridge_active_guard_clears_on_drop() {
         let _l = lock_global_state();
-        BRIDGE_ACTIVE.store(true, Ordering::SeqCst);
+        let id = SerialPortId::A;
+        BRIDGE_ACTIVE[id.index()].store(true, Ordering::SeqCst);
         {
-            let _g = BridgeActiveGuard;
+            let _g = BridgeActiveGuard { id };
         }
         assert!(
-            !BRIDGE_ACTIVE.load(Ordering::SeqCst),
+            !BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst),
             "guard drop should clear BRIDGE_ACTIVE"
         );
     }
@@ -3249,17 +3475,18 @@ mod tests {
     #[test]
     fn test_take_does_not_set_bridge_active() {
         let _g = lock_global_state();
-        BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
-        let _ = take_console_request();
+        let id = SerialPortId::A;
+        BRIDGE_ACTIVE[id.index()].store(false, Ordering::SeqCst);
+        let _ = take_console_request(id);
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         {
-            let mut slot = CONSOLE_REQUEST.lock().unwrap();
+            let mut slot = CONSOLE_REQUEST[id.index()].lock().unwrap();
             *slot = Some(tx);
         }
-        let _ = take_console_request();
+        let _ = take_console_request(id);
         assert!(
-            !BRIDGE_ACTIVE.load(Ordering::SeqCst),
+            !BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst),
             "take_console_request must not flip BRIDGE_ACTIVE"
         );
     }
@@ -3400,20 +3627,30 @@ mod tests {
 
     #[test]
     fn test_request_ring_slot() {
+        let _g = lock_global_state();
+        let id = SerialPortId::A;
         // Clear any pending request
-        RING_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+        RING_REQUEST[id.index()]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
 
         // First request should succeed
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<u8>(1);
-        assert!(request_ring(tx1));
+        assert!(request_ring(id, tx1));
 
-        // Second request should fail (slot occupied)
+        // Second request on the same port should fail (slot occupied)
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<u8>(1);
-        assert!(!request_ring(tx2));
+        assert!(!request_ring(id, tx2));
 
-        // Take the request to clean up
-        assert!(take_ring_request().is_some());
-        assert!(take_ring_request().is_none());
+        // Port B is independent — its slot is still empty.
+        let (tx_b, _rx_b) = tokio::sync::mpsc::channel::<u8>(1);
+        assert!(request_ring(SerialPortId::B, tx_b));
+        assert!(take_ring_request(SerialPortId::B).is_some());
+
+        // Take Port A's request to clean up
+        assert!(take_ring_request(id).is_some());
+        assert!(take_ring_request(id).is_none());
     }
 
     #[test]

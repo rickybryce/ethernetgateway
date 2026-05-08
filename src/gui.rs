@@ -237,16 +237,21 @@ struct App {
     kermit_max_packet_length_buf: String,
     kermit_window_size_buf: String,
     kermit_block_check_type_buf: String,
-    serial_baud_buf: String,
-    // Detected serial ports for the dropdown
+    /// Per-port baud text buffer, indexed by `SerialPortId::index()`.
+    /// Two slots — one each for Port A and Port B — let the user type
+    /// freely without their input being clobbered by a partial parse.
+    serial_baud_buf: [String; 2],
+    // Detected serial ports for the dropdown (shared between both ports).
     serial_ports: Vec<String>,
     /// Set when the user edits any field; prevents refresh_from_global from
     /// overwriting in-progress edits. Cleared on save.
     dirty: bool,
     /// Whether the Server "More..." popup is open.
     server_popup_open: bool,
-    /// Whether the Serial Port "More..." popup is open.
-    serial_popup_open: bool,
+    /// Per-port "Serial Port — More..." popup state, indexed by
+    /// `SerialPortId::index()`.  Independent so the user can have one
+    /// port's popup open while editing the other's primary controls.
+    serial_popup_open: [bool; 2],
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
     /// Whether the security-warning popup for `Allow ATDT KERMIT` is
@@ -298,7 +303,10 @@ impl App {
         let kermit_max_packet_length_buf = cfg.kermit_max_packet_length.to_string();
         let kermit_window_size_buf = cfg.kermit_window_size.to_string();
         let kermit_block_check_type_buf = cfg.kermit_block_check_type.to_string();
-        let serial_baud_buf = cfg.serial_baud.to_string();
+        let serial_baud_buf = [
+            cfg.serial_a.baud.to_string(),
+            cfg.serial_b.baud.to_string(),
+        ];
         let serial_ports = detect_serial_ports();
         let last_synced_cfg = cfg.clone();
         Self {
@@ -333,7 +341,7 @@ impl App {
             serial_ports,
             dirty: false,
             server_popup_open: false,
-            serial_popup_open: false,
+            serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             atdt_kermit_warn_open: false,
             kermit_server_warn_open: false,
@@ -365,7 +373,13 @@ impl App {
         if let Ok(v) = self.kermit_max_packet_length_buf.parse::<u16>() && (10..=9024).contains(&v) { self.cfg.kermit_max_packet_length = v; }
         if let Ok(v) = self.kermit_window_size_buf.parse::<u8>() && (1..=31).contains(&v) { self.cfg.kermit_window_size = v; }
         if let Ok(v) = self.kermit_block_check_type_buf.parse::<u8>() && matches!(v, 1..=3) { self.cfg.kermit_block_check_type = v; }
-        if let Ok(v) = self.serial_baud_buf.parse::<u32>() && v >= 300 { self.cfg.serial_baud = v; }
+        for id in crate::config::SERIAL_PORT_IDS {
+            if let Ok(v) = self.serial_baud_buf[id.index()].parse::<u32>()
+                && v >= 300
+            {
+                self.cfg.port_mut(id).baud = v;
+            }
+        }
     }
 
     fn poll_logs(&mut self) {
@@ -530,82 +544,149 @@ impl App {
         }
     }
 
-    /// Render the Serial Port frame's primary field rows (port, baud,
-    /// line framing, flow control).  Shared between the main layout and
-    /// the Serial Port popup.  When `with_more_button` is true, a right-
-    /// aligned "More..." button is appended to the Bits/Par/Stop/Flow
-    /// row; the popup passes false since it's already the More view.
-    fn draw_serial_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
+    /// Render the primary row for one port on the main Serial Port
+    /// frame: port-device dropdown, baud field, and a "More..." button
+    /// that opens this port's advanced popup.  The full bits/parity/
+    /// stop/flow row plus AT/S-register state moved into the popup so
+    /// the main frame fits both ports plus the header in three rows.
+    fn draw_serial_primary_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: crate::config::SerialPortId,
+    ) {
+        let idx = id.index();
         ui.horizontal(|ui| {
-            ui.label("Port:");
-            let selected = if self.cfg.serial_port.is_empty() {
+            ui.label(format!("Port {}:", id.label()));
+            let selected = if self.cfg.port(id).port.is_empty() {
                 "(none)".to_string()
             } else {
-                self.cfg.serial_port.clone()
+                self.cfg.port(id).port.clone()
             };
-            egui::ComboBox::from_id_salt("serial_port")
-                .width(120.0)
+            // Per-port salt so the two ComboBoxes don't share state.
+            egui::ComboBox::from_id_salt(format!("serial_port_{}", id.label()))
+                .width(180.0)
                 .selected_text(&selected)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
-                        &mut self.cfg.serial_port,
+                        &mut self.cfg.port_mut(id).port,
                         String::new(),
                         "(none)",
                     );
                     for port in &self.serial_ports {
                         ui.selectable_value(
-                            &mut self.cfg.serial_port,
+                            &mut self.cfg.port_mut(id).port,
                             port.clone(),
                             port,
                         );
                     }
                 });
-            if ui.small_button("\u{21bb}").on_hover_text("Refresh ports").clicked() {
+            if ui
+                .small_button("\u{21bb}")
+                .on_hover_text("Refresh ports")
+                .clicked()
+            {
                 self.serial_ports = detect_serial_ports();
             }
             ui.add_space(4.0);
-            labeled_field(ui, "Baud:", &mut self.serial_baud_buf, 70.0);
+            labeled_field(ui, "Baud:", &mut self.serial_baud_buf[idx], 70.0);
+            if right_aligned_small_button(ui, "More...") {
+                self.serial_popup_open[idx] = true;
+            }
         });
+    }
+
+    /// Render the framing/flow row inside one port's "More..." popup.
+    /// (Used to share the main-layout slot with the primary row before
+    /// the dual-port redesign moved framing/flow exclusively to the
+    /// popup.)
+    fn draw_serial_more_framing_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: crate::config::SerialPortId,
+    ) {
         ui.horizontal(|ui| {
             ui.label("Bits:");
-            egui::ComboBox::from_id_salt("databits")
+            egui::ComboBox::from_id_salt(format!("databits_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_databits.to_string())
+                .selected_text(self.cfg.port(id).databits.to_string())
                 .show_ui(ui, |ui| {
                     for b in [5u8, 6, 7, 8] {
-                        ui.selectable_value(&mut self.cfg.serial_databits, b, b.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).databits,
+                            b,
+                            b.to_string(),
+                        );
                     }
                 });
             ui.label("Par:");
-            egui::ComboBox::from_id_salt("parity")
+            egui::ComboBox::from_id_salt(format!("parity_{}", id.label()))
                 .width(56.0)
-                .selected_text(&self.cfg.serial_parity)
+                .selected_text(&self.cfg.port(id).parity)
                 .show_ui(ui, |ui| {
                     for p in ["none", "odd", "even"] {
-                        ui.selectable_value(&mut self.cfg.serial_parity, p.to_string(), p);
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).parity,
+                            p.to_string(),
+                            p,
+                        );
                     }
                 });
             ui.label("Stop:");
-            egui::ComboBox::from_id_salt("stopbits")
+            egui::ComboBox::from_id_salt(format!("stopbits_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_stopbits.to_string())
+                .selected_text(self.cfg.port(id).stopbits.to_string())
                 .show_ui(ui, |ui| {
                     for s in [1u8, 2] {
-                        ui.selectable_value(&mut self.cfg.serial_stopbits, s, s.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).stopbits,
+                            s,
+                            s.to_string(),
+                        );
                     }
                 });
             ui.label("Flow:");
-            egui::ComboBox::from_id_salt("flow")
+            egui::ComboBox::from_id_salt(format!("flow_{}", id.label()))
                 .width(72.0)
-                .selected_text(&self.cfg.serial_flowcontrol)
+                .selected_text(&self.cfg.port(id).flowcontrol)
                 .show_ui(ui, |ui| {
                     for f in ["none", "hardware", "software"] {
-                        ui.selectable_value(&mut self.cfg.serial_flowcontrol, f.to_string(), f);
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).flowcontrol,
+                            f.to_string(),
+                            f,
+                        );
                     }
                 });
-            if with_more_button && right_aligned_small_button(ui, "More...") {
-                self.serial_popup_open = true;
-            }
+        });
+    }
+
+    /// Render the per-port "Mode" selector inside the More popup.
+    fn draw_serial_mode_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: crate::config::SerialPortId,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("Mode:");
+            egui::ComboBox::from_id_salt(format!("mode_{}", id.label()))
+                .width(220.0)
+                .selected_text(if self.cfg.port(id).mode == "console" {
+                    "Telnet-Serial Mode"
+                } else {
+                    "Modem (AT Command) Mode"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.cfg.port_mut(id).mode,
+                        "modem".into(),
+                        "Modem (AT Command) Mode",
+                    );
+                    ui.selectable_value(
+                        &mut self.cfg.port_mut(id).mode,
+                        "console".into(),
+                        "Telnet-Serial Mode",
+                    );
+                });
         });
     }
 
@@ -614,53 +695,73 @@ impl App {
     /// only in the popup.  The advanced state is only meaningful when
     /// the port is in `modem` mode; in `console` mode the values are
     /// still persisted but unused.
-    fn draw_serial_advanced(&mut self, ui: &mut egui::Ui) {
+    fn draw_serial_advanced(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: crate::config::SerialPortId,
+    ) {
         ui.label(egui::RichText::new("Hayes AT Saved State").strong().color(AMBER));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.cfg.serial_echo, "Echo (E1)");
+            ui.checkbox(&mut self.cfg.port_mut(id).echo, "Echo (E1)");
             ui.add_space(8.0);
-            ui.checkbox(&mut self.cfg.serial_verbose, "Verbose (V1)");
+            ui.checkbox(&mut self.cfg.port_mut(id).verbose, "Verbose (V1)");
             ui.add_space(8.0);
-            ui.checkbox(&mut self.cfg.serial_quiet, "Quiet (Q1)");
+            ui.checkbox(&mut self.cfg.port_mut(id).quiet, "Quiet (Q1)");
         });
         ui.horizontal(|ui| {
             ui.label("Result level (X):");
-            egui::ComboBox::from_id_salt("x_code")
+            egui::ComboBox::from_id_salt(format!("x_code_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_x_code.to_string())
+                .selected_text(self.cfg.port(id).x_code.to_string())
                 .show_ui(ui, |ui| {
                     for x in 0u8..=4 {
-                        ui.selectable_value(&mut self.cfg.serial_x_code, x, x.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).x_code,
+                            x,
+                            x.to_string(),
+                        );
                     }
                 });
             ui.add_space(8.0);
             ui.label("DTR (&D):");
-            egui::ComboBox::from_id_salt("dtr_mode")
+            egui::ComboBox::from_id_salt(format!("dtr_mode_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_dtr_mode.to_string())
+                .selected_text(self.cfg.port(id).dtr_mode.to_string())
                 .show_ui(ui, |ui| {
                     for d in 0u8..=3 {
-                        ui.selectable_value(&mut self.cfg.serial_dtr_mode, d, d.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).dtr_mode,
+                            d,
+                            d.to_string(),
+                        );
                     }
                 });
             ui.add_space(8.0);
             ui.label("Flow (&K):");
-            egui::ComboBox::from_id_salt("flow_mode")
+            egui::ComboBox::from_id_salt(format!("flow_mode_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_flow_mode.to_string())
+                .selected_text(self.cfg.port(id).flow_mode.to_string())
                 .show_ui(ui, |ui| {
                     for f in 0u8..=4 {
-                        ui.selectable_value(&mut self.cfg.serial_flow_mode, f, f.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).flow_mode,
+                            f,
+                            f.to_string(),
+                        );
                     }
                 });
             ui.add_space(8.0);
             ui.label("DCD (&C):");
-            egui::ComboBox::from_id_salt("dcd_mode")
+            egui::ComboBox::from_id_salt(format!("dcd_mode_{}", id.label()))
                 .width(36.0)
-                .selected_text(self.cfg.serial_dcd_mode.to_string())
+                .selected_text(self.cfg.port(id).dcd_mode.to_string())
                 .show_ui(ui, |ui| {
                     for c in 0u8..=1 {
-                        ui.selectable_value(&mut self.cfg.serial_dcd_mode, c, c.to_string());
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).dcd_mode,
+                            c,
+                            c.to_string(),
+                        );
                     }
                 });
         });
@@ -676,7 +777,7 @@ impl App {
             .italics()
             .small(),
         );
-        multiline_with_menu(ui, &mut self.cfg.serial_s_regs, 2);
+        multiline_with_menu(ui, &mut self.cfg.port_mut(id).s_regs, 2);
 
         ui.add_space(6.0);
         ui.separator();
@@ -686,7 +787,7 @@ impl App {
                 .strong()
                 .color(AMBER),
         );
-        for (i, slot) in self.cfg.serial_stored_numbers.iter_mut().enumerate() {
+        for (i, slot) in self.cfg.port_mut(id).stored_numbers.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(format!("&Z{} =", i));
                 singleline_with_menu(ui, slot, false, Some(f32::INFINITY));
@@ -959,12 +1060,16 @@ impl App {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
-    /// Persist config and signal the serial manager to reopen the port
-    /// with the new settings.  Leaves telnet/SSH sessions untouched.
+    /// Persist config and signal both serial managers to reopen their
+    /// ports with the new settings.  Leaves telnet/SSH sessions
+    /// untouched.  The GUI Save button is the only call site, and it
+    /// might have changed either or both ports — restarting both is
+    /// cheaper than diffing config slices and avoids the bug where a
+    /// saved change is silently ignored.
     fn save_and_restart_serial(&mut self) {
         self.persist_config();
-        crate::serial::restart_serial();
-        logger::log("Configuration saved — serial modem reconfigured.".into());
+        crate::serial::restart_all_serial();
+        logger::log("Configuration saved — serial ports reconfigured.".into());
     }
 
     /// Render the console panel as a single read-only multiline `TextEdit`.
@@ -1073,7 +1178,9 @@ impl App {
         self.kermit_window_size_buf = self.cfg.kermit_window_size.to_string();
         self.kermit_block_check_type_buf =
             self.cfg.kermit_block_check_type.to_string();
-        self.serial_baud_buf = self.cfg.serial_baud.to_string();
+        for id in crate::config::SERIAL_PORT_IDS {
+            self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
+        }
     }
 }
 
@@ -1481,71 +1588,39 @@ impl eframe::App for App {
                 });
                 ui.add_space(4.0);
 
-                // ── Row 3: Serial Port + General ─────────────
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(half, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Serial Port").strong().color(AMBER));
-                                    ui.add_space(8.0);
-                                    ui.checkbox(&mut self.cfg.serial_enabled, "Enabled");
-                                    ui.add_space(8.0);
-                                    let prev_mode = self.cfg.serial_mode.clone();
-                                    egui::ComboBox::from_id_salt("serial_mode")
-                                        .width(190.0)
-                                        .selected_text(if self.cfg.serial_mode == "console" {
-                                            "Telnet-Serial Mode"
-                                        } else {
-                                            "Modem (AT Command) Mode"
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.cfg.serial_mode,
-                                                "modem".into(),
-                                                "Modem (AT Command) Mode",
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.cfg.serial_mode,
-                                                "console".into(),
-                                                "Telnet-Serial Mode",
-                                            );
-                                        });
-                                    if self.cfg.serial_mode != prev_mode {
-                                        // Mode change is persistent and immediate.
-                                        self.save_and_restart_serial();
-                                    }
-                                    if right_aligned_small_button(ui, "Save") {
-                                        self.save_and_restart_serial();
-                                    }
-                                });
-                                self.draw_serial_controls(ui, true);
-                            });
-                        },
-                    );
+                // ── Row 3: Serial Ports (full-width) ─────────
+                // Three rows in this frame: a header with both ports'
+                // Enabled checkboxes plus the Save button on the right,
+                // then one row per port with its device dropdown,
+                // baud, and a "More..." button into the per-port popup.
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Serial Port A").strong().color(AMBER));
+                        ui.checkbox(&mut self.cfg.serial_a.enabled, "Enabled");
+                        ui.add_space(20.0);
+                        ui.label(egui::RichText::new("Serial Port B").strong().color(AMBER));
+                        ui.checkbox(&mut self.cfg.serial_b.enabled, "Enabled");
+                        if right_aligned_small_button(ui, "Save") {
+                            self.save_and_restart_serial();
+                        }
+                    });
+                    self.draw_serial_primary_row(ui, crate::config::SerialPortId::A);
+                    self.draw_serial_primary_row(ui, crate::config::SerialPortId::B);
+                });
+                ui.add_space(4.0);
 
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(half, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("General").strong().color(AMBER));
-                                    if right_aligned_small_button(ui, "Save") {
-                                        self.save_config_now();
-                                    }
-                                });
-                                ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
-                                ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
-                            });
-                        },
-                    );
+                // ── Row 4: General ───────────────────────────
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("General").strong().color(AMBER));
+                        if right_aligned_small_button(ui, "Save") {
+                            self.save_config_now();
+                        }
+                    });
+                    ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+                    ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
                 });
                 ui.add_space(6.0);
 
@@ -1673,8 +1748,18 @@ impl eframe::App for App {
             });
         self.server_popup_open = server_open;
 
-        let mut serial_open = self.serial_popup_open;
-        egui::Window::new(egui::RichText::new("Serial Port — More").strong().color(AMBER_BRIGHT))
+        // One independent popup per port — each shows that port's
+        // mode selector, framing/flow row, AT/S-register state, stored
+        // numbers, and a Save button.  Both can be open simultaneously
+        // so the operator can compare settings side-by-side.
+        for id in crate::config::SERIAL_PORT_IDS {
+            let idx = id.index();
+            let mut serial_open = self.serial_popup_open[idx];
+            let title = format!("Serial Port {} — More", id.label());
+            egui::Window::new(
+                egui::RichText::new(&title).strong().color(AMBER_BRIGHT),
+            )
+            .id(egui::Id::new(format!("serial_popup_{}", id.label())))
             .open(&mut serial_open)
             .resizable(true)
             .collapsible(false)
@@ -1682,11 +1767,13 @@ impl eframe::App for App {
             .frame(popup_frame)
             .show(&ctx, |ui| {
                 ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-                self.draw_serial_controls(ui, false);
+                self.draw_serial_mode_row(ui, id);
+                ui.add_space(4.0);
+                self.draw_serial_more_framing_row(ui, id);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
-                self.draw_serial_advanced(ui);
+                self.draw_serial_advanced(ui, id);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -1699,10 +1786,11 @@ impl eframe::App for App {
                     ))
                     .clicked()
                 {
-                    self.save_config_now();
+                    self.save_and_restart_serial();
                 }
             });
-        self.serial_popup_open = serial_open;
+            self.serial_popup_open[idx] = serial_open;
+        }
 
         let mut ft_open = self.file_transfer_popup_open;
         egui::Window::new(
@@ -2017,7 +2105,8 @@ impl eframe::App for App {
                 || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
                 || self.kermit_window_size_buf != self.last_synced_cfg.kermit_window_size.to_string()
                 || self.kermit_block_check_type_buf != self.last_synced_cfg.kermit_block_check_type.to_string()
-                || self.serial_baud_buf != self.last_synced_cfg.serial_baud.to_string();
+                || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
+                || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
         }
     }
 }
@@ -2091,7 +2180,8 @@ mod tests {
             app.kermit_block_check_type_buf,
             app.cfg.kermit_block_check_type.to_string()
         );
-        assert_eq!(app.serial_baud_buf, app.cfg.serial_baud.to_string());
+        assert_eq!(app.serial_baud_buf[0], app.cfg.serial_a.baud.to_string());
+        assert_eq!(app.serial_baud_buf[1], app.cfg.serial_b.baud.to_string());
     }
 
     #[test]
@@ -2128,7 +2218,7 @@ mod tests {
         app.kermit_max_packet_length_buf = "2048".into();
         app.kermit_window_size_buf = "8".into();
         app.kermit_block_check_type_buf = "2".into();
-        app.serial_baud_buf = "115200".into();
+        app.serial_baud_buf = ["115200".into(), "57600".into()];
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, 8080);
         assert_eq!(app.cfg.ssh_port, 3333);
@@ -2149,7 +2239,8 @@ mod tests {
         assert_eq!(app.cfg.kermit_max_packet_length, 2048);
         assert_eq!(app.cfg.kermit_window_size, 8);
         assert_eq!(app.cfg.kermit_block_check_type, 2);
-        assert_eq!(app.cfg.serial_baud, 115200);
+        assert_eq!(app.cfg.serial_a.baud, 115200);
+        assert_eq!(app.cfg.serial_b.baud, 57600);
     }
 
     #[test]
@@ -2213,12 +2304,14 @@ mod tests {
     fn test_sync_invalid_leaves_original() {
         let mut app = test_app();
         let orig_port = app.cfg.telnet_port;
-        let orig_baud = app.cfg.serial_baud;
+        let orig_baud_a = app.cfg.serial_a.baud;
+        let orig_baud_b = app.cfg.serial_b.baud;
         app.telnet_port_buf = "not_a_number".into();
-        app.serial_baud_buf = "".into();
+        app.serial_baud_buf = ["".into(), "".into()];
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, orig_port);
-        assert_eq!(app.cfg.serial_baud, orig_baud);
+        assert_eq!(app.cfg.serial_a.baud, orig_baud_a);
+        assert_eq!(app.cfg.serial_b.baud, orig_baud_b);
     }
 
     /// Invalid or zero ZMODEM buffers must not clobber the existing
@@ -2279,13 +2372,27 @@ mod tests {
     #[test]
     fn test_sync_partial_invalid() {
         let mut app = test_app();
-        // Valid port, invalid baud — only port should update
+        // Valid port, invalid baud on both serial ports — only port should update
         app.telnet_port_buf = "9999".into();
-        app.serial_baud_buf = "abc".into();
-        let orig_baud = app.cfg.serial_baud;
+        let orig_baud_a = app.cfg.serial_a.baud;
+        let orig_baud_b = app.cfg.serial_b.baud;
+        app.serial_baud_buf = ["abc".into(), "abc".into()];
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, 9999);
-        assert_eq!(app.cfg.serial_baud, orig_baud);
+        assert_eq!(app.cfg.serial_a.baud, orig_baud_a);
+        assert_eq!(app.cfg.serial_b.baud, orig_baud_b);
+    }
+
+    /// Updating Port A's baud buffer doesn't bleed into Port B and
+    /// vice versa.  Direct guard for the per-port buffer indexing.
+    #[test]
+    fn test_sync_baud_isolated_per_port() {
+        let mut app = test_app();
+        app.serial_baud_buf[0] = "57600".into();
+        app.serial_baud_buf[1] = "115200".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.serial_a.baud, 57600);
+        assert_eq!(app.cfg.serial_b.baud, 115200);
     }
 
     // ── poll_logs buffer cap ─────────────────────────────────

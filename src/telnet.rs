@@ -3127,7 +3127,11 @@ impl TelnetSession {
         // that arrived over that port would loop the user's terminal
         // to itself.  gateway_serial() also rejects this with an
         // explanation, but hiding the menu item is the cleaner UX.
-        if !self.is_serial {
+        // Also hidden when neither port is in console mode — without
+        // an eligible target, the entry would dead-end at the picker.
+        if !self.is_serial
+            && crate::serial::any_port_console_eligible(&config::get_config())
+        {
             self.send_line(&format!(
                 "  {}  Serial Gateway",
                 self.cyan("G")
@@ -6151,9 +6155,98 @@ impl TelnetSession {
 
     // ─── SERIAL GATEWAY ─────────────────────────────────────
 
-    /// Bridge the telnet session directly to the configured serial port.
-    /// Requires `serial_enabled = true` and `serial_mode = "console"` —
-    /// otherwise we explain how to switch and return.
+    /// Render the Serial Gateway port picker.  Returns `Ok(Some(id))`
+    /// if the user picked an eligible port, `Ok(None)` if they backed
+    /// out (or every port was ineligible and they pressed any key).
+    /// Always shows both ports' status — even when only one is
+    /// eligible — so the menu structure stays consistent and the
+    /// user can see *why* a port is unavailable.
+    async fn gateway_serial_picker(
+        &mut self,
+    ) -> Result<Option<crate::config::SerialPortId>, std::io::Error> {
+        use crate::config::{SerialPortId, SERIAL_PORT_IDS};
+
+        loop {
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("SERIAL GATEWAY")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let cfg = config::get_config();
+            let mut any_eligible = false;
+            for id in SERIAL_PORT_IDS {
+                let port = cfg.port(id);
+                let eligibility = crate::serial::check_console_bridge_eligible(&cfg, id);
+                let ok = eligibility.is_ok();
+                any_eligible |= ok;
+                let label = format!("[{}] Port {}", id.label(), id.label());
+                let status = if !port.enabled {
+                    self.red("Disabled")
+                } else if port.mode != "console" {
+                    self.amber("Modem mode")
+                } else if port.port.is_empty() {
+                    self.red("No device")
+                } else {
+                    self.green(&format!(
+                        "Console — {} {}",
+                        truncate_to_width(&port.port, 24),
+                        port.baud
+                    ))
+                };
+                self.send_line(&format!(
+                    "  {}  {}",
+                    if ok { self.cyan(&label) } else { self.dim(&label) },
+                    status
+                ))
+                .await?;
+            }
+            self.send_line("").await?;
+            if !any_eligible {
+                self.send_line(&format!(
+                    "  {}",
+                    self.red("No port is in console mode.")
+                ))
+                .await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Use Configuration → M to set up a port.")
+                ))
+                .await?;
+                self.send_line("").await?;
+            }
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
+                .await?;
+            let prompt = format!("{}> ", self.cyan("ethernet/gateway"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(None),
+            };
+            let id = match input.as_str() {
+                "a" => SerialPortId::A,
+                "b" => SerialPortId::B,
+                "q" => return Ok(None),
+                _ => {
+                    self.show_error("Press A, B, or Q.").await?;
+                    continue;
+                }
+            };
+            // Final eligibility check happens in the caller — we
+            // return the picked id even if it's currently dim, so
+            // the user gets a specific reason rather than the
+            // generic "Press A, B, or Q" rejection.
+            return Ok(Some(id));
+        }
+    }
+
+    /// Bridge the telnet session directly to one of the configured
+    /// serial ports.  Always presents an A/B picker first; the chosen
+    /// port must be `enabled = true` with `mode = "console"`.
     ///
     /// The escape sequence is two consecutive ESC presses (PETSCII `<-`
     /// on Commodore terminals).  A single ESC is forwarded to the wire
@@ -6172,29 +6265,28 @@ impl TelnetSession {
             return Ok(());
         }
 
+        // Always render a picker — even if only one port is eligible
+        // — so the user can see both ports' status side-by-side and
+        // the menu structure stays consistent regardless of config.
+        let id = match self.gateway_serial_picker().await? {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
         let cfg = config::get_config();
-        if !cfg.serial_enabled || cfg.serial_port.is_empty() {
+        // Re-validate under the picked id.  Eligibility might have
+        // changed since the picker rendered (operator could have
+        // toggled mode in another session).
+        if let Err(e) = crate::serial::check_console_bridge_eligible(&cfg, id) {
             self.show_error_lines(&[
-                "Serial port is not enabled.",
+                "Could not acquire serial port:",
                 "",
-                "Open Configuration, press T to",
-                "switch to Console mode if needed,",
-                "then M to enable the port and",
-                "select a device.",
+                e.as_str(),
             ])
             .await?;
             return Ok(());
         }
-        if cfg.serial_mode != "console" {
-            self.show_error_lines(&[
-                "Serial port is in modem mode.",
-                "",
-                "Press T at the Configuration",
-                "menu to switch to Console mode.",
-            ])
-            .await?;
-            return Ok(());
-        }
+        let port_cfg = cfg.port(id).clone();
 
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
@@ -6204,8 +6296,11 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("SERIAL GATEWAY")))
-            .await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow(&format!("SERIAL GATEWAY (PORT {})", id.label()))
+        ))
+        .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
         // Stack the port info so a long device path
@@ -6213,20 +6308,20 @@ impl TelnetSession {
         // PETSCII width.
         self.send_line(&format!(
             "  Port: {}",
-            self.amber(&cfg.serial_port)
+            self.amber(&port_cfg.port)
         ))
         .await?;
         self.send_line(&format!(
             "  Baud: {}",
-            self.amber(&cfg.serial_baud.to_string())
+            self.amber(&port_cfg.baud.to_string())
         ))
         .await?;
         self.send_line(&format!(
             "  Data: {}{}{} flow={}",
-            cfg.serial_databits,
-            cfg.serial_parity.chars().next().unwrap_or('N').to_uppercase(),
-            cfg.serial_stopbits,
-            cfg.serial_flowcontrol,
+            port_cfg.databits,
+            port_cfg.parity.chars().next().unwrap_or('N').to_uppercase(),
+            port_cfg.stopbits,
+            port_cfg.flowcontrol,
         ))
         .await?;
         self.send_line("").await?;
@@ -6270,7 +6365,8 @@ impl TelnetSession {
         ))
         .await?;
         self.flush().await?;
-        let bridge = match crate::serial::request_console_bridge().await {
+        let _ = id; // bind id for the bridge request below
+        let bridge = match crate::serial::request_console_bridge(id).await {
             Ok(b) => b,
             Err(e) => {
                 self.show_error_lines(&[
@@ -7173,7 +7269,89 @@ impl TelnetSession {
 
     // ─── Modem settings ───────────────────────────────────
 
-    async fn modem_settings(&mut self) -> Result<(), std::io::Error> {
+    /// Render the Serial Configuration submenu (the new entry point
+    /// from Configuration → M).  Lists both ports with their status
+    /// and lets the user pick one to drop into `modem_settings`.
+    async fn serial_configuration_menu(&mut self) -> Result<(), std::io::Error> {
+        use crate::config::{SerialPortId, SERIAL_PORT_IDS};
+
+        loop {
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("SERIAL CONFIGURATION")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let cfg = config::get_config();
+            for id in SERIAL_PORT_IDS {
+                let port = cfg.port(id);
+                let status = if !port.enabled {
+                    self.red("Disabled")
+                } else if port.mode == "console" {
+                    self.green(&format!(
+                        "Console — {} {}",
+                        truncate_to_width(&port.port, 20),
+                        port.baud
+                    ))
+                } else {
+                    self.amber(&format!(
+                        "Modem — {} {}",
+                        truncate_to_width(&port.port, 20),
+                        port.baud
+                    ))
+                };
+                let label = format!("[{}] Port {}", id.label(), id.label());
+                self.send_line(&format!("  {}  {}", self.cyan(&label), status))
+                    .await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}  {}",
+                self.action_prompt("Q", "Back"),
+                self.action_prompt("H", "Help")
+            ))
+            .await?;
+            let prompt = format!("{}> ", self.cyan("ethernet/serial"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "a" => self.modem_settings(SerialPortId::A).await?,
+                "b" => self.modem_settings(SerialPortId::B).await?,
+                "h" => self.serial_configuration_help().await?,
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press A, B, H, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    async fn serial_configuration_help(&mut self) -> Result<(), std::io::Error> {
+        let lines: &[&str] = &[
+            "  Each serial port has its own enabled",
+            "  flag, role (Modem Emulator or Serial",
+            "  Console), device path, baud rate, and",
+            "  AT/S-register state.",
+            "",
+            "  Pick A or B to configure that port.",
+            "  Inside, press T to toggle between",
+            "  Modem and Console mode for the port",
+            "  you're editing.",
+        ];
+        self.show_help_page("SERIAL CONFIGURATION HELP", lines).await
+    }
+
+    async fn modem_settings(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         // Snapshot current config so we can detect changes and revert if needed.
         let original_cfg = config::get_config();
 
@@ -7183,18 +7361,19 @@ impl TelnetSession {
             self.send_line(&sep).await?;
 
             let cfg = config::get_config();
-            let console_mode = cfg.serial_mode == "console";
+            let port = cfg.port(id).clone();
+            let console_mode = port.mode == "console";
             let title = if console_mode {
-                "SERIAL CONSOLE"
+                format!("PORT {} — SERIAL CONSOLE", id.label())
             } else {
-                "MODEM EMULATOR"
+                format!("PORT {} — MODEM EMULATOR", id.label())
             };
-            self.send_line(&format!("  {}", self.yellow(title)))
+            self.send_line(&format!("  {}", self.yellow(&title)))
                 .await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
-            let status = if cfg.serial_enabled {
+            let status = if port.enabled {
                 self.green("ENABLED")
             } else {
                 self.red("Disabled")
@@ -7212,10 +7391,10 @@ impl TelnetSession {
                 status, mode_label
             ))
             .await?;
-            let port_display = if cfg.serial_port.is_empty() {
+            let port_display = if port.port.is_empty() {
                 "(not set)".to_string()
             } else {
-                cfg.serial_port.clone()
+                port.port.clone()
             };
             self.send_line(&format!(
                 "  Port:   {}",
@@ -7224,25 +7403,25 @@ impl TelnetSession {
             .await?;
             self.send_line(&format!(
                 "  Baud:   {}",
-                self.amber(&cfg.serial_baud.to_string())
+                self.amber(&port.baud.to_string())
             ))
             .await?;
             self.send_line(&format!(
                 "  Data:   {}",
                 self.amber(&format!(
                     "{}-{}-{}",
-                    cfg.serial_databits,
-                    cfg.serial_parity.chars().next().unwrap_or('N').to_uppercase(),
-                    cfg.serial_stopbits
+                    port.databits,
+                    port.parity.chars().next().unwrap_or('N').to_uppercase(),
+                    port.stopbits
                 ))
             ))
             .await?;
             self.send_line(&format!(
                 "  Flow:   {}",
-                self.amber(&cfg.serial_flowcontrol)
+                self.amber(&port.flowcontrol)
             ))
             .await?;
-            if cfg.serial_enabled && !console_mode {
+            if port.enabled && !console_mode {
                 self.send_line(&format!(
                     "  {}",
                     self.amber("ATD ETHERNET-GATEWAY")
@@ -7255,6 +7434,18 @@ impl TelnetSession {
                 self.cyan("E")
             ))
             .await?;
+            // T moved here from the Configuration menu so each port's
+            // mode toggle lives next to the rest of its settings.
+            // Hidden for serial-side sessions because flipping the
+            // caller's own port to Console mid-session would tear
+            // down their connection before they could confirm.
+            if !self.is_serial {
+                self.send_line(&format!(
+                    "  {}  Toggle Modem/Console mode",
+                    self.cyan("T")
+                ))
+                .await?;
+            }
             self.send_line(&format!(
                 "  {}  Select serial port",
                 self.cyan("S")
@@ -7300,62 +7491,67 @@ impl TelnetSession {
             .await?;
 
             let prompt_label = if console_mode {
-                "ethernet/console"
+                format!("ethernet/console-{}", id.label().to_ascii_lowercase())
             } else {
-                "ethernet/modem"
+                format!("ethernet/modem-{}", id.label().to_ascii_lowercase())
             };
-            let prompt = format!("{}> ", self.cyan(prompt_label));
+            let prompt = format!("{}> ", self.cyan(&prompt_label));
             self.send(&prompt).await?;
             self.flush().await?;
 
             let input = match self.get_menu_input(false).await? {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    self.modem_apply_settings(&original_cfg).await?;
+                    self.modem_apply_settings(id, &original_cfg).await?;
                     return Ok(());
                 }
             };
 
             match input.as_str() {
                 "e" => {
-                    let new_val = if cfg.serial_enabled { "false" } else { "true" };
+                    let new_val = if port.enabled { "false" } else { "true" };
                     let v = new_val.to_string();
+                    let key = config::serial_key(id, "enabled");
                     tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_enabled", &v);
+                        config::update_config_value(&key, &v);
                     })
                     .await
                     .ok();
                 }
+                "t" if !self.is_serial => {
+                    self.toggle_serial_mode(id).await?;
+                }
                 "s" => {
-                    self.modem_select_port().await?;
+                    self.modem_select_port(id).await?;
                 }
                 "b" => {
-                    self.modem_set_baud().await?;
+                    self.modem_set_baud(id).await?;
                 }
                 "p" => {
-                    self.modem_set_data_params().await?;
+                    self.modem_set_data_params(id).await?;
                 }
                 "f" => {
-                    self.modem_set_flow().await?;
+                    self.modem_set_flow(id).await?;
                 }
                 "d" if !console_mode => {
                     self.dialup_mapping().await?;
                 }
                 "i" if !console_mode && !self.is_serial => {
-                    self.modem_ring_emulator().await?;
+                    self.modem_ring_emulator(id).await?;
                 }
                 "h" => {
-                    self.modem_show_help().await?;
+                    self.modem_show_help(id).await?;
                 }
                 "q" => {
-                    self.modem_apply_settings(&original_cfg).await?;
+                    self.modem_apply_settings(id, &original_cfg).await?;
                     return Ok(());
                 }
                 _ => {
                     let msg = match (console_mode, self.is_serial) {
-                        (true, _) => "Press E, S, B, P, F, H, or Q.",
+                        (true, true) => "Press E, S, B, P, F, H, or Q.",
+                        (true, false) => "Press E, T, S, B, P, F, H, or Q.",
                         (false, true) => "Press E, S, B, P, D, F, H, or Q.",
-                        (false, false) => "Press E, S, B, P, D, F, I, H, or Q.",
+                        (false, false) => "Press E, T, S, B, P, D, F, I, H, or Q.",
                     };
                     self.show_error(msg).await?;
                 }
@@ -7363,28 +7559,33 @@ impl TelnetSession {
         }
     }
 
-    /// Apply modem settings changes.  For serial users, ask for
-    /// acknowledgement and revert if no response within 60 seconds.
+    /// Apply modem settings changes for a specific port.  For serial
+    /// users, ask for acknowledgement and revert if no response within
+    /// 60 seconds.  Diff is per-port — saving Port A's changes leaves
+    /// any in-flight Port B activity alone.
     async fn modem_apply_settings(
         &mut self,
+        id: crate::config::SerialPortId,
         original_cfg: &config::Config,
     ) -> Result<(), std::io::Error> {
         let new_cfg = config::get_config();
-        let changed = new_cfg.serial_enabled != original_cfg.serial_enabled
-            || new_cfg.serial_mode != original_cfg.serial_mode
-            || new_cfg.serial_port != original_cfg.serial_port
-            || new_cfg.serial_baud != original_cfg.serial_baud
-            || new_cfg.serial_databits != original_cfg.serial_databits
-            || new_cfg.serial_parity != original_cfg.serial_parity
-            || new_cfg.serial_stopbits != original_cfg.serial_stopbits
-            || new_cfg.serial_flowcontrol != original_cfg.serial_flowcontrol;
+        let new_port = new_cfg.port(id);
+        let old_port = original_cfg.port(id);
+        let changed = new_port.enabled != old_port.enabled
+            || new_port.mode != old_port.mode
+            || new_port.port != old_port.port
+            || new_port.baud != old_port.baud
+            || new_port.databits != old_port.databits
+            || new_port.parity != old_port.parity
+            || new_port.stopbits != old_port.stopbits
+            || new_port.flowcontrol != old_port.flowcontrol;
 
         if !changed {
             return Ok(());
         }
 
         if !self.is_serial {
-            crate::serial::restart_serial();
+            crate::serial::restart_serial(id);
             return Ok(());
         }
 
@@ -7413,7 +7614,7 @@ impl TelnetSession {
         let _ = self.flush().await;
 
         // Apply the new serial settings now.
-        crate::serial::restart_serial();
+        crate::serial::restart_serial(id);
 
         let deadline = tokio::time::Instant::now()
             + tokio::time::Duration::from_secs(60);
@@ -7478,20 +7679,22 @@ impl TelnetSession {
         )).await;
         let _ = self.flush().await;
 
-        Self::revert_serial_config(original_cfg).await;
-        crate::serial::restart_serial();
+        Self::revert_serial_config(id, original_cfg).await;
+        crate::serial::restart_serial(id);
         Ok(())
     }
 
-    /// Toggle serial_mode between "modem" and "console" from the
-    /// configuration menu.  Refuses the toggle for a caller who came in
-    /// over the modem itself — switching to console mode would tear
-    /// down their own connection before they could acknowledge, and the
-    /// 60 s Y+Enter recovery in `modem_apply_settings` cannot be reached
-    /// once the modem session is gone.  Console-mode sessions are raw
-    /// passthroughs that don't run TelnetSession, so they never reach
-    /// this code.
-    async fn toggle_serial_mode(&mut self) -> Result<(), std::io::Error> {
+    /// Toggle one port's mode between "modem" and "console".  Refuses
+    /// the toggle for a caller who came in over the modem itself —
+    /// switching to console mode would tear down their own connection
+    /// before they could acknowledge, and the 60 s Y+Enter recovery in
+    /// `modem_apply_settings` cannot be reached once the modem session
+    /// is gone.  Console-mode sessions are raw passthroughs that don't
+    /// run TelnetSession, so they never reach this code.
+    async fn toggle_serial_mode(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         if self.is_serial {
             self.show_error_lines(&[
                 "Cannot toggle mode from a",
@@ -7502,51 +7705,71 @@ impl TelnetSession {
                 "",
                 "Connect via telnet, SSH, or the",
                 "system console and press T from",
-                "the Configuration menu there.",
+                "the per-port settings menu there.",
             ])
             .await?;
             return Ok(());
         }
 
         let original_cfg = config::get_config();
-        let new_mode = if original_cfg.serial_mode == "console" {
+        let new_mode = if original_cfg.port(id).mode == "console" {
             "modem"
         } else {
             "console"
         };
         let v = new_mode.to_string();
+        let key = config::serial_key(id, "mode");
         tokio::task::spawn_blocking(move || {
-            config::update_config_value("serial_mode", &v);
+            config::update_config_value(&key, &v);
         })
         .await
         .ok();
-        self.modem_apply_settings(&original_cfg).await
+        self.modem_apply_settings(id, &original_cfg).await
     }
 
-    /// Revert serial config to a previous snapshot using a single batch write.
-    async fn revert_serial_config(cfg: &config::Config) {
-        let oc = cfg.clone();
+    /// Revert one port's config to a previous snapshot using a single
+    /// batch write.  Port-scoped — never touches the other port.
+    async fn revert_serial_config(
+        id: crate::config::SerialPortId,
+        cfg: &config::Config,
+    ) {
+        let port = cfg.port(id).clone();
         let _ = tokio::task::spawn_blocking(move || {
+            let enabled_key = config::serial_key(id, "enabled");
+            let mode_key = config::serial_key(id, "mode");
+            let port_key = config::serial_key(id, "port");
+            let baud_key = config::serial_key(id, "baud");
+            let databits_key = config::serial_key(id, "databits");
+            let parity_key = config::serial_key(id, "parity");
+            let stopbits_key = config::serial_key(id, "stopbits");
+            let flow_key = config::serial_key(id, "flowcontrol");
+            let baud_str = port.baud.to_string();
+            let databits_str = port.databits.to_string();
+            let stopbits_str = port.stopbits.to_string();
             config::update_config_values(&[
-                ("serial_enabled", if oc.serial_enabled { "true" } else { "false" }),
-                ("serial_mode", &oc.serial_mode),
-                ("serial_port", &oc.serial_port),
-                ("serial_baud", &oc.serial_baud.to_string()),
-                ("serial_databits", &oc.serial_databits.to_string()),
-                ("serial_parity", &oc.serial_parity),
-                ("serial_stopbits", &oc.serial_stopbits.to_string()),
-                ("serial_flowcontrol", &oc.serial_flowcontrol),
+                (enabled_key.as_str(), if port.enabled { "true" } else { "false" }),
+                (mode_key.as_str(), port.mode.as_str()),
+                (port_key.as_str(), port.port.as_str()),
+                (baud_key.as_str(), baud_str.as_str()),
+                (databits_key.as_str(), databits_str.as_str()),
+                (parity_key.as_str(), port.parity.as_str()),
+                (stopbits_key.as_str(), stopbits_str.as_str()),
+                (flow_key.as_str(), port.flowcontrol.as_str()),
             ]);
         })
         .await;
     }
 
-    async fn modem_select_port(&mut self) -> Result<(), std::io::Error> {
+    async fn modem_select_port(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
+        let title = format!("PORT {} — DEVICE", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("SERIAL PORT"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}...", self.dim("Detecting ports"))).await?;
@@ -7559,7 +7782,7 @@ impl TelnetSession {
             if ports.is_empty() {
                 self.clear_screen().await?;
                 self.send_line(&sep).await?;
-                self.send_line(&format!("  {}", self.yellow("SERIAL PORT"))).await?;
+                self.send_line(&format!("  {}", self.yellow(&title))).await?;
                 self.send_line(&sep).await?;
                 self.send_line("").await?;
                 self.send_line(&format!("  {}", self.red("No serial ports detected.")))
@@ -7585,11 +7808,13 @@ impl TelnetSession {
                     Some(s) if !s.is_empty() => s,
                     _ => return Ok(()),
                 };
+                let port_key = config::serial_key(id, "port");
                 match input.as_str() {
                     "r" => continue,
                     "n" => {
-                        tokio::task::spawn_blocking(|| {
-                            config::update_config_value("serial_port", "");
+                        let k = port_key.clone();
+                        tokio::task::spawn_blocking(move || {
+                            config::update_config_value(&k, "");
                         })
                         .await
                         .ok();
@@ -7599,8 +7824,9 @@ impl TelnetSession {
                     _ => {
                         // Allow typing a port path directly even with no ports detected
                         let port_name = input;
+                        let k = port_key.clone();
                         tokio::task::spawn_blocking(move || {
-                            config::update_config_value("serial_port", &port_name);
+                            config::update_config_value(&k, &port_name);
                         })
                         .await
                         .ok();
@@ -7612,7 +7838,7 @@ impl TelnetSession {
             // Redraw with port list
             self.clear_screen().await?;
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("SERIAL PORT"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             let max_w = if self.terminal_type == TerminalType::Petscii {
@@ -7653,11 +7879,13 @@ impl TelnetSession {
                 _ => return Ok(()),
             };
 
+            let port_key = config::serial_key(id, "port");
             match input.as_str() {
                 "r" => continue,
                 "n" => {
-                    tokio::task::spawn_blocking(|| {
-                        config::update_config_value("serial_port", "");
+                    let k = port_key.clone();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value(&k, "");
                     })
                     .await
                     .ok();
@@ -7670,8 +7898,9 @@ impl TelnetSession {
             if let Ok(idx) = input.parse::<usize>() {
                 if idx >= 1 && idx <= ports.len() {
                     let port_name = ports[idx - 1].clone();
+                    let k = port_key.clone();
                     tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_port", &port_name);
+                        config::update_config_value(&k, &port_name);
                     })
                     .await
                     .ok();
@@ -7682,8 +7911,9 @@ impl TelnetSession {
             } else {
                 // Allow typing a port path directly
                 let port_name = input;
+                let k = port_key.clone();
                 tokio::task::spawn_blocking(move || {
-                    config::update_config_value("serial_port", &port_name);
+                    config::update_config_value(&k, &port_name);
                 })
                 .await
                 .ok();
@@ -7692,16 +7922,20 @@ impl TelnetSession {
         }
     }
 
-    async fn modem_set_baud(&mut self) -> Result<(), std::io::Error> {
+    async fn modem_set_baud(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         let bauds = [
             "300", "1200", "2400", "4800", "9600", "19200", "38400",
             "57600", "115200",
         ];
+        let title = format!("PORT {} — BAUD RATE", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("BAUD RATE"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             for (i, b) in bauds.iter().enumerate() {
@@ -7727,10 +7961,11 @@ impl TelnetSession {
                 "q" => return Ok(()),
                 "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
                     // Safe: the match arm only accepts single ASCII digits 1-9.
-                    let idx = (input.as_bytes()[0] - b'1') as usize;
-                    let baud_str = bauds[idx].to_string();
+                    let idx_v = (input.as_bytes()[0] - b'1') as usize;
+                    let baud_str = bauds[idx_v].to_string();
+                    let key = config::serial_key(id, "baud");
                     tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_baud", &baud_str);
+                        config::update_config_value(&key, &baud_str);
                     })
                     .await
                     .ok();
@@ -7743,13 +7978,17 @@ impl TelnetSession {
         }
     }
 
-    async fn modem_set_data_params(&mut self) -> Result<(), std::io::Error> {
+    async fn modem_set_data_params(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
+        let title = format!("PORT {} — DATA BITS", id.label());
         // Data bits
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("DATA BITS"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  5 bits", self.cyan("5"))).await?;
@@ -7771,8 +8010,9 @@ impl TelnetSession {
                 "q" => return Ok(()),
                 "5" | "6" | "7" | "8" => {
                     let v = input.clone();
+                    let key = config::serial_key(id, "databits");
                     tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_databits", &v);
+                        config::update_config_value(&key, &v);
                     })
                     .await
                     .ok();
@@ -7785,11 +8025,12 @@ impl TelnetSession {
         }
 
         // Parity
+        let parity_title = format!("PORT {} — PARITY", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("PARITY"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&parity_title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  None", self.cyan("1"))).await?;
@@ -7817,8 +8058,9 @@ impl TelnetSession {
                 }
             };
             let p = parity.to_string();
+            let key = config::serial_key(id, "parity");
             tokio::task::spawn_blocking(move || {
-                config::update_config_value("serial_parity", &p);
+                config::update_config_value(&key, &p);
             })
             .await
             .ok();
@@ -7826,11 +8068,12 @@ impl TelnetSession {
         }
 
         // Stop bits
+        let stop_title = format!("PORT {} — STOP BITS", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("STOP BITS"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&stop_title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  1 stop bit", self.cyan("1"))).await?;
@@ -7850,8 +8093,9 @@ impl TelnetSession {
                 "q" => return Ok(()),
                 "1" | "2" => {
                     let v = input.clone();
+                    let key = config::serial_key(id, "stopbits");
                     tokio::task::spawn_blocking(move || {
-                        config::update_config_value("serial_stopbits", &v);
+                        config::update_config_value(&key, &v);
                     })
                     .await
                     .ok();
@@ -7864,12 +8108,16 @@ impl TelnetSession {
         }
     }
 
-    async fn modem_set_flow(&mut self) -> Result<(), std::io::Error> {
+    async fn modem_set_flow(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
+        let title = format!("PORT {} — FLOW CONTROL", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("FLOW CONTROL"))).await?;
+            self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  None", self.cyan("1"))).await?;
@@ -7897,8 +8145,9 @@ impl TelnetSession {
                 }
             };
             let f = flow.to_string();
+            let key = config::serial_key(id, "flowcontrol");
             tokio::task::spawn_blocking(move || {
-                config::update_config_value("serial_flowcontrol", &f);
+                config::update_config_value(&key, &f);
             })
             .await
             .ok();
@@ -7906,19 +8155,26 @@ impl TelnetSession {
         }
     }
 
-    async fn modem_ring_emulator(&mut self) -> Result<(), std::io::Error> {
+    async fn modem_ring_emulator(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
+        let port = cfg.port(id).clone();
 
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("RING EMULATOR")))
-            .await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow(&format!("PORT {} — RING EMULATOR", id.label()))
+        ))
+        .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
 
         // Check if serial port is enabled
-        if !cfg.serial_enabled || cfg.serial_port.is_empty() {
+        if !port.enabled || port.port.is_empty() {
             self.send_line(&format!(
                 "  {}",
                 self.red("Serial port is not enabled.")
@@ -7934,7 +8190,7 @@ impl TelnetSession {
         // Create progress channel
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(16);
 
-        if !crate::serial::request_ring(tx) {
+        if !crate::serial::request_ring(id, tx) {
             self.send_line(&format!(
                 "  {}",
                 self.red("A ring is already in progress.")
@@ -7949,7 +8205,7 @@ impl TelnetSession {
 
         self.send_line(&format!(
             "  Calling {}...",
-            self.amber(&cfg.serial_port)
+            self.amber(&port.port)
         ))
         .await?;
         self.send_line("").await?;
@@ -8014,7 +8270,7 @@ impl TelnetSession {
         // Drop the receiver to signal cancellation if we broke out early,
         // and clear the slot in case the serial thread never picked it up.
         drop(rx);
-        crate::serial::cancel_ring_request();
+        crate::serial::cancel_ring_request(id);
 
         self.send_line("").await?;
         if answered {
@@ -8043,8 +8299,11 @@ impl TelnetSession {
         Ok(())
     }
 
-    async fn modem_show_help(&mut self) -> Result<(), std::io::Error> {
-        let console_mode = config::get_config().serial_mode == "console";
+    async fn modem_show_help(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
+        let console_mode = config::get_config().port(id).mode == "console";
         if console_mode {
             return self.console_show_help().await;
         }
@@ -8252,23 +8511,26 @@ impl TelnetSession {
             self.send_line("").await?;
 
             let cfg = config::get_config();
-            let console_mode = cfg.serial_mode == "console";
-            let serial_status = if !cfg.serial_enabled {
-                self.red("Disabled")
-            } else if console_mode {
-                self.green("Console mode")
-            } else {
-                self.amber("Modem mode")
-            };
-            self.send_line(&format!("  Serial port: {}", serial_status))
+            // Per-port status banner: one line per port so the
+            // operator sees both at a glance.
+            for id in crate::config::SERIAL_PORT_IDS {
+                let port = cfg.port(id);
+                let status = if !port.enabled {
+                    self.red("Disabled")
+                } else if port.mode == "console" {
+                    self.green("Console mode")
+                } else {
+                    self.amber("Modem mode")
+                };
+                self.send_line(&format!(
+                    "  Port {}: {}",
+                    id.label(),
+                    status
+                ))
                 .await?;
+            }
             self.send_line("").await?;
 
-            let modem_label = if console_mode {
-                "Serial Console"
-            } else {
-                "Modem Emulator"
-            };
             self.send_line(&format!(
                 "  {}  Security",
                 self.cyan("E")
@@ -8280,22 +8542,10 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  {}",
-                self.cyan("M"),
-                modem_label
+                "  {}  Serial Configuration",
+                self.cyan("M")
             ))
             .await?;
-            // Toggling to the other mode from a modem-side session
-            // would tear down the caller's own connection before they
-            // could confirm.  toggle_serial_mode() also rejects this
-            // path; hide the menu item to match.
-            if !self.is_serial {
-                self.send_line(&format!(
-                    "  {}  Toggle Modem/Console mode",
-                    self.cyan("T")
-                ))
-                .await?;
-            }
             self.send_line(&format!(
                 "  {}  Server Configuration",
                 self.cyan("S")
@@ -8341,10 +8591,7 @@ impl TelnetSession {
                     self.gateway_configuration().await?;
                 }
                 "m" => {
-                    self.modem_settings().await?;
-                }
-                "t" => {
-                    self.toggle_serial_mode().await?;
+                    self.serial_configuration_menu().await?;
                 }
                 "o" => {
                     self.other_settings().await?;
@@ -8369,15 +8616,10 @@ impl TelnetSession {
                             "  G  Gateway: configure outbound",
                             "     Telnet and SSH Gateway menus",
                             "",
-                            "  M  Modem Emulator or Serial",
-                            "     Console settings (port, baud,",
-                            "     dialup mappings).  The label",
-                            "     reflects the current mode.",
-                            "",
-                            "  T  Toggle the serial port mode",
-                            "     between Modem Emulator and",
-                            "     Serial Console without",
-                            "     entering the M submenu.",
+                            "  M  Serial Configuration: pick",
+                            "     Port A or B and set its",
+                            "     mode (Modem / Console),",
+                            "     device, baud, AT settings.",
                             "",
                             "  S  Server: enable/disable",
                             "     services, set ports, and",
@@ -8413,14 +8655,12 @@ impl TelnetSession {
                             "     Telnet and SSH Gateway menus",
                             "     (proxy to remote servers)",
                             "",
-                            "  M  Modem Emulator / Serial Console",
-                            "     settings (port, baud, dialup).",
-                            "     The label reflects the current",
-                            "     mode shown above.",
-                            "",
-                            "  T  Toggle the serial port between",
-                            "     Modem Emulator and Serial Console",
-                            "     mode without entering the M submenu",
+                            "  M  Serial Configuration: pick Port A",
+                            "     or Port B and set its mode (Modem",
+                            "     Emulator or Serial Console),",
+                            "     device, baud, AT/S-register state,",
+                            "     and dialup mapping.  Each port has",
+                            "     independent settings.",
                             "",
                             "  S  Server: enable/disable services,",
                             "     set ports, and restart the server",
@@ -8451,7 +8691,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press E, F, G, M, O, R, S, T, H, or Q.").await?;
+                    self.show_error("Press E, F, G, M, O, R, S, H, or Q.").await?;
                 }
             }
         }
@@ -14224,26 +14464,75 @@ mod tests {
         assert!(data.len() <= PETSCII_WIDTH, "data line {} chars", data.len());
     }
 
+    /// New Serial Gateway picker (always shown, even when only one
+    /// port is eligible): chrome + 2 port rows + 2 fallback lines for
+    /// the no-port-eligible case + footer + prompt.  Must fit the
+    /// 22-row PETSCII budget.
+    #[test]
+    fn test_serial_gateway_picker_row_count() {
+        let chrome = 3 + 1; // sep+title+sep, blank
+        let port_rows = 2; // [A] ... / [B] ...
+        let fallback = 1 + 1 + 1; // red error + dim hint + blank (only when no port eligible)
+        let footer = 1 + 1; // Q footer + prompt
+        let worst_case = chrome + port_rows + fallback + footer;
+        assert!(
+            worst_case <= 22,
+            "Serial Gateway picker is {} rows, exceeds 22",
+            worst_case
+        );
+    }
+
+    /// New Serial Configuration picker (Configuration → M now lands
+    /// here): chrome + 2 port rows + footer + prompt.  Fits well under
+    /// the 22-row budget regardless of port status.
+    #[test]
+    fn test_serial_configuration_picker_row_count() {
+        let chrome = 3 + 1; // sep+title+sep, blank
+        let port_rows = 2;
+        let footer = 1 + 1; // footer line + prompt
+        let total = chrome + port_rows + footer;
+        assert!(
+            total <= 22,
+            "Serial Configuration picker is {} rows",
+            total
+        );
+    }
+
     /// Modem/Console settings menu in console mode loses Dialup +
-    /// Ring rows.  The Modem/Console Mode toggle moved to the parent
-    /// configuration menu in v0.5.x, so this submenu now omits the M
-    /// row.  Item count must still fit the 22-row budget for every
-    /// combination.  Status + Mode share one line so the modem-mode-
-    /// enabled-non-serial case stays under 22 rows.
+    /// Ring rows.  The dual-port refactor put the Modem/Console
+    /// toggle (T) inside this per-port menu, so non-serial flows have
+    /// one extra row vs. v0.5.x.  Item count must still fit the
+    /// 22-row budget for every combination.  Status + Mode share one
+    /// line so the modem-mode-enabled-non-serial case stays under 22
+    /// rows even with the new T item.
     #[test]
     fn test_modem_console_menu_row_counts() {
         // Status block: status_mode + Port + Baud + Data + Flow = 5.
         let status_block = 5;
         let chrome = 3 + 1 + 1 + 1 + 1; // sep+title+sep, blank, blank, footer, prompt = 7
-        let menu_console = 5; // E, S, B, P, F
-        let menu_modem_serial = 6; // + D
-        let menu_modem_full = 7; // + D + I
+        // Console mode menu items (serial-side hides T): E S B P F = 5
+        let menu_console_serial = 5;
+        let menu_console_non_serial = 6; // + T
+        let menu_modem_serial = 6; // E S B P D F (no T, no I)
+        let menu_modem_full = 8; // E T S B P D F I
 
-        // Console mode: chrome + status_block + menu_console.
-        let console_rows = chrome + status_block + menu_console; // 17
-        assert!(console_rows <= 22, "console menu is {} rows", console_rows);
+        // Console mode + serial session: no T row.
+        let console_serial_rows = chrome + status_block + menu_console_serial; // 17
+        assert!(
+            console_serial_rows <= 22,
+            "console-serial menu is {} rows",
+            console_serial_rows
+        );
 
-        // Modem mode + serial session + enabled: + ATD + D, no I.
+        // Console mode + non-serial: + T.
+        let console_full_rows = chrome + status_block + menu_console_non_serial; // 18
+        assert!(
+            console_full_rows <= 22,
+            "console-full menu is {} rows",
+            console_full_rows
+        );
+
+        // Modem mode + serial session + enabled: + ATD + D, no T, no I.
         let modem_serial_rows = chrome + status_block + 1 + menu_modem_serial; // 20
         assert!(
             modem_serial_rows <= 22,
@@ -14251,8 +14540,8 @@ mod tests {
             modem_serial_rows
         );
 
-        // Modem mode + non-serial + enabled (worst case): + ATD + D + I.
-        let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 21
+        // Modem mode + non-serial + enabled (worst case): + ATD + T + D + I.
+        let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 22
         assert!(
             modem_full_rows <= 22,
             "modem-full menu is {} rows",
@@ -14281,17 +14570,13 @@ mod tests {
             "     remote server via telnet",
             "  W  Weather: check weather by zip",
             "  X  Exit: disconnect from server",
-            // Configuration submenu help
+            // Configuration submenu help (post-dual-port refactor)
             "  E  Security: require login,",
             "     set usernames and passwords",
-            "  M  Modem Emulator or Serial",
-            "     Console settings (port, baud,",
-            "     dialup mappings).  The label",
-            "     reflects the current mode.",
-            "  T  Toggle the serial port mode",
-            "     between Modem Emulator and",
-            "     Serial Console without",
-            "     entering the M submenu.",
+            "  M  Serial Configuration: pick",
+            "     Port A or B and set its",
+            "     mode (Modem / Console),",
+            "     device, baud, AT settings.",
             "  S  Server: enable/disable",
             "     services, set ports, and",
             "     restart the server",

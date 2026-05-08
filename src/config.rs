@@ -190,6 +190,111 @@ const DEFAULT_SSH_PASSWORD: &str = "changeme";
 /// public key on the remote's `~/.ssh/authorized_keys`.
 const DEFAULT_SSH_GATEWAY_AUTH: &str = "password";
 
+/// Identifier for one of the two configurable serial ports.
+///
+/// Two physically independent ports — Port A (the legacy single port) and
+/// Port B (added when the gateway grew dual-port support) — share an
+/// identical settings shape but persist under distinct `serial_a_*` /
+/// `serial_b_*` config keys, run separate modem-emulator state machines,
+/// and own separate console-bridge slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SerialPortId {
+    A,
+    B,
+}
+
+impl SerialPortId {
+    /// Single-character display label ("A" or "B") used in menus, log
+    /// lines, and prompts.  Centralized so a future rename touches one
+    /// place instead of every menu render site.
+    pub fn label(self) -> &'static str {
+        match self {
+            SerialPortId::A => "A",
+            SerialPortId::B => "B",
+        }
+    }
+
+    /// 0/1 array index, for static arrays keyed by port (e.g. the
+    /// per-port restart flags and console-bridge slots in `serial.rs`).
+    pub fn index(self) -> usize {
+        match self {
+            SerialPortId::A => 0,
+            SerialPortId::B => 1,
+        }
+    }
+}
+
+/// Iteration helper: `[SerialPortId::A, SerialPortId::B]`.  Lets callers
+/// loop over both ports without re-listing the enum variants.
+pub const SERIAL_PORT_IDS: [SerialPortId; 2] = [SerialPortId::A, SerialPortId::B];
+
+/// Per-port serial settings.  Each `Config` owns two of these — one for
+/// Port A, one for Port B — and the persisted file keys those fields
+/// under `serial_a_*` and `serial_b_*` respectively.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SerialPortConfig {
+    /// Master enable for this port.  When false, the port's manager
+    /// thread idles and no menu surface activates.
+    pub enabled: bool,
+    /// `"modem"` (Hayes AT emulator) or `"console"` (telnet-serial bridge).
+    pub mode: String,
+    /// Device path (e.g. `/dev/ttyUSB0`, `COM3`).  Empty = unconfigured.
+    pub port: String,
+    pub baud: u32,
+    pub databits: u8,
+    pub parity: String,
+    pub stopbits: u8,
+    pub flowcontrol: String,
+    /// Saved modem echo setting (AT&W persists, ATZ restores).
+    pub echo: bool,
+    /// Saved modem verbose/numeric mode (AT&W persists, ATZ restores).
+    pub verbose: bool,
+    /// Saved modem quiet mode (AT&W persists, ATZ restores).
+    pub quiet: bool,
+    /// Saved S-register values as comma-separated decimal.
+    pub s_regs: String,
+    /// Saved ATX result-code level (0-4).
+    pub x_code: u8,
+    /// Saved AT&D DTR-handling mode (0-3).
+    pub dtr_mode: u8,
+    /// Saved AT&K flow-control mode (0-4).
+    pub flow_mode: u8,
+    /// Saved AT&C DCD mode (0-1).
+    pub dcd_mode: u8,
+    /// Stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Four slots,
+    /// persisted by AT&W and restored by ATZ.  Empty string = unset.
+    pub stored_numbers: [String; 4],
+}
+
+impl Default for SerialPortConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_SERIAL_ENABLED,
+            mode: DEFAULT_SERIAL_MODE.into(),
+            port: DEFAULT_SERIAL_PORT.into(),
+            baud: DEFAULT_SERIAL_BAUD,
+            databits: DEFAULT_SERIAL_DATABITS,
+            parity: DEFAULT_SERIAL_PARITY.into(),
+            stopbits: DEFAULT_SERIAL_STOPBITS,
+            flowcontrol: DEFAULT_SERIAL_FLOWCONTROL.into(),
+            echo: DEFAULT_SERIAL_ECHO,
+            verbose: DEFAULT_SERIAL_VERBOSE,
+            quiet: DEFAULT_SERIAL_QUIET,
+            s_regs: DEFAULT_SERIAL_S_REGS.into(),
+            x_code: DEFAULT_SERIAL_X_CODE,
+            dtr_mode: DEFAULT_SERIAL_DTR_MODE,
+            flow_mode: DEFAULT_SERIAL_FLOW_MODE,
+            dcd_mode: DEFAULT_SERIAL_DCD_MODE,
+            stored_numbers: [
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+        }
+    }
+}
+
 /// Runtime configuration loaded from `egateway.conf`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -310,43 +415,15 @@ pub struct Config {
     /// Port for the standalone Kermit server listener.  Only consulted
     /// when `kermit_server_enabled` is true.
     pub kermit_server_port: u16,
-    /// Enable serial modem emulation.
-    pub serial_enabled: bool,
-    /// Serial console mode.  `"modem"` runs the Hayes AT emulator;
-    /// `"console"` exposes the port via the Serial Gateway menu so a
-    /// telnet/SSH user can talk directly to whatever is on the wire.
-    pub serial_mode: String,
-    /// Serial port device (e.g. /dev/ttyUSB0, COM3). Empty = not configured.
-    pub serial_port: String,
-    /// Serial baud rate.
-    pub serial_baud: u32,
-    /// Serial data bits (5, 6, 7, or 8).
-    pub serial_databits: u8,
-    /// Serial parity: "none", "odd", or "even".
-    pub serial_parity: String,
-    /// Serial stop bits (1 or 2).
-    pub serial_stopbits: u8,
-    /// Serial flow control: "none", "hardware", or "software".
-    pub serial_flowcontrol: String,
-    /// Saved modem echo setting (AT&W persists, ATZ restores).
-    pub serial_echo: bool,
-    /// Saved modem verbose/numeric mode (AT&W persists, ATZ restores).
-    pub serial_verbose: bool,
-    /// Saved modem quiet mode (AT&W persists, ATZ restores).
-    pub serial_quiet: bool,
-    /// Saved S-register values as comma-separated decimal (AT&W persists, ATZ restores).
-    pub serial_s_regs: String,
-    /// Saved ATX result-code level (0-4). AT&W persists, ATZ restores.
-    pub serial_x_code: u8,
-    /// Saved AT&D DTR-handling mode (0-3). AT&W persists, ATZ restores.
-    pub serial_dtr_mode: u8,
-    /// Saved AT&K flow-control mode (0-4). AT&W persists, ATZ restores.
-    pub serial_flow_mode: u8,
-    /// Saved AT&C DCD mode (0-1). AT&W persists, ATZ restores.
-    pub serial_dcd_mode: u8,
-    /// Stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Four slots,
-    /// persisted by AT&W and restored by ATZ.  Empty string = unset.
-    pub serial_stored_numbers: [String; 4],
+    /// Settings for Serial Port A (the legacy single port).  Persisted
+    /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
+    /// on first read.
+    pub serial_a: SerialPortConfig,
+    /// Settings for Serial Port B (added when the gateway grew dual-port
+    /// support).  Persisted under `serial_b_*` keys.  Defaults to
+    /// `enabled = false` so existing single-port deployments keep their
+    /// observable behavior unchanged until the operator opts in.
+    pub serial_b: SerialPortConfig,
     /// Enable SSH server interface.
     pub ssh_enabled: bool,
     /// SSH server port.
@@ -408,33 +485,31 @@ impl Default for Config {
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
-            serial_enabled: DEFAULT_SERIAL_ENABLED,
-            serial_mode: DEFAULT_SERIAL_MODE.into(),
-            serial_port: DEFAULT_SERIAL_PORT.into(),
-            serial_baud: DEFAULT_SERIAL_BAUD,
-            serial_databits: DEFAULT_SERIAL_DATABITS,
-            serial_parity: DEFAULT_SERIAL_PARITY.into(),
-            serial_stopbits: DEFAULT_SERIAL_STOPBITS,
-            serial_flowcontrol: DEFAULT_SERIAL_FLOWCONTROL.into(),
-            serial_echo: DEFAULT_SERIAL_ECHO,
-            serial_verbose: DEFAULT_SERIAL_VERBOSE,
-            serial_quiet: DEFAULT_SERIAL_QUIET,
-            serial_s_regs: DEFAULT_SERIAL_S_REGS.into(),
-            serial_x_code: DEFAULT_SERIAL_X_CODE,
-            serial_dtr_mode: DEFAULT_SERIAL_DTR_MODE,
-            serial_flow_mode: DEFAULT_SERIAL_FLOW_MODE,
-            serial_dcd_mode: DEFAULT_SERIAL_DCD_MODE,
-            serial_stored_numbers: [
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ],
+            serial_a: SerialPortConfig::default(),
+            serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
             ssh_port: DEFAULT_SSH_PORT,
             ssh_username: DEFAULT_SSH_USERNAME.into(),
             ssh_password: DEFAULT_SSH_PASSWORD.into(),
             ssh_gateway_auth: DEFAULT_SSH_GATEWAY_AUTH.into(),
+        }
+    }
+}
+
+impl Config {
+    /// Borrow the per-port settings for `id`.
+    pub fn port(&self, id: SerialPortId) -> &SerialPortConfig {
+        match id {
+            SerialPortId::A => &self.serial_a,
+            SerialPortId::B => &self.serial_b,
+        }
+    }
+
+    /// Mutably borrow the per-port settings for `id`.
+    pub fn port_mut(&mut self, id: SerialPortId) -> &mut SerialPortConfig {
+        match id {
+            SerialPortId::A => &mut self.serial_a,
+            SerialPortId::B => &mut self.serial_b,
         }
     }
 }
@@ -704,86 +779,8 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_KERMIT_SERVER_PORT),
-        serial_enabled: map
-            .get("serial_enabled")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(DEFAULT_SERIAL_ENABLED),
-        serial_mode: map
-            .get("serial_mode")
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| matches!(v.as_str(), "modem" | "console"))
-            .unwrap_or_else(|| DEFAULT_SERIAL_MODE.into()),
-        serial_port: map
-            .get("serial_port")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SERIAL_PORT.into()),
-        serial_baud: map
-            .get("serial_baud")
-            .and_then(|v| v.parse().ok())
-            .filter(|&v: &u32| v >= 300)
-            .unwrap_or(DEFAULT_SERIAL_BAUD),
-        serial_databits: map
-            .get("serial_databits")
-            .and_then(|v| v.parse().ok())
-            .filter(|&v: &u8| matches!(v, 5..=8))
-            .unwrap_or(DEFAULT_SERIAL_DATABITS),
-        serial_parity: map
-            .get("serial_parity")
-            .filter(|v| matches!(v.as_str(), "none" | "odd" | "even"))
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SERIAL_PARITY.into()),
-        serial_stopbits: map
-            .get("serial_stopbits")
-            .and_then(|v| v.parse().ok())
-            .filter(|&v: &u8| v == 1 || v == 2)
-            .unwrap_or(DEFAULT_SERIAL_STOPBITS),
-        serial_flowcontrol: map
-            .get("serial_flowcontrol")
-            .filter(|v| matches!(v.as_str(), "none" | "hardware" | "software"))
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SERIAL_FLOWCONTROL.into()),
-        serial_echo: map
-            .get("serial_echo")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(DEFAULT_SERIAL_ECHO),
-        serial_verbose: map
-            .get("serial_verbose")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(DEFAULT_SERIAL_VERBOSE),
-        serial_quiet: map
-            .get("serial_quiet")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(DEFAULT_SERIAL_QUIET),
-        serial_s_regs: map
-            .get("serial_s_regs")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SERIAL_S_REGS.into()),
-        serial_x_code: map
-            .get("serial_x_code")
-            .and_then(|v| v.parse::<u8>().ok())
-            .filter(|&v| v <= 4)
-            .unwrap_or(DEFAULT_SERIAL_X_CODE),
-        serial_dtr_mode: map
-            .get("serial_dtr_mode")
-            .and_then(|v| v.parse::<u8>().ok())
-            .filter(|&v| v <= 3)
-            .unwrap_or(DEFAULT_SERIAL_DTR_MODE),
-        serial_flow_mode: map
-            .get("serial_flow_mode")
-            .and_then(|v| v.parse::<u8>().ok())
-            .filter(|&v| v <= 4)
-            .unwrap_or(DEFAULT_SERIAL_FLOW_MODE),
-        serial_dcd_mode: map
-            .get("serial_dcd_mode")
-            .and_then(|v| v.parse::<u8>().ok())
-            .filter(|&v| v <= 1)
-            .unwrap_or(DEFAULT_SERIAL_DCD_MODE),
-        serial_stored_numbers: [
-            map.get("serial_stored_0").cloned().unwrap_or_default(),
-            map.get("serial_stored_1").cloned().unwrap_or_default(),
-            map.get("serial_stored_2").cloned().unwrap_or_default(),
-            map.get("serial_stored_3").cloned().unwrap_or_default(),
-        ],
+        serial_a: read_serial_port_config(&map, "serial_a", true),
+        serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
             .get("ssh_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -808,6 +805,98 @@ fn read_config_file(path: &str) -> Config {
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "key" | "password"))
             .unwrap_or_else(|| DEFAULT_SSH_GATEWAY_AUTH.into()),
+    }
+}
+
+/// Read one port's settings from `map` under `prefix` (e.g. `"serial_a"`).
+///
+/// When `legacy_fallback` is true, missing `serial_a_*` keys fall back to
+/// the legacy un-prefixed `serial_*` keys.  This is the dual-port
+/// migration path: an existing single-port `egateway.conf` continues to
+/// load into Port A on startup, and the next `save_config` rewrites it
+/// under the new key names.  Port B never falls back — its only valid
+/// source is `serial_b_*` keys.
+fn read_serial_port_config(
+    map: &HashMap<String, String>,
+    prefix: &str,
+    legacy_fallback: bool,
+) -> SerialPortConfig {
+    // Look up `<prefix>_<key>` first; if absent and legacy_fallback is on,
+    // try the legacy `serial_<key>` form (or the explicit override for
+    // the four stored-number slots, which use `serial_stored_<n>`).
+    let lookup = |suffix: &str, legacy: &str| -> Option<String> {
+        let primary = format!("{}_{}", prefix, suffix);
+        if let Some(v) = map.get(&primary) {
+            return Some(v.clone());
+        }
+        if legacy_fallback {
+            if let Some(v) = map.get(legacy) {
+                return Some(v.clone());
+            }
+        }
+        None
+    };
+
+    SerialPortConfig {
+        enabled: lookup("enabled", "serial_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_ENABLED),
+        mode: lookup("mode", "serial_mode")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "modem" | "console"))
+            .unwrap_or_else(|| DEFAULT_SERIAL_MODE.into()),
+        port: lookup("port", "serial_port").unwrap_or_else(|| DEFAULT_SERIAL_PORT.into()),
+        baud: lookup("baud", "serial_baud")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u32| v >= 300)
+            .unwrap_or(DEFAULT_SERIAL_BAUD),
+        databits: lookup("databits", "serial_databits")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u8| matches!(v, 5..=8))
+            .unwrap_or(DEFAULT_SERIAL_DATABITS),
+        parity: lookup("parity", "serial_parity")
+            .filter(|v| matches!(v.as_str(), "none" | "odd" | "even"))
+            .unwrap_or_else(|| DEFAULT_SERIAL_PARITY.into()),
+        stopbits: lookup("stopbits", "serial_stopbits")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u8| v == 1 || v == 2)
+            .unwrap_or(DEFAULT_SERIAL_STOPBITS),
+        flowcontrol: lookup("flowcontrol", "serial_flowcontrol")
+            .filter(|v| matches!(v.as_str(), "none" | "hardware" | "software"))
+            .unwrap_or_else(|| DEFAULT_SERIAL_FLOWCONTROL.into()),
+        echo: lookup("echo", "serial_echo")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_ECHO),
+        verbose: lookup("verbose", "serial_verbose")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_VERBOSE),
+        quiet: lookup("quiet", "serial_quiet")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_QUIET),
+        s_regs: lookup("s_regs", "serial_s_regs")
+            .unwrap_or_else(|| DEFAULT_SERIAL_S_REGS.into()),
+        x_code: lookup("x_code", "serial_x_code")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 4)
+            .unwrap_or(DEFAULT_SERIAL_X_CODE),
+        dtr_mode: lookup("dtr_mode", "serial_dtr_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 3)
+            .unwrap_or(DEFAULT_SERIAL_DTR_MODE),
+        flow_mode: lookup("flow_mode", "serial_flow_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 4)
+            .unwrap_or(DEFAULT_SERIAL_FLOW_MODE),
+        dcd_mode: lookup("dcd_mode", "serial_dcd_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 1)
+            .unwrap_or(DEFAULT_SERIAL_DCD_MODE),
+        stored_numbers: [
+            lookup("stored_0", "serial_stored_0").unwrap_or_default(),
+            lookup("stored_1", "serial_stored_1").unwrap_or_default(),
+            lookup("stored_2", "serial_stored_2").unwrap_or_default(),
+            lookup("stored_3", "serial_stored_3").unwrap_or_default(),
+        ],
     }
 }
 
@@ -843,6 +932,39 @@ fn write_kv(out: &mut String, key: &str, value: impl std::fmt::Display) {
 fn write_kv_str(out: &mut String, key: &str, value: &str) {
     use std::fmt::Write;
     let _ = writeln!(out, "{} = {}", key, sanitize_value(value));
+}
+
+/// Emit one port's full settings section (header comment, all key/value
+/// lines, trailing blank).  Centralizes the dual-port symmetry so adding
+/// a new per-port field touches one place instead of two.
+fn write_serial_port_section(
+    out: &mut String,
+    title: &str,
+    prefix: &str,
+    port: &SerialPortConfig,
+) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "# {}", title);
+    write_kv(out, &format!("{}_enabled", prefix), port.enabled);
+    write_kv_str(out, &format!("{}_mode", prefix), &port.mode);
+    write_kv_str(out, &format!("{}_port", prefix), &port.port);
+    write_kv(out, &format!("{}_baud", prefix), port.baud);
+    write_kv(out, &format!("{}_databits", prefix), port.databits);
+    write_kv_str(out, &format!("{}_parity", prefix), &port.parity);
+    write_kv(out, &format!("{}_stopbits", prefix), port.stopbits);
+    write_kv_str(out, &format!("{}_flowcontrol", prefix), &port.flowcontrol);
+    write_kv(out, &format!("{}_echo", prefix), port.echo);
+    write_kv(out, &format!("{}_verbose", prefix), port.verbose);
+    write_kv(out, &format!("{}_quiet", prefix), port.quiet);
+    write_kv_str(out, &format!("{}_s_regs", prefix), &port.s_regs);
+    write_kv(out, &format!("{}_x_code", prefix), port.x_code);
+    write_kv(out, &format!("{}_dtr_mode", prefix), port.dtr_mode);
+    write_kv(out, &format!("{}_flow_mode", prefix), port.flow_mode);
+    write_kv(out, &format!("{}_dcd_mode", prefix), port.dcd_mode);
+    for (i, slot) in port.stored_numbers.iter().enumerate() {
+        write_kv_str(out, &format!("{}_stored_{}", prefix, i), slot);
+    }
+    out.push('\n');
 }
 
 /// Write the config file with comments.
@@ -1070,60 +1192,21 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
-# Serial console (modem emulator or direct telnet bridge).
-# Set serial_enabled = true and configure the port to activate.
-# serial_mode selects the role of the configured port:
-#   modem    — run the Hayes AT command emulator (default)
+# Serial ports.  The gateway exposes two physically independent ports —
+# Port A and Port B — each with its own enabled flag, role (modem
+# emulator or telnet-serial console), serial parameters, and persisted
+# AT/S-register state.
+#
+# <port>_enabled = true activates that port.  <port>_mode selects its role:
+#   modem    — run the Hayes AT command emulator
 #   console  — expose the port via the telnet menu's Serial Gateway,
 #              bridging the telnet client directly to the wire.
+#
+# Legacy single-port configs (using bare `serial_*` keys) auto-migrate
+# into Port A on first read; this writer always emits the dual-port form.
 ");
-    write_kv(&mut content, "serial_enabled", cfg.serial_enabled);
-    write_kv_str(&mut content, "serial_mode", &cfg.serial_mode);
-    content.push('\n');
-
-    content.push_str("\
-# Serial port device (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)
-# Leave empty if not configured. Use the Modem Emulator menu to detect ports.
-");
-    write_kv_str(&mut content, "serial_port", &cfg.serial_port);
-    content.push('\n');
-
-    content.push_str("# Serial port parameters\n");
-    write_kv(&mut content, "serial_baud", cfg.serial_baud);
-    write_kv(&mut content, "serial_databits", cfg.serial_databits);
-    write_kv_str(&mut content, "serial_parity", &cfg.serial_parity);
-    write_kv(&mut content, "serial_stopbits", cfg.serial_stopbits);
-    write_kv_str(&mut content, "serial_flowcontrol", &cfg.serial_flowcontrol);
-    content.push('\n');
-
-    content.push_str("# Saved modem settings (written by AT&W, restored by ATZ)\n");
-    write_kv(&mut content, "serial_echo", cfg.serial_echo);
-    write_kv(&mut content, "serial_verbose", cfg.serial_verbose);
-    write_kv(&mut content, "serial_quiet", cfg.serial_quiet);
-    write_kv_str(&mut content, "serial_s_regs", &cfg.serial_s_regs);
-    content.push('\n');
-
-    content.push_str("\
-# Hayes extended command state (written by AT&W, restored by ATZ)
-# serial_x_code:    ATX level 0-4 (4 = all extended result codes, Hayes default)
-# serial_dtr_mode:  AT&D 0-3 (0 = ignore DTR, gateway-friendly default)
-# serial_flow_mode: AT&K 0-4 (0 = no flow control at modem layer,
-#                   gateway-friendly default; physical port flow control
-#                   is still controlled by serial_flowcontrol above)
-# serial_dcd_mode:  AT&C 0-1 (1 = DCD reflects carrier, Hayes default)
-");
-    write_kv(&mut content, "serial_x_code", cfg.serial_x_code);
-    write_kv(&mut content, "serial_dtr_mode", cfg.serial_dtr_mode);
-    write_kv(&mut content, "serial_flow_mode", cfg.serial_flow_mode);
-    write_kv(&mut content, "serial_dcd_mode", cfg.serial_dcd_mode);
-    content.push('\n');
-
-    content.push_str("# Hayes stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Empty = unset.\n");
-    write_kv_str(&mut content, "serial_stored_0", &cfg.serial_stored_numbers[0]);
-    write_kv_str(&mut content, "serial_stored_1", &cfg.serial_stored_numbers[1]);
-    write_kv_str(&mut content, "serial_stored_2", &cfg.serial_stored_numbers[2]);
-    write_kv_str(&mut content, "serial_stored_3", &cfg.serial_stored_numbers[3]);
-    content.push('\n');
+    write_serial_port_section(&mut content, "Serial Port A", "serial_a", &cfg.serial_a);
+    write_serial_port_section(&mut content, "Serial Port B", "serial_b", &cfg.serial_b);
 
     content.push_str("\
 # SSH server interface (encrypted access to the gateway)
@@ -1217,6 +1300,93 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     }
     write_config_file(CONFIG_FILE, &cfg);
     *guard = Some(cfg);
+}
+
+/// Apply one per-port key/value pair to a `SerialPortConfig`.  `suffix`
+/// is the part of the key after the `serial_a_` / `serial_b_` prefix
+/// (e.g. `"baud"`, `"stored_2"`).  Validation rules mirror
+/// `read_serial_port_config` so both code paths accept exactly the same
+/// set of values.
+fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str) {
+    match suffix {
+        "enabled" => port.enabled = value.eq_ignore_ascii_case("true"),
+        "mode" => {
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "modem" | "console") {
+                port.mode = lower;
+            }
+        }
+        "port" => port.port = value.to_string(),
+        "baud" => {
+            if let Ok(v) = value.parse::<u32>() && v >= 300 {
+                port.baud = v;
+            }
+        }
+        "databits" => {
+            if let Ok(v) = value.parse::<u8>() && matches!(v, 5..=8) {
+                port.databits = v;
+            }
+        }
+        "parity" => {
+            if matches!(value, "none" | "odd" | "even") {
+                port.parity = value.to_string();
+            }
+        }
+        "stopbits" => {
+            if let Ok(v) = value.parse::<u8>() && (v == 1 || v == 2) {
+                port.stopbits = v;
+            }
+        }
+        "flowcontrol" => {
+            if matches!(value, "none" | "hardware" | "software") {
+                port.flowcontrol = value.to_string();
+            }
+        }
+        "echo" => port.echo = value.eq_ignore_ascii_case("true"),
+        "verbose" => port.verbose = value.eq_ignore_ascii_case("true"),
+        "quiet" => port.quiet = value.eq_ignore_ascii_case("true"),
+        "s_regs" => port.s_regs = value.to_string(),
+        "x_code" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 4 {
+                port.x_code = v;
+            }
+        }
+        "dtr_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 3 {
+                port.dtr_mode = v;
+            }
+        }
+        "flow_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 4 {
+                port.flow_mode = v;
+            }
+        }
+        "dcd_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 1 {
+                port.dcd_mode = v;
+            }
+        }
+        "stored_0" => port.stored_numbers[0] = value.to_string(),
+        "stored_1" => port.stored_numbers[1] = value.to_string(),
+        "stored_2" => port.stored_numbers[2] = value.to_string(),
+        "stored_3" => port.stored_numbers[3] = value.to_string(),
+        _ => {}
+    }
+}
+
+/// Construct the per-port config key for `id` and `suffix`, e.g.
+/// `serial_key(SerialPortId::A, "baud")` → `"serial_a_baud"`.  Used by
+/// runtime persistence paths (modem AT&W, telnet revert) that need to
+/// target a specific port's keys.
+pub fn serial_key(id: SerialPortId, suffix: &str) -> String {
+    format!(
+        "serial_{}_{}",
+        match id {
+            SerialPortId::A => "a",
+            SerialPortId::B => "b",
+        },
+        suffix
+    )
 }
 
 /// Apply a single key-value pair to a Config struct.
@@ -1374,67 +1544,17 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.kermit_server_port = v;
             }
         }
-        "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
-        "serial_mode" => {
-            let lower = value.trim().to_ascii_lowercase();
-            if matches!(lower.as_str(), "modem" | "console") {
-                cfg.serial_mode = lower;
-            }
+        // Per-port keys.  Both `serial_a_*` and `serial_b_*` prefixes
+        // are recognized; the helper below dispatches on the prefix and
+        // applies the shared validation rules to whichever port-config
+        // slice is selected.  Anything else falls through to the
+        // unrecognized-key arm.
+        k if k.starts_with("serial_a_") => {
+            apply_serial_port_key(&mut cfg.serial_a, &k["serial_a_".len()..], value);
         }
-        "serial_port" => cfg.serial_port = value.to_string(),
-        "serial_baud" => {
-            if let Ok(v) = value.parse::<u32>() && v >= 300 {
-                cfg.serial_baud = v;
-            }
+        k if k.starts_with("serial_b_") => {
+            apply_serial_port_key(&mut cfg.serial_b, &k["serial_b_".len()..], value);
         }
-        "serial_databits" => {
-            if let Ok(v) = value.parse::<u8>() && matches!(v, 5..=8) {
-                cfg.serial_databits = v;
-            }
-        }
-        "serial_parity" => {
-            if matches!(value, "none" | "odd" | "even") {
-                cfg.serial_parity = value.to_string();
-            }
-        }
-        "serial_stopbits" => {
-            if let Ok(v) = value.parse::<u8>() && (v == 1 || v == 2) {
-                cfg.serial_stopbits = v;
-            }
-        }
-        "serial_flowcontrol" => {
-            if matches!(value, "none" | "hardware" | "software") {
-                cfg.serial_flowcontrol = value.to_string();
-            }
-        }
-        "serial_echo" => cfg.serial_echo = value.eq_ignore_ascii_case("true"),
-        "serial_verbose" => cfg.serial_verbose = value.eq_ignore_ascii_case("true"),
-        "serial_quiet" => cfg.serial_quiet = value.eq_ignore_ascii_case("true"),
-        "serial_s_regs" => cfg.serial_s_regs = value.to_string(),
-        "serial_x_code" => {
-            if let Ok(v) = value.parse::<u8>() && v <= 4 {
-                cfg.serial_x_code = v;
-            }
-        }
-        "serial_dtr_mode" => {
-            if let Ok(v) = value.parse::<u8>() && v <= 3 {
-                cfg.serial_dtr_mode = v;
-            }
-        }
-        "serial_flow_mode" => {
-            if let Ok(v) = value.parse::<u8>() && v <= 4 {
-                cfg.serial_flow_mode = v;
-            }
-        }
-        "serial_dcd_mode" => {
-            if let Ok(v) = value.parse::<u8>() && v <= 1 {
-                cfg.serial_dcd_mode = v;
-            }
-        }
-        "serial_stored_0" => cfg.serial_stored_numbers[0] = value.to_string(),
-        "serial_stored_1" => cfg.serial_stored_numbers[1] = value.to_string(),
-        "serial_stored_2" => cfg.serial_stored_numbers[2] = value.to_string(),
-        "serial_stored_3" => cfg.serial_stored_numbers[3] = value.to_string(),
         "ssh_enabled" => cfg.ssh_enabled = value.eq_ignore_ascii_case("true"),
         "ssh_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
@@ -1633,31 +1753,36 @@ mod tests {
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
         assert!(!cfg.allow_atdt_kermit);
-        assert!(!cfg.serial_enabled);
-        assert_eq!(cfg.serial_mode, "modem");
-        assert_eq!(cfg.serial_port, "");
-        assert_eq!(cfg.serial_baud, 9600);
-        assert_eq!(cfg.serial_databits, 8);
-        assert_eq!(cfg.serial_parity, "none");
-        assert_eq!(cfg.serial_stopbits, 1);
-        assert_eq!(cfg.serial_flowcontrol, "none");
-        assert!(cfg.serial_echo);
-        assert!(cfg.serial_verbose);
-        assert!(!cfg.serial_quiet);
-        assert_eq!(
-            cfg.serial_s_regs,
-            "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1"
-        );
-        assert_eq!(cfg.serial_x_code, 4);
-        assert_eq!(cfg.serial_dtr_mode, 0);
-        assert_eq!(cfg.serial_flow_mode, 0);
-        assert_eq!(cfg.serial_dcd_mode, 1);
-        assert_eq!(cfg.serial_stored_numbers, [
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        ]);
+        for port in [&cfg.serial_a, &cfg.serial_b] {
+            assert!(!port.enabled);
+            assert_eq!(port.mode, "modem");
+            assert_eq!(port.port, "");
+            assert_eq!(port.baud, 9600);
+            assert_eq!(port.databits, 8);
+            assert_eq!(port.parity, "none");
+            assert_eq!(port.stopbits, 1);
+            assert_eq!(port.flowcontrol, "none");
+            assert!(port.echo);
+            assert!(port.verbose);
+            assert!(!port.quiet);
+            assert_eq!(
+                port.s_regs,
+                "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1"
+            );
+            assert_eq!(port.x_code, 4);
+            assert_eq!(port.dtr_mode, 0);
+            assert_eq!(port.flow_mode, 0);
+            assert_eq!(port.dcd_mode, 1);
+            assert_eq!(
+                port.stored_numbers,
+                [
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ]
+            );
+        }
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
         assert_eq!(cfg.ssh_username, "admin");
@@ -1765,10 +1890,12 @@ mod tests {
         assert_eq!(cfg.telnet_port, defaults.telnet_port);
         assert_eq!(cfg.max_sessions, defaults.max_sessions);
         assert_eq!(cfg.security_enabled, defaults.security_enabled);
-        assert_eq!(cfg.serial_baud, defaults.serial_baud);
-        assert_eq!(cfg.serial_databits, defaults.serial_databits);
-        assert_eq!(cfg.serial_parity, defaults.serial_parity);
-        assert_eq!(cfg.serial_mode, defaults.serial_mode);
+        // Malformed legacy `serial_*` keys must still fall back to defaults
+        // even though the migration path picks them up for Port A.
+        assert_eq!(cfg.serial_a.baud, defaults.serial_a.baud);
+        assert_eq!(cfg.serial_a.databits, defaults.serial_a.databits);
+        assert_eq!(cfg.serial_a.parity, defaults.serial_a.parity);
+        assert_eq!(cfg.serial_a.mode, defaults.serial_a.mode);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1831,28 +1958,54 @@ mod tests {
             allow_atdt_kermit: true,
             kermit_server_enabled: true,
             kermit_server_port: 2525,
-            serial_enabled: true,
-            serial_mode: "console".into(),
-            serial_port: "/dev/ttyUSB0".into(),
-            serial_baud: 115200,
-            serial_databits: 7,
-            serial_parity: "even".into(),
-            serial_stopbits: 2,
-            serial_flowcontrol: "hardware".into(),
-            serial_echo: false,
-            serial_verbose: false,
-            serial_quiet: true,
-            serial_s_regs: "1,0,43,13,10,8,2,50,2,6,14,95,50".into(),
-            serial_x_code: 3,
-            serial_dtr_mode: 2,
-            serial_flow_mode: 3,
-            serial_dcd_mode: 0,
-            serial_stored_numbers: [
-                "5551234".into(),
-                "example.com:23".into(),
-                String::new(),
-                "9W,5551212".into(),
-            ],
+            serial_a: SerialPortConfig {
+                enabled: true,
+                mode: "console".into(),
+                port: "/dev/ttyUSB0".into(),
+                baud: 115200,
+                databits: 7,
+                parity: "even".into(),
+                stopbits: 2,
+                flowcontrol: "hardware".into(),
+                echo: false,
+                verbose: false,
+                quiet: true,
+                s_regs: "1,0,43,13,10,8,2,50,2,6,14,95,50".into(),
+                x_code: 3,
+                dtr_mode: 2,
+                flow_mode: 3,
+                dcd_mode: 0,
+                stored_numbers: [
+                    "5551234".into(),
+                    "example.com:23".into(),
+                    String::new(),
+                    "9W,5551212".into(),
+                ],
+            },
+            serial_b: SerialPortConfig {
+                enabled: true,
+                mode: "modem".into(),
+                port: "/dev/ttyUSB1".into(),
+                baud: 19200,
+                databits: 8,
+                parity: "odd".into(),
+                stopbits: 1,
+                flowcontrol: "software".into(),
+                echo: true,
+                verbose: true,
+                quiet: false,
+                s_regs: "5,1,43,13,10,8,2,15,2,6,14,95,50".into(),
+                x_code: 2,
+                dtr_mode: 1,
+                flow_mode: 2,
+                dcd_mode: 1,
+                stored_numbers: [
+                    "B1".into(),
+                    "B2".into(),
+                    "B3".into(),
+                    "B4".into(),
+                ],
+            },
             ssh_enabled: true,
             ssh_port: 2222,
             ssh_username: "sshuser".into(),
@@ -1939,23 +2092,8 @@ mod tests {
         assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
         assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
-        assert_eq!(loaded.serial_enabled, original.serial_enabled);
-        assert_eq!(loaded.serial_mode, original.serial_mode);
-        assert_eq!(loaded.serial_port, original.serial_port);
-        assert_eq!(loaded.serial_baud, original.serial_baud);
-        assert_eq!(loaded.serial_databits, original.serial_databits);
-        assert_eq!(loaded.serial_parity, original.serial_parity);
-        assert_eq!(loaded.serial_stopbits, original.serial_stopbits);
-        assert_eq!(loaded.serial_flowcontrol, original.serial_flowcontrol);
-        assert_eq!(loaded.serial_echo, original.serial_echo);
-        assert_eq!(loaded.serial_verbose, original.serial_verbose);
-        assert_eq!(loaded.serial_quiet, original.serial_quiet);
-        assert_eq!(loaded.serial_s_regs, original.serial_s_regs);
-        assert_eq!(loaded.serial_x_code, original.serial_x_code);
-        assert_eq!(loaded.serial_dtr_mode, original.serial_dtr_mode);
-        assert_eq!(loaded.serial_flow_mode, original.serial_flow_mode);
-        assert_eq!(loaded.serial_dcd_mode, original.serial_dcd_mode);
-        assert_eq!(loaded.serial_stored_numbers, original.serial_stored_numbers);
+        assert_eq!(loaded.serial_a, original.serial_a);
+        assert_eq!(loaded.serial_b, original.serial_b);
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);
         assert_eq!(loaded.ssh_port, original.ssh_port);
         assert_eq!(loaded.ssh_username, original.ssh_username);
@@ -2054,26 +2192,46 @@ mod tests {
             "kermit_resume_partial",
             "kermit_resume_max_age_hours",
             "kermit_locking_shifts",
-            "serial_enabled",
-            "serial_mode",
-            "serial_port",
-            "serial_baud",
-            "serial_databits",
-            "serial_parity",
-            "serial_stopbits",
-            "serial_flowcontrol",
-            "serial_echo",
-            "serial_verbose",
-            "serial_quiet",
-            "serial_s_regs",
-            "serial_x_code",
-            "serial_dtr_mode",
-            "serial_flow_mode",
-            "serial_dcd_mode",
-            "serial_stored_0",
-            "serial_stored_1",
-            "serial_stored_2",
-            "serial_stored_3",
+            "serial_a_enabled",
+            "serial_a_mode",
+            "serial_a_port",
+            "serial_a_baud",
+            "serial_a_databits",
+            "serial_a_parity",
+            "serial_a_stopbits",
+            "serial_a_flowcontrol",
+            "serial_a_echo",
+            "serial_a_verbose",
+            "serial_a_quiet",
+            "serial_a_s_regs",
+            "serial_a_x_code",
+            "serial_a_dtr_mode",
+            "serial_a_flow_mode",
+            "serial_a_dcd_mode",
+            "serial_a_stored_0",
+            "serial_a_stored_1",
+            "serial_a_stored_2",
+            "serial_a_stored_3",
+            "serial_b_enabled",
+            "serial_b_mode",
+            "serial_b_port",
+            "serial_b_baud",
+            "serial_b_databits",
+            "serial_b_parity",
+            "serial_b_stopbits",
+            "serial_b_flowcontrol",
+            "serial_b_echo",
+            "serial_b_verbose",
+            "serial_b_quiet",
+            "serial_b_s_regs",
+            "serial_b_x_code",
+            "serial_b_dtr_mode",
+            "serial_b_flow_mode",
+            "serial_b_dcd_mode",
+            "serial_b_stored_0",
+            "serial_b_stored_1",
+            "serial_b_stored_2",
+            "serial_b_stored_3",
             "ssh_enabled",
             "ssh_port",
             "ssh_username",
@@ -2111,63 +2269,72 @@ mod tests {
     fn test_apply_config_key_serial_fields() {
         let mut cfg = Config::default();
 
-        apply_config_key(&mut cfg, "serial_enabled", "true");
-        assert!(cfg.serial_enabled);
+        apply_config_key(&mut cfg, "serial_a_enabled", "true");
+        assert!(cfg.serial_a.enabled);
 
-        apply_config_key(&mut cfg, "serial_enabled", "false");
-        assert!(!cfg.serial_enabled);
+        apply_config_key(&mut cfg, "serial_a_enabled", "false");
+        assert!(!cfg.serial_a.enabled);
 
-        apply_config_key(&mut cfg, "serial_port", "/dev/ttyS0");
-        assert_eq!(cfg.serial_port, "/dev/ttyS0");
+        apply_config_key(&mut cfg, "serial_a_port", "/dev/ttyS0");
+        assert_eq!(cfg.serial_a.port, "/dev/ttyS0");
 
-        apply_config_key(&mut cfg, "serial_baud", "115200");
-        assert_eq!(cfg.serial_baud, 115200);
+        apply_config_key(&mut cfg, "serial_a_baud", "115200");
+        assert_eq!(cfg.serial_a.baud, 115200);
 
-        apply_config_key(&mut cfg, "serial_databits", "7");
-        assert_eq!(cfg.serial_databits, 7);
+        apply_config_key(&mut cfg, "serial_a_databits", "7");
+        assert_eq!(cfg.serial_a.databits, 7);
 
         // Invalid databits should be ignored
-        apply_config_key(&mut cfg, "serial_databits", "9");
-        assert_eq!(cfg.serial_databits, 7);
+        apply_config_key(&mut cfg, "serial_a_databits", "9");
+        assert_eq!(cfg.serial_a.databits, 7);
 
-        apply_config_key(&mut cfg, "serial_parity", "even");
-        assert_eq!(cfg.serial_parity, "even");
+        apply_config_key(&mut cfg, "serial_a_parity", "even");
+        assert_eq!(cfg.serial_a.parity, "even");
 
         // Invalid parity should be ignored
-        apply_config_key(&mut cfg, "serial_parity", "bogus");
-        assert_eq!(cfg.serial_parity, "even");
+        apply_config_key(&mut cfg, "serial_a_parity", "bogus");
+        assert_eq!(cfg.serial_a.parity, "even");
 
-        apply_config_key(&mut cfg, "serial_stopbits", "2");
-        assert_eq!(cfg.serial_stopbits, 2);
+        apply_config_key(&mut cfg, "serial_a_stopbits", "2");
+        assert_eq!(cfg.serial_a.stopbits, 2);
 
         // Invalid stopbits should be ignored
-        apply_config_key(&mut cfg, "serial_stopbits", "3");
-        assert_eq!(cfg.serial_stopbits, 2);
+        apply_config_key(&mut cfg, "serial_a_stopbits", "3");
+        assert_eq!(cfg.serial_a.stopbits, 2);
 
-        apply_config_key(&mut cfg, "serial_flowcontrol", "hardware");
-        assert_eq!(cfg.serial_flowcontrol, "hardware");
+        apply_config_key(&mut cfg, "serial_a_flowcontrol", "hardware");
+        assert_eq!(cfg.serial_a.flowcontrol, "hardware");
 
         // Invalid flow should be ignored
-        apply_config_key(&mut cfg, "serial_flowcontrol", "bogus");
-        assert_eq!(cfg.serial_flowcontrol, "hardware");
+        apply_config_key(&mut cfg, "serial_a_flowcontrol", "bogus");
+        assert_eq!(cfg.serial_a.flowcontrol, "hardware");
 
-        // serial_mode accepts "modem" / "console" (case-insensitive),
+        // mode accepts "modem" / "console" (case-insensitive),
         // anything else is ignored.
-        apply_config_key(&mut cfg, "serial_mode", "console");
-        assert_eq!(cfg.serial_mode, "console");
-        apply_config_key(&mut cfg, "serial_mode", "MODEM");
-        assert_eq!(cfg.serial_mode, "modem");
-        apply_config_key(&mut cfg, "serial_mode", "bogus");
-        assert_eq!(cfg.serial_mode, "modem");
+        apply_config_key(&mut cfg, "serial_a_mode", "console");
+        assert_eq!(cfg.serial_a.mode, "console");
+        apply_config_key(&mut cfg, "serial_a_mode", "MODEM");
+        assert_eq!(cfg.serial_a.mode, "modem");
+        apply_config_key(&mut cfg, "serial_a_mode", "bogus");
+        assert_eq!(cfg.serial_a.mode, "modem");
         // Whitespace around the value is trimmed before validation.
-        apply_config_key(&mut cfg, "serial_mode", "  Console  ");
-        assert_eq!(cfg.serial_mode, "console");
+        apply_config_key(&mut cfg, "serial_a_mode", "  Console  ");
+        assert_eq!(cfg.serial_a.mode, "console");
         // Empty value rejected — keep the existing setting.
-        apply_config_key(&mut cfg, "serial_mode", "");
-        assert_eq!(cfg.serial_mode, "console");
+        apply_config_key(&mut cfg, "serial_a_mode", "");
+        assert_eq!(cfg.serial_a.mode, "console");
+
+        // The same dispatch routes serial_b_* keys to Port B without
+        // touching Port A.  This is the entire dual-port plumbing in one
+        // assertion: prefix selects the slice.
+        apply_config_key(&mut cfg, "serial_b_baud", "57600");
+        assert_eq!(cfg.serial_b.baud, 57600);
+        // Port A's previously-set values must be untouched by Port B writes.
+        assert_eq!(cfg.serial_a.baud, 115200);
+        assert_eq!(cfg.serial_a.mode, "console");
     }
 
-    /// Reading a config file with `serial_mode = console` (case-
+    /// Reading a config file with `serial_a_mode = console` (case-
     /// insensitive, with surrounding whitespace) loads to the
     /// canonical lowercase value.  Reading without the key falls back
     /// to the modem default.
@@ -2183,37 +2350,38 @@ mod tests {
             ("CONSOLE", "console"),
             ("  Modem  ", "modem"),
         ] {
-            std::fs::write(&path, format!("serial_mode = {}", raw)).unwrap();
+            std::fs::write(&path, format!("serial_a_mode = {}", raw)).unwrap();
             let cfg = read_config_file(path.to_str().unwrap());
             assert_eq!(
-                cfg.serial_mode, expected,
+                cfg.serial_a.mode, expected,
                 "input {:?} should normalize to {:?}",
                 raw, expected
             );
         }
 
         // Missing key → default.
-        std::fs::write(&path, "serial_enabled = true").unwrap();
+        std::fs::write(&path, "serial_a_enabled = true").unwrap();
         let cfg = read_config_file(path.to_str().unwrap());
-        assert_eq!(cfg.serial_mode, "modem");
+        assert_eq!(cfg.serial_a.mode, "modem");
 
         // Invalid value → default, doesn't poison other fields.
         std::fs::write(
             &path,
-            "serial_enabled = true\nserial_mode = telegraph\nserial_baud = 19200",
+            "serial_a_enabled = true\nserial_a_mode = telegraph\nserial_a_baud = 19200",
         )
         .unwrap();
         let cfg = read_config_file(path.to_str().unwrap());
-        assert_eq!(cfg.serial_mode, "modem");
-        assert!(cfg.serial_enabled);
-        assert_eq!(cfg.serial_baud, 19200);
+        assert_eq!(cfg.serial_a.mode, "modem");
+        assert!(cfg.serial_a.enabled);
+        assert_eq!(cfg.serial_a.baud, 19200);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `serial_mode` round-trips through write→read correctly for both
-    /// values.  Guards against the writer dropping the field for one
-    /// of the two enum values.
+    /// `serial_<port>_mode` round-trips through write→read correctly for
+    /// both values on both ports.  Guards against the writer dropping
+    /// the field for one of the two enum values, and against a future
+    /// edit that accidentally loses the per-port symmetry.
     #[test]
     fn test_serial_mode_round_trip_both_values() {
         let dir = std::env::temp_dir().join("xmodem_test_serial_mode_rt");
@@ -2222,12 +2390,20 @@ mod tests {
 
         for value in ["modem", "console"] {
             let cfg = Config {
-                serial_mode: value.into(),
+                serial_a: SerialPortConfig {
+                    mode: value.into(),
+                    ..SerialPortConfig::default()
+                },
+                serial_b: SerialPortConfig {
+                    mode: value.into(),
+                    ..SerialPortConfig::default()
+                },
                 ..Config::default()
             };
             write_config_file(path.to_str().unwrap(), &cfg);
             let loaded = read_config_file(path.to_str().unwrap());
-            assert_eq!(loaded.serial_mode, value);
+            assert_eq!(loaded.serial_a.mode, value);
+            assert_eq!(loaded.serial_b.mode, value);
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2236,9 +2412,9 @@ mod tests {
     #[test]
     fn test_apply_config_key_unknown_key_ignored() {
         let mut cfg = Config::default();
-        let baud_before = cfg.serial_baud;
+        let baud_before = cfg.serial_a.baud;
         apply_config_key(&mut cfg, "nonexistent_key", "value");
-        assert_eq!(cfg.serial_baud, baud_before);
+        assert_eq!(cfg.serial_a.baud, baud_before);
     }
 
     #[test]
@@ -2676,5 +2852,183 @@ mod tests {
         assert_eq!(default.number, "1234567");
         assert_eq!(default.host, "telnetbible.com");
         assert_eq!(default.port, 6400);
+    }
+
+    // ─── Dual-port migration & round-trip ──────────────────
+
+    /// Legacy single-port `egateway.conf` files use bare `serial_*`
+    /// keys with no port prefix.  When the gateway loads such a file
+    /// it must auto-migrate every legacy key into Port A while leaving
+    /// Port B at defaults — and the next save (covered by the round-
+    /// trip tests above) emits the new dual-port form.
+    #[test]
+    fn test_legacy_serial_keys_migrate_to_port_a() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_legacy_migrate");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "serial_enabled = true").unwrap();
+        writeln!(f, "serial_mode = console").unwrap();
+        writeln!(f, "serial_port = /dev/ttyUSB0").unwrap();
+        writeln!(f, "serial_baud = 38400").unwrap();
+        writeln!(f, "serial_databits = 7").unwrap();
+        writeln!(f, "serial_parity = even").unwrap();
+        writeln!(f, "serial_stopbits = 2").unwrap();
+        writeln!(f, "serial_flowcontrol = hardware").unwrap();
+        writeln!(f, "serial_echo = false").unwrap();
+        writeln!(f, "serial_quiet = true").unwrap();
+        writeln!(f, "serial_s_regs = 1,2,3").unwrap();
+        writeln!(f, "serial_x_code = 2").unwrap();
+        writeln!(f, "serial_dtr_mode = 1").unwrap();
+        writeln!(f, "serial_flow_mode = 3").unwrap();
+        writeln!(f, "serial_dcd_mode = 0").unwrap();
+        writeln!(f, "serial_stored_0 = 5551111").unwrap();
+        writeln!(f, "serial_stored_2 = 5553333").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+
+        // Every legacy key landed on Port A.
+        assert!(cfg.serial_a.enabled);
+        assert_eq!(cfg.serial_a.mode, "console");
+        assert_eq!(cfg.serial_a.port, "/dev/ttyUSB0");
+        assert_eq!(cfg.serial_a.baud, 38400);
+        assert_eq!(cfg.serial_a.databits, 7);
+        assert_eq!(cfg.serial_a.parity, "even");
+        assert_eq!(cfg.serial_a.stopbits, 2);
+        assert_eq!(cfg.serial_a.flowcontrol, "hardware");
+        assert!(!cfg.serial_a.echo);
+        assert!(cfg.serial_a.quiet);
+        assert_eq!(cfg.serial_a.s_regs, "1,2,3");
+        assert_eq!(cfg.serial_a.x_code, 2);
+        assert_eq!(cfg.serial_a.dtr_mode, 1);
+        assert_eq!(cfg.serial_a.flow_mode, 3);
+        assert_eq!(cfg.serial_a.dcd_mode, 0);
+        assert_eq!(cfg.serial_a.stored_numbers[0], "5551111");
+        assert_eq!(cfg.serial_a.stored_numbers[2], "5553333");
+
+        // Port B was untouched — still at defaults.
+        assert_eq!(cfg.serial_b, SerialPortConfig::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When both prefixed and legacy keys are present, the prefixed
+    /// form wins.  This guards the migration path against silently
+    /// reverting after the writer has already emitted the dual-port
+    /// form once.
+    #[test]
+    fn test_serial_a_prefixed_keys_win_over_legacy() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_prefix_wins");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("both.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Legacy says baud 9600, prefixed says baud 115200.  Prefixed wins.
+        writeln!(f, "serial_baud = 9600").unwrap();
+        writeln!(f, "serial_a_baud = 115200").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.serial_a.baud, 115200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Port B never falls back to legacy keys.  The legacy migration
+    /// is Port-A-only by design — the legacy single-port file never
+    /// described two ports.
+    #[test]
+    fn test_serial_b_does_not_migrate_legacy_keys() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_b_no_migrate");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("b.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "serial_enabled = true").unwrap();
+        writeln!(f, "serial_baud = 38400").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+        // Port A picked the legacy keys up.
+        assert!(cfg.serial_a.enabled);
+        assert_eq!(cfg.serial_a.baud, 38400);
+        // Port B did NOT — legacy keys are Port A's domain only.
+        assert!(!cfg.serial_b.enabled);
+        assert_eq!(cfg.serial_b.baud, DEFAULT_SERIAL_BAUD);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Port-B-only round-trip: write a file with Port B configured,
+    /// read it back, and confirm every Port B field survives.  This
+    /// is a direct guard against the writer or reader silently
+    /// shadowing Port B onto Port A.
+    #[test]
+    fn test_serial_b_round_trip() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_b_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("b.conf");
+
+        let original = Config {
+            serial_b: SerialPortConfig {
+                enabled: true,
+                mode: "console".into(),
+                port: "/dev/ttyUSB1".into(),
+                baud: 57600,
+                databits: 7,
+                parity: "odd".into(),
+                stopbits: 2,
+                flowcontrol: "software".into(),
+                echo: false,
+                verbose: false,
+                quiet: true,
+                s_regs: "9,8,7".into(),
+                x_code: 1,
+                dtr_mode: 3,
+                flow_mode: 4,
+                dcd_mode: 0,
+                stored_numbers: [
+                    "B-zero".into(),
+                    String::new(),
+                    "B-two".into(),
+                    "B-three".into(),
+                ],
+            },
+            ..Config::default()
+        };
+        write_config_file(path.to_str().unwrap(), &original);
+        let loaded = read_config_file(path.to_str().unwrap());
+
+        assert_eq!(loaded.serial_b, original.serial_b);
+        // Port A stayed at defaults — writing Port B doesn't bleed.
+        assert_eq!(loaded.serial_a, SerialPortConfig::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `serial_key` produces the canonical persistence key for any
+    /// (port, suffix) pair.  Tested directly because the modem AT&W
+    /// path and the telnet revert helper both build keys this way and
+    /// a typo in one place (e.g. `serial_a_baud` vs `serial_a-baud`)
+    /// would silently fail to persist.
+    #[test]
+    fn test_serial_key_format() {
+        assert_eq!(serial_key(SerialPortId::A, "baud"), "serial_a_baud");
+        assert_eq!(serial_key(SerialPortId::B, "stored_3"), "serial_b_stored_3");
+    }
+
+    /// The `Config::port` / `port_mut` accessors return the right
+    /// slice for each port id.  Trivial but worth pinning so a future
+    /// rename can't silently swap A↔B.
+    #[test]
+    fn test_config_port_accessor_dispatch() {
+        let mut cfg = Config::default();
+        cfg.serial_a.baud = 1200;
+        cfg.serial_b.baud = 2400;
+        assert_eq!(cfg.port(SerialPortId::A).baud, 1200);
+        assert_eq!(cfg.port(SerialPortId::B).baud, 2400);
+        cfg.port_mut(SerialPortId::A).baud = 4800;
+        cfg.port_mut(SerialPortId::B).baud = 9600;
+        assert_eq!(cfg.serial_a.baud, 4800);
+        assert_eq!(cfg.serial_b.baud, 9600);
     }
 }
