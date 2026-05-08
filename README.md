@@ -362,12 +362,12 @@ opens on startup. The GUI provides:
 - **Live console output** -- server log messages stream in the bottom panel
 - **Configuration editing** -- all `egateway.conf` settings can be changed and
   saved without editing the file by hand
-- **Serial port auto-detection** -- the Console Mode section lists detected
+- **Serial port auto-detection** -- the Serial Port section lists detected
   serial ports in a dropdown; click the refresh button to re-scan. The
   Mode dropdown beside the Enabled checkbox switches the port between
   **Modem (AT Command) Mode** and **Telnet-Serial Mode** (see Console Mode
   below) -- changes are persistent and immediate
-- **"More..." popups** -- the Server, File Transfer, and Console Mode frames
+- **"More..." popups** -- the Server, File Transfer, and Serial Port frames
   each have a **More...** button that opens an advanced-options window. The
   File Transfer popup exposes the XMODEM-family timeouts plus the independent
   ZMODEM tunables (handshake, frame timeout, retry cap) side by side.
@@ -873,10 +873,10 @@ The configured serial port can run in one of two modes:
   selects **G  Serial Gateway** from the main menu, at which point the
   session is bridged directly to the wire. See **Console Mode** below.
 
-The dropdown beside the **Enabled** checkbox in the GUI's Console Mode
-frame, and the **M** (Toggle Modem/Console mode) item in the telnet
-**Configuration > Modem/Console** menu, both switch between the two
-modes. The setting persists in `serial_mode` in `egateway.conf`.
+The dropdown beside the **Enabled** checkbox in the GUI's Serial Port
+frame, and the **T** (Toggle Modem/Console mode) item in the telnet
+**Configuration** menu, both switch between the two modes. The setting
+persists in `serial_mode` in `egateway.conf`.
 
 ### Setting Up
 
@@ -1116,7 +1116,7 @@ session becomes a transparent pipe to the wire in both directions.
 
 **Switching modes:**
 
-- **GUI:** in the **Console Mode** frame, set the dropdown beside the
+- **GUI:** in the **Serial Port** frame, set the dropdown beside the
   **Enabled** checkbox to **Telnet-Serial Mode**. The change is saved
   immediately and reconfigures the running serial thread.
 - **Telnet/SSH:** **Configuration > T (Toggle Modem/Console mode)**.

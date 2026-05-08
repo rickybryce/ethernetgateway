@@ -662,7 +662,7 @@ and a console panel at the bottom:
     <li><strong>Security</strong> — Require Login toggle, plus separate username and password fields for telnet and SSH.</li>
     <li><strong>File Transfer (XMODEM)</strong> — transfer directory, XMODEM-family timeouts (negotiation, per-block, retries). The card's subtitle reads <em>(More for YMODEM / ZMODEM)</em>: a <em>More&#8230;</em> button opens a popup with the full per-protocol breakdown covering the XMODEM/XMODEM-1K/YMODEM shared keys and the independent ZMODEM tunables (handshake timeout, frame timeout, retry cap, and retry interval).</li>
     <li><strong>AI Chat, Browser, and Weather</strong> — Groq API key (rendered as a password field), browser homepage URL, and weather ZIP.</li>
-    <li><strong>Console Mode</strong> — Enabled checkbox, mode dropdown (<em>Modem (AT Command) Mode</em> / <em>Telnet-Serial Mode</em>), port dropdown with a refresh (&#8634;) button, baud, data bits, parity, stop bits, flow control. Mode changes save and reconfigure the running serial thread immediately. A <em>More&#8230;</em> button reveals the Hayes AT state popup.</li>
+    <li><strong>Serial Port</strong> — Enabled checkbox, mode dropdown (<em>Modem (AT Command) Mode</em> / <em>Telnet-Serial Mode</em>), port dropdown with a refresh (&#8634;) button, baud, data bits, parity, stop bits, flow control. Mode changes save and reconfigure the running serial thread immediately. A <em>More&#8230;</em> button reveals the Hayes AT state popup.</li>
     <li><strong>General</strong> — Verbose XMODEM Logging, Show GUI on Startup.</li>
 </ul>
 
@@ -708,7 +708,7 @@ fields so they're visually distinct from the navy main window. This is a
 UI convention — it doesn't affect any setting.
 </aside>
 
-<h3>4.2.2 Console Mode — More</h3>
+<h3>4.2.2 Serial Port — More</h3>
 
 <p>
 Mirrors the primary serial port, baud, framing, and flow-control controls, and
@@ -1515,7 +1515,7 @@ S0–S26, the <code>A/</code> repeat-last-command shortcut, and the
 <h2 id="ch9-setup">9.1 Enabling the Emulator</h2>
 
 <p>
-From the GUI Console Mode frame:
+From the GUI Serial Port frame:
 </p>
 
 <ol>
@@ -1898,7 +1898,7 @@ want to drive it remotely.
 <aside class="tip">
 <span class="label">Switching modes</span>
 <ul>
-    <li><strong>GUI:</strong> change the dropdown beside <em>Enabled</em> in the Console Mode frame from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change is persistent and immediate; the running serial thread reconfigures on the spot.</li>
+    <li><strong>GUI:</strong> change the dropdown beside <em>Enabled</em> in the Serial Port frame from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change is persistent and immediate; the running serial thread reconfigures on the spot.</li>
     <li><strong>Telnet/SSH menu:</strong> from the <em>Configuration</em> menu, press <span class="kbd">T</span> (<em>Toggle Modem/Console mode</em>). The Modem/Console submenu's header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features). The <span class="kbd">T</span> entry is hidden from sessions connected over the modem itself, since flipping to console mode would tear down the caller's own connection before they could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
     <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval &mdash; no restart required.</li>
 </ul>
