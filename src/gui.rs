@@ -245,7 +245,7 @@ struct App {
     dirty: bool,
     /// Whether the Server "More..." popup is open.
     server_popup_open: bool,
-    /// Whether the Console Mode "More..." popup is open.
+    /// Whether the Serial Port "More..." popup is open.
     serial_popup_open: bool,
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
@@ -530,9 +530,9 @@ impl App {
         }
     }
 
-    /// Render the Console Mode frame's primary field rows (port, baud,
+    /// Render the Serial Port frame's primary field rows (port, baud,
     /// line framing, flow control).  Shared between the main layout and
-    /// the Console Mode popup.  When `with_more_button` is true, a right-
+    /// the Serial Port popup.  When `with_more_button` is true, a right-
     /// aligned "More..." button is appended to the Bits/Par/Stop/Flow
     /// row; the popup passes false since it's already the More view.
     fn draw_serial_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
@@ -609,7 +609,7 @@ impl App {
         });
     }
 
-    /// Render the Console Mode frame's advanced options — Hayes AT
+    /// Render the Serial Port frame's advanced options — Hayes AT
     /// saved state, S-registers, and stored phone-number slots.  Shown
     /// only in the popup.  The advanced state is only meaningful when
     /// the port is in `modem` mode; in `console` mode the values are
@@ -1481,7 +1481,7 @@ impl eframe::App for App {
                 });
                 ui.add_space(4.0);
 
-                // ── Row 3: Console Mode + General ─────────────
+                // ── Row 3: Serial Port + General ─────────────
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
@@ -1491,7 +1491,7 @@ impl eframe::App for App {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Console Mode").strong().color(AMBER));
+                                    ui.label(egui::RichText::new("Serial Port").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.serial_enabled, "Enabled");
                                     ui.add_space(8.0);
@@ -1674,7 +1674,7 @@ impl eframe::App for App {
         self.server_popup_open = server_open;
 
         let mut serial_open = self.serial_popup_open;
-        egui::Window::new(egui::RichText::new("Console Mode — More").strong().color(AMBER_BRIGHT))
+        egui::Window::new(egui::RichText::new("Serial Port — More").strong().color(AMBER_BRIGHT))
             .open(&mut serial_open)
             .resizable(true)
             .collapsible(false)
