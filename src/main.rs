@@ -19,6 +19,7 @@ mod ssh;
 mod telnet;
 mod tnio;
 mod webbrowser;
+mod webserver;
 mod xmodem;
 mod zmodem;
 
@@ -107,12 +108,18 @@ fn main() {
                     restart_rt.clone(),
                     notify_rt.clone(),
                     session_writers,
-                    lockouts,
+                    lockouts.clone(),
                 );
                 serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
                 telnet::start_kermit_server(
                     shutdown_rt.clone(),
                     notify_rt.clone(),
+                );
+                webserver::start_web_server(
+                    shutdown_rt.clone(),
+                    restart_rt.clone(),
+                    notify_rt.clone(),
+                    lockouts,
                 );
 
                 // Wait for shutdown signal

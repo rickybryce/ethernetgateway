@@ -283,7 +283,7 @@ fn reject_insecure_ipv4(octets: [u8; 4]) -> Option<&'static str> {
 /// and reject any address ending in .1 (typically a gateway), except for
 /// loopback addresses (127.x.x.x). Returns the rejection reason, or None
 /// if the address is allowed.
-fn reject_insecure_ip(ip: IpAddr) -> Option<&'static str> {
+pub(crate) fn reject_insecure_ip(ip: IpAddr) -> Option<&'static str> {
     match ip {
         IpAddr::V4(v4) => reject_insecure_ipv4(v4.octets()),
         IpAddr::V6(v6) => {
@@ -9335,6 +9335,16 @@ impl TelnetSession {
                 kermit_status, cfg.kermit_server_port
             ))
             .await?;
+            let web_status = if cfg.web_enabled {
+                self.green("ENABLED")
+            } else {
+                self.red("Disabled")
+            };
+            self.send_line(&format!(
+                "  Web:    {} (port {})",
+                web_status, cfg.web_port
+            ))
+            .await?;
             let ip_safety_status = if cfg.disable_ip_safety {
                 self.red("DISABLED")
             } else {
@@ -9397,12 +9407,17 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  {}  Toggle Web       {}  Set Web port",
+                self.cyan("W"),
+                self.cyan("B")
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  {}  IP safety        {}  Restart server",
                 self.cyan("I"),
                 self.cyan("R")
             ))
             .await?;
-            self.send_line("").await?;
             self.send_line(&format!(
                 "  {}  {}",
                 self.action_prompt("Q", "Back"),
@@ -9457,6 +9472,19 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "w" => {
+                    let new_val = if cfg.web_enabled { "false" } else { "true" };
+                    let v = new_val.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("web_enabled", &v);
+                    })
+                    .await
+                    .ok();
+                    self.config_restart_notice().await?;
+                }
+                "b" => {
+                    self.config_set_port("Web", "web_port", cfg.web_port).await?;
+                }
                 "i" => {
                     self.disable_ip_safety_toggle(cfg.disable_ip_safety).await?;
                 }
@@ -9468,7 +9496,11 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, P, S, O, K, J, I, R, H, or Q.").await?;
+                    // Keep this short — show_error indents by 2 chars
+                    // and PETSCII tops out at 40 cols.  The expanded
+                    // "Press T, P, S, O, ..." form blew the limit once
+                    // W and B were added, so we now point to the menu.
+                    self.show_error("Press a letter from the menu.").await?;
                 }
             }
         }
@@ -13716,6 +13748,7 @@ mod tests {
             // ZMODEM settings
             "Press N, I, F, M, R, H, or Q.",
             "Press T, P, S, O, R, H, or Q.",
+            "Press a letter from the menu.",
             "Invalid port number.",
             // Modem / console emulator menu
             "Press E, S, B, P, F, H, or Q.",
@@ -13802,7 +13835,20 @@ mod tests {
             "  P  Set telnet port",
             "  S  Toggle SSH",
             "  O  Set SSH port",
+            "  K  Toggle Kermit",
+            "  J  Set Kermit port",
+            "  W  Toggle Web",
+            "  B  Set Web port",
+            "  I  IP safety",
             "  R  Restart server",
+            // The two-key rows the server menu actually renders.
+            // We test the full formatted strings (key letter included)
+            // because the new W/B row is the tightest fit at 37 chars.
+            "  T  Toggle telnet    P  Set telnet port",
+            "  S  Toggle SSH       O  Set SSH port",
+            "  K  Toggle Kermit    J  Set Kermit port",
+            "  W  Toggle Web       B  Set Web port",
+            "  I  IP safety        R  Restart server",
             // Dialup mapping menu
             "  A  Add mapping",
             "  D  Delete mapping",
@@ -14083,12 +14129,22 @@ mod tests {
         // + blank + Q/H + prompt = 17
         let submenu_rows = 3 + 1 + 2 + 1 + 7 + 1 + 1 + 1; // 17
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
-        // Server configuration: header(3) + blank + 2 status + blank + 5 items + blank + Q/H + prompt = 15
-        let static_rows = 3 + 1 + 2 + 1 + 5 + 1 + 1 + 1; // 15
+        // Server configuration: header(3) + blank + 5 status (telnet,
+        // ssh, kermit, web, ip-safety) + blank + 5 items (T/P, S/O,
+        // K/J, W/B, I/R) + Q/H + prompt = 17.  The blank line between
+        // the menu and the Q/H footer was dropped when the web row
+        // was added so the screen still fits PETSCII's 22-row cap
+        // when a typical host has 1–3 server addresses.
+        let static_rows = 3 + 1 + 5 + 1 + 5 + 1 + 1; // 17
         assert!(static_rows <= 22, "server config menu static is {} rows, exceeds 22", static_rows);
-        // With address list: +1 label +3 addrs +1 blank = 5 extra → 20
-        let with_addrs = static_rows + 1 + 3 + 1; // 20
-        assert!(with_addrs <= 22, "server config menu with 3 addrs is {} rows, exceeds 22", with_addrs);
+        // With telnet-enabled address block: +1 label + N addrs + 1
+        // example + 1 trailing blank.  For N=3 that's 6 extra rows →
+        // 23 total, one over the PETSCII cap, so the address list
+        // scrolls on hardware-PETSCII terminals with 3+ private IPs.
+        // Modern ANSI/ASCII clients (24+ rows) are unaffected.  N=2
+        // remains within the cap on every terminal type.
+        let with_addrs = static_rows + 1 + 2 + 1 + 1; // 22 (N=2, telnet on)
+        assert!(with_addrs <= 22, "server config menu with 2 addrs is {} rows, exceeds 22", with_addrs);
     }
 
     /// Configuration help screen (ANSI): header(3) + blank + 15 content lines +

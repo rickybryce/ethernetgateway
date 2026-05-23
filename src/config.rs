@@ -159,6 +159,13 @@ const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
 /// (24 ≈ "kermit").
 const DEFAULT_KERMIT_SERVER_ENABLED: bool = false;
 const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
+/// Configuration web server.  Off by default.  Port 8080 is the
+/// canonical "alternate HTTP" port — high enough to avoid the
+/// `<1024 needs root` trap and unlikely to collide with system
+/// services.  Honors the same `disable_ip_safety` allowlist and
+/// `security_enabled` HTTP Basic auth as the telnet listener.
+const DEFAULT_WEB_ENABLED: bool = false;
+const DEFAULT_WEB_PORT: u16 = 8080;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -415,6 +422,15 @@ pub struct Config {
     /// Port for the standalone Kermit server listener.  Only consulted
     /// when `kermit_server_enabled` is true.
     pub kermit_server_port: u16,
+    /// Run the HTTP configuration web server.  Mirrors the GUI's
+    /// settings page in a browser.  Honors the same IP-safety
+    /// allowlist as the telnet listener (private/loopback only,
+    /// unless `disable_ip_safety` is set), and the same
+    /// `security_enabled` flag for HTTP Basic auth.
+    pub web_enabled: bool,
+    /// Port for the configuration web server.  Only consulted when
+    /// `web_enabled` is true.
+    pub web_port: u16,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
     /// on first read.
@@ -485,6 +501,8 @@ impl Default for Config {
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
+            web_enabled: DEFAULT_WEB_ENABLED,
+            web_port: DEFAULT_WEB_PORT,
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
@@ -779,6 +797,15 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_KERMIT_SERVER_PORT),
+        web_enabled: map
+            .get("web_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_WEB_ENABLED),
+        web_port: map
+            .get("web_port")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
+            .unwrap_or(DEFAULT_WEB_PORT),
         serial_a: read_serial_port_config(&map, "serial_a", true),
         serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
@@ -1192,6 +1219,20 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
+# Configuration web server.  Renders the same settings page the GUI
+# does, in a browser.  Honors the same `disable_ip_safety` allowlist as
+# the telnet listener (private/loopback only unless disabled), and the
+# same `security_enabled` flag for HTTP Basic auth (uses `username` /
+# `password`).
+# web_enabled: bind a TCP listener on `web_port` and serve the
+#              configuration page.
+# web_port:    TCP port for the web listener (default 8080).
+");
+    write_kv(&mut content, "web_enabled", cfg.web_enabled);
+    write_kv(&mut content, "web_port", cfg.web_port);
+    content.push('\n');
+
+    content.push_str("\
 # Serial ports.  The gateway exposes two physically independent ports —
 # Port A and Port B — each with its own enabled flag, role (modem
 # emulator or telnet-serial console), serial parameters, and persisted
@@ -1544,6 +1585,12 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.kermit_server_port = v;
             }
         }
+        "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
+        "web_port" => {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
+                cfg.web_port = v;
+            }
+        }
         // Per-port keys.  Both `serial_a_*` and `serial_b_*` prefixes
         // are recognized; the helper below dispatches on the prefix and
         // applies the shared validation rules to whichever port-config
@@ -1787,6 +1834,11 @@ mod tests {
         assert_eq!(cfg.ssh_port, 2222);
         assert_eq!(cfg.ssh_username, "admin");
         assert_eq!(cfg.ssh_password, "changeme");
+        // Web config server defaults: opt-in, port 8080 (the canonical
+        // "alternate HTTP" port — high enough to avoid `<1024 needs
+        // root` and unlikely to collide with system services).
+        assert!(!cfg.web_enabled);
+        assert_eq!(cfg.web_port, 8080);
     }
 
     #[test]
@@ -1958,6 +2010,8 @@ mod tests {
             allow_atdt_kermit: true,
             kermit_server_enabled: true,
             kermit_server_port: 2525,
+            web_enabled: true,
+            web_port: 9090,
             serial_a: SerialPortConfig {
                 enabled: true,
                 mode: "console".into(),
@@ -2192,6 +2246,8 @@ mod tests {
             "kermit_resume_partial",
             "kermit_resume_max_age_hours",
             "kermit_locking_shifts",
+            "web_enabled",
+            "web_port",
             "serial_a_enabled",
             "serial_a_mode",
             "serial_a_port",
@@ -2493,6 +2549,29 @@ mod tests {
         // Zero ignored (port must be ≥ 1).
         apply_config_key(&mut cfg, "kermit_server_port", "0");
         assert_eq!(cfg.kermit_server_port, 2525);
+    }
+
+    #[test]
+    fn test_apply_config_key_web_fields() {
+        let mut cfg = Config::default();
+        // Defaults: disabled, port 8080.
+        assert!(!cfg.web_enabled);
+        assert_eq!(cfg.web_port, 8080);
+
+        apply_config_key(&mut cfg, "web_enabled", "true");
+        assert!(cfg.web_enabled);
+        apply_config_key(&mut cfg, "web_enabled", "false");
+        assert!(!cfg.web_enabled);
+
+        apply_config_key(&mut cfg, "web_port", "9090");
+        assert_eq!(cfg.web_port, 9090);
+
+        // Invalid (non-numeric) ignored.
+        apply_config_key(&mut cfg, "web_port", "notanumber");
+        assert_eq!(cfg.web_port, 9090);
+        // Zero ignored (port must be ≥ 1).
+        apply_config_key(&mut cfg, "web_port", "0");
+        assert_eq!(cfg.web_port, 9090);
     }
 
     #[test]

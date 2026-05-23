@@ -220,6 +220,7 @@ struct App {
     telnet_port_buf: String,
     ssh_port_buf: String,
     kermit_server_port_buf: String,
+    web_port_buf: String,
     max_sessions_buf: String,
     idle_timeout_buf: String,
     negotiation_timeout_buf: String,
@@ -284,6 +285,7 @@ impl App {
         let telnet_port_buf = cfg.telnet_port.to_string();
         let ssh_port_buf = cfg.ssh_port.to_string();
         let kermit_server_port_buf = cfg.kermit_server_port.to_string();
+        let web_port_buf = cfg.web_port.to_string();
         let max_sessions_buf = cfg.max_sessions.to_string();
         let idle_timeout_buf = cfg.idle_timeout_secs.to_string();
         let negotiation_timeout_buf = cfg.xmodem_negotiation_timeout.to_string();
@@ -320,6 +322,7 @@ impl App {
             telnet_port_buf,
             ssh_port_buf,
             kermit_server_port_buf,
+            web_port_buf,
             max_sessions_buf,
             idle_timeout_buf,
             negotiation_timeout_buf,
@@ -354,6 +357,7 @@ impl App {
         if let Ok(v) = self.telnet_port_buf.parse::<u16>() && v >= 1 { self.cfg.telnet_port = v; }
         if let Ok(v) = self.ssh_port_buf.parse::<u16>() && v >= 1 { self.cfg.ssh_port = v; }
         if let Ok(v) = self.kermit_server_port_buf.parse::<u16>() && v >= 1 { self.cfg.kermit_server_port = v; }
+        if let Ok(v) = self.web_port_buf.parse::<u16>() && v >= 1 { self.cfg.web_port = v; }
         if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
         if let Ok(v) = self.idle_timeout_buf.parse() { self.cfg.idle_timeout_secs = v; }
         if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
@@ -426,6 +430,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
             labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
+            // Web Server shares the Telnet row — paired with Kermit on
+            // the SSH row below it.  The wide gutter visually separates
+            // the two listeners so the row doesn't read as one cluster.
+            ui.add_space(24.0);
+            ui.checkbox(&mut self.cfg.web_enabled, "Web Server");
+            labeled_field(ui, "Port:", &mut self.web_port_buf, 50.0);
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
@@ -1157,6 +1167,7 @@ impl App {
         self.telnet_port_buf = self.cfg.telnet_port.to_string();
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
         self.kermit_server_port_buf = self.cfg.kermit_server_port.to_string();
+        self.web_port_buf = self.cfg.web_port.to_string();
         self.max_sessions_buf = self.cfg.max_sessions.to_string();
         self.idle_timeout_buf = self.cfg.idle_timeout_secs.to_string();
         self.negotiation_timeout_buf = self.cfg.xmodem_negotiation_timeout.to_string();
@@ -2103,6 +2114,7 @@ impl eframe::App for App {
                 || self.telnet_port_buf != self.last_synced_cfg.telnet_port.to_string()
                 || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
                 || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
+                || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
                 || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
                 || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
                 || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
@@ -2151,6 +2163,7 @@ mod tests {
             app.kermit_server_port_buf,
             app.cfg.kermit_server_port.to_string()
         );
+        assert_eq!(app.web_port_buf, app.cfg.web_port.to_string());
         assert_eq!(app.max_sessions_buf, app.cfg.max_sessions.to_string());
         assert_eq!(app.idle_timeout_buf, app.cfg.idle_timeout_secs.to_string());
         assert_eq!(app.negotiation_timeout_buf, app.cfg.xmodem_negotiation_timeout.to_string());
@@ -2216,6 +2229,7 @@ mod tests {
         app.telnet_port_buf = "8080".into();
         app.ssh_port_buf = "3333".into();
         app.kermit_server_port_buf = "2525".into();
+        app.web_port_buf = "9090".into();
         app.max_sessions_buf = "100".into();
         app.idle_timeout_buf = "1800".into();
         app.negotiation_timeout_buf = "60".into();
@@ -2237,6 +2251,7 @@ mod tests {
         assert_eq!(app.cfg.telnet_port, 8080);
         assert_eq!(app.cfg.ssh_port, 3333);
         assert_eq!(app.cfg.kermit_server_port, 2525);
+        assert_eq!(app.cfg.web_port, 9090);
         assert_eq!(app.cfg.max_sessions, 100);
         assert_eq!(app.cfg.idle_timeout_secs, 1800);
         assert_eq!(app.cfg.xmodem_negotiation_timeout, 60);
