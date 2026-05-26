@@ -736,7 +736,7 @@ fn collect_form_updates(
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
         "security_enabled", "disable_ip_safety", "enable_console", "verbose",
-        "telnet_gateway_negotiate", "telnet_gateway_raw",
+        "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
@@ -1166,10 +1166,11 @@ fn frame_general(cfg: &Config) -> String {
          <span class=\"title\">General</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{v}</div>\
-         <div class=\"row\">{g}</div>\
+         <div class=\"row\">{d}<span class=\"hspace\"></span>{g}</div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         v = checkbox("verbose", "Verbose Transfer Logging", cfg.verbose),
+        d = checkbox("gateway_debug", "Gateway Debug Trace", cfg.gateway_debug),
         g = checkbox("enable_console", "Show GUI on Startup", cfg.enable_console),
     )
 }
@@ -1486,6 +1487,7 @@ h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; 
 .label { color: var(--text); }
 .label-dim { color: var(--amber-dim); min-width: 56px; }
 .chk { display: inline-flex; align-items: center; gap: 6px; }
+.hspace { display: inline-block; width: 18px; }
 input[type=text], input[type=password], select {
   background: var(--bg-mid);
   color: var(--text-input);

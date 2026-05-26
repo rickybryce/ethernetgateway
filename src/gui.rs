@@ -1693,7 +1693,11 @@ impl eframe::App for App {
                                     }
                                 });
                                 ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
-                                ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
+                                    ui.add_space(40.0);
+                                    ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+                                });
                             });
                         },
                     );

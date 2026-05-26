@@ -30,6 +30,12 @@ const DEFAULT_TELNET_GATEWAY_NEGOTIATE: bool = false;
 /// which is the last-resort escape hatch for destinations that clearly
 /// aren't telnet at all.
 const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
+/// Byte-level trace of the SSH/Telnet gateway proxy loops, for diagnosing
+/// input corruption and terminal-translation issues.  Off by default — it
+/// is verbose, per-byte output meant for troubleshooting.  Read fresh by
+/// each gateway session, so toggling it takes effect on the next session
+/// without restarting the program.
+const DEFAULT_GATEWAY_DEBUG: bool = false;
 const DEFAULT_ENABLE_CONSOLE: bool = true;
 const DEFAULT_SECURITY_ENABLED: bool = false;
 /// When `security_enabled` is false, the telnet listener restricts
@@ -318,6 +324,12 @@ pub struct Config {
     /// BBS software).  Supersedes `telnet_gateway_negotiate` — when raw
     /// is on, there is no negotiation to do.
     pub telnet_gateway_raw: bool,
+    /// Byte-level trace of the SSH/Telnet gateway proxy loops, for
+    /// diagnosing input corruption / terminal-translation issues.  Read
+    /// fresh by each gateway session, so toggling it takes effect on the
+    /// next session without a restart.  The `EGATEWAY_GATEWAY_DEBUG`
+    /// environment variable still forces it on regardless of this flag.
+    pub gateway_debug: bool,
     /// Show the GUI configuration/console window on startup.
     pub enable_console: bool,
     pub security_enabled: bool,
@@ -456,6 +468,7 @@ impl Default for Config {
             telnet_port: DEFAULT_TELNET_PORT,
             telnet_gateway_negotiate: DEFAULT_TELNET_GATEWAY_NEGOTIATE,
             telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
+            gateway_debug: DEFAULT_GATEWAY_DEBUG,
             enable_console: DEFAULT_ENABLE_CONSOLE,
             security_enabled: DEFAULT_SECURITY_ENABLED,
             disable_ip_safety: DEFAULT_DISABLE_IP_SAFETY,
@@ -605,6 +618,10 @@ fn read_config_file(path: &str) -> Config {
             .get("telnet_gateway_raw")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_TELNET_GATEWAY_RAW),
+        gateway_debug: map
+            .get("gateway_debug")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_GATEWAY_DEBUG),
         enable_console: map
             .get("enable_console")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1057,6 +1074,17 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
+# Gateway byte-trace (debug).  When true, the SSH/Telnet gateway logs every
+# byte crossing the proxy — verbose, per-byte output for diagnosing input
+# corruption and terminal-translation issues.  Read fresh by each gateway
+# session, so toggling takes effect on the next session without a restart.
+# Toggleable from the GUI/web General settings and the Serial Configuration
+# menu.  The EGATEWAY_GATEWAY_DEBUG environment variable forces it on too.
+");
+    write_kv(&mut content, "gateway_debug", cfg.gateway_debug);
+    content.push('\n');
+
+    content.push_str("\
 # Show the GUI configuration/console window on startup.
 # Set to false when running as a headless service.
 ");
@@ -1454,6 +1482,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "telnet_gateway_raw" => {
             cfg.telnet_gateway_raw = value.eq_ignore_ascii_case("true");
         }
+        "gateway_debug" => cfg.gateway_debug = value.eq_ignore_ascii_case("true"),
         "enable_console" => cfg.enable_console = value.eq_ignore_ascii_case("true"),
         "security_enabled" => cfg.security_enabled = value.eq_ignore_ascii_case("true"),
         "disable_ip_safety" => cfg.disable_ip_safety = value.eq_ignore_ascii_case("true"),
@@ -1980,6 +2009,7 @@ mod tests {
             telnet_port: 1234,
             telnet_gateway_negotiate: true,
             telnet_gateway_raw: true,
+            gateway_debug: true,
             enable_console: true,
             security_enabled: true,
             disable_ip_safety: true,
@@ -2083,6 +2113,7 @@ mod tests {
             original.telnet_gateway_negotiate
         );
         assert_eq!(loaded.telnet_gateway_raw, original.telnet_gateway_raw);
+        assert_eq!(loaded.gateway_debug, original.gateway_debug);
         assert_eq!(loaded.enable_console, original.enable_console);
         assert_eq!(loaded.security_enabled, original.security_enabled);
         assert_eq!(loaded.username, original.username);
@@ -2215,6 +2246,7 @@ mod tests {
             "telnet_port",
             "telnet_gateway_negotiate",
             "telnet_gateway_raw",
+            "gateway_debug",
             "enable_console",
             "security_enabled",
             "disable_ip_safety",

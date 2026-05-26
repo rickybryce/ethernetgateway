@@ -559,6 +559,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>Telnet listen port. Must be &ge; 1.</td></tr>
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
+        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>Byte-level trace of SSH/Telnet gateway sessions. Toggle from the GUI/web General frame or the telnet Other / Serial Configuration menus; takes effect next session. <code>EGATEWAY_GATEWAY_DEBUG</code> env var forces it on. See §16.10.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
         <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>Require username/password login on telnet, SSH, and the web UI.</td></tr>
         <tr><td><code>username</code>, <code>password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>Unified login credentials — shared by telnet, SSH, and the configuration web UI.  (The legacy per-protocol <code>ssh_username</code> / <code>ssh_password</code> keys were removed in v0.6.0; configs that still have them auto-migrate into this pair on first load when the unified pair is still at the factory defaults.)</td></tr>
@@ -1715,6 +1716,25 @@ for 9600 8N1 as well; remember to press <em>stop</em> and <em>aux1 up</em> on
 the front panel to configure its serial ports.
 </p>
 
+<aside class="note">
+<span class="label">Commodore 64 with a bit-banged userport serial adapter</span>
+If your C64 reaches the gateway through a <strong>bit-banged userport
+RS-232 adapter</strong> &mdash; such as the <strong>EZ232</strong>, which is a
+passive level-shifter with no UART of its own &mdash; use <strong>1200
+baud</strong>, not 2400. On these adapters the C64 times every serial bit in
+software, and it has almost no timing margin to spare. When a long command
+wraps past column 40 the screen scrolls, the KERNAL briefly masks interrupts
+to shuffle screen memory, and any keystroke being transmitted during that
+scroll has its bit timing disrupted. The result is an intermittent,
+single-character corruption (a typed letter arriving as a stray PETSCII
+graphics byte) that runs a garbled command. This has been observed with
+<strong>CCGMS</strong> in PETSCII mode. Dropping both the gateway port
+(<code>serial_a_baud = 1200</code>) and the C64 terminal program to 1200 baud
+roughly doubles the per-bit timing budget and clears it up. A hardware-UART
+interface (SwiftLink / Turbo232) or a WiFi modem with its own UART is not
+affected and can run faster. See &sect;16.9.
+</aside>
+
 <h2 id="ch9-dial">9.2 Dialing</h2>
 
 <p>
@@ -2552,6 +2572,104 @@ timeout, tagged with the protocol (<code>XMODEM recv:</code>,
 If you change baud from a serial session with mismatched terminal settings,
 don't panic. The gateway waits up to 60 seconds for confirmation and reverts
 automatically on timeout. Within 60 seconds your old settings come back.
+</p>
+
+<h2 id="ch16-c64garble">16.9 Garbled Input from a Commodore 64 (Bit-Banged Serial)</h2>
+
+<p>
+<strong>Symptom:</strong> a command typed on a C64 over a userport RS-232
+adapter runs <em>truncated or corrupted</em> &mdash; usually a single typed
+character arrives as a stray PETSCII graphics byte &mdash; and it tends to
+happen on <em>longer</em> commands that wrap past the 40-column screen edge.
+It is intermittent: the same command may go through cleanly on the next try.
+</p>
+
+<p>
+<strong>Cause:</strong> passive userport adapters like the
+<strong>EZ232</strong> have no UART; the C64 times every serial bit in
+software (&ldquo;bit-banging&rdquo;), which has very little timing margin.
+When a long line wraps, the screen scrolls and the KERNAL briefly masks
+interrupts to move screen memory &mdash; long enough to disrupt the bit timing
+of a keystroke being transmitted at that moment, garbling the byte on the
+wire. This is a C64 transmit-side timing fault that happens <em>before</em>
+any byte reaches the gateway, so it affects the SSH Gateway, the Telnet
+Gateway, and every other feature that rides the same serial link.
+</p>
+
+<p>
+<strong>Fix:</strong>
+</p>
+<ul>
+    <li><strong>Use 1200 baud, not 2400</strong>, on bit-banged userport adapters. Set <code>serial_<em>x</em>_baud = 1200</code> on the gateway port <em>and</em> set your C64 terminal program (e.g. CCGMS) to 1200. This roughly doubles the per-bit timing budget and is the reliable cure.</li>
+    <li>If you must run faster, a hardware-UART interface (SwiftLink / Turbo232) or a WiFi modem with its own UART removes the bit-banging entirely and is not affected.</li>
+    <li>To confirm the diagnosis on your own hardware, enable the gateway byte-trace (&sect;16.10) and watch the per-byte timing and the assembled <code>[gw-in] line</code>.</li>
+</ul>
+
+<h2 id="ch16-trace">16.10 Gateway Byte-Trace (Debug Mode)</h2>
+
+<p>
+The SSH Gateway and Telnet Gateway can log every byte that crosses the
+gateway, which is useful for diagnosing input corruption, terminal
+translation, and flow problems like &sect;16.9. It costs nothing when off and
+needs no special build.
+</p>
+
+<p>
+<strong>Enable it</strong> with the <code>gateway_debug</code> setting, which
+you can toggle from any of three places without restarting the program:
+</p>
+
+<ul>
+    <li><strong>GUI:</strong> the <em>General</em> frame &mdash; tick <em>Gateway Debug Trace</em> (next to <em>Show GUI on Startup</em>) and click <em>Save</em>.</li>
+    <li><strong>Web console:</strong> the <em>General</em> frame &mdash; same checkbox, then <em>Save</em>.</li>
+    <li><strong>In-session telnet menu:</strong> <em>Configuration</em> &rarr; <em>O&nbsp;Other Settings</em> &rarr; <em>D</em>, or <em>Configuration</em> &rarr; <em>M&nbsp;Serial Configuration</em> &rarr; <em>D</em>. Both toggle the same flag.</li>
+</ul>
+
+<p>
+The flag is read fresh when each gateway session starts, so a change takes
+effect on the <em>next</em> SSH/Telnet Gateway connection &mdash; no restart
+needed. It is persisted to <code>egateway.conf</code> as
+<code>gateway_debug = true</code>.
+</p>
+
+<aside class="note">
+<span class="label">Forcing it on from the environment</span>
+The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable still forces the
+trace on regardless of the config flag &mdash; handy for headless or
+scripted runs where you want it active from the moment the process starts:
+<pre><code>EGATEWAY_GATEWAY_DEBUG=1 ./ethernet-gateway</code></pre>
+Under systemd, add <code>Environment=EGATEWAY_GATEWAY_DEBUG=1</code> to the
+unit. When set, it overrides the <code>gateway_debug</code> setting.
+</aside>
+
+<p>
+<strong>Where the trace appears:</strong> the same places as all gateway log
+output &mdash; the process's stderr, the GUI's live console, and (when
+<code>web_enabled = true</code>) the web-config console's <code>/logs</code>
+endpoint, e.g. <code>curl http://<em>host</em>:8080/logs</code>.
+</p>
+
+<p>
+<strong>Reading the trace.</strong> When a gateway session opens you'll see a
+banner, then one line per input byte and a summary line per typed command:
+</p>
+
+<table>
+    <thead><tr><th>Line</th><th>Meaning</th></tr></thead>
+    <tbody>
+        <tr><td><code>[gw] SSH gateway trace ON — …</code></td><td>Session opened (or <code>Telnet gateway</code>); shows terminal type and PTY/window size.</td></tr>
+        <tr><td><code>[gw-in] +Δms t=…ms byte=0x<em>NN</em> '<em>c</em>' (petscii 0x<em>NN</em>)</code></td><td>One byte forwarded to the remote. <code>+Δms</code> is the gap since the previous byte; <code>t=</code> is elapsed since the trace started; the <code>petscii</code> note appears only when the PETSCII&rarr;ASCII case-swap changed the byte.</td></tr>
+        <tr><td><code>[gw-in] line (<em>N</em> bytes) -> <em>hex</em> | "<em>ascii</em>"</code></td><td>The full line as the remote shell received it, flushed on RETURN (CR/LF). This is exactly what bash ran.</td></tr>
+        <tr><td><code>[gw-out] raw <em>N</em> bytes -> …</code> / <code>filtered …</code></td><td>Bytes received from the remote, shown before and after the PETSCII/ASCII output filter.</td></tr>
+    </tbody>
+</table>
+
+<p>
+The <code>+Δms</code> timing distinguishes terminal behaviours: large
+per-byte gaps mean the client sends each keystroke live (character mode,
+e.g. CCGMS), while a near-zero burst of bytes means a whole line was sent at
+once. This is verbose, per-byte output intended for troubleshooting &mdash;
+leave it disabled in normal operation.
 </p>
 
 <!-- ═══════════════════ Appendix A ═══════════════════ -->

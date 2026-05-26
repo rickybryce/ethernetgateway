@@ -604,6 +604,29 @@ async fn read_gateway_event(
 
 // ─── SSH Gateway helpers ────────────────────────────────────
 
+/// True when gateway byte-tracing is enabled — either by the
+/// `gateway_debug` config flag (toggleable from the GUI, web console, and
+/// the in-session Serial Configuration menu) or forced on by the
+/// `EGATEWAY_GATEWAY_DEBUG` environment variable (any non-empty value).
+/// Gates the chatty per-byte diagnostics in the SSH and Telnet gateway
+/// proxy loops so they cost nothing when off.  `cfg_flag` is the caller's
+/// already-read `cfg.gateway_debug`, avoiding a second config lock.
+fn gw_debug_enabled(cfg_flag: bool) -> bool {
+    cfg_flag || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
+}
+
+/// Format a byte slice as a compact hex + printable-ASCII dump for the
+/// gateway diagnostics log, e.g. `73 75 64 6f | "sudo"`.  Non-printable
+/// bytes render as `.` in the ASCII column.
+fn gw_hexdump(bytes: &[u8]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let ascii: String = bytes
+        .iter()
+        .map(|&b| if (0x20..=0x7E).contains(&b) { b as char } else { '.' })
+        .collect();
+    format!("{} | \"{}\"", hex.join(" "), ascii)
+}
+
 /// Filter SSH gateway output for non-ANSI terminals.
 ///
 /// Strips all ANSI escape sequences (CSI, OSC, DCS, PM, APC, SOS) from the
@@ -2138,22 +2161,12 @@ impl TelnetSession {
         self.read_input_loop(&mut Vec::new(), InputMode::Normal).await
     }
 
-    /// Continue collecting line input with bytes already in `buf` (which have
-    /// already been echoed). Used when the caller consumed the first byte to
-    /// decide between instant-action and line-input modes.
-    async fn get_line_input_continuing(
-        &mut self,
-        buf: &mut Vec<u8>,
-    ) -> Result<Option<String>, std::io::Error> {
-        self.read_input_loop(buf, InputMode::Normal).await
-    }
-
     async fn get_password_input(&mut self) -> Result<Option<String>, std::io::Error> {
         self.read_input_loop(&mut Vec::new(), InputMode::Password).await
     }
 
-    /// Core input loop shared by `get_line_input`, `get_line_input_continuing`,
-    /// and `get_password_input`. In `Normal` mode, typed characters are echoed
+    /// Core input loop shared by `get_line_input` and `get_password_input`.
+    /// In `Normal` mode, typed characters are echoed
     /// and the result is trimmed. In `Password` mode, `*` is echoed instead and
     /// the result is returned untrimmed.
     async fn read_input_loop(
@@ -5816,6 +5829,26 @@ impl TelnetSession {
         let mut last_was_esc = false;
         let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
 
+        // Gateway byte-tracing (EGATEWAY_GATEWAY_DEBUG).  `dbg_in` accumulates
+        // every byte we forward to the remote shell and is flushed to the log
+        // on each CR/LF — so the log shows exactly the line bash receives on
+        // RETURN, which is the crux of the c64sshwrap long-line truncation
+        // investigation.
+        let gw_debug = gw_debug_enabled(cfg.gateway_debug);
+        let mut dbg_in: Vec<u8> = Vec::new();
+        // Per-byte timing: `+Δms` is the gap since the previous input byte and
+        // `t=…` is elapsed since trace start.  Large gaps = bytes typed live
+        // (character-mode terminal); a near-zero burst = a line dumped at once
+        // (screen-memory walk).  This is what tells the two mechanisms apart.
+        let gw_start = std::time::Instant::now();
+        let mut gw_last = gw_start;
+        if gw_debug {
+            glog!(
+                "[gw] SSH gateway trace ON — term={:?} pty=({}x{},{})",
+                self.terminal_type, cols, rows, term
+            );
+        }
+
         loop {
             tokio::select! {
                 byte = read_byte_iac_filtered(reader, true) => {
@@ -5834,9 +5867,27 @@ impl TelnetSession {
                                 if let Some(e) = normalize_gateway_input(e, &mut last_cr)
                                     && ssh_writer.write_all(&[e]).await.is_err() { break; }
                             }
+                            let raw = b;
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
                             let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
                             if let Some(b) = normalize_gateway_input(b, &mut last_cr) {
+                                if gw_debug {
+                                    let now = std::time::Instant::now();
+                                    let dt = now.duration_since(gw_last).as_millis();
+                                    let t = now.duration_since(gw_start).as_millis();
+                                    gw_last = now;
+                                    let swap = if raw != b { format!(" (petscii 0x{:02x})", raw) } else { String::new() };
+                                    glog!("[gw-in] +{:>5}ms t={:>6}ms  byte=0x{:02x} '{}'{}",
+                                        dt, t, b,
+                                        if (0x20..=0x7E).contains(&b) { b as char } else { '.' },
+                                        swap);
+                                    if b == b'\r' || b == b'\n' {
+                                        glog!("[gw-in] line ({} bytes) -> {}", dbg_in.len(), gw_hexdump(&dbg_in));
+                                        dbg_in.clear();
+                                    } else {
+                                        dbg_in.push(b);
+                                    }
+                                }
                                 if ssh_writer.write_all(&[b]).await.is_err() { break; }
                                 if ssh_writer.flush().await.is_err() { break; }
                             }
@@ -5855,6 +5906,12 @@ impl TelnetSession {
                             } else {
                                 &ssh_buf[..n]
                             };
+                            if gw_debug {
+                                glog!("[gw-out] raw {} bytes -> {}", n, gw_hexdump(&ssh_buf[..n]));
+                                if is_petscii || is_ascii {
+                                    glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
+                                }
+                            }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
                                 if w.write_all(data).await.is_err() { break; }
@@ -6068,6 +6125,20 @@ impl TelnetSession {
         let mut data_from_remote: Vec<u8> = Vec::with_capacity(4096);
         let mut replies_to_remote: Vec<u8> = Vec::new();
 
+        // Gateway byte-tracing (EGATEWAY_GATEWAY_DEBUG) — mirrors the SSH
+        // gateway path so the Telnet Gateway can be checked for the same
+        // c64sshwrap long-line truncation.
+        let gw_debug = gw_debug_enabled(cfg.gateway_debug);
+        let mut dbg_in: Vec<u8> = Vec::new();
+        let gw_start = std::time::Instant::now();
+        let mut gw_last = gw_start;
+        if gw_debug {
+            glog!(
+                "[gw] Telnet gateway trace ON — term={:?} raw={} window=({}x{})",
+                self.terminal_type, raw, cols, rows
+            );
+        }
+
         loop {
             tokio::select! {
                 event = read_gateway_event(reader) => {
@@ -6090,8 +6161,26 @@ impl TelnetSession {
                                 };
                                 if !write_ok { break; }
                             }
+                            let raw_in = b;
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
                             let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
+                            if gw_debug {
+                                let now = std::time::Instant::now();
+                                let dt = now.duration_since(gw_last).as_millis();
+                                let t = now.duration_since(gw_start).as_millis();
+                                gw_last = now;
+                                let swap = if raw_in != b { format!(" (petscii 0x{:02x})", raw_in) } else { String::new() };
+                                glog!("[gw-in] +{:>5}ms t={:>6}ms  byte=0x{:02x} '{}'{}",
+                                    dt, t, b,
+                                    if (0x20..=0x7E).contains(&b) { b as char } else { '.' },
+                                    swap);
+                                if b == b'\r' || b == b'\n' {
+                                    glog!("[gw-in] line ({} bytes) -> {}", dbg_in.len(), gw_hexdump(&dbg_in));
+                                    dbg_in.clear();
+                                } else {
+                                    dbg_in.push(b);
+                                }
+                            }
                             let write_ok = if raw {
                                 remote_writer.write_all(&[b]).await.is_ok()
                             } else {
@@ -6144,6 +6233,12 @@ impl TelnetSession {
                             } else {
                                 raw_slice
                             };
+                            if gw_debug {
+                                glog!("[gw-out] raw {} bytes -> {}", raw_slice.len(), gw_hexdump(raw_slice));
+                                if is_petscii || is_ascii {
+                                    glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
+                                }
+                            }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
                                 // Always IAC-escape when writing to the
@@ -6712,30 +6807,29 @@ impl TelnetSession {
                 .await?;
             self.flush().await?;
 
-            // P/N/Q act instantly; any other printable key starts
-            // line-input mode so the user can type a new question.
-            let first = match self.read_byte_filtered().await? {
-                Some(b) => b,
+            // Read a full line before acting.  A lone command letter
+            // (Q/N/P/H by itself, then Enter) navigates; anything longer
+            // is sent to the AI as a new question — so a follow-up that
+            // merely starts with a command letter (e.g. "Quantum...") is
+            // no longer swallowed by the menu.  ESC / disconnect → None.
+            let input = match self.get_line_input().await? {
+                Some(s) => s,
                 None => return Ok(None),
             };
-
-            if is_esc_key(first, self.terminal_type == TerminalType::Petscii) {
-                self.drain_input().await;
-                return Ok(None);
-            }
-            if first == b'\r' || first == b'\n' || first < 0x20 {
+            if input.is_empty() {
                 continue;
             }
-
-            let ch = if self.terminal_type == TerminalType::Petscii {
-                (petscii_to_ascii_byte(first) as char).to_ascii_lowercase()
+            // Only a one-character line can be a command; a longer line
+            // (even one starting with q/n/p/h) is treated as a question.
+            let cmd = if input.chars().count() == 1 {
+                input.chars().next().unwrap().to_ascii_lowercase()
             } else {
-                (first as char).to_ascii_lowercase()
+                '\0'
             };
 
-            match ch {
-                'n' if has_next => { scroll += page_h; }
-                'p' if has_prev => { scroll = scroll.saturating_sub(page_h); }
+            match cmd {
+                'n' => { if has_next { scroll += page_h; } }
+                'p' => { if has_prev { scroll = scroll.saturating_sub(page_h); } }
                 'q' => { return Ok(None); }
                 'h' => {
                     self.show_help_page("AI CHAT HELP", &[
@@ -6783,16 +6877,9 @@ impl TelnetSession {
                     ]).await?;
                 }
                 _ => {
-                    // Start of a new question — echo the first byte
-                    // and collect the rest via line input.
-                    self.send_raw(&[first]).await?;
-                    self.flush().await?;
-                    let mut buf: Vec<u8> = vec![first];
-                    let rest = match self.get_line_input_continuing(&mut buf).await? {
-                        Some(s) if !s.is_empty() => s,
-                        _ => return Ok(None),
-                    };
-                    return Ok(Some(rest));
+                    // Not a navigation command — send the whole line to
+                    // the AI as a new question.
+                    return Ok(Some(input));
                 }
             }
         }
@@ -7380,8 +7467,21 @@ impl TelnetSession {
                 }
             }
             self.send_line("").await?;
+            let dbg_state = if cfg.gateway_debug {
+                self.green("ON")
+            } else {
+                self.red("OFF")
+            };
             self.send_line(&format!(
-                "  {}  {}",
+                "  {} - Gateway debug trace: {}",
+                self.cyan("[D]"),
+                dbg_state
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}  {}  {}",
+                self.action_prompt("D", "Toggle debug"),
                 self.action_prompt("Q", "Back"),
                 self.action_prompt("H", "Help")
             ))
@@ -7397,10 +7497,18 @@ impl TelnetSession {
             match input.as_str() {
                 "a" => self.modem_settings(SerialPortId::A).await?,
                 "b" => self.modem_settings(SerialPortId::B).await?,
+                "d" => {
+                    let v = (!cfg.gateway_debug).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("gateway_debug", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "h" => self.serial_configuration_help().await?,
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press A, B, H, or Q.").await?;
+                    self.show_error("Press A, B, D, H, or Q.").await?;
                 }
             }
         }
@@ -7417,6 +7525,11 @@ impl TelnetSession {
             "  Inside, press T to toggle between",
             "  Modem and Console mode for the port",
             "  you're editing.",
+            "",
+            "  Press D to toggle the gateway debug",
+            "  trace (byte-level logging of SSH/",
+            "  Telnet gateway sessions). Takes effect",
+            "  on the next gateway session.",
         ];
         self.show_help_page("SERIAL CONFIGURATION HELP", lines).await
     }
@@ -8615,27 +8728,8 @@ impl TelnetSession {
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
-            let cfg = config::get_config();
-            // Per-port status banner: one line per port so the
-            // operator sees both at a glance.
-            for id in crate::config::SERIAL_PORT_IDS {
-                let port = cfg.port(id);
-                let status = if !port.enabled {
-                    self.red("Disabled")
-                } else if port.mode == "console" {
-                    self.green("Console mode")
-                } else {
-                    self.amber("Modem mode")
-                };
-                self.send_line(&format!(
-                    "  Port {}: {}",
-                    id.label(),
-                    status
-                ))
-                .await?;
-            }
-            self.send_line("").await?;
-
+            // Per-port mode/status is shown under Serial Configuration (M),
+            // so the top-level menu no longer duplicates it here.
             self.send_line(&format!(
                 "  {}  Security",
                 self.cyan("E")
@@ -8851,6 +8945,14 @@ impl TelnetSession {
             };
             self.send_line(&format!("  GUI startup: {}", gui_status))
                 .await?;
+
+            let gw_dbg_status = if cfg.gateway_debug {
+                self.green("ON")
+            } else {
+                self.dim("off")
+            };
+            self.send_line(&format!("  Gateway dbg: {}", gw_dbg_status))
+                .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -8876,6 +8978,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle GUI on startup",
                 self.cyan("G")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle gateway debug trace",
+                self.cyan("D")
             ))
             .await?;
             self.send_line(&format!(
@@ -8947,6 +9054,14 @@ impl TelnetSession {
                     .ok();
                     self.config_restart_notice().await?;
                 }
+                "d" => {
+                    let v = (!cfg.gateway_debug).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("gateway_debug", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -8955,7 +9070,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press A, B, W, V, G, R, H, or Q.").await?;
+                    self.show_error("Press A, B, W, V, G, D, R, H, or Q.").await?;
                 }
             }
         }
@@ -9026,6 +9141,7 @@ impl TelnetSession {
                 "  V  Toggle verbose transfer log",
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
+                "  D  Toggle gateway debug trace",
                 "  R  Restart the server",
             ]
         } else {
@@ -9038,6 +9154,7 @@ impl TelnetSession {
                 "  V  Toggle verbose transfer logging",
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
+                "  D  Toggle gateway debug trace",
                 "  R  Restart the server",
             ]
         };
@@ -14127,10 +14244,10 @@ mod tests {
     #[test]
     fn test_config_menu_row_count() {
         // Configuration submenu (post dual-port refactor):
-        // header(3) + blank + per-port status(2) + blank
-        // + 7 items (E, G, M, S, F, O, R; T moved to per-port menu)
-        // + blank + Q/H + prompt = 17
-        let submenu_rows = 3 + 1 + 2 + 1 + 7 + 1 + 1 + 1; // 17
+        // header(3) + blank + 7 items (E, G, M, S, F, O, R; T moved to
+        // per-port menu) + blank + Q/H + prompt = 14.  The per-port status
+        // block was removed — it's shown under Serial Configuration (M).
+        let submenu_rows = 3 + 1 + 7 + 1 + 1 + 1; // 14
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
         // Server configuration: header(3) + blank + 5 status (telnet,
         // ssh, kermit, web, ip-safety) + blank + 5 items (T/P, S/O,
@@ -14239,10 +14356,10 @@ mod tests {
     }
 
     /// Other settings menu row count:
-    /// header(3) + blank + 5 values + blank + 6 items + blank + Q/H + prompt = 19
+    /// header(3) + blank + 6 values + blank + 7 items + blank + Q/H + prompt = 21
     #[test]
     fn test_other_settings_menu_row_count() {
-        let rows = 3 + 1 + 5 + 1 + 6 + 1 + 1 + 1; // 19
+        let rows = 3 + 1 + 6 + 1 + 7 + 1 + 1 + 1; // 21
         assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
     }
 
@@ -14259,6 +14376,7 @@ mod tests {
             "  V  Toggle verbose transfer log",
             "  G  Toggle GUI on startup",
             "     (requires restart)",
+            "  D  Toggle gateway debug trace",
             "  R  Restart the server",
         ];
         for line in &lines {
@@ -14272,11 +14390,11 @@ mod tests {
         }
     }
 
-    /// Other settings help screen (PETSCII): header(3) + blank + 10 content +
-    /// blank + "Press any key" = 16 rows.
+    /// Other settings help screen (PETSCII): header(3) + blank + 11 content +
+    /// blank + "Press any key" = 17 rows.
     #[test]
     fn test_other_help_screen_row_count() {
-        let rows = 3 + 1 + 10 + 1 + 1; // 16
+        let rows = 3 + 1 + 11 + 1 + 1; // 17
         assert!(rows <= 22, "other help screen is {} rows, exceeds 22", rows);
     }
 
@@ -14862,14 +14980,16 @@ mod tests {
 
     /// New Serial Configuration picker (Configuration → M now lands
     /// here): chrome + 4 port rows (worst case both configured) +
-    /// footer + prompt.  Fits well under the 22-row budget.
+    /// gateway-debug toggle row + footer + prompt.  Fits well under the
+    /// 22-row budget.
     #[test]
     fn test_serial_configuration_picker_row_count() {
         let chrome = 3 + 1; // sep+title+sep, blank
         let port_rows = 2 * 2; // 2 lines per port at worst case
         let blank_after = 1;
+        let debug_row = 1 + 1; // gateway-debug status line + blank
         let footer = 1 + 1; // footer line + prompt
-        let total = chrome + port_rows + blank_after + footer;
+        let total = chrome + port_rows + blank_after + debug_row + footer;
         assert!(
             total <= 22,
             "Serial Configuration picker is {} rows",
