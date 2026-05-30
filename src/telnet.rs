@@ -7587,11 +7587,24 @@ impl TelnetSession {
                 ))
             ))
             .await?;
-            self.send_line(&format!(
-                "  Flow:   {}",
-                self.amber(&port.flowcontrol)
-            ))
-            .await?;
+            // PETSCII xlate is a modem-emulator feature (direct-TCP dials
+            // only), so it rides on the Flow line in modem mode rather
+            // than spending a row of the 22-row PETSCII budget.
+            if console_mode {
+                self.send_line(&format!(
+                    "  Flow:   {}",
+                    self.amber(&port.flowcontrol)
+                ))
+                .await?;
+            } else {
+                let petscii_state = if port.petscii_translate { "on" } else { "off" };
+                self.send_line(&format!(
+                    "  Flow:   {}   PETSCII: {}",
+                    self.amber(&port.flowcontrol),
+                    self.amber(petscii_state)
+                ))
+                .await?;
+            }
             if port.enabled && !console_mode {
                 self.send_line(&format!(
                     "  {}",
@@ -7635,11 +7648,22 @@ impl TelnetSession {
                 self.cyan("P")
             ))
             .await?;
-            self.send_line(&format!(
-                "  {}  Set flow control",
-                self.cyan("F")
-            ))
-            .await?;
+            // X (PETSCII xlate) shares this row in modem mode to keep the
+            // menu within the 22-row PETSCII budget.
+            if console_mode {
+                self.send_line(&format!(
+                    "  {}  Set flow control",
+                    self.cyan("F")
+                ))
+                .await?;
+            } else {
+                self.send_line(&format!(
+                    "  {}  Set flow control   {}  PETSCII",
+                    self.cyan("F"),
+                    self.cyan("X")
+                ))
+                .await?;
+            }
             // Dialup mapping and ring emulator are modem-emulator
             // features only — they don't apply to a raw console bridge.
             if !console_mode {
@@ -7712,6 +7736,19 @@ impl TelnetSession {
                 "f" => {
                     self.modem_set_flow(id).await?;
                 }
+                "x" if !console_mode => {
+                    // Toggle PETSCII translation and persist immediately —
+                    // it's a sticky per-port preference, the same field the
+                    // AT+PETSCII command and the web/GUI surfaces write.
+                    let new_val = if port.petscii_translate { "false" } else { "true" };
+                    let v = new_val.to_string();
+                    let key = config::serial_key(id, "petscii_translate");
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value(&key, &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "d" if !console_mode => {
                     self.dialup_mapping().await?;
                 }
@@ -7736,8 +7773,8 @@ impl TelnetSession {
                     let msg = match (console_mode, on_own_port) {
                         (true, true) => "Press E, S, B, P, F, H, or Q.",
                         (true, false) => "Press E, T, S, B, P, F, H, or Q.",
-                        (false, true) => "Press E, S, B, P, D, F, H, or Q.",
-                        (false, false) => "Press E, T, S, B, P, D, F, I, H, or Q.",
+                        (false, true) => "Press E, S, B, P, D, F, X, H, or Q.",
+                        (false, false) => "Press E, T, S, B, P, D, F, X, I, H, or Q.",
                     };
                     self.show_error(msg).await?;
                 }
@@ -8541,6 +8578,7 @@ impl TelnetSession {
                 "  AT&Cn    DCD mode (0-1)",
                 "  AT&Dn    DTR handling (0-3)",
                 "  AT&Kn    Flow control (0-4)",
+                "  AT+PETSCII=n  PETSCII xlate 0/1",
                 "  AT&W     Save settings",
                 "  ATZ      Reload saved settings",
                 "  AT&F     Reset to gateway",
@@ -8604,6 +8642,8 @@ impl TelnetSession {
                 "  AT&Cn      DCD: 0=always on, 1=carrier",
                 "  AT&Dn      DTR handling 0-3",
                 "  AT&Kn      Flow control 0-4",
+                "  AT+PETSCII=n  PETSCII translation on direct-",
+                "             TCP dials (0=off, 1=on; persists)",
                 "  ATSn=v     Set S-register n to v",
                 "  AT&W       Save settings to egateway.conf",
                 "  ATZ        Reload saved settings",

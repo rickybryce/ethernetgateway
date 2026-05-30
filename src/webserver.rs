@@ -744,6 +744,7 @@ fn collect_form_updates(
         "serial_a_enabled", "serial_b_enabled",
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
+        "serial_a_petscii_translate", "serial_b_petscii_translate",
     ];
     for key in bool_keys {
         let truthy = fields.get(*key).map(|s| is_truthy(s)).unwrap_or(false);
@@ -1308,7 +1309,7 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
          <span class=\"label\">Parity:</span><select name=\"{prefix}_parity\">{po}</select>\
          <span class=\"label\">Flow:</span><select name=\"{prefix}_flowcontrol\">{fo}</select>\
          </div>\
-         <div class=\"row\">{echo} {verb} {quiet}</div>\
+         <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
          <div class=\"row\">{xc} {dtr} {flw} {dcd}</div>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\
          <input type=\"text\" name=\"{prefix}_s_regs\" value=\"{sregs}\" size=\"40\"></div>\
@@ -1329,6 +1330,7 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
         echo = checkbox(&format!("{}_echo", prefix), "Echo (E1)", port.echo),
         verb = checkbox(&format!("{}_verbose", prefix), "Verbose (V1)", port.verbose),
         quiet = checkbox(&format!("{}_quiet", prefix), "Quiet (Q1)", port.quiet),
+        petscii = checkbox(&format!("{}_petscii_translate", prefix), "PETSCII (AT+PETSCII)", port.petscii_translate),
         xc = numfield(&format!("{}_x_code", prefix), "X-code", port.x_code),
         dtr = numfield(&format!("{}_dtr_mode", prefix), "&D", port.dtr_mode),
         flw = numfield(&format!("{}_flow_mode", prefix), "&K", port.flow_mode),

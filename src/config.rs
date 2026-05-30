@@ -191,9 +191,11 @@ const DEFAULT_SERIAL_DTR_MODE: u8 = 0;
 const DEFAULT_SERIAL_FLOW_MODE: u8 = 0;
 /// AT&C1 — DCD reflects carrier state (Hayes default).
 const DEFAULT_SERIAL_DCD_MODE: u8 = 1;
-/// AT&P0 — PETSCII translation off (ASCII passthrough on direct-TCP dials).
-/// Vendor extension; C64 callers flip this on with `AT&P1` and persist with
-/// `AT&W` so subsequent `ATDT host:port` sessions render PETSCII correctly.
+/// AT+PETSCII=0 — PETSCII translation off (ASCII passthrough on direct-TCP
+/// dials).  Vendor extension; C64 callers flip this on with `AT+PETSCII=1`
+/// (which persists immediately) so subsequent `ATDT host:port` sessions
+/// render PETSCII correctly.  Also editable from the telnet, web, and GUI
+/// config surfaces.
 const DEFAULT_SERIAL_PETSCII_TRANSLATE: bool = false;
 const DEFAULT_SSH_ENABLED: bool = false;
 const DEFAULT_SSH_PORT: u16 = 2222;
@@ -279,11 +281,12 @@ pub struct SerialPortConfig {
     /// Stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Four slots,
     /// persisted by AT&W and restored by ATZ.  Empty string = unset.
     pub stored_numbers: [String; 4],
-    /// Saved AT&P PETSCII-translation toggle.  When true, the modem
+    /// Saved AT+PETSCII PETSCII-translation toggle.  When true, the modem
     /// emulator translates the byte stream on direct-TCP dials so a
     /// PETSCII terminal (C64/PET) sees readable text from an ASCII
-    /// host.  Vendor-extension AT command; persisted by AT&W and
-    /// restored by ATZ like other &-settings.
+    /// host.  Vendor-extension AT command; `AT+PETSCII=1` persists it
+    /// immediately, and it is also editable from the telnet, web, and
+    /// GUI config surfaces.
     pub petscii_translate: bool,
 }
 

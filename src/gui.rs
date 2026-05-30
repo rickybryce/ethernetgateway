@@ -805,6 +805,17 @@ impl App {
                     }
                 });
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.cfg.port_mut(id).petscii_translate,
+                "PETSCII translation (AT+PETSCII)",
+            );
+            ui.label(
+                egui::RichText::new("(C64/PET direct-TCP dials)")
+                    .small()
+                    .color(AMBER),
+            );
+        });
 
         ui.add_space(6.0);
         ui.separator();

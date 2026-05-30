@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+- **Serial modem `AT+PETSCII=n` command** — toggles PETSCII⇄ASCII
+  translation on direct-TCP dials (`AT+PETSCII=1` on, `AT+PETSCII=0`
+  off) so a Commodore 64/PET dialing `ATDT host:port` sees readable
+  text instead of raw ASCII. Set-only, in the ITU-T V.250 `+`
+  extension namespace (`&P` is the pulse-dial make/break ratio on real
+  Hayes modems, so it is intentionally left alone). `AT+PETSCII=1`
+  persists the setting immediately; `AT&V` reports it as `+PETSCII:n`.
+- **PETSCII translation is now editable from every configuration
+  surface** — the per-port modem screen in the telnet/serial-console
+  menu, the web configuration page, and the desktop GUI — in addition
+  to the AT command. It is a per-serial-port setting saved to
+  `egateway.conf`.
+- Serial: inbound PETSCII punctuation normalizer, and the C64 PETSCII
+  DEL key (0x14, INST/DEL) is accepted as a command-line backspace
+  when PETSCII translation is active. `+++` escape sequences are
+  traced when the gateway debug trace is on.
+- **Persisted `gateway_debug` byte-trace flag**, toggleable from the
+  GUI/web General frame and the telnet Other Settings / Serial
+  Configuration menus. Read fresh per gateway session (no restart
+  needed); `EGATEWAY_GATEWAY_DEBUG` still forces it on. The trace now
+  timestamps each input byte.
+
+### Fixed
+- AI chat: a follow-up question that merely starts with a menu command
+  letter (e.g. "Quantum…") is no longer swallowed by the answer-screen
+  navigation. A lone command letter still navigates; any longer line
+  is sent to the model.
+
+### Changed
+- Removed the duplicate Port A/B status banner from the main
+  configuration menu — per-port mode is already shown under Serial
+  Configuration.
 
 ## [0.6.0] - 2026-05-24
 
@@ -996,7 +1028,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.0...HEAD
 [0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
 [0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3
 [0.5.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.2

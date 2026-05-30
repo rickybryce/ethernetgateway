@@ -96,8 +96,8 @@ const DEFAULT_FLOW_MODE: u8 = 0;
 /// Gateway-friendly default for AT&C (DCD handling).
 /// &C1 = DCD tracks carrier state.  Matches Hayes default.
 const DEFAULT_DCD_MODE: u8 = 1;
-/// Default for AT&P (vendor-extension: PETSCII translation on direct TCP
-/// dial-out).  Off — only C64/PET callers want this.
+/// Default for AT+PETSCII (vendor-extension: PETSCII translation on direct
+/// TCP dial-out).  Off — only C64/PET callers want this.
 const DEFAULT_PETSCII_TRANSLATE: bool = false;
 
 /// Per-port restart flags.  Indexed by `SerialPortId::index()`.  The
@@ -223,7 +223,7 @@ struct ModemState {
     /// Hayes stored-number slots (AT&Zn=s / ATDSn).  Mirrored from config on
     /// startup and ATZ, persisted to config on AT&W.
     stored_numbers: [String; 4],
-    /// AT&P PETSCII-translation toggle.  When true, `online_mode_tcp`
+    /// AT+PETSCII PETSCII-translation toggle.  When true, `online_mode_tcp`
     /// translates the byte stream both ways so a C64 dialing
     /// `ATDT host:port` sees readable PETSCII instead of raw ASCII.
     /// Vendor extension; off by default.  Only affects direct-TCP
@@ -895,7 +895,7 @@ fn serial_thread(
 /// editing.  Always accepts the configured backspace char (`S5`, default
 /// ASCII BS 0x08) and ASCII DEL (0x7F).  The C64's PETSCII DEL (0x14, the
 /// INST/DEL key) is accepted only when PETSCII translation is active
-/// (`AT&P1`), so a plain-ASCII caller's command-mode editing is byte-for-
+/// (`AT+PETSCII=1`), so a plain-ASCII caller's command-mode editing is byte-for-
 /// byte unchanged — e.g. an ASCII terminal sending 0x14 (Ctrl-T) stays an
 /// ignored control byte, exactly as before the C64 affordance was added.
 fn is_command_backspace(byte: u8, bs: u8, petscii: bool) -> bool {
@@ -1019,7 +1019,7 @@ enum AtResult {
     StoreNumber(usize, String),
     /// ATDSn — dial stored number from slot `n` (0-3).
     DialStored(usize),
-    /// AT&P n — vendor extension: PETSCII translation on direct TCP
+    /// AT+PETSCII=n — vendor extension: PETSCII translation on direct TCP
     /// dials. 0 = off (ASCII passthrough), 1 = on.
     PetsciiSet(u8),
 }
@@ -1140,6 +1140,14 @@ fn split_at_subcommand(rest: &str) -> (usize, bool) {
                 1
             };
             (n, false)
+        }
+        b'+' => {
+            // Extended (ITU-T V.250 `+NAME[=value]`) command — vendor
+            // extensions such as `+PETSCII=1`.  The value can contain
+            // `=` and digits, so consume to end-of-line; these are issued
+            // alone, never chained ahead of another subcommand.  Stays in
+            // command mode (does not go online).
+            (rest.len(), false)
         }
         b'S' => {
             // S?, S<digits>?, or S<digits>=<digits>.  Stop at the
@@ -1296,8 +1304,12 @@ fn parse_one_at_subcommand(
         // &K2 is reserved (not defined in Hayes spec)
         "&K3" => vec![AtResult::FlowSet(3)],
         "&K4" => vec![AtResult::FlowSet(4)],
-        "&P" | "&P0" => vec![AtResult::PetsciiSet(0)],
-        "&P1" => vec![AtResult::PetsciiSet(1)],
+        // Vendor extension (V.250 `+` namespace).  PETSCII-translation
+        // toggle for direct-TCP dials, set-only.  `&P` is intentionally
+        // NOT used: on real Hayes modems `AT&Pn` is the pulse-dial
+        // make/break ratio, so the `+` namespace is the spec-correct home.
+        "+PETSCII=0" => vec![AtResult::PetsciiSet(0)],
+        "+PETSCII=1" => vec![AtResult::PetsciiSet(1)],
         _ if token_upper.starts_with("&Z") => {
             // &Zn=s — store a phone number.  n is a single digit slot 0-3.
             let after = &token_upper[2..];
@@ -1559,6 +1571,13 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::PetsciiSet(n) => {
                 state.petscii_translate = n != 0;
+                // Persist immediately — unlike the Hayes register state
+                // (which waits for AT&W), the PETSCII toggle is a sticky
+                // per-port preference shared with the telnet/web/GUI
+                // config surfaces, so it writes through on every change.
+                let key = config::serial_key(state.port_id, "petscii_translate");
+                let val = if state.petscii_translate { "true" } else { "false" };
+                config::update_config_value(&key, val);
                 pending_ok = true;
             }
             AtResult::StoreNumber(slot, value) => {
@@ -1615,7 +1634,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                         "ATS?   Register help   +++   Escape to cmd",
                         "ATX0-4 Result verbosity AT&C  DCD mode",
                         "AT&D   DTR mode        AT&K  Flow control",
-                        "AT&P0/1 PETSCII xlate   A/    Repeat last cmd",
+                        "AT+PETSCII=0/1 xlate   A/    Repeat last cmd",
                         "AT?    This help",
                     ].join("\r\n");
                     send_response(state, &text);
@@ -1655,7 +1674,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     let verbose_str = if state.verbose { "V1" } else { "V0" };
                     let quiet_str = if state.quiet { "Q1" } else { "Q0" };
                     let header = format!(
-                        "{} {} {} X{} &C{} &D{} &K{} &P{} B{}",
+                        "{} {} {} X{} &C{} &D{} &K{} +PETSCII:{} B{}",
                         echo_str, verbose_str, quiet_str,
                         state.x_code, state.dcd_mode, state.dtr_mode,
                         state.flow_mode,
@@ -2240,7 +2259,7 @@ fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
 /// State machine that strips ECMA-48 / ANSI escape sequences from a
 /// byte stream.  PETSCII terminals can't render `ESC [ … letter`
 /// cursor-control sequences from ASCII BBSes (telehack, NetHack, etc.)
-/// so when AT&P1 is active we drop them rather than leak garbage to
+/// so when AT+PETSCII=1 is active we drop them rather than leak garbage to
 /// the C64.  Persists across reads — a CSI split across two TCP
 /// packets is still recognized.
 #[derive(Default)]
@@ -2356,7 +2375,7 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     state.last_data_time = Instant::now();
 
     // ANSI ESC-stripper state for the inbound (TCP→serial) direction.
-    // Only consulted when AT&P1 is active, but its state has to live
+    // Only consulted when AT+PETSCII=1 is active, but its state has to live
     // across reads regardless so a CSI split across packets still
     // collapses correctly.
     let mut ansi = AnsiStripState::default();
@@ -4258,24 +4277,36 @@ mod tests {
         assert_eq!(parse("at&c1", &mut echo), vec![AtResult::DcdSet(1)]);
         assert_eq!(parse("at&d2", &mut echo), vec![AtResult::DtrSet(2)]);
         assert_eq!(parse("at&k3", &mut echo), vec![AtResult::FlowSet(3)]);
-        assert_eq!(parse("at&p1", &mut echo), vec![AtResult::PetsciiSet(1)]);
+        assert_eq!(parse("at+petscii=1", &mut echo), vec![AtResult::PetsciiSet(1)]);
     }
 
     #[test]
-    fn test_at_ampersand_p_parsing() {
+    fn test_at_plus_petscii_parsing() {
         let mut echo = true;
-        assert_eq!(parse("AT&P", &mut echo), vec![AtResult::PetsciiSet(0)]);
-        assert_eq!(parse("AT&P0", &mut echo), vec![AtResult::PetsciiSet(0)]);
-        assert_eq!(parse("AT&P1", &mut echo), vec![AtResult::PetsciiSet(1)]);
+        assert_eq!(parse("AT+PETSCII=0", &mut echo), vec![AtResult::PetsciiSet(0)]);
+        assert_eq!(parse("AT+PETSCII=1", &mut echo), vec![AtResult::PetsciiSet(1)]);
     }
 
     #[test]
-    fn test_at_ampersand_p_chains() {
-        // &P chains like other &-letters; the trailing E0 still parses.
+    fn test_at_plus_petscii_set_only() {
+        // Set-only: bare `+PETSCII`, a query, and out-of-range values are
+        // not recognized as the toggle.  They fall through to the lenient
+        // unknown-command handler (silent OK), never flipping the flag.
+        let mut echo = true;
+        assert_eq!(parse("AT+PETSCII", &mut echo), vec![AtResult::Ok]);
+        assert_eq!(parse("AT+PETSCII?", &mut echo), vec![AtResult::Ok]);
+        assert_eq!(parse("AT+PETSCII=2", &mut echo), vec![AtResult::Ok]);
+    }
+
+    #[test]
+    fn test_at_plus_petscii_chains() {
+        // `+` extended commands consume to end-of-line, so they are issued
+        // alone or last.  A subcommand chained *ahead* still parses; the
+        // trailing E0 here flips echo off before +PETSCII runs.
         let mut echo = true;
         assert_eq!(
-            parse("AT&P1E0", &mut echo),
-            vec![AtResult::PetsciiSet(1), AtResult::Ok]
+            parse("ATE0+PETSCII=1", &mut echo),
+            vec![AtResult::Ok, AtResult::PetsciiSet(1)]
         );
         assert!(!echo);
     }
@@ -4312,7 +4343,7 @@ mod tests {
                 assert!(!is_command_backspace(b, bs, petscii));
             }
         }
-        // C64 PETSCII DEL (INST/DEL key) is backspace ONLY under AT&P1 —
+        // C64 PETSCII DEL (INST/DEL key) is backspace ONLY under AT+PETSCII=1 —
         // a plain-ASCII caller's 0x14 (Ctrl-T) stays an ignored control
         // byte, so ASCII command-mode editing is unchanged.
         assert!(is_command_backspace(0x14, bs, true));
