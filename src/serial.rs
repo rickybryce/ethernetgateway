@@ -96,6 +96,9 @@ const DEFAULT_FLOW_MODE: u8 = 0;
 /// Gateway-friendly default for AT&C (DCD handling).
 /// &C1 = DCD tracks carrier state.  Matches Hayes default.
 const DEFAULT_DCD_MODE: u8 = 1;
+/// Default for AT&P (vendor-extension: PETSCII translation on direct TCP
+/// dial-out).  Off — only C64/PET callers want this.
+const DEFAULT_PETSCII_TRANSLATE: bool = false;
 
 /// Per-port restart flags.  Indexed by `SerialPortId::index()`.  The
 /// outer manager thread for each port watches its own slot — set by
@@ -220,6 +223,13 @@ struct ModemState {
     /// Hayes stored-number slots (AT&Zn=s / ATDSn).  Mirrored from config on
     /// startup and ATZ, persisted to config on AT&W.
     stored_numbers: [String; 4],
+    /// AT&P PETSCII-translation toggle.  When true, `online_mode_tcp`
+    /// translates the byte stream both ways so a C64 dialing
+    /// `ATDT host:port` sees readable PETSCII instead of raw ASCII.
+    /// Vendor extension; off by default.  Only affects direct-TCP
+    /// dials — the `ATDT ethernet-gateway` duplex path already does its
+    /// own terminal-aware rendering through the telnet menu.
+    petscii_translate: bool,
 }
 
 // ─── Public API ────────────────────────────────────────────
@@ -847,6 +857,7 @@ fn serial_thread(
         last_dial: String::new(),
         last_command: String::new(),
         stored_numbers: port_cfg.stored_numbers.clone(),
+        petscii_translate: port_cfg.petscii_translate,
     };
 
     send_response(&mut state, "OK");
@@ -988,6 +999,9 @@ enum AtResult {
     StoreNumber(usize, String),
     /// ATDSn — dial stored number from slot `n` (0-3).
     DialStored(usize),
+    /// AT&P n — vendor extension: PETSCII translation on direct TCP
+    /// dials. 0 = off (ASCII passthrough), 1 = on.
+    PetsciiSet(u8),
 }
 
 /// Parse an AT command line into a list of responses.  Pure function for
@@ -1262,6 +1276,8 @@ fn parse_one_at_subcommand(
         // &K2 is reserved (not defined in Hayes spec)
         "&K3" => vec![AtResult::FlowSet(3)],
         "&K4" => vec![AtResult::FlowSet(4)],
+        "&P" | "&P0" => vec![AtResult::PetsciiSet(0)],
+        "&P1" => vec![AtResult::PetsciiSet(1)],
         _ if token_upper.starts_with("&Z") => {
             // &Zn=s — store a phone number.  n is a single digit slot 0-3.
             let after = &token_upper[2..];
@@ -1437,6 +1453,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.dtr_mode = DEFAULT_DTR_MODE;
                 state.flow_mode = DEFAULT_FLOW_MODE;
                 state.dcd_mode = DEFAULT_DCD_MODE;
+                state.petscii_translate = DEFAULT_PETSCII_TRANSLATE;
                 pending_ok = true;
             }
             AtResult::ResetStored => {
@@ -1455,6 +1472,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.flow_mode = port.flow_mode;
                 state.dcd_mode = port.dcd_mode;
                 state.stored_numbers = port.stored_numbers.clone();
+                state.petscii_translate = port.petscii_translate;
                 state.active_connection = None;
                 pending_ok = true;
             }
@@ -1485,6 +1503,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     config::serial_key(id, "stored_2"),
                     config::serial_key(id, "stored_3"),
                 ];
+                let petscii_key = config::serial_key(id, "petscii_translate");
                 config::update_config_values(&[
                     (echo_key.as_str(), if state.echo { "true" } else { "false" }),
                     (verbose_key.as_str(), if state.verbose { "true" } else { "false" }),
@@ -1498,6 +1517,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     (stored_keys[1].as_str(), state.stored_numbers[1].as_str()),
                     (stored_keys[2].as_str(), state.stored_numbers[2].as_str()),
                     (stored_keys[3].as_str(), state.stored_numbers[3].as_str()),
+                    (petscii_key.as_str(), if state.petscii_translate { "true" } else { "false" }),
                 ]);
                 pending_ok = true;
             }
@@ -1515,6 +1535,10 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::FlowSet(n) => {
                 state.flow_mode = n;
+                pending_ok = true;
+            }
+            AtResult::PetsciiSet(n) => {
+                state.petscii_translate = n != 0;
                 pending_ok = true;
             }
             AtResult::StoreNumber(slot, value) => {
@@ -1571,7 +1595,8 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                         "ATS?   Register help   +++   Escape to cmd",
                         "ATX0-4 Result verbosity AT&C  DCD mode",
                         "AT&D   DTR mode        AT&K  Flow control",
-                        "A/     Repeat last cmd AT?   This help",
+                        "AT&P0/1 PETSCII xlate   A/    Repeat last cmd",
+                        "AT?    This help",
                     ].join("\r\n");
                     send_response(state, &text);
                 }
@@ -1610,10 +1635,12 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     let verbose_str = if state.verbose { "V1" } else { "V0" };
                     let quiet_str = if state.quiet { "Q1" } else { "Q0" };
                     let header = format!(
-                        "{} {} {} X{} &C{} &D{} &K{} B{}",
+                        "{} {} {} X{} &C{} &D{} &K{} &P{} B{}",
                         echo_str, verbose_str, quiet_str,
                         state.x_code, state.dcd_mode, state.dtr_mode,
-                        state.flow_mode, state.baud,
+                        state.flow_mode,
+                        if state.petscii_translate { 1 } else { 0 },
+                        state.baud,
                     );
                     let s_line = state.s_regs.iter().enumerate()
                         .map(|(i, v)| format!("S{:02}={:03}", i, v))
@@ -2159,6 +2186,83 @@ fn online_mode_duplex(
     }
 }
 
+/// Map a PETSCII byte from a C64 keyboard into ASCII for transmission
+/// to a host that expects ASCII.  Letter banks fold to their ASCII
+/// counterparts (PETSCII upper-bank 0x41–0x5A renders as lowercase on
+/// a C64 in text mode, so it represents the lowercase the user typed;
+/// PETSCII shifted-upper 0xC1–0xDA represents typed uppercase).  The
+/// C64 DEL key (0x14) maps to ASCII BS (0x08).  Other bytes pass
+/// through, including punctuation and digits which share codepoints.
+fn translate_petscii_to_ascii_byte(byte: u8) -> u8 {
+    match byte {
+        0x41..=0x5A => byte + 32,
+        0xC1..=0xDA => byte - 0x80,
+        0x14 => 0x08,
+        _ => byte,
+    }
+}
+
+/// Map an ASCII byte received from a host into a byte that displays
+/// correctly on a C64 in text (lower/upper) mode.  The C64's
+/// character mapping is case-shifted relative to ASCII — sending
+/// `'a'` (0x61) renders as uppercase `A`, sending `'A'` (0x41) renders
+/// as lowercase `a` — so we case-swap letters before writing them to
+/// the wire.  ASCII BS (0x08) becomes PETSCII DEL (0x14).
+fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
+    match byte {
+        b'A'..=b'Z' => byte + 32,
+        b'a'..=b'z' => byte - 32,
+        0x08 => 0x14,
+        _ => byte,
+    }
+}
+
+/// State machine that strips ECMA-48 / ANSI escape sequences from a
+/// byte stream.  PETSCII terminals can't render `ESC [ … letter`
+/// cursor-control sequences from ASCII BBSes (telehack, NetHack, etc.)
+/// so when AT&P1 is active we drop them rather than leak garbage to
+/// the C64.  Persists across reads — a CSI split across two TCP
+/// packets is still recognized.
+#[derive(Default)]
+struct AnsiStripState {
+    in_esc: bool,
+    in_csi: bool,
+}
+
+impl AnsiStripState {
+    /// Push one input byte.  Returns `Some(b)` if `b` should be
+    /// forwarded, `None` if it's part of an escape sequence we're
+    /// dropping.
+    fn feed(&mut self, byte: u8) -> Option<u8> {
+        if self.in_csi {
+            // CSI ends on a final byte in 0x40..=0x7E; intermediate
+            // and parameter bytes (0x20..=0x3F) all get dropped.
+            if (0x40..=0x7E).contains(&byte) {
+                self.in_csi = false;
+            }
+            return None;
+        }
+        if self.in_esc {
+            self.in_esc = false;
+            if byte == b'[' {
+                self.in_csi = true;
+                return None;
+            }
+            // Single-byte-final ESC sequences (ESC 7, ESC 8, ESC =,
+            // charset selectors `ESC ( B`, etc.).  Dropping just the
+            // immediate byte misses two-byte tails like `ESC ( B`, but
+            // those collapse to one screen glyph at worst — preferable
+            // to a stuck state machine if a stray ESC arrives.
+            return None;
+        }
+        if byte == 0x1B {
+            self.in_esc = true;
+            return None;
+        }
+        Some(byte)
+    }
+}
+
 /// Online mode for direct TCP connections (ATDT host:port).
 /// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
 fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> OnlineExit {
@@ -2167,6 +2271,12 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
+
+    // ANSI ESC-stripper state for the inbound (TCP→serial) direction.
+    // Only consulted when AT&P1 is active, but its state has to live
+    // across reads regardless so a CSI split across packets still
+    // collapses correctly.
+    let mut ansi = AnsiStripState::default();
 
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
@@ -2182,6 +2292,11 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Ok(n) => {
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
+                if state.petscii_translate {
+                    for b in forward.iter_mut() {
+                        *b = translate_petscii_to_ascii_byte(*b);
+                    }
+                }
                 if !forward.is_empty() && tcp.write_all(&forward).is_err() {
                     return OnlineExit::Disconnected;
                 }
@@ -2196,10 +2311,24 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
         match tcp.read(&mut tcp_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
-                if state.port.write_all(&tcp_buf[..n]).is_err() {
-                    return OnlineExit::Disconnected;
+                if state.petscii_translate {
+                    let translated: Vec<u8> = tcp_buf[..n]
+                        .iter()
+                        .filter_map(|&b| ansi.feed(b))
+                        .map(translate_ascii_to_petscii_byte)
+                        .collect();
+                    if !translated.is_empty() {
+                        if state.port.write_all(&translated).is_err() {
+                            return OnlineExit::Disconnected;
+                        }
+                        let _ = state.port.flush();
+                    }
+                } else {
+                    if state.port.write_all(&tcp_buf[..n]).is_err() {
+                        return OnlineExit::Disconnected;
+                    }
+                    let _ = state.port.flush();
                 }
-                let _ = state.port.flush();
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::TimedOut
@@ -3987,6 +4116,111 @@ mod tests {
         assert_eq!(parse("at&c1", &mut echo), vec![AtResult::DcdSet(1)]);
         assert_eq!(parse("at&d2", &mut echo), vec![AtResult::DtrSet(2)]);
         assert_eq!(parse("at&k3", &mut echo), vec![AtResult::FlowSet(3)]);
+        assert_eq!(parse("at&p1", &mut echo), vec![AtResult::PetsciiSet(1)]);
+    }
+
+    #[test]
+    fn test_at_ampersand_p_parsing() {
+        let mut echo = true;
+        assert_eq!(parse("AT&P", &mut echo), vec![AtResult::PetsciiSet(0)]);
+        assert_eq!(parse("AT&P0", &mut echo), vec![AtResult::PetsciiSet(0)]);
+        assert_eq!(parse("AT&P1", &mut echo), vec![AtResult::PetsciiSet(1)]);
+    }
+
+    #[test]
+    fn test_at_ampersand_p_chains() {
+        // &P chains like other &-letters; the trailing E0 still parses.
+        let mut echo = true;
+        assert_eq!(
+            parse("AT&P1E0", &mut echo),
+            vec![AtResult::PetsciiSet(1), AtResult::Ok]
+        );
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_translate_petscii_to_ascii_byte() {
+        // Lowercase typed on a C64 (PETSCII upper-bank) → ASCII a-z.
+        assert_eq!(translate_petscii_to_ascii_byte(0x41), b'a');
+        assert_eq!(translate_petscii_to_ascii_byte(0x5A), b'z');
+        // Shifted uppercase on a C64 (PETSCII shifted-upper) → ASCII A-Z.
+        assert_eq!(translate_petscii_to_ascii_byte(0xC1), b'A');
+        assert_eq!(translate_petscii_to_ascii_byte(0xDA), b'Z');
+        // PETSCII DEL → ASCII BS.
+        assert_eq!(translate_petscii_to_ascii_byte(0x14), 0x08);
+        // Digits, punctuation, CR/LF, space pass through.
+        for b in [b'0', b'9', b' ', b'!', b':', b'-', 0x0D, 0x0A] {
+            assert_eq!(translate_petscii_to_ascii_byte(b), b);
+        }
+    }
+
+    #[test]
+    fn test_translate_ascii_to_petscii_byte() {
+        // ASCII A-Z → bytes that render as uppercase on a C64 in text mode.
+        assert_eq!(translate_ascii_to_petscii_byte(b'A'), b'a');
+        assert_eq!(translate_ascii_to_petscii_byte(b'Z'), b'z');
+        // ASCII a-z → bytes that render as lowercase on a C64.
+        assert_eq!(translate_ascii_to_petscii_byte(b'a'), b'A');
+        assert_eq!(translate_ascii_to_petscii_byte(b'z'), b'Z');
+        // ASCII BS → PETSCII DEL.
+        assert_eq!(translate_ascii_to_petscii_byte(0x08), 0x14);
+        // Pass-through for digits/punctuation/CR/LF.
+        for b in [b'0', b'9', b' ', b'!', b':', b'-', 0x0D, 0x0A] {
+            assert_eq!(translate_ascii_to_petscii_byte(b), b);
+        }
+    }
+
+    #[test]
+    fn test_petscii_outbound_user_typed_letters_arrive_as_ascii() {
+        // What the C64 actually sends when the user types lowercase
+        // 'h' is the PETSCII upper-bank byte 0x48; the host should
+        // see 'h'.  Same for shifted uppercase 'H' arriving as 0xC8.
+        // Verifies the outbound direction is faithful to what the
+        // user typed regardless of case.
+        for (typed_byte, expected_ascii) in [
+            (0x48u8, b'h'),  // unshifted h
+            (0x41u8, b'a'),  // unshifted a
+            (0x5Au8, b'z'),  // unshifted z
+            (0xC8u8, b'H'),  // shifted H
+            (0xC1u8, b'A'),  // shifted A
+            (0xDAu8, b'Z'),  // shifted Z
+        ] {
+            assert_eq!(translate_petscii_to_ascii_byte(typed_byte), expected_ascii);
+        }
+    }
+
+    #[test]
+    fn test_ansi_strip_csi() {
+        let mut ansi = AnsiStripState::default();
+        // Bare text passes through.
+        let kept: Vec<u8> = b"hi".iter().filter_map(|&b| ansi.feed(b)).collect();
+        assert_eq!(kept, b"hi");
+        // CSI sequence is dropped end-to-end.
+        let kept: Vec<u8> = b"\x1b[31mX\x1b[0mY"
+            .iter()
+            .filter_map(|&b| ansi.feed(b))
+            .collect();
+        assert_eq!(kept, b"XY");
+    }
+
+    #[test]
+    fn test_ansi_strip_csi_split_across_reads() {
+        // A CSI split mid-sequence still collapses — the parser
+        // state survives across feed() calls.
+        let mut ansi = AnsiStripState::default();
+        let first: Vec<u8> = b"A\x1b[3".iter().filter_map(|&b| ansi.feed(b)).collect();
+        let second: Vec<u8> = b"1mB".iter().filter_map(|&b| ansi.feed(b)).collect();
+        let combined: Vec<u8> = first.into_iter().chain(second).collect();
+        assert_eq!(combined, b"AB");
+    }
+
+    #[test]
+    fn test_ansi_strip_non_csi_esc() {
+        // Single-byte-final ESC sequences (ESC 7 / ESC 8 / charset
+        // selectors) drop the ESC and the next byte.
+        let mut ansi = AnsiStripState::default();
+        let kept: Vec<u8> = b"A\x1b7B".iter().filter_map(|&b| ansi.feed(b)).collect();
+        assert_eq!(kept, b"AB");
     }
 
     // ─── Numeric result code mapping ──────────────────────

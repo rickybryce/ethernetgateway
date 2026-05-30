@@ -646,6 +646,7 @@ upgrade transparently, with Port B disabled by default.
         <tr><td><code>flow_mode</code></td><td>u8 0–4</td><td><code>0</code></td><td>Saved <code>AT&amp;K</code> mode.</td></tr>
         <tr><td><code>dcd_mode</code></td><td>u8 0–1</td><td><code>1</code></td><td>Saved <code>AT&amp;C</code> mode.</td></tr>
         <tr><td><code>stored_0</code> … <code>stored_3</code></td><td>string</td><td>empty</td><td>Stored phone-number slots for <code>AT&amp;Zn=s</code> / <code>ATDSn</code>.</td></tr>
+        <tr><td><code>petscii_translate</code></td><td>bool</td><td><code>false</code></td><td>Saved <code>AT&amp;P</code> state (PETSCII translation on direct-TCP dials).</td></tr>
     </tbody>
 </table>
 
@@ -1665,7 +1666,7 @@ The emulator speaks a full Hayes command set on each port: <code>AT</code>,
 <code>AT&amp;V</code>, <code>ATE</code>, <code>ATV</code>, <code>ATQ</code>,
 <code>ATI</code> variants, <code>ATH</code>, <code>ATA</code>,
 <code>ATO</code>, <code>ATX</code>, <code>AT&amp;C</code>, <code>AT&amp;D</code>,
-<code>AT&amp;K</code>, <code>AT&amp;Z</code>, <code>ATD</code> (with
+<code>AT&amp;K</code>, <code>AT&amp;P</code>, <code>AT&amp;Z</code>, <code>ATD</code> (with
 <code>T</code>, <code>P</code>, <code>L</code>, <code>S</code> variants),
 <code>ATSn</code>, S-registers S0–S26, the <code>A/</code> repeat-last-command
 shortcut, and the <code>+++</code> escape sequence with S2/S12 guard-time
@@ -1841,7 +1842,7 @@ hit the same entry.
     <tbody>
         <tr><td><code>ATZ</code></td><td>Reset to the stored profile (read from <code>egateway.conf</code>). Drops any active connection.</td></tr>
         <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults. Does <em>not</em> overwrite the stored profile, but does drop any active connection (same as <code>ATZ</code> in that respect).</td></tr>
-        <tr><td><code>AT&amp;W</code></td><td>Save current settings to <code>egateway.conf</code>. Persists echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, and the four stored-number slots.</td></tr>
+        <tr><td><code>AT&amp;W</code></td><td>Save current settings to <code>egateway.conf</code>. Persists echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, <code>&amp;P</code>, and the four stored-number slots.</td></tr>
         <tr><td><code>AT&amp;V</code></td><td>Display current configuration — one line of mode flags, a second line listing every S-register, and a third line listing stored numbers.</td></tr>
     </tbody>
 </table>
@@ -1898,6 +1899,8 @@ baud rates report code 1.
         <tr><td><code>AT&amp;K1</code></td><td>Auto-detect (Hayes convention). Accepted and stored; like every <code>&amp;K</code> mode, does not drive the wire (see warning below).</td></tr>
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
+        <tr><td><code>AT&amp;P0</code> (<em>gateway default</em>)</td><td>PETSCII translation off — direct-TCP dials (<code>ATDT&nbsp;host:port</code>) are raw ASCII passthrough.</td></tr>
+        <tr><td><code>AT&amp;P1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. Persists via <code>AT&amp;W</code>.</td></tr>
     </tbody>
 </table>
 
@@ -1924,6 +1927,17 @@ than <code>&amp;K</code>. Most
 retro terminal software works fine without these signals; if your program
 requires DCD before communicating, look for a "force DTR" or "ignore
 carrier" option.
+</aside>
+
+<aside class="note">
+<span class="label">AT&amp;P is a vendor extension</span>
+<code>AT&amp;P0/1</code> is not part of the original Hayes command set —
+it's a gateway-specific addition for PETSCII translation on direct-TCP
+dials. The Hayes Smartmodem specification reserves <code>AT&amp;</code>
+commands beyond the standard letters for vendor use, and the gateway
+slots <code>&amp;P</code> in there. Persistence and reset behavior match
+every other <code>&amp;</code>-setting: <code>AT&amp;W</code> saves,
+<code>ATZ</code> reloads, <code>AT&amp;F</code> resets to <code>&amp;P0</code>.
 </aside>
 
 <h2 id="ch9-sregs">9.7 S-Registers</h2>

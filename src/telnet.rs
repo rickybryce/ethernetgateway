@@ -1694,8 +1694,15 @@ impl TelnetSession {
     }
 
     fn separator(&self) -> String {
+        // PETSCII terminals are auto-wrap: a 40-char separator on a
+        // 40-col C64 fills the row, auto-wraps to col 0 of the next
+        // row, *then* the trailing CR/LF emits another newline — so
+        // we end up two rows below the separator with an empty row
+        // in between, wasting a precious line on a 25-row screen.
+        // Shrinking the bar by one column keeps the cursor inside
+        // the row so CR/LF moves down exactly once.
         let width = if self.terminal_type == TerminalType::Petscii {
-            PETSCII_WIDTH
+            PETSCII_WIDTH - 1
         } else {
             56
         };
@@ -3056,25 +3063,9 @@ impl TelnetSession {
             }
         }
 
-        // Welcome banner
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("ETHERNET GATEWAY")))
-            .await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
-        self.send_line(&format!(
-            "  Welcome! Terminal: {}",
-            self.white(match self.terminal_type {
-                TerminalType::Petscii => "PETSCII",
-                TerminalType::Ansi => "ANSI",
-                TerminalType::Ascii => "ASCII",
-            })
-        ))
-        .await?;
-        self.send_line("").await?;
-
+        // The main menu render does its own clear + banner; emitting a
+        // separate welcome banner here would just flash on screen before
+        // being wiped, which is especially painful at 1200 baud on a C64.
         match self.run_menu_loop().await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
@@ -6683,18 +6674,12 @@ impl TelnetSession {
         };
 
         loop {
-            self.clear_screen().await?;
-            let sep = self.separator();
-            self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("AI CHAT")))
+            // Inline "Thinking..." on the current screen rather than
+            // doing a full clear + banner redraw — at 1200 baud the
+            // extra wipe is a visible flicker before the answer page
+            // (which does its own clear) replaces it anyway.
+            self.send_line(&format!("  {}...", self.dim("Thinking")))
                 .await?;
-            self.send_line(&sep).await?;
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}...",
-                self.dim("Thinking")
-            ))
-            .await?;
             self.flush().await?;
 
             let key = api_key.to_string();
@@ -11536,8 +11521,9 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line("").await?;
+        // PETSCII width minus 1 — same auto-wrap reason as `separator()`.
         self.send_line(&self.yellow(&"-".repeat(
-            if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 56 }
+            if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 56 }
         )))
         .await?;
         self.send_line("").await?;
@@ -15243,10 +15229,12 @@ mod tests {
         }
     }
 
-    /// Separator width must match terminal type.
+    /// Separator width must match terminal type.  PETSCII intentionally
+    /// stays one column shy of `PETSCII_WIDTH` so a divider on a 40-col
+    /// C64 doesn't auto-wrap and eat an extra row.
     #[test]
     fn test_separator_widths() {
-        assert_eq!("=".repeat(PETSCII_WIDTH).len(), 40);
+        assert_eq!("=".repeat(PETSCII_WIDTH - 1).len(), 39);
         assert_eq!("=".repeat(56).len(), 56); // ANSI/ASCII separator
     }
 

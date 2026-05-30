@@ -191,6 +191,10 @@ const DEFAULT_SERIAL_DTR_MODE: u8 = 0;
 const DEFAULT_SERIAL_FLOW_MODE: u8 = 0;
 /// AT&C1 — DCD reflects carrier state (Hayes default).
 const DEFAULT_SERIAL_DCD_MODE: u8 = 1;
+/// AT&P0 — PETSCII translation off (ASCII passthrough on direct-TCP dials).
+/// Vendor extension; C64 callers flip this on with `AT&P1` and persist with
+/// `AT&W` so subsequent `ATDT host:port` sessions render PETSCII correctly.
+const DEFAULT_SERIAL_PETSCII_TRANSLATE: bool = false;
 const DEFAULT_SSH_ENABLED: bool = false;
 const DEFAULT_SSH_PORT: u16 = 2222;
 /// Default SSH-gateway authentication mode: "key" uses the gateway's
@@ -275,6 +279,12 @@ pub struct SerialPortConfig {
     /// Stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Four slots,
     /// persisted by AT&W and restored by ATZ.  Empty string = unset.
     pub stored_numbers: [String; 4],
+    /// Saved AT&P PETSCII-translation toggle.  When true, the modem
+    /// emulator translates the byte stream on direct-TCP dials so a
+    /// PETSCII terminal (C64/PET) sees readable text from an ASCII
+    /// host.  Vendor-extension AT command; persisted by AT&W and
+    /// restored by ATZ like other &-settings.
+    pub petscii_translate: bool,
 }
 
 impl Default for SerialPortConfig {
@@ -302,6 +312,7 @@ impl Default for SerialPortConfig {
                 String::new(),
                 String::new(),
             ],
+            petscii_translate: DEFAULT_SERIAL_PETSCII_TRANSLATE,
         }
     }
 }
@@ -953,6 +964,9 @@ fn read_serial_port_config(
             lookup("stored_2", "serial_stored_2").unwrap_or_default(),
             lookup("stored_3", "serial_stored_3").unwrap_or_default(),
         ],
+        petscii_translate: lookup("petscii_translate", "serial_petscii_translate")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_PETSCII_TRANSLATE),
     }
 }
 
@@ -1020,6 +1034,7 @@ fn write_serial_port_section(
     for (i, slot) in port.stored_numbers.iter().enumerate() {
         write_kv_str(out, &format!("{}_stored_{}", prefix, i), slot);
     }
+    write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
     out.push('\n');
 }
 
@@ -1448,6 +1463,7 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
         "stored_1" => port.stored_numbers[1] = value.to_string(),
         "stored_2" => port.stored_numbers[2] = value.to_string(),
         "stored_3" => port.stored_numbers[3] = value.to_string(),
+        "petscii_translate" => port.petscii_translate = value.eq_ignore_ascii_case("true"),
         _ => {}
     }
 }
@@ -2074,6 +2090,7 @@ mod tests {
                     String::new(),
                     "9W,5551212".into(),
                 ],
+                petscii_translate: true,
             },
             serial_b: SerialPortConfig {
                 enabled: true,
@@ -2098,6 +2115,7 @@ mod tests {
                     "B3".into(),
                     "B4".into(),
                 ],
+                petscii_translate: false,
             },
             ssh_enabled: true,
             ssh_port: 2222,
@@ -2305,6 +2323,7 @@ mod tests {
             "serial_a_stored_1",
             "serial_a_stored_2",
             "serial_a_stored_3",
+            "serial_a_petscii_translate",
             "serial_b_enabled",
             "serial_b_mode",
             "serial_b_port",
@@ -2325,6 +2344,7 @@ mod tests {
             "serial_b_stored_1",
             "serial_b_stored_2",
             "serial_b_stored_3",
+            "serial_b_petscii_translate",
             "ssh_enabled",
             "ssh_port",
             "ssh_gateway_auth",
@@ -3229,6 +3249,7 @@ mod tests {
                     "B-two".into(),
                     "B-three".into(),
                 ],
+                petscii_translate: true,
             },
             ..Config::default()
         };
@@ -3283,6 +3304,7 @@ mod tests {
             ("stored_1", "222"),
             ("stored_2", "333"),
             ("stored_3", "444"),
+            ("petscii_translate", "true"),
         ];
 
         for &id in &[SerialPortId::A, SerialPortId::B] {
@@ -3314,6 +3336,7 @@ mod tests {
             assert_eq!(port.stored_numbers[1], "222");
             assert_eq!(port.stored_numbers[2], "333");
             assert_eq!(port.stored_numbers[3], "444");
+            assert!(port.petscii_translate);
 
             // The OTHER port must still be at defaults — proves no
             // cross-contamination.
