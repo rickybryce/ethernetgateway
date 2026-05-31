@@ -623,6 +623,12 @@ fn gw_debug_enabled(cfg_flag: bool) -> bool {
     cfg_flag || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
 }
 
+/// Maximum bytes the gateway-debug `dbg_in` line buffer will accumulate
+/// before being force-flushed.  Prevents a no-newline stream (a TUI editor,
+/// a binary paste, a remote program doing its own line editing) from growing
+/// the trace buffer without bound while gateway_debug is enabled.
+const GW_DBG_IN_CAP: usize = 4096;
+
 /// Format a byte slice as a compact hex + printable-ASCII dump for the
 /// gateway diagnostics log, e.g. `73 75 64 6f | "sudo"`.  Non-printable
 /// bytes render as `.` in the ASCII column.
@@ -4062,8 +4068,16 @@ impl TelnetSession {
             )
             .await?;
         }
-        self.send_line(&format!("  Start transfer within {} seconds.",
-            config::get_config().xmodem_negotiation_timeout))
+        let neg_timeout = {
+            let cfg = config::get_config();
+            match protocol {
+                UploadProtocol::Zmodem => cfg.zmodem_negotiation_timeout,
+                UploadProtocol::Kermit => cfg.kermit_negotiation_timeout,
+                UploadProtocol::Punter => cfg.punter_negotiation_timeout,
+                UploadProtocol::XmodemYmodem => cfg.xmodem_negotiation_timeout,
+            }
+        };
+        self.send_line(&format!("  Start transfer within {} seconds.", neg_timeout))
             .await?;
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
@@ -4191,10 +4205,28 @@ impl TelnetSession {
                 verbose,
             )
             .await
-            // C1 carries no filename — the user-entered name wins (None),
-            // matching XMODEM/YMODEM.  The declared PRG/SEQ type is recorded
-            // by the receiver but the bytes are written flat; we drop it here.
-            .map(|(data, _file_type)| vec![(None, data, None)]),
+            // C1 carries no filename, so the user-entered name normally
+            // wins (matching XMODEM/YMODEM).  Novaterm preserves the
+            // declared PRG/SEQ/USR type via the CBM directory entry; on
+            // Linux we don't have that, so we append the matching
+            // extension when the user's filename has none — the same
+            // suffix `PunterFileType::autodetect` will read on the way
+            // back out.  Anything the user typed with an explicit
+            // extension is honored verbatim, and `Unknown` skips the
+            // suffix entirely.
+            .map(|(data, file_type)| {
+                let has_extension = filename
+                    .find('.')
+                    .map(|i| i > 0)
+                    .unwrap_or(false);
+                let chosen_name = match file_type.extension() {
+                    Some(ext) if !has_extension => {
+                        Some(format!("{}.{}", filename, ext))
+                    }
+                    _ => None,
+                };
+                vec![(chosen_name, data, None)]
+            }),
         };
         drop(writer_guard);
         let elapsed = start.elapsed();
@@ -4647,8 +4679,18 @@ impl TelnetSession {
             })
         ))
         .await?;
-        self.send_line(&format!("  Start transfer within {} seconds.",
-            config::get_config().xmodem_negotiation_timeout))
+        let neg_timeout = {
+            let cfg = config::get_config();
+            match protocol {
+                DownloadProtocol::Zmodem => cfg.zmodem_negotiation_timeout,
+                DownloadProtocol::Kermit => cfg.kermit_negotiation_timeout,
+                DownloadProtocol::Punter => cfg.punter_negotiation_timeout,
+                DownloadProtocol::Xmodem
+                | DownloadProtocol::Xmodem1k
+                | DownloadProtocol::Ymodem => cfg.xmodem_negotiation_timeout,
+            }
+        };
+        self.send_line(&format!("  Start transfer within {} seconds.", neg_timeout))
             .await?;
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
@@ -5873,7 +5915,9 @@ impl TelnetSession {
         // every byte we forward to the remote shell and is flushed to the log
         // on each CR/LF — so the log shows exactly the line bash receives on
         // RETURN, which is the crux of the c64sshwrap long-line truncation
-        // investigation.
+        // investigation.  A no-newline stream (binary paste, TUI input editor)
+        // is capped at GW_DBG_IN_CAP bytes so a long-running debug session
+        // doesn't grow the buffer without bound.
         let gw_debug = gw_debug_enabled(cfg.gateway_debug);
         let mut dbg_in: Vec<u8> = Vec::new();
         // Per-byte timing: `+Δms` is the gap since the previous input byte and
@@ -5926,6 +5970,11 @@ impl TelnetSession {
                                         dbg_in.clear();
                                     } else {
                                         dbg_in.push(b);
+                                        if dbg_in.len() >= GW_DBG_IN_CAP {
+                                            glog!("[gw-in] line (no CR/LF, {} bytes cap) -> {}",
+                                                dbg_in.len(), gw_hexdump(&dbg_in));
+                                            dbg_in.clear();
+                                        }
                                     }
                                 }
                                 if ssh_writer.write_all(&[b]).await.is_err() { break; }
@@ -6219,6 +6268,11 @@ impl TelnetSession {
                                     dbg_in.clear();
                                 } else {
                                     dbg_in.push(b);
+                                    if dbg_in.len() >= GW_DBG_IN_CAP {
+                                        glog!("[gw-in] line (no CR/LF, {} bytes cap) -> {}",
+                                            dbg_in.len(), gw_hexdump(&dbg_in));
+                                        dbg_in.clear();
+                                    }
                                 }
                             }
                             let write_ok = if raw {
@@ -6853,10 +6907,18 @@ impl TelnetSession {
             if input.is_empty() {
                 continue;
             }
-            // Only a one-character line can be a command; a longer line
-            // (even one starting with q/n/p/h) is treated as a question.
+            // Only a one-character line CAN be a command, and only when
+            // it would actually do something — `n` on the last page or
+            // `p` on the first page falls through to the question path
+            // instead of silently no-op'ing.  Q and H always act.
             let cmd = if input.chars().count() == 1 {
-                input.chars().next().unwrap().to_ascii_lowercase()
+                let c = input.chars().next().unwrap().to_ascii_lowercase();
+                match c {
+                    'q' | 'h' => c,
+                    'n' if has_next => c,
+                    'p' if has_prev => c,
+                    _ => '\0',
+                }
             } else {
                 '\0'
             };
@@ -7850,7 +7912,8 @@ impl TelnetSession {
             || new_port.databits != old_port.databits
             || new_port.parity != old_port.parity
             || new_port.stopbits != old_port.stopbits
-            || new_port.flowcontrol != old_port.flowcontrol;
+            || new_port.flowcontrol != old_port.flowcontrol
+            || new_port.petscii_translate != old_port.petscii_translate;
 
         if !changed {
             return Ok(());

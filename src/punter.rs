@@ -118,27 +118,35 @@ impl Code {
     }
 
     fn from_window(w: &[u8; 3]) -> Option<Code> {
-        for c in [Code::Goo, Code::Bad, Code::Ack, Code::Sb, Code::Syn] {
-            if w == c.bytes() {
-                return Some(c);
-            }
-        }
-        None
+        [Code::Goo, Code::Bad, Code::Ack, Code::Sb, Code::Syn]
+            .into_iter()
+            .find(|c| w == c.bytes())
     }
 }
 
 // ─── File type ───────────────────────────────────────────────────────────
 
-/// The one-byte file-type carried by the C1 type block (Phase A): `0` = PRG
-/// (a Commodore program, load-address-prefixed), `1` = SEQ (a flat sequential
-/// file).  The gateway's Linux file server has no native PRG/SEQ distinction,
-/// so on receive we record the sender's declared type for the caller and write
-/// the bytes flat; on send the caller picks the type (auto-detected from the
-/// file, overridable in the UI).
+/// The one-byte file-type carried by the C1 type block (Phase A).  Matches
+/// Novaterm's directory-entry table (`api/head.src` lines 423-426):
+///
+/// ```text
+/// 0 = PRG     load-address-prefixed Commodore program
+/// 1 = SEQ     flat sequential file
+/// 2 = USR     flat user-defined file
+/// 3 = ---     unknown / none
+/// ```
+///
+/// CBM filesystems carry this in the directory entry; on Linux we don't have
+/// that, so to preserve the round-trip we append the matching extension on
+/// receive when the saved filename lacks one (`.prg` / `.seq` / `.usr`).
+/// `Unknown` is left without a suffix — the operator named the file
+/// explicitly and we don't second-guess that.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PunterFileType {
     Prg,
     Seq,
+    Usr,
+    Unknown,
 }
 
 impl PunterFileType {
@@ -146,27 +154,47 @@ impl PunterFileType {
         match self {
             PunterFileType::Prg => 0,
             PunterFileType::Seq => 1,
+            PunterFileType::Usr => 2,
+            PunterFileType::Unknown => 3,
         }
     }
 
-    /// Any non-zero type byte is treated as SEQ; only `0` is PRG.  (The C1
-    /// type byte is effectively boolean in every terminal we target.)
+    /// Map a Phase-A type byte back to the CBM-aligned enum.  Bytes outside
+    /// the documented 0..=3 range are treated as `Unknown` rather than
+    /// silently coerced to SEQ.
     fn from_byte(b: u8) -> PunterFileType {
-        if b == 0 {
-            PunterFileType::Prg
-        } else {
-            PunterFileType::Seq
+        match b {
+            0 => PunterFileType::Prg,
+            1 => PunterFileType::Seq,
+            2 => PunterFileType::Usr,
+            _ => PunterFileType::Unknown,
+        }
+    }
+
+    /// File-extension stand-in for the CBM directory-entry type, used by the
+    /// receiver to preserve the declared type when saving to a Linux
+    /// filesystem.  Returns `None` for `Unknown` so the operator's chosen
+    /// filename is left as-is.
+    pub(crate) fn extension(self) -> Option<&'static str> {
+        match self {
+            PunterFileType::Prg => Some("prg"),
+            PunterFileType::Seq => Some("seq"),
+            PunterFileType::Usr => Some("usr"),
+            PunterFileType::Unknown => None,
         }
     }
 
     /// Auto-detect the type to declare for an outbound file.  Text-flavoured
-    /// extensions (`.seq`/`.txt`/`.doc`) are SEQ; everything else defaults to
-    /// PRG, since the overwhelming majority of Commodore BBS downloads are
-    /// load-address-prefixed programs.  The UI may override this per transfer.
+    /// extensions (`.seq`/`.txt`/`.doc`) are SEQ; `.usr` is USR; everything
+    /// else defaults to PRG, since the overwhelming majority of Commodore
+    /// BBS downloads are load-address-prefixed programs.  The UI may
+    /// override this per transfer.
     pub(crate) fn autodetect(filename: &str) -> PunterFileType {
         let lower = filename.to_ascii_lowercase();
         if lower.ends_with(".seq") || lower.ends_with(".txt") || lower.ends_with(".doc") {
             PunterFileType::Seq
+        } else if lower.ends_with(".usr") {
+            PunterFileType::Usr
         } else {
             PunterFileType::Prg
         }
@@ -236,6 +264,11 @@ fn is_final_block(blk: &[u8]) -> bool {
     blk.len() > NUMPOS + 1 && blk[NUMPOS + 1] == 0xFF
 }
 
+/// Largest non-final block index we can safely emit.  Indices 0xFF00..=0xFFFF
+/// all set the high-byte flag that `is_final_block` reads, so the final block
+/// uses 0xFFFF and intermediate data blocks must stay strictly below 0xFF00.
+const MAX_DATA_BLOCK_INDEX: u16 = 0xFEFF;
+
 /// Split a file into the C1 block sequence for one phase.
 ///
 /// The returned blocks are ready to transmit in order.  The first block is the
@@ -243,7 +276,14 @@ fn is_final_block(blk: &[u8]) -> bool {
 /// block's index high byte is forced to 0xFF.  Each block's `size` field is
 /// back-patched to the *next* block's total length (the last block keeps its
 /// own length there — harmless, the receiver stops before using it).
-fn build_data_blocks(data: &[u8], block_payload: usize) -> Vec<Vec<u8>> {
+///
+/// Returns an error if the file would require more non-final data blocks than
+/// the 16-bit block-index field can address without colliding with the
+/// final-block flag (high byte 0xFF) — e.g. a small `block_payload` and a
+/// many-megabyte file.  This guards the receiver from a silent truncation
+/// where an intermediate block's index lands in 0xFF00..=0xFFFE and is
+/// mistaken for the end of the transfer.
+fn build_data_blocks(data: &[u8], block_payload: usize) -> Result<Vec<Vec<u8>>, String> {
     let payload_cap = block_payload.clamp(1, MAX_PAYLOAD);
     let mut blocks: Vec<Vec<u8>> = Vec::new();
 
@@ -255,6 +295,15 @@ fn build_data_blocks(data: &[u8], block_payload: usize) -> Vec<Vec<u8>> {
         // Empty file: a single header-only final block after block 0.
         blocks.push(build_block(0, 0xFFFF, &[]));
     } else {
+        let chunk_count = data.len().div_ceil(payload_cap);
+        if chunk_count.saturating_sub(1) > MAX_DATA_BLOCK_INDEX as usize {
+            return Err(format!(
+                "Punter send: file too large for block payload {} ({} chunks exceeds {} addressable blocks)",
+                payload_cap,
+                chunk_count,
+                MAX_DATA_BLOCK_INDEX as usize + 1,
+            ));
+        }
         let chunks: Vec<&[u8]> = data.chunks(payload_cap).collect();
         let last = chunks.len() - 1;
         for (i, chunk) in chunks.iter().enumerate() {
@@ -264,7 +313,7 @@ fn build_data_blocks(data: &[u8], block_payload: usize) -> Vec<Vec<u8>> {
     }
 
     backpatch_next_sizes(&mut blocks);
-    blocks
+    Ok(blocks)
 }
 
 /// Build the single Phase-A type block (index 0xFFFF, one payload byte).
@@ -398,7 +447,11 @@ pub(crate) async fn punter_receive(
         reader, writer, is_tcp, is_petscii, verbose, &mut state, TYPE_PHASE_SIZE, &t,
     )
     .await?;
-    let file_type = PunterFileType::from_byte(type_payload.first().copied().unwrap_or(1));
+    // Phase A is fixed at TYPE_PHASE_SIZE = 8 bytes (header + one type byte),
+    // so a missing payload byte means the negotiation was malformed.  Map it
+    // to `Unknown` rather than silently defaulting to a real type.
+    let file_type =
+        PunterFileType::from_byte(type_payload.first().copied().unwrap_or(3));
     if verbose {
         glog!("PUNTER recv: file type = {:?}", file_type);
     }
@@ -418,6 +471,7 @@ pub(crate) async fn punter_receive(
 /// Receive one phase (a sequence of blocks ending at the 0xFF-flagged block),
 /// returning the concatenated payloads.  `initial_size` is the fixed length of
 /// the first block (8 for the type phase, 7 for the data phase).
+#[allow(clippy::too_many_arguments)]
 async fn receive_phase(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -433,17 +487,33 @@ async fn receive_phase(
     // What to send at the top of each round: GOO when the previous block was
     // good (or it's the first round), BAD to demand a resend.
     let mut signal = Code::Goo;
+    // Count consecutive BAD rounds against the SAME logical block so a peer
+    // that keeps shipping corrupt bodies can't loop forever.  Reset each
+    // time we accept a good block.
+    let mut bad_rounds: u32 = 0;
 
     loop {
-        // rc1: send GOO/BAD, then wait for the sender's ACK (resend on
-        // timeout, up to max_retries).  First round uses the negotiation
-        // budget so the user has time to start their terminal's sender.
+        // rc1: send GOO/BAD, then wait for the sender's ACK.  Re-send the
+        // signal on a SHORT cadence rather than blocking the whole budget on a
+        // single read: at a phase boundary the C1 sender is briefly draining
+        // its end-off handshake (`tranhand` tx9 sends three S/B and reads-and-
+        // discards between them) and will swallow our first signal, so we must
+        // re-probe promptly to resync.  This mirrors Novaterm `rc1`, which
+        // resends GOO every `accept` timeout (a short per-attempt wait, looped
+        // via `codecyc`) instead of waiting once for a long window.
+        //
+        // The very first contact of the transfer gets the full negotiation
+        // budget (the user may need a moment to start their terminal's sender);
+        // mid-transfer it is one block timeout.  Either way we re-probe every
+        // `retry_interval` seconds until the budget is spent.
         let first_round = out.is_empty() && signal == Code::Goo;
-        let ack_wait = if first_round { t.negotiation_timeout } else { t.block_timeout };
+        let total_budget = if first_round { t.negotiation_timeout } else { t.block_timeout };
+        let probe = total_budget.min(t.retry_interval.max(1));
+        let attempts = total_budget.div_ceil(probe.max(1)).max(1);
         let mut got_ack = false;
-        for attempt in 0..=t.max_retries {
+        for attempt in 0..attempts {
             send_code(writer, signal, is_tcp).await?;
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], ack_wait).await? {
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], probe).await? {
                 Some(Code::Ack) => {
                     got_ack = true;
                     break;
@@ -452,7 +522,6 @@ async fn receive_phase(
                     if verbose && attempt == 0 {
                         glog!("PUNTER recv: waiting for ACK ({:?})", signal);
                     }
-                    let _ = t.retry_interval;
                 }
             }
         }
@@ -475,11 +544,12 @@ async fn receive_phase(
             let final_block = is_final_block(&blk);
             next_size = blk[SIZEPOS];
             signal = Code::Goo;
+            bad_rounds = 0;
 
             if final_block {
                 // End-off: send GOO (acks the final block), wait ACK, send
                 // S/B, then the SYN handshake.  Mirrors `rechand` rc6/rc8.
-                end_off_receiver(reader, writer, is_tcp, is_petscii, state, t).await?;
+                end_off_receiver(reader, writer, is_tcp, is_petscii, verbose, state, t).await?;
                 return Ok(out);
             }
 
@@ -492,6 +562,13 @@ async fn receive_phase(
             }
             // rec2: demand a resend of the same-sized block.
             signal = Code::Bad;
+            bad_rounds = bad_rounds.saturating_add(1);
+            if bad_rounds > t.max_retries {
+                return Err(format!(
+                    "Punter receive: {} consecutive bad blocks, giving up",
+                    bad_rounds
+                ));
+            }
         }
     }
 }
@@ -501,6 +578,12 @@ async fn receive_phase(
 /// and a fully blank read likewise.  Returns whatever bytes arrived (a short
 /// read just fails the checksum upstream → BAD), or errors on abort / repeated
 /// failure.  Mirrors `recmodem` (`punter.src` line 379).
+///
+/// `t.block_timeout` is a *per-byte* budget, mirroring `recmodem`'s timer,
+/// which `rcm5` clears before every character: a slow-but-steady sender
+/// completes as long as each byte arrives within `block_timeout` of the one
+/// before it.  The first missing byte ends the read; a short buffer simply
+/// fails the checksum upstream → BAD → resend.
 async fn read_block(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -513,13 +596,9 @@ async fn read_block(
     for _attempt in 0..=t.max_retries {
         send_code(writer, Code::Sb, is_tcp).await?;
         let mut buf: Vec<u8> = Vec::with_capacity(size);
-        let mut stray_ack = false;
-        for i in 0..size {
-            // First byte may take a while (sender prepping the block); give it
-            // the full block timeout.  Subsequent bytes should stream in.
-            let per_byte = t.block_timeout;
+        for _ in 0..size {
             let r = tokio::time::timeout(
-                tokio::time::Duration::from_secs(per_byte),
+                tokio::time::Duration::from_secs(t.block_timeout),
                 nvt_read_byte(reader, is_tcp, state),
             )
             .await;
@@ -530,17 +609,18 @@ async fn read_block(
                     // wire sequence), so we must NOT interpret 0x1B / 0x18×2
                     // here — they occur freely as data.
                     buf.push(b);
-                    // Detect a stray "ack" prefix: the sender resent ACK
-                    // because it never saw our S/B.  Resend S/B and retry.
-                    if i == 2 && buf[..3] == *Code::Ack.bytes() {
-                        stray_ack = true;
-                        break;
-                    }
                 }
                 _ => break, // timeout — short/blank read
             }
         }
-        if stray_ack {
+        // A real block is at least DATAPOS=7 bytes (the header).  If exactly
+        // "ack" arrived and nothing else, the sender re-transmitted ACK
+        // because it never saw our S/B (`recmodem` rc2); resend S/B and
+        // retry.  Checking the buffer length rather than just the prefix
+        // avoids a false positive when a data block's checksum-pair bytes
+        // coincidentally spell "ack" — those blocks carry a full payload
+        // behind them, so they're longer than 3 bytes.
+        if buf == *Code::Ack.bytes() {
             continue; // resend S/B, read again
         }
         if buf.is_empty() {
@@ -553,39 +633,67 @@ async fn read_block(
 
 /// Receiver end-off (`rechand` rc6/rc8): GOO → wait ACK → S/B → wait SYN →
 /// SYN → wait S/B.
+///
+/// Like Novaterm's `rechand`, an unanswered SYN handshake here is NOT
+/// treated as a transfer failure — by the time we reach end-off the final
+/// data block has already been ack'd, so the file on disk is complete.
+/// Real C1 peers commonly tear down immediately after the final S/B; the
+/// receiver's later SYN/S-B exchanges land in a closed pipe with no harm.
+/// `verbose` enables a per-stage warning so operators can still see when
+/// the handshake didn't fully complete.
 async fn end_off_receiver(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     is_petscii: bool,
+    verbose: bool,
     state: &mut ReadState,
     t: &Tunables,
 ) -> Result<(), String> {
     // Acknowledge the final block and re-handshake.
+    let mut got_ack = false;
     for _ in 0..=t.max_retries {
         send_code(writer, Code::Goo, is_tcp).await?;
         if let Some(Code::Ack) =
             accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout).await?
         {
+            got_ack = true;
             break;
         }
+    }
+    if verbose && !got_ack {
+        glog!("PUNTER recv: end-off ACK not received (peer may have torn down)");
     }
     send_code(writer, Code::Sb, is_tcp).await?;
 
     // Wait for the sender's SYN (resend S/B on timeout), then answer SYN and
     // wait for the sender's S/B (resend SYN on timeout).
+    let mut got_syn = false;
     for _ in 0..=t.max_retries {
         match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await? {
-            Some(Code::Syn) => break,
+            Some(Code::Syn) => {
+                got_syn = true;
+                break;
+            }
             _ => send_code(writer, Code::Sb, is_tcp).await?,
         }
     }
+    if verbose && !got_syn {
+        glog!("PUNTER recv: end-off SYN not received (peer may have torn down)");
+    }
+    let mut got_final_sb = false;
     for _ in 0..=t.max_retries {
         send_code(writer, Code::Syn, is_tcp).await?;
         match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await? {
-            Some(Code::Sb) => break,
+            Some(Code::Sb) => {
+                got_final_sb = true;
+                break;
+            }
             _ => continue,
         }
+    }
+    if verbose && !got_final_sb {
+        glog!("PUNTER recv: end-off final S/B not received (peer may have torn down)");
     }
     Ok(())
 }
@@ -621,7 +729,7 @@ pub(crate) async fn punter_send(
         .await?;
 
     // Phase B — data blocks.  The receiver opens; the sender just waits.
-    let data_blocks = build_data_blocks(data, t.block_payload);
+    let data_blocks = build_data_blocks(data, t.block_payload)?;
     send_phase(reader, writer, is_tcp, is_petscii, verbose, &mut state, &data_blocks, false, &t)
         .await?;
 
@@ -634,6 +742,7 @@ pub(crate) async fn punter_send(
 /// Send one phase's blocks in order, driven by the receiver's GOO/BAD acks.
 /// `spec_mode` (Phase A only) makes the sender emit an opening GOO.  Mirrors
 /// `tranhand`/`transmit` (`punter.src` line 263).
+#[allow(clippy::too_many_arguments)]
 async fn send_phase(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -647,6 +756,10 @@ async fn send_phase(
 ) -> Result<(), String> {
     let mut idx: usize = 0;
     let mut started = false;
+    // Cap consecutive resend requests against the same block so a peer that
+    // keeps returning BAD or stray S/B can't loop forever.  Reset each time
+    // we advance to the next block on GOO.
+    let mut resend_rounds: u32 = 0;
 
     loop {
         // tx20: wait for the receiver's response.  GOO = previous block good
@@ -684,18 +797,27 @@ async fn send_phase(
                 if started {
                     // The block we last sent (idx) was accepted.
                     if is_final_block(&blocks[idx]) {
-                        end_off_sender(reader, writer, is_tcp, is_petscii, state, t).await?;
+                        end_off_sender(reader, writer, is_tcp, is_petscii, verbose, state, t)
+                            .await?;
                         return Ok(());
                     }
                     idx += 1;
                 }
                 started = true;
+                resend_rounds = 0;
             }
             // BAD or S/B → resend the current block (do not advance).
             _ => {
                 started = true;
                 if verbose {
                     glog!("PUNTER send: resend requested for block {}", idx);
+                }
+                resend_rounds = resend_rounds.saturating_add(1);
+                if resend_rounds > t.max_retries {
+                    return Err(format!(
+                        "Punter send: {} consecutive resend requests for block {}, giving up",
+                        resend_rounds, idx
+                    ));
                 }
             }
         }
@@ -723,39 +845,59 @@ async fn send_phase(
 /// Sender end-off (`tranhand` tx4/tx5/tx8/tx9): ACK → wait S/B → SYN → wait
 /// SYN → S/B ×3.  The triple S/B is the deliberately-inherited "end-off"
 /// behaviour real C1 receivers expect to drain.
+///
+/// Like Novaterm's `tranhand`, missed handshake responses here are NOT
+/// treated as failures — the last data block was acknowledged before we
+/// got here, so the file has already arrived intact.  `verbose` enables
+/// a per-stage warning when the handshake doesn't complete.
 async fn end_off_sender(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     is_petscii: bool,
+    verbose: bool,
     state: &mut ReadState,
     t: &Tunables,
 ) -> Result<(), String> {
     // tx41: ACK until the receiver's S/B.
+    let mut got_sb = false;
     for _ in 0..=t.max_retries {
         send_code(writer, Code::Ack, is_tcp).await?;
         if let Some(Code::Sb) =
             accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await?
         {
+            got_sb = true;
             break;
         }
     }
+    if verbose && !got_sb {
+        glog!("PUNTER send: end-off S/B not received (peer may have torn down)");
+    }
     // tx5: SYN until the receiver's SYN comes back.
+    let mut got_syn = false;
     for _ in 0..=t.max_retries {
         send_code(writer, Code::Syn, is_tcp).await?;
         if let Some(Code::Syn) =
             accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await?
         {
+            got_syn = true;
             break;
         }
     }
-    // tx9: three S/B, draining anything the receiver echoes between them.
-    // Best-effort: by this point the receiver may already have accepted the
-    // first S/B and torn the link down, so a failed write on #2/#3 is not an
-    // error — the transfer succeeded.
+    if verbose && !got_syn {
+        glog!("PUNTER send: end-off SYN not received (peer may have torn down)");
+    }
+    // tx9: three S/B for the receiver to drain.  We deliberately do NOT read
+    // here.  Consuming bytes during this drain would swallow the receiver's
+    // *opening signal for the next phase* — at the type→data boundary the
+    // receiver finishes its end-off and immediately sends the data-phase GOO,
+    // and eating it stalls resync until the receiver re-probes.  Any echo the
+    // receiver sends instead stays buffered and is harmlessly skipped by the
+    // next phase's `accept` window.  Best-effort: by this point the receiver
+    // may already have accepted the first S/B and torn the link down, so a
+    // failed write on #2/#3 is not an error — the transfer succeeded.
     for _ in 0..3 {
         let _ = send_code(writer, Code::Sb, is_tcp).await;
-        let _ = accept_code(reader, is_tcp, is_petscii, state, &[], 1).await;
     }
     Ok(())
 }
@@ -841,7 +983,7 @@ mod tests {
 
     #[test]
     fn data_blocks_have_header_first_and_final_flag() {
-        let blocks = build_data_blocks(&[1, 2, 3], 255);
+        let blocks = build_data_blocks(&[1, 2, 3], 255).unwrap();
         // First block: header only, index 0, 7 bytes.
         assert_eq!(blocks[0].len(), DATAPOS);
         assert_eq!(blocks[0][NUMPOS + 1], 0x00);
@@ -870,10 +1012,106 @@ mod tests {
     fn small_block_size_forces_multiple_payload_blocks() {
         // block_payload derives from total size; total 47 -> payload 40.
         let data: Vec<u8> = (0..100).collect();
-        let blocks = build_data_blocks(&data, 47);
+        let blocks = build_data_blocks(&data, 47).unwrap();
         // 1 header + ceil(100/40)=3 payload blocks = 4.
         assert_eq!(blocks.len(), 4);
         assert!(is_final_block(blocks.last().unwrap()));
+    }
+
+    // — File-type mapping (verified against head.src:423-426 prg/seq/usr/---) —
+
+    #[test]
+    fn file_type_byte_roundtrips_all_known_types() {
+        for ft in [
+            PunterFileType::Prg,
+            PunterFileType::Seq,
+            PunterFileType::Usr,
+            PunterFileType::Unknown,
+        ] {
+            assert_eq!(PunterFileType::from_byte(ft.to_byte()), ft);
+        }
+        // The four documented wire values map to the four enum variants.
+        assert_eq!(PunterFileType::from_byte(0), PunterFileType::Prg);
+        assert_eq!(PunterFileType::from_byte(1), PunterFileType::Seq);
+        assert_eq!(PunterFileType::from_byte(2), PunterFileType::Usr);
+        assert_eq!(PunterFileType::from_byte(3), PunterFileType::Unknown);
+    }
+
+    #[test]
+    fn file_type_out_of_range_byte_is_unknown_not_seq() {
+        // Anything past the documented 0..=3 range maps to Unknown (matches
+        // filetype3 "---"), never silently coerced to a real type.
+        for b in 4u8..=255 {
+            assert_eq!(PunterFileType::from_byte(b), PunterFileType::Unknown);
+        }
+    }
+
+    #[test]
+    fn file_type_extension_matches_head_src_suffixes() {
+        assert_eq!(PunterFileType::Prg.extension(), Some("prg"));
+        assert_eq!(PunterFileType::Seq.extension(), Some("seq"));
+        assert_eq!(PunterFileType::Usr.extension(), Some("usr"));
+        // Unknown ("---") has no real suffix — the operator's name wins.
+        assert_eq!(PunterFileType::Unknown.extension(), None);
+    }
+
+    #[test]
+    fn autodetect_picks_type_from_extension() {
+        assert_eq!(PunterFileType::autodetect("game"), PunterFileType::Prg);
+        assert_eq!(PunterFileType::autodetect("game.prg"), PunterFileType::Prg);
+        assert_eq!(PunterFileType::autodetect("readme.txt"), PunterFileType::Seq);
+        assert_eq!(PunterFileType::autodetect("notes.doc"), PunterFileType::Seq);
+        assert_eq!(PunterFileType::autodetect("data.seq"), PunterFileType::Seq);
+        assert_eq!(PunterFileType::autodetect("scratch.usr"), PunterFileType::Usr);
+        // Case-insensitive.
+        assert_eq!(PunterFileType::autodetect("README.TXT"), PunterFileType::Seq);
+        assert_eq!(PunterFileType::autodetect("SCRATCH.USR"), PunterFileType::Usr);
+    }
+
+    // — is_final_block edge: only high byte 0xFF flags the final block —
+
+    #[test]
+    fn final_flag_is_exactly_the_index_high_byte() {
+        // 0xFEFF is the largest non-final index; 0xFF00 is the smallest final.
+        assert!(!is_final_block(&build_block(0, 0xFEFF, &[1])));
+        assert!(is_final_block(&build_block(0, 0xFF00, &[1])));
+        assert!(is_final_block(&build_block(0, 0xFFFF, &[1])));
+        assert!(!is_final_block(&build_block(0, 0x0000, &[1])));
+        assert!(!is_final_block(&build_block(0, 0x00FF, &[1]))); // low byte 0xFF ≠ final
+    }
+
+    #[test]
+    fn header_only_block_is_seven_bytes_and_checksum_verifies() {
+        // The data-phase block 0 carries no payload; it must still checksum.
+        let blocks = build_data_blocks(&[1, 2, 3], 248).unwrap();
+        assert_eq!(blocks[0].len(), DATAPOS);
+        assert!(checksum_ok(&blocks[0]));
+        assert!(!is_final_block(&blocks[0]));
+    }
+
+    // — Block-index overflow guard (precise boundary) —
+
+    #[test]
+    fn build_data_blocks_accepts_max_addressable_block_count() {
+        // With payload 1, chunk_count == data.len(). The largest non-final
+        // index is chunk_count-1, which must stay ≤ MAX_DATA_BLOCK_INDEX
+        // (0xFEFF). 0xFF00 chunks → max non-final index 0xFEFF: still legal.
+        let data = vec![0u8; MAX_DATA_BLOCK_INDEX as usize + 1]; // 0xFF00
+        let blocks = build_data_blocks(&data, 1).expect("0xFF00 chunks must fit");
+        // No non-final block may carry an index whose high byte is 0xFF.
+        for b in &blocks[..blocks.len() - 1] {
+            assert_ne!(b[NUMPOS + 1], 0xFF, "non-final block masquerades as final");
+        }
+        assert!(is_final_block(blocks.last().unwrap()));
+    }
+
+    #[test]
+    fn build_data_blocks_rejects_too_many_blocks() {
+        // One chunk past the addressable range must error rather than silently
+        // emit an intermediate block with a 0xFF high byte (false "final").
+        let data = vec![0u8; MAX_DATA_BLOCK_INDEX as usize + 2]; // 0xFF01
+        let err = build_data_blocks(&data, 1).unwrap_err();
+        assert!(err.contains("too large"), "unexpected error text: {err}");
     }
 
     // — Round-trip over an in-memory duplex pipe —
@@ -956,6 +1194,62 @@ mod tests {
         assert_eq!(out, data);
     }
 
+    #[tokio::test]
+    async fn round_trip_preserves_usr_and_unknown_types() {
+        // The declared file type survives Phase A end to end for every variant
+        // — not just the original PRG/SEQ pair.
+        let (_, ft) = round_trip(&[1, 2, 3], PunterFileType::Usr).await;
+        assert_eq!(ft, PunterFileType::Usr);
+        let (_, ft) = round_trip(&[1, 2, 3], PunterFileType::Unknown).await;
+        assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    // — Stray-ACK recovery: sender re-sent ACK because it missed our S/B —
+
+    #[tokio::test]
+    async fn read_block_swallows_lone_ack_then_returns_real_block() {
+        use tokio::io::AsyncWriteExt;
+
+        // Short per-byte budget so the test doesn't wait the 20s default.
+        let t = Tunables {
+            negotiation_timeout: 1,
+            block_timeout: 1,
+            max_retries: 3,
+            retry_interval: 0,
+            block_payload: MAX_PAYLOAD,
+        };
+        // next-size field is arbitrary here (read_block returns raw bytes;
+        // the caller validates the checksum, which build_block fills in).
+        let real = build_block(10, 0x0001, &[10, 20, 30]);
+        let real_for_assert = real.clone();
+        let size = real.len() as u8;
+
+        // reader: bytes flow peer → read_block; writer: read_block's S/B codes.
+        let (mut peer_wr, mut rb_rd) = duplex(512);
+        let (mut rb_wr, _drain) = duplex(512);
+
+        let feeder = tokio::spawn(async move {
+            // The stray "ack" arrives first, alone.
+            peer_wr.write_all(Code::Ack.bytes()).await.unwrap();
+            // A gap longer than block_timeout makes read_block time out on the
+            // would-be 4th byte and recognise the lone "ack" — exactly the
+            // "sender missed our S/B" case (recmodem rcm4/rc2). Only then does
+            // the real block follow, in the next S/B round.
+            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+            peer_wr.write_all(&real).await.unwrap();
+            // Keep the write half alive until read_block has consumed the block.
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        });
+
+        let mut state = ReadState::default();
+        let got = read_block(&mut rb_rd, &mut rb_wr, false, &mut state, size, &t)
+            .await
+            .expect("read_block should recover from the stray ack");
+        assert_eq!(got, real_for_assert);
+        assert!(checksum_ok(&got));
+        feeder.await.unwrap();
+    }
+
     // — Header parser must never panic on adversarial input —
 
     #[test]
@@ -1010,7 +1304,7 @@ mod tests {
                 data in prop::collection::vec(any::<u8>(), 0..1500),
                 block_size in 8usize..=255,
             ) {
-                let blocks = build_data_blocks(&data, block_size - DATAPOS);
+                let blocks = build_data_blocks(&data, block_size - DATAPOS).unwrap();
                 prop_assert_eq!(blocks[0].len(), DATAPOS);
                 prop_assert!(is_final_block(blocks.last().unwrap()));
                 let mut reassembled = Vec::new();

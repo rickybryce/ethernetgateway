@@ -1341,7 +1341,12 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
         echo = checkbox(&format!("{}_echo", prefix), "Echo (E1)", port.echo),
         verb = checkbox(&format!("{}_verbose", prefix), "Verbose (V1)", port.verbose),
         quiet = checkbox(&format!("{}_quiet", prefix), "Quiet (Q1)", port.quiet),
-        petscii = checkbox(&format!("{}_petscii_translate", prefix), "PETSCII (AT+PETSCII)", port.petscii_translate),
+        petscii = checkbox_with_attr(
+            &format!("{}_petscii_translate", prefix),
+            "PETSCII (AT+PETSCII)",
+            port.petscii_translate,
+            "title=\"Text only — disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter transfers over the same TCP session, or the binary payload will be corrupted.\"",
+        ),
         xc = numfield(&format!("{}_x_code", prefix), "X-code", port.x_code),
         dtr = numfield(&format!("{}_dtr_mode", prefix), "&D", port.dtr_mode),
         flw = numfield(&format!("{}_flow_mode", prefix), "&K", port.flow_mode),

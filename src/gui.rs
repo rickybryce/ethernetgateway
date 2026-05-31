@@ -830,6 +830,11 @@ impl App {
             ui.checkbox(
                 &mut self.cfg.port_mut(id).petscii_translate,
                 "PETSCII translation (AT+PETSCII)",
+            )
+            .on_hover_text(
+                "Text only. Disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter \
+                 transfers over the same TCP session — the translator will \
+                 corrupt the binary payload otherwise.",
             );
             ui.label(
                 egui::RichText::new("(C64/PET direct-TCP dials)")
@@ -2574,9 +2579,17 @@ mod tests {
 
     // ── poll_logs buffer cap ─────────────────────────────────
 
+    // The logger is a process-global buffer, so these two tests would
+    // otherwise race: one test's poll_logs() (a drain) can swallow the
+    // line the other test just logged. Serialize them and clear residue
+    // up front so each sees only its own entries.
+    static LOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_poll_logs_caps_at_2000() {
+        let _guard = LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         logger::init();
+        let _ = logger::drain(); // discard any residue from other tests
         let mut app = test_app();
         // Pre-fill with 1990 lines
         for i in 0..1990 {
@@ -2592,7 +2605,9 @@ mod tests {
 
     #[test]
     fn test_poll_logs_trims_oldest() {
+        let _guard = LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         logger::init();
+        let _ = logger::drain(); // discard any residue from other tests
         let mut app = test_app();
         // Fill to exactly 2000
         for i in 0..2000 {

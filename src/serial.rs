@@ -229,6 +229,14 @@ struct ModemState {
     /// Vendor extension; off by default.  Only affects direct-TCP
     /// dials — the `ATDT ethernet-gateway` duplex path already does its
     /// own terminal-aware rendering through the telnet menu.
+    ///
+    /// **Text only.** The translator strips ANSI sequences, rewrites
+    /// punctuation, drops bytes the C64 can't render, and case-swaps
+    /// ASCII letters — fine for chatting with a BBS, but it WILL
+    /// corrupt an XMODEM/YMODEM/ZMODEM/Kermit/Punter binary payload
+    /// carried over the same `ATDT` TCP session.  Toggle it off with
+    /// `AT+PETSCII=0` (or the X key in the serial port menu) before
+    /// starting a file transfer; re-enable it after.
     petscii_translate: bool,
 }
 
@@ -2262,10 +2270,21 @@ fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
 /// so when AT+PETSCII=1 is active we drop them rather than leak garbage to
 /// the C64.  Persists across reads — a CSI split across two TCP
 /// packets is still recognized.
+/// Hard cap on how many bytes we'll consume inside an unterminated CSI
+/// before giving up and resuming normal forwarding.  ECMA-48 doesn't bound
+/// the parameter-byte run, but in practice no real terminal sends more than
+/// a handful, so 64 covers every legitimate sequence and still recovers
+/// quickly if a malformed/truncated CSI arrives (a host that dropped its
+/// final byte would otherwise wedge the inbound path indefinitely).
+const ANSI_STRIP_CSI_LEN_CAP: usize = 64;
+
 #[derive(Default)]
 struct AnsiStripState {
     in_esc: bool,
     in_csi: bool,
+    /// Bytes consumed in the current CSI run, including the `[` opener.
+    /// Reset to 0 each time we exit CSI mode.
+    csi_len: usize,
 }
 
 impl AnsiStripState {
@@ -2276,8 +2295,13 @@ impl AnsiStripState {
         if self.in_csi {
             // CSI ends on a final byte in 0x40..=0x7E; intermediate
             // and parameter bytes (0x20..=0x3F) all get dropped.
-            if (0x40..=0x7E).contains(&byte) {
+            // ANSI_STRIP_CSI_LEN_CAP guards against an unterminated
+            // CSI (host disconnect mid-sequence, non-spec emitter)
+            // that would otherwise eat every following byte forever.
+            self.csi_len = self.csi_len.saturating_add(1);
+            if (0x40..=0x7E).contains(&byte) || self.csi_len >= ANSI_STRIP_CSI_LEN_CAP {
                 self.in_csi = false;
+                self.csi_len = 0;
             }
             return None;
         }
@@ -2285,6 +2309,7 @@ impl AnsiStripState {
             self.in_esc = false;
             if byte == b'[' {
                 self.in_csi = true;
+                self.csi_len = 1;
                 return None;
             }
             // Single-byte-final ESC sequences (ESC 7, ESC 8, ESC =,
