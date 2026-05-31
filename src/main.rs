@@ -14,6 +14,7 @@ mod config;
 mod gui;
 mod kermit;
 mod logger;
+mod punter;
 mod serial;
 mod ssh;
 mod telnet;

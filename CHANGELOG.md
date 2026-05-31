@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Punter (C1) file-transfer protocol** — the protocol CCGMS /
+  Novaterm / StrikeTerm speak natively on Commodore BBSes, added
+  alongside XMODEM/YMODEM/ZMODEM/Kermit. Single-file C1 with the full
+  two-phase (file-type then data) handshake, both block checksums
+  (16-bit additive + cyclic), the "size of next block" framing, and
+  the three-`S/B` end-off real C1 endpoints expect. Selectable in the
+  telnet upload/download protocol pickers; the outbound PRG/SEQ file
+  type is auto-detected from the filename. New `punter_*` tunables
+  (block size, timeouts, retries) are editable from the telnet File
+  Transfer settings menu, the web configuration page, and the desktop
+  GUI, and persist to `egateway.conf`. The send/receive entry points
+  take an open stream so a future Multi-Punter (MPP) batch wrapper can
+  layer on without touching the wire code.
 - **Serial modem `AT+PETSCII=n` command** — toggles PETSCII⇄ASCII
   translation on direct-TCP dials (`AT+PETSCII=1` on, `AT+PETSCII=0`
   off) so a Commodore 64/PET dialing `ATDT host:port` sees readable

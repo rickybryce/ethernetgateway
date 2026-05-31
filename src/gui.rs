@@ -241,6 +241,11 @@ struct App {
     kermit_max_packet_length_buf: String,
     kermit_window_size_buf: String,
     kermit_block_check_type_buf: String,
+    punter_block_size_buf: String,
+    punter_negotiation_timeout_buf: String,
+    punter_block_timeout_buf: String,
+    punter_max_retries_buf: String,
+    punter_negotiation_retry_interval_buf: String,
     /// Per-port baud text buffer, indexed by `SerialPortId::index()`.
     /// Two slots — one each for Port A and Port B — let the user type
     /// freely without their input being clobbered by a partial parse.
@@ -308,6 +313,12 @@ impl App {
         let kermit_max_packet_length_buf = cfg.kermit_max_packet_length.to_string();
         let kermit_window_size_buf = cfg.kermit_window_size.to_string();
         let kermit_block_check_type_buf = cfg.kermit_block_check_type.to_string();
+        let punter_block_size_buf = cfg.punter_block_size.to_string();
+        let punter_negotiation_timeout_buf = cfg.punter_negotiation_timeout.to_string();
+        let punter_block_timeout_buf = cfg.punter_block_timeout.to_string();
+        let punter_max_retries_buf = cfg.punter_max_retries.to_string();
+        let punter_negotiation_retry_interval_buf =
+            cfg.punter_negotiation_retry_interval.to_string();
         let serial_baud_buf = [
             cfg.serial_a.baud.to_string(),
             cfg.serial_b.baud.to_string(),
@@ -343,6 +354,11 @@ impl App {
             kermit_max_packet_length_buf,
             kermit_window_size_buf,
             kermit_block_check_type_buf,
+            punter_block_size_buf,
+            punter_negotiation_timeout_buf,
+            punter_block_timeout_buf,
+            punter_max_retries_buf,
+            punter_negotiation_retry_interval_buf,
             serial_baud_buf,
             serial_ports,
             dirty: false,
@@ -380,6 +396,11 @@ impl App {
         if let Ok(v) = self.kermit_max_packet_length_buf.parse::<u16>() && (10..=9024).contains(&v) { self.cfg.kermit_max_packet_length = v; }
         if let Ok(v) = self.kermit_window_size_buf.parse::<u8>() && (1..=31).contains(&v) { self.cfg.kermit_window_size = v; }
         if let Ok(v) = self.kermit_block_check_type_buf.parse::<u8>() && matches!(v, 1..=3) { self.cfg.kermit_block_check_type = v; }
+        if let Ok(v) = self.punter_block_size_buf.parse::<u16>() && (8..=255).contains(&v) { self.cfg.punter_block_size = v; }
+        if let Ok(v) = self.punter_negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_timeout = v; }
+        if let Ok(v) = self.punter_block_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.punter_block_timeout = v; }
+        if let Ok(v) = self.punter_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_retries = v; }
+        if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
         for id in crate::config::SERIAL_PORT_IDS {
             if let Ok(v) = self.serial_baud_buf[id.index()].parse::<u32>()
                 && v >= 300
@@ -1079,6 +1100,49 @@ impl App {
                     );
                 });
         });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("PUNTER").strong().color(AMBER));
+        ui.label(
+            egui::RichText::new(
+                "Punter C1 — the protocol CCGMS / Novaterm speak on Commodore BBSes. \
+                 Block size 255 is the native max (248-byte payload); lower it toward \
+                 40 for noisy lines.",
+            )
+            .italics()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Block size (8-255):",
+                &mut self.punter_block_size_buf,
+                50.0,
+            );
+            labeled_field(
+                ui,
+                "Negotiate (s):",
+                &mut self.punter_negotiation_timeout_buf,
+                50.0,
+            );
+        });
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Block (s):",
+                &mut self.punter_block_timeout_buf,
+                50.0,
+            );
+            labeled_field(ui, "Retries:", &mut self.punter_max_retries_buf, 50.0);
+            labeled_field(
+                ui,
+                "Retry interval (s):",
+                &mut self.punter_negotiation_retry_interval_buf,
+                50.0,
+            );
+        });
     }
 
     /// Flush numeric text buffers into `cfg`, persist to disk, refresh
@@ -1230,6 +1294,13 @@ impl App {
         self.kermit_window_size_buf = self.cfg.kermit_window_size.to_string();
         self.kermit_block_check_type_buf =
             self.cfg.kermit_block_check_type.to_string();
+        self.punter_block_size_buf = self.cfg.punter_block_size.to_string();
+        self.punter_negotiation_timeout_buf =
+            self.cfg.punter_negotiation_timeout.to_string();
+        self.punter_block_timeout_buf = self.cfg.punter_block_timeout.to_string();
+        self.punter_max_retries_buf = self.cfg.punter_max_retries.to_string();
+        self.punter_negotiation_retry_interval_buf =
+            self.cfg.punter_negotiation_retry_interval.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
             self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
         }
@@ -2203,6 +2274,11 @@ impl eframe::App for App {
                 || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
                 || self.kermit_window_size_buf != self.last_synced_cfg.kermit_window_size.to_string()
                 || self.kermit_block_check_type_buf != self.last_synced_cfg.kermit_block_check_type.to_string()
+                || self.punter_block_size_buf != self.last_synced_cfg.punter_block_size.to_string()
+                || self.punter_negotiation_timeout_buf != self.last_synced_cfg.punter_negotiation_timeout.to_string()
+                || self.punter_block_timeout_buf != self.last_synced_cfg.punter_block_timeout.to_string()
+                || self.punter_max_retries_buf != self.last_synced_cfg.punter_max_retries.to_string()
+                || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
                 || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
         }

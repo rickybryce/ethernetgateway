@@ -565,7 +565,7 @@
                     Ethernet Gateway is a standalone, retro-themed server written in Rust
                     that bridges vintage and modern computing. It provides telnet and
                     SSH access to a full-featured gateway with XMODEM, XMODEM-1K, YMODEM,
-                    ZMODEM, and Kermit file transfer, SSH and telnet proxying, an AI chat
+                    ZMODEM, Kermit, and Punter file transfer, SSH and telnet proxying, an AI chat
                     client, a text-mode web browser, weather reports, and Hayes-compatible
                     serial modem emulation on <strong>two physically independent serial
                     ports</strong> (each port also flips to a telnet-serial console bridge
@@ -588,7 +588,7 @@
                     <tr>
                         <td class="key-col">[F]</td>
                         <td class="name-col">File Transfer</td>
-                        <td class="desc-col">Upload, download, and delete files via XMODEM, XMODEM-1K, YMODEM, ZMODEM (batch), or Kermit (server + client).</td>
+                        <td class="desc-col">Upload, download, and delete files via XMODEM, XMODEM-1K, YMODEM, ZMODEM (batch), Kermit (server + client), or Punter C1 (Commodore).</td>
                     </tr>
                     <tr>
                         <td class="key-col">[S]</td>
@@ -772,7 +772,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li><strong>A</strong> &mdash; AI Chat: ask questions to an AI</li>
                         <li><strong>B</strong> &mdash; Browser: browse the web</li>
                         <li><strong>C</strong> &mdash; Configuration: server settings and other options</li>
-                        <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Kermit</li>
+                        <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter</li>
                         <li><strong>G</strong> &mdash; Serial Gateway: pick Port A or Port B (whichever is in console mode) and bridge to its wire</li>
                         <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
                         <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
@@ -790,7 +790,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="file-transfer">
                 <div class="section-title">File Transfer</div>
-                <p class="intro">Upload, download, and manage files on the server using XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Kermit. The gateway supports the full Forsberg ZMODEM spec including batch sends/receives + ZSKIP, plus a spec-complete Kermit implementation with both client and server modes.</p>
+                <p class="intro">Upload, download, and manage files on the server using XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter. The gateway supports the full Forsberg ZMODEM spec including batch sends/receives + ZSKIP, a spec-complete Kermit implementation with both client and server modes, and single-file Punter C1 (&ldquo;New Punter&rdquo;) for Commodore 64/128 terminals like CCGMS, Novaterm, and StrikeTerm.</p>
 
                 <div class="menu-block">
                     <div class="sep">========================================</div>
@@ -826,9 +826,10 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>If the file already exists, confirm overwrite with <strong>Y</strong></li>
                         <li>On the <strong>SELECT UPLOAD PROTOCOL</strong> screen press
                             <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected),
-                            <strong>Z</strong> (ZMODEM), or
-                            <strong>K</strong> (Kermit, any flavor &mdash; see the <a href="kermit.html">Kermit Reference</a>)</li>
-                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), or <code>kermit_negotiation_timeout</code> (Kermit, default 300 s)</li>
+                            <strong>Z</strong> (ZMODEM),
+                            <strong>K</strong> (Kermit, any flavor &mdash; see the <a href="kermit.html">Kermit Reference</a>), or
+                            <strong>P</strong> (Punter C1)</li>
+                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), <code>kermit_negotiation_timeout</code> (Kermit, default 300 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s)</li>
                         <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog, or for Kermit a client like <code>kermit -s file</code> (C-Kermit) / Kermit-95</li>
                         <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP). Kermit batches use the same per-file save-as behavior</li>
                     </ol>
@@ -845,7 +846,8 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                             <strong>1</strong> (XMODEM-1K, 1024-byte blocks with SOH fallback),
                             <strong>Y</strong> (YMODEM, filename + size header),
                             <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals),
-                            or <strong>K</strong> (Kermit, any flavor &mdash; see <a href="kermit.html">Kermit Reference</a>)</li>
+                            <strong>K</strong> (Kermit, any flavor &mdash; see <a href="kermit.html">Kermit Reference</a>),
+                            or <strong>P</strong> (Punter C1; the outbound file type, PRG vs SEQ, is auto-detected from the filename extension)</li>
                         <li>Start the matching receive in your terminal and choose where to save the file locally</li>
                         <li>The file is transmitted and the server reports bytes / blocks / elapsed time on completion</li>
                     </ol>
@@ -1176,8 +1178,8 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     In the telnet menu, <strong>Configuration &rsaquo; F File Transfer</strong>
                     opens a submenu with the shared transfer directory plus per-protocol
                     pages for <strong>X</strong> XMODEM, <strong>Y</strong> YMODEM,
-                    <strong>Z</strong> ZMODEM, and <strong>K</strong> Kermit (plus Kermit
-                    server toggles). In the GUI, the same fields live under the File
+                    <strong>Z</strong> ZMODEM, <strong>K</strong> Kermit (plus Kermit
+                    server toggles), and <strong>P</strong> Punter. In the GUI, the same fields live under the File
                     Transfer frame's <strong>More...</strong> popup. The full Kermit-tuning
                     surface (long packets, sliding windows, streaming, attribute packets,
                     block-check type, resume, locking shifts, 8th-bit quoting, and the
@@ -1243,6 +1245,25 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Allow ATDT KERMIT</td><td>false</td><td>Permit serial-modem dial target to drop into Kermit server (bypasses auth gate)</td></tr>
                 </table>
 
+                <div class="cat" style="margin-top:12px;">Punter (C1)</div>
+                <p class="dim-text">
+                    Single-file Punter C1 (&ldquo;New Punter&rdquo;) &mdash; the protocol
+                    CCGMS, Novaterm, and StrikeTerm speak natively on Commodore 64/128 BBSes.
+                    It uses a two-phase handshake (a file-type block, then the data blocks)
+                    with two per-block checksums (a 16-bit additive checksum and a 16-bit
+                    cyclic checksum) and 3-byte ASCII handshake codes (GOO / BAD / ACK / S/B / SYN).
+                    Blocks carry a 248-byte payload plus a 7-byte header; lower the block size
+                    toward ~40 on noisy lines.
+                </p>
+                <table class="data-table">
+                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
+                    <tr><td>Block size</td><td>255</td><td>8&ndash;255 bytes (lower toward ~40 for noisy lines)</td></tr>
+                    <tr><td>Negotiation timeout</td><td>45s</td><td>1&ndash;300 seconds (file-type handshake)</td></tr>
+                    <tr><td>Retry interval</td><td>5s</td><td>1&ndash;60 seconds (handshake re-send gap)</td></tr>
+                    <tr><td>Block timeout</td><td>20s</td><td>1&ndash;120 seconds (per-block read)</td></tr>
+                    <tr><td>Max retries</td><td>10</td><td>1&ndash;100</td></tr>
+                </table>
+
                 <div class="cat">Serial Modem / Console Settings (per port)</div>
                 <p class="dim-text">
                     The gateway exposes <strong>two physically independent
@@ -1274,7 +1295,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Groq API key</td><td><em>(empty)</em></td><td>API key for AI Chat (free at console.groq.com)</td></tr>
                     <tr><td>Browser homepage</td><td>http://telnetbible.com</td><td>Default URL for the Simple Browser</td></tr>
                     <tr><td>Weather zip code</td><td><em>(empty)</em></td><td>5-digit US zip code for weather</td></tr>
-                    <tr><td>Verbose logging</td><td>false</td><td>Enable detailed per-block / per-subpacket protocol diagnostics across XMODEM, YMODEM, ZMODEM, and Kermit</td></tr>
+                    <tr><td>Verbose logging</td><td>false</td><td>Enable detailed per-block / per-subpacket protocol diagnostics across XMODEM, YMODEM, ZMODEM, Kermit, and Punter</td></tr>
                     <tr><td>GUI console</td><td>true</td><td>Show the GUI window on startup</td></tr>
                 </table>
 
@@ -1338,6 +1359,11 @@ kermit_window_size = 4
 kermit_server_enabled = false
 kermit_server_port = 2424
 allow_atdt_kermit = false
+punter_block_size = 255
+punter_negotiation_timeout = 45
+punter_block_timeout = 20
+punter_max_retries = 10
+punter_negotiation_retry_interval = 5
 disable_ip_safety = false
 ssh_gateway_auth = password</span></code></pre>
                 <p class="dim-text" style="margin-top:8px;">
@@ -1723,11 +1749,11 @@ ssh_gateway_auth = password</span></code></pre>
                     <tr><th>Symptom</th><th>Solution</th></tr>
                     <tr>
                         <td>Transfer times out before starting</td>
-                        <td>Pick the same protocol on both sides: the gateway's upload menu expects either XMODEM/YMODEM or ZMODEM, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, or ZMODEM explicitly. If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM, default 45 s) or <code>zmodem_negotiation_timeout</code> (ZMODEM, default 45 s) in <code>egateway.conf</code>.</td>
+                        <td>Pick the same protocol on both sides: the gateway's upload menu expects XMODEM/YMODEM, ZMODEM, Kermit, or Punter, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter explicitly. If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM, default 45 s), <code>zmodem_negotiation_timeout</code> (ZMODEM, default 45 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s) in <code>egateway.conf</code>.</td>
                     </tr>
                     <tr>
                         <td>Transfer fails partway through</td>
-                        <td>For XMODEM/XMODEM-1K/YMODEM raise <code>xmodem_block_timeout</code> and <code>xmodem_max_retries</code>. For ZMODEM raise <code>zmodem_frame_timeout</code> and <code>zmodem_max_retries</code>. Check for a noisy or slow connection.</td>
+                        <td>For XMODEM/XMODEM-1K/YMODEM raise <code>xmodem_block_timeout</code> and <code>xmodem_max_retries</code>. For ZMODEM raise <code>zmodem_frame_timeout</code> and <code>zmodem_max_retries</code>. For Punter raise <code>punter_block_timeout</code> and <code>punter_max_retries</code>, or lower <code>punter_block_size</code> toward ~40 on a noisy line. Check for a noisy or slow connection.</td>
                     </tr>
                     <tr>
                         <td>Consistent block-CRC failures in the same direction</td>

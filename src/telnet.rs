@@ -130,6 +130,10 @@ enum UploadProtocol {
     /// (C-Kermit, G-Kermit, etc.) is auto-detected from the peer's
     /// CAPAS bits and surfaced in the post-transfer summary.
     Kermit,
+    /// Punter (C1) — the protocol CCGMS / Novaterm speak natively on
+    /// Commodore BBSes.  Receiver drives the GOO/ACK/S-B handshake and
+    /// records the sender's declared PRG/SEQ file type.
+    Punter,
 }
 
 /// Transfer protocol selected at download time by the user.  Picked
@@ -152,6 +156,10 @@ enum DownloadProtocol {
     /// sliding window, streaming, and attribute packets per the
     /// peer's CAPAS bits.
     Kermit,
+    /// Punter (C1) — Commodore BBS protocol; sender drives the
+    /// ACK/block handshake.  File type (PRG/SEQ) is auto-detected from
+    /// the file and overridable by the user.
+    Punter,
 }
 
 // ─── Input mode ────────────────────────────────────────────
@@ -3891,6 +3899,11 @@ impl TelnetSession {
             self.cyan("K")
         ))
         .await?;
+        self.send_line(&format!(
+            "  {}  PUNTER         (C1 — CCGMS / Novaterm Commodore BBS)",
+            self.cyan("P")
+        ))
+        .await?;
         self.send_line("").await?;
         self.send(&format!(
             "  Pick one, or {} to cancel: ",
@@ -3920,6 +3933,7 @@ impl TelnetSession {
                 'x' | 'y' => Some(UploadProtocol::XmodemYmodem),
                 'z' => Some(UploadProtocol::Zmodem),
                 'k' => Some(UploadProtocol::Kermit),
+                'p' => Some(UploadProtocol::Punter),
                 _ => None,
             };
             if let Some(p) = chosen {
@@ -4033,6 +4047,8 @@ impl TelnetSession {
                     "Start ZMODEM send from your terminal now.",
                 UploadProtocol::Kermit =>
                     "Start KERMIT send from your terminal now.",
+                UploadProtocol::Punter =>
+                    "Start PUNTER send from your terminal now.",
             })
         ))
         .await?;
@@ -4167,6 +4183,18 @@ impl TelnetSession {
                     })
                     .collect()
             }),
+            UploadProtocol::Punter => crate::punter::punter_receive(
+                &mut self.reader,
+                &mut *writer_guard,
+                self.xmodem_iac,
+                is_petscii,
+                verbose,
+            )
+            .await
+            // C1 carries no filename — the user-entered name wins (None),
+            // matching XMODEM/YMODEM.  The declared PRG/SEQ type is recorded
+            // by the receiver but the bytes are written flat; we drop it here.
+            .map(|(data, _file_type)| vec![(None, data, None)]),
         };
         drop(writer_guard);
         let elapsed = start.elapsed();
@@ -4497,6 +4525,11 @@ impl TelnetSession {
             self.cyan("K")
         ))
         .await?;
+        self.send_line(&format!(
+            "  {}  PUNTER       (C1 — CCGMS / Novaterm)",
+            self.cyan("P")
+        ))
+        .await?;
         self.send_line("").await?;
         self.send(&format!(
             "  Pick one, or {} to cancel: ",
@@ -4525,6 +4558,7 @@ impl TelnetSession {
                 'y' => Some(DownloadProtocol::Ymodem),
                 'z' => Some(DownloadProtocol::Zmodem),
                 'k' => Some(DownloadProtocol::Kermit),
+                'p' => Some(DownloadProtocol::Punter),
                 _ => None,
             };
             if let Some(p) = chosen {
@@ -4609,6 +4643,7 @@ impl TelnetSession {
                 DownloadProtocol::Ymodem => "Start YMODEM receive now.",
                 DownloadProtocol::Zmodem => "Start ZMODEM receive now.",
                 DownloadProtocol::Kermit => "Start KERMIT receive now.",
+                DownloadProtocol::Punter => "Start PUNTER receive now.",
             })
         ))
         .await?;
@@ -4659,6 +4694,20 @@ impl TelnetSession {
                 &files,
                 self.xmodem_iac,
                 is_petscii,
+                verbose,
+            )
+            .await
+        } else if matches!(protocol, DownloadProtocol::Punter) {
+            // C1 declares a PRG/SEQ type in its Phase-A block; auto-detect it
+            // from the filename (text extensions → SEQ, else PRG).
+            let file_type = crate::punter::PunterFileType::autodetect(filename);
+            crate::punter::punter_send(
+                &mut self.reader,
+                &mut *writer_guard,
+                &data,
+                file_type,
+                self.xmodem_iac,
+                self.terminal_type == TerminalType::Petscii,
                 verbose,
             )
             .await
@@ -10339,6 +10388,11 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  {}  PUNTER settings",
+                self.cyan("P")
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  {}  Restart server",
                 self.cyan("R")
             ))
@@ -10376,6 +10430,9 @@ impl TelnetSession {
                 "k" => {
                     self.kermit_settings().await?;
                 }
+                "p" => {
+                    self.punter_settings().await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -10384,7 +10441,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press D, X, Y, Z, K, R, H, or Q.").await?;
+                    self.show_error("Press D, X, Y, Z, K, P, R, H, or Q.").await?;
                 }
             }
         }
@@ -10402,12 +10459,13 @@ impl TelnetSession {
                 "  Y  YMODEM settings",
                 "  Z  ZMODEM settings",
                 "  K  KERMIT settings",
+                "  P  PUNTER settings",
                 "  R  Restart the server",
                 "",
                 "  XMODEM, XMODEM-1K, and YMODEM",
                 "  share the same timeouts.",
-                "  ZMODEM and Kermit each have",
-                "  their own.",
+                "  ZMODEM, Kermit, and Punter",
+                "  each have their own.",
             ]
         } else {
             &[
@@ -10419,13 +10477,14 @@ impl TelnetSession {
                 "  Y  YMODEM settings (shared with XMODEM)",
                 "  Z  ZMODEM settings",
                 "  K  KERMIT settings",
+                "  P  PUNTER settings",
                 "  R  Restart the server",
                 "",
                 "  XMODEM, XMODEM-1K, and YMODEM share",
                 "  the same timeouts because they share",
-                "  the same protocol code path. ZMODEM",
-                "  and Kermit each have their own independent",
-                "  tunables.",
+                "  the same protocol code path. ZMODEM,",
+                "  Kermit, and Punter each have their own",
+                "  independent tunables.",
             ]
         };
         self.show_help_page("FILE TRANSFER HELP", lines).await
@@ -10777,6 +10836,210 @@ impl TelnetSession {
             ]
         };
         self.show_help_page("ZMODEM SETTINGS HELP", lines).await
+    }
+
+    // ─── PUNTER SETTINGS ────────────────────────────────────
+
+    async fn punter_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("PUNTER SETTINGS")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  Block size:     {} bytes",
+                self.amber(&cfg.punter_block_size.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Negotiate:      {} s",
+                self.amber(&cfg.punter_negotiation_timeout.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Retry interval: {} s",
+                self.amber(&cfg.punter_negotiation_retry_interval.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Block timeout:  {} s",
+                self.amber(&cfg.punter_block_timeout.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Max retries:    {}",
+                self.amber(&cfg.punter_max_retries.to_string())
+            ))
+            .await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}  Set block size",
+                self.cyan("B")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set negotiation timeout",
+                self.cyan("N")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set retry interval",
+                self.cyan("I")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set block timeout",
+                self.cyan("F")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set max retries",
+                self.cyan("M")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Restart server",
+                self.cyan("R")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}  {}",
+                self.action_prompt("Q", "Back"),
+                self.action_prompt("H", "Help")
+            ))
+            .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/punter"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            match input.as_str() {
+                "b" => {
+                    self.xmodem_set_numeric(
+                        "Block size",
+                        "punter_block_size",
+                        cfg.punter_block_size as u64,
+                        8,
+                        255,
+                        "bytes",
+                    )
+                    .await?;
+                }
+                "n" => {
+                    self.xmodem_set_numeric(
+                        "Negotiation timeout",
+                        "punter_negotiation_timeout",
+                        cfg.punter_negotiation_timeout,
+                        1,
+                        300,
+                        "seconds",
+                    )
+                    .await?;
+                }
+                "i" => {
+                    self.xmodem_set_numeric(
+                        "Retry interval",
+                        "punter_negotiation_retry_interval",
+                        cfg.punter_negotiation_retry_interval,
+                        1,
+                        60,
+                        "seconds",
+                    )
+                    .await?;
+                }
+                "f" => {
+                    self.xmodem_set_numeric(
+                        "Block timeout",
+                        "punter_block_timeout",
+                        cfg.punter_block_timeout,
+                        1,
+                        120,
+                        "seconds",
+                    )
+                    .await?;
+                }
+                "m" => {
+                    self.xmodem_set_numeric(
+                        "Max retries",
+                        "punter_max_retries",
+                        cfg.punter_max_retries as u64,
+                        1,
+                        100,
+                        "retries",
+                    )
+                    .await?;
+                }
+                "r" => {
+                    self.config_restart_server().await?;
+                }
+                "h" => {
+                    self.punter_show_help().await?;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press B, N, I, F, M, R, H, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    async fn punter_show_help(&mut self) -> Result<(), std::io::Error> {
+        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+            &[
+                "  Configure PUNTER (C1) file",
+                "  transfer settings.  C1 is the",
+                "  protocol CCGMS and Novaterm",
+                "  speak on Commodore BBSes.",
+                "",
+                "  B  Block size in bytes (8-255).",
+                "     255 = native max; lower for",
+                "     noisy lines (40 floor)",
+                "  N  Negotiation timeout: wait for",
+                "     the peer's first code",
+                "  I  Retry interval: code re-send",
+                "     gap during negotiation",
+                "  F  Block timeout: per-block read",
+                "     timeout in transfer",
+                "  M  Max retries per code / block",
+                "  R  Restart the server",
+                "",
+                "  Takes effect on next transfer.",
+            ]
+        } else {
+            &[
+                "  Configure PUNTER (C1) file transfer",
+                "  settings.  C1 is the protocol CCGMS /",
+                "  Novaterm speak on Commodore BBSes.",
+                "",
+                "  B  Block size in bytes (8-255). 255 is",
+                "     the native max; lower it toward 40",
+                "     for noisy lines",
+                "  N  Negotiation timeout: how long to",
+                "     wait for the peer's first code",
+                "  I  Retry interval: seconds between",
+                "     handshake-code re-sends",
+                "  F  Block timeout: per-block read",
+                "     timeout once a transfer is live",
+                "  M  Max retries: retry cap per code / block",
+                "  R  Restart the server",
+                "",
+                "  Takes effect on next transfer.",
+            ]
+        };
+        self.show_help_page("PUNTER SETTINGS HELP", lines).await
     }
 
     // ─── KERMIT SETTINGS ────────────────────────────────────

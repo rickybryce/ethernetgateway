@@ -165,6 +165,24 @@ const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
 /// (24 ≈ "kermit").
 const DEFAULT_KERMIT_SERVER_ENABLED: bool = false;
 const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
+/// Punter (C1) total block size in bytes (8..=255).  255 is the native C1
+/// maximum and the right choice for virtually every connection; lowering it
+/// (40 is the recommended floor) cuts the resend cost on a noisy line at the
+/// expense of per-block handshake overhead.  The 7-byte header is included in
+/// this figure, so 255 yields a 248-byte payload.
+const DEFAULT_PUNTER_BLOCK_SIZE: u16 = 255;
+/// Punter negotiation timeout: how long the receiver/sender waits for the
+/// peer's first handshake code before giving up — long enough to start the
+/// transfer on the C64 terminal.
+const DEFAULT_PUNTER_NEGOTIATION_TIMEOUT: u64 = 45;
+/// Punter per-block read timeout in seconds — bounds how long we wait for a
+/// handshake code or block body once a transfer is under way.
+const DEFAULT_PUNTER_BLOCK_TIMEOUT: u64 = 20;
+/// Punter max retries for a handshake code / block (resend GOO·BAD·ACK·S/B).
+const DEFAULT_PUNTER_MAX_RETRIES: u32 = 10;
+/// Seconds between successive handshake-code re-sends during the Punter
+/// negotiation phase.  Analogous to the XMODEM/ZMODEM retry intervals.
+const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// Configuration web server.  Off by default.  Port 8080 is the
 /// canonical "alternate HTTP" port — high enough to avoid the
 /// `<1024 needs root` trap and unlikely to collide with system
@@ -446,6 +464,17 @@ pub struct Config {
     /// Port for the standalone Kermit server listener.  Only consulted
     /// when `kermit_server_enabled` is true.
     pub kermit_server_port: u16,
+    /// Punter (C1) total block size in bytes (8..=255, header included).
+    pub punter_block_size: u16,
+    /// Punter negotiation timeout (seconds): wait for the peer's first
+    /// handshake code before giving up.
+    pub punter_negotiation_timeout: u64,
+    /// Punter per-block read timeout (seconds) once a transfer is under way.
+    pub punter_block_timeout: u64,
+    /// Punter max retries for a handshake code / block.
+    pub punter_max_retries: u32,
+    /// Seconds between handshake-code re-sends during Punter negotiation.
+    pub punter_negotiation_retry_interval: u64,
     /// Run the HTTP configuration web server.  Mirrors the GUI's
     /// settings page in a browser.  Honors the same IP-safety
     /// allowlist as the telnet listener (private/loopback only,
@@ -522,6 +551,11 @@ impl Default for Config {
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
+            punter_block_size: DEFAULT_PUNTER_BLOCK_SIZE,
+            punter_negotiation_timeout: DEFAULT_PUNTER_NEGOTIATION_TIMEOUT,
+            punter_block_timeout: DEFAULT_PUNTER_BLOCK_TIMEOUT,
+            punter_max_retries: DEFAULT_PUNTER_MAX_RETRIES,
+            punter_negotiation_retry_interval: DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL,
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
             serial_a: SerialPortConfig::default(),
@@ -832,6 +866,31 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_KERMIT_SERVER_PORT),
+        punter_block_size: map
+            .get("punter_block_size")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| (8..=255).contains(&v))
+            .unwrap_or(DEFAULT_PUNTER_BLOCK_SIZE),
+        punter_negotiation_timeout: map
+            .get("punter_negotiation_timeout")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
+            .unwrap_or(DEFAULT_PUNTER_NEGOTIATION_TIMEOUT),
+        punter_block_timeout: map
+            .get("punter_block_timeout")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
+            .unwrap_or(DEFAULT_PUNTER_BLOCK_TIMEOUT),
+        punter_max_retries: map
+            .get("punter_max_retries")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u32| v >= 1)
+            .unwrap_or(DEFAULT_PUNTER_MAX_RETRIES),
+        punter_negotiation_retry_interval: map
+            .get("punter_negotiation_retry_interval")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
+            .unwrap_or(DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL),
         web_enabled: map
             .get("web_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1289,6 +1348,29 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
+# Punter (C1) protocol tunables.  C1 is the file-transfer protocol CCGMS /
+# Novaterm / StrikeTerm speak natively on Commodore BBSes.
+# punter_block_size:                 total block size in bytes (8..=255, the
+#                                    7-byte header included).  255 = native max
+#                                    (248-byte payload); lower it toward 40 for
+#                                    noisy lines at the cost of handshake overhead.
+# punter_negotiation_timeout:        seconds to wait for the peer's first code.
+# punter_block_timeout:              per-block read timeout once under way.
+# punter_max_retries:                handshake-code / block retry limit.
+# punter_negotiation_retry_interval: seconds between code re-sends.
+");
+    write_kv(&mut content, "punter_block_size", cfg.punter_block_size);
+    write_kv(&mut content, "punter_negotiation_timeout", cfg.punter_negotiation_timeout);
+    write_kv(&mut content, "punter_block_timeout", cfg.punter_block_timeout);
+    write_kv(&mut content, "punter_max_retries", cfg.punter_max_retries);
+    write_kv(
+        &mut content,
+        "punter_negotiation_retry_interval",
+        cfg.punter_negotiation_retry_interval,
+    );
+    content.push('\n');
+
+    content.push_str("\
 # Configuration web server.  Renders the same settings page the GUI
 # does, in a browser.  Honors the same `disable_ip_safety` allowlist as
 # the telnet listener (private/loopback only unless disabled), and the
@@ -1652,6 +1734,31 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_server_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.kermit_server_port = v;
+            }
+        }
+        "punter_block_size" => {
+            if let Ok(v) = value.parse::<u16>() && (8..=255).contains(&v) {
+                cfg.punter_block_size = v;
+            }
+        }
+        "punter_negotiation_timeout" => {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
+                cfg.punter_negotiation_timeout = v;
+            }
+        }
+        "punter_block_timeout" => {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
+                cfg.punter_block_timeout = v;
+            }
+        }
+        "punter_max_retries" => {
+            if let Ok(v) = value.parse::<u32>() && v >= 1 {
+                cfg.punter_max_retries = v;
+            }
+        }
+        "punter_negotiation_retry_interval" => {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
+                cfg.punter_negotiation_retry_interval = v;
             }
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
@@ -2080,6 +2187,11 @@ mod tests {
             allow_atdt_kermit: true,
             kermit_server_enabled: true,
             kermit_server_port: 2525,
+            punter_block_size: 200,
+            punter_negotiation_timeout: 50,
+            punter_block_timeout: 25,
+            punter_max_retries: 12,
+            punter_negotiation_retry_interval: 6,
             web_enabled: true,
             web_port: 9090,
             serial_a: SerialPortConfig {
@@ -2217,6 +2329,14 @@ mod tests {
         assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
         assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
+        assert_eq!(loaded.punter_block_size, original.punter_block_size);
+        assert_eq!(loaded.punter_negotiation_timeout, original.punter_negotiation_timeout);
+        assert_eq!(loaded.punter_block_timeout, original.punter_block_timeout);
+        assert_eq!(loaded.punter_max_retries, original.punter_max_retries);
+        assert_eq!(
+            loaded.punter_negotiation_retry_interval,
+            original.punter_negotiation_retry_interval
+        );
         assert_eq!(loaded.serial_a, original.serial_a);
         assert_eq!(loaded.serial_b, original.serial_b);
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);

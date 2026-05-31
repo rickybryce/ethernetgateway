@@ -721,6 +721,9 @@ fn collect_form_updates(
         "kermit_max_packet_length", "kermit_window_size",
         "kermit_block_check_type", "kermit_8bit_quote",
         "kermit_resume_max_age_hours",
+        "punter_block_size", "punter_negotiation_timeout",
+        "punter_block_timeout", "punter_max_retries",
+        "punter_negotiation_retry_interval",
         "ssh_gateway_auth",
     ];
     for key in plain_keys {
@@ -1242,6 +1245,9 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{krc} {krp}</div>\
          <div class=\"row\">{kma} {kls}</div>\
          <div class=\"row\">{atd}</div>\
+         <h3>Punter (C1)</h3>\
+         <div class=\"row\">{pbs} {pneg}</div>\
+         <div class=\"row\">{pblk} {pret} {pint}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
@@ -1269,6 +1275,11 @@ fn render_more_popups(cfg: &Config) -> String {
         kma = numfield("kermit_resume_max_age_hours", "Resume max age (h)", cfg.kermit_resume_max_age_hours),
         kls = checkbox("kermit_locking_shifts", "Locking shifts", cfg.kermit_locking_shifts),
         atd = checkbox("allow_atdt_kermit", "Allow ATDT KERMIT (modem emulator)", cfg.allow_atdt_kermit),
+        pbs = numfield("punter_block_size", "Block size (8-255)", cfg.punter_block_size),
+        pneg = numfield("punter_negotiation_timeout", "Neg (s)", cfg.punter_negotiation_timeout),
+        pblk = numfield("punter_block_timeout", "Block (s)", cfg.punter_block_timeout),
+        pret = numfield("punter_max_retries", "Retries", cfg.punter_max_retries),
+        pint = numfield("punter_negotiation_retry_interval", "Poke (s)", cfg.punter_negotiation_retry_interval),
     ));
 
     // Per-port serial popups.
