@@ -59,10 +59,16 @@
 //! ## End-off
 //!
 //! After the final block (block index high byte 0xFF) both ends run a SYN
-//! handshake, and the sender finishes by transmitting `S/B` three times.
-//! This "send three S/B" behaviour is inherited deliberately for interop:
-//! real C1 senders emit it (`tranhand` tx8/tx9, line 359) and real receivers
-//! expect to drain it.
+//! handshake, and the sender finishes by transmitting `S/B` three times.  The
+//! receiver consumes one to complete the SYN/S-B exchange and *drains the other
+//! two* (two fixed 3-byte reads) before opening the next phase — verified
+//! against the real CCGMS receiver, which stalls if fewer than three arrive.
+//!
+//! Critically, after the type block CCGMS sends `GOO` **twice** — the block-ack
+//! `GOO` (inside its `recv_block`) and a second `GOO` before the `S/B` — and
+//! each needs its own `ACK`.  The sender's end-off therefore re-sends `ACK` on
+//! a short cadence until the `S/B` arrives (see `end_off_sender`); a single
+//! slow `ACK` strands CCGMS looping `GOO` forever (the "Downloading…" hang).
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -97,6 +103,14 @@ const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
 
 /// The five three-byte handshake tokens.  Values from the packed Novaterm
 /// `codes` string (`punter.src` v9.6 line 98).
+///
+/// **On the wire these are UPPERCASE** (`GOO`/`BAD`/`ACK`/`S/B`/`SYN`).  The
+/// Novaterm source renders them as `.asc "goobadacks/bsyn"`, but a real C64
+/// assembles that in the default uppercase/graphics PETSCII charset, so the
+/// bytes that actually leave the machine are 0x47 0x4F 0x4F … — confirmed by
+/// capturing CCGMS, which transmits `0x47 'G' 0x4F 'O' 0x4F 'O'`.  We send
+/// uppercase so real C64 peers recognise us, and [`Code::from_window`] matches
+/// case-insensitively so a peer that happens to send lowercase still works.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Code {
     Goo,
@@ -109,18 +123,27 @@ enum Code {
 impl Code {
     fn bytes(self) -> &'static [u8; 3] {
         match self {
-            Code::Goo => b"goo",
-            Code::Bad => b"bad",
-            Code::Ack => b"ack",
-            Code::Sb => b"s/b",
-            Code::Syn => b"syn",
+            Code::Goo => b"GOO",
+            Code::Bad => b"BAD",
+            Code::Ack => b"ACK",
+            Code::Sb => b"S/B",
+            Code::Syn => b"SYN",
         }
     }
 
+    /// Recognise a code in the sliding window, case-insensitively.  Real C64
+    /// peers send uppercase; we fold to uppercase before comparing so a
+    /// lowercase variant is still accepted.  The `/` in `S/B` (0x2F) is
+    /// unaffected by case folding.
     fn from_window(w: &[u8; 3]) -> Option<Code> {
+        let up = [
+            w[0].to_ascii_uppercase(),
+            w[1].to_ascii_uppercase(),
+            w[2].to_ascii_uppercase(),
+        ];
         [Code::Goo, Code::Bad, Code::Ack, Code::Sb, Code::Syn]
             .into_iter()
-            .find(|c| w == c.bytes())
+            .find(|c| &up == c.bytes())
     }
 }
 
@@ -371,7 +394,11 @@ async fn send_code(
     writer: &mut (impl AsyncWrite + Unpin),
     code: Code,
     is_tcp: bool,
+    verbose: bool,
 ) -> Result<(), String> {
+    if verbose {
+        glog!("PUNTER tx code: {:?}", code);
+    }
     raw_write_bytes(writer, code.bytes(), is_tcp).await
 }
 
@@ -379,6 +406,7 @@ async fn send_code(
 /// sliding a 3-byte window over the incoming bytes (mirrors `accept`,
 /// `punter.src` line 111).  Returns `Ok(Some(code))` on a match, `Ok(None)`
 /// on timeout, and `Err` on a user abort (ESC / CAN×2) or I/O failure.
+#[allow(clippy::too_many_arguments)]
 async fn accept_code(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
@@ -386,6 +414,7 @@ async fn accept_code(
     state: &mut ReadState,
     allowed: &[Code],
     timeout_secs: u64,
+    verbose: bool,
 ) -> Result<Option<Code>, String> {
     let deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
@@ -402,6 +431,19 @@ async fn accept_code(
             Ok(Err(e)) => return Err(e),
             Err(_) => return Ok(None),
         };
+        // Surface every byte that arrives during a handshake wait.  These
+        // windows only ever carry 3-byte ASCII codes, so the volume is tiny
+        // — and when a real peer is sending something we don't recognise
+        // (e.g. a case/charset mismatch in the codes), this is the only way
+        // to see it.  Printable bytes show their char; others show hex.
+        if verbose {
+            let b = byte;
+            if b.is_ascii_graphic() {
+                glog!("PUNTER rx byte: 0x{:02X} '{}'", b, b as char);
+            } else {
+                glog!("PUNTER rx byte: 0x{:02X}", b);
+            }
+        }
         // Between blocks the only bytes that should appear are the 3-byte
         // ASCII handshake codes, none of which contain ESC — so honouring a
         // local user's ESC/PETSCII-stop here is safe and lets them bail.
@@ -419,6 +461,9 @@ async fn accept_code(
             && let Some(c) = Code::from_window(&window)
             && allowed.contains(&c)
         {
+            if verbose {
+                glog!("PUNTER rx code: {:?}", c);
+            }
             return Ok(Some(c));
         }
     }
@@ -512,8 +557,8 @@ async fn receive_phase(
         let attempts = total_budget.div_ceil(probe.max(1)).max(1);
         let mut got_ack = false;
         for attempt in 0..attempts {
-            send_code(writer, signal, is_tcp).await?;
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], probe).await? {
+            send_code(writer, signal, is_tcp, verbose).await?;
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], probe, verbose).await? {
                 Some(Code::Ack) => {
                     got_ack = true;
                     break;
@@ -531,7 +576,7 @@ async fn receive_phase(
 
         // rc2: send S/B, then read the block.  Resends S/B on a blank read or
         // on a stray ACK (sender missed our S/B), up to max_retries.
-        let blk = read_block(reader, writer, is_tcp, state, next_size, t).await?;
+        let blk = read_block(reader, writer, is_tcp, state, next_size, t, verbose).await?;
 
         if checksum_ok(&blk) {
             let payload_len = blk.len().saturating_sub(DATAPOS);
@@ -603,13 +648,14 @@ async fn read_block(
     state: &mut ReadState,
     size: u8,
     t: &Tunables,
+    verbose: bool,
 ) -> Result<Vec<u8>, String> {
     let size = size as usize;
     // First-byte wait: short enough to re-prompt a peer that missed our S/B,
     // but never longer than the per-byte budget.
     let first_wait = t.block_timeout.min(t.retry_interval.max(1));
     for _attempt in 0..=t.max_retries {
-        send_code(writer, Code::Sb, is_tcp).await?;
+        send_code(writer, Code::Sb, is_tcp, verbose).await?;
         let mut buf: Vec<u8> = Vec::with_capacity(size);
         for i in 0..size {
             let wait = if i == 0 { first_wait } else { t.block_timeout };
@@ -677,9 +723,9 @@ async fn end_off_receiver(
         // Acknowledge the final block and re-handshake.
         let mut got_ack = false;
         for _ in 0..=t.max_retries {
-            send_code(writer, Code::Goo, is_tcp).await?;
+            send_code(writer, Code::Goo, is_tcp, verbose).await?;
             if let Some(Code::Ack) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout, verbose).await?
             {
                 got_ack = true;
                 break;
@@ -688,18 +734,18 @@ async fn end_off_receiver(
         if verbose && !got_ack {
             glog!("PUNTER recv: end-off ACK not received (peer may have torn down)");
         }
-        send_code(writer, Code::Sb, is_tcp).await?;
+        send_code(writer, Code::Sb, is_tcp, verbose).await?;
 
         // Wait for the sender's SYN (resend S/B on timeout), then answer SYN
         // and wait for the sender's S/B (resend SYN on timeout).
         let mut got_syn = false;
         for _ in 0..=t.max_retries {
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await? {
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout, verbose).await? {
                 Some(Code::Syn) => {
                     got_syn = true;
                     break;
                 }
-                _ => send_code(writer, Code::Sb, is_tcp).await?,
+                _ => send_code(writer, Code::Sb, is_tcp, verbose).await?,
             }
         }
         if verbose && !got_syn {
@@ -707,8 +753,8 @@ async fn end_off_receiver(
         }
         let mut got_final_sb = false;
         for _ in 0..=t.max_retries {
-            send_code(writer, Code::Syn, is_tcp).await?;
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await? {
+            send_code(writer, Code::Syn, is_tcp, verbose).await?;
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout, verbose).await? {
                 Some(Code::Sb) => {
                     got_final_sb = true;
                     break;
@@ -804,7 +850,7 @@ async fn send_phase(
         let mut code = None;
         for attempt in 0..attempts {
             if spec_mode && !started {
-                send_code(writer, Code::Goo, is_tcp).await?;
+                send_code(writer, Code::Goo, is_tcp, verbose).await?;
             }
             code = accept_code(
                 reader,
@@ -813,6 +859,7 @@ async fn send_phase(
                 state,
                 &[Code::Goo, Code::Bad, Code::Sb],
                 probe,
+                verbose,
             )
             .await?;
             if code.is_some() {
@@ -865,9 +912,9 @@ async fn send_phase(
         let sb_attempts = t.block_timeout.div_ceil(sb_probe.max(1)).max(1);
         let mut got_sb = false;
         for _ in 0..sb_attempts {
-            send_code(writer, Code::Ack, is_tcp).await?;
+            send_code(writer, Code::Ack, is_tcp, verbose).await?;
             if let Some(Code::Sb) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], sb_probe).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], sb_probe, verbose).await?
             {
                 got_sb = true;
                 break;
@@ -882,9 +929,10 @@ async fn send_phase(
     }
 }
 
-/// Sender end-off (`tranhand` tx4/tx5/tx8/tx9): ACK → wait S/B → SYN → wait
-/// SYN → S/B ×3.  The triple S/B is the deliberately-inherited "end-off"
-/// behaviour real C1 receivers expect to drain.
+/// Sender end-off: ACK (re-sent until S/B) → SYN (re-sent until SYN) → S/B ×3.
+/// The ACK stage re-sends on a short cadence because CCGMS sends GOO twice
+/// after the type block (block-ack + a second GOO), each needing an ACK; the
+/// three closing S/B feed the receiver's one-consume-plus-two-drain.
 ///
 /// Like Novaterm's `tranhand`, missed handshake responses here are NOT
 /// treated as failures — the last data block was acknowledged before we
@@ -905,13 +953,23 @@ async fn end_off_sender(
     // finished transfer.  Run the SYN handshake with `?` in an inner future and
     // discard any error — a teardown just stops it early.  (Timeouts return
     // `Ok(None)`, so the per-stage verbose warnings still fire.)
+    // Re-send each code on a SHORT cadence rather than blocking the whole
+    // block_timeout on one read.  This mirrors CCGMS's reference sender, whose
+    // `handshake("ACK","S/B")` re-sends ACK every ~1s until S/B arrives — which
+    // is essential because CCGMS's receiver sends GOO *twice* after the type
+    // block (the block-ack GOO inside recv_block, then a second GOO before the
+    // S/B), and EACH needs its own ACK.  A single slow ACK strands CCGMS
+    // looping GOO forever ("Downloading..." hang).  Total patience is still
+    // ~block_timeout, just spread across prompt re-sends.
+    let probe = t.block_timeout.min(t.retry_interval.max(1));
+    let attempts = t.block_timeout.div_ceil(probe.max(1)).max(1);
     let _ = async {
-        // tx41: ACK until the receiver's S/B.
+        // tx41: ACK (re-sent every probe) until the receiver's S/B.
         let mut got_sb = false;
-        for _ in 0..=t.max_retries {
-            send_code(writer, Code::Ack, is_tcp).await?;
+        for _ in 0..attempts {
+            send_code(writer, Code::Ack, is_tcp, verbose).await?;
             if let Some(Code::Sb) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], probe, verbose).await?
             {
                 got_sb = true;
                 break;
@@ -920,12 +978,12 @@ async fn end_off_sender(
         if verbose && !got_sb {
             glog!("PUNTER send: end-off S/B not received (peer may have torn down)");
         }
-        // tx5: SYN until the receiver's SYN comes back.
+        // tx5: SYN (re-sent every probe) until the receiver's SYN comes back.
         let mut got_syn = false;
-        for _ in 0..=t.max_retries {
-            send_code(writer, Code::Syn, is_tcp).await?;
+        for _ in 0..attempts {
+            send_code(writer, Code::Syn, is_tcp, verbose).await?;
             if let Some(Code::Syn) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], probe, verbose).await?
             {
                 got_syn = true;
                 break;
@@ -937,17 +995,15 @@ async fn end_off_sender(
         Ok::<(), String>(())
     }
     .await;
-    // tx9: three S/B for the receiver to drain.  We deliberately do NOT read
-    // here.  Consuming bytes during this drain would swallow the receiver's
-    // *opening signal for the next phase* — at the type→data boundary the
-    // receiver finishes its end-off and immediately sends the data-phase GOO,
-    // and eating it stalls resync until the receiver re-probes.  Any echo the
-    // receiver sends instead stays buffered and is harmlessly skipped by the
-    // next phase's `accept` window.  Best-effort: by this point the receiver
-    // may already have accepted the first S/B and torn the link down, so a
-    // failed write on #2/#3 is not an error — the transfer succeeded.
+    // tx9: three closing S/B.  CCGMS's receiver consumes one to complete its
+    // SYN/S-B end-off, then *drains two more* (two fixed 3-byte reads) before
+    // sleeping and opening the next phase — verified against the real CCGMS
+    // receiver, which starves (and stalls ~20s) if fewer than three arrive.
+    // We deliberately do NOT read here: consuming bytes would swallow the
+    // receiver's opening signal for the next phase.  Best-effort — the final
+    // block was already acknowledged, so a failed write here is not an error.
     for _ in 0..3 {
-        let _ = send_code(writer, Code::Sb, is_tcp).await;
+        let _ = send_code(writer, Code::Sb, is_tcp, verbose).await;
     }
     Ok(())
 }
@@ -958,6 +1014,111 @@ async fn end_off_sender(
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    // Live interop against the real CCGMS receiver (compiled from
+    // mist64/ccgmsterm test/punter.c). Set CCGMS_RECV_BIN to the compiled
+    // binary path to run; otherwise skipped. The child speaks raw bytes over
+    // its stdio, so is_tcp=false.
+    #[tokio::test]
+    async fn ccgms_real_receiver_interop() {
+        let bin = match std::env::var("CCGMS_RECV_BIN") {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("CCGMS_RECV_BIN not set; skipping");
+                return;
+            }
+        };
+        use tokio::process::Command;
+        let mut child = Command::new(&bin)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn ccgms receiver");
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 7 + 1) as u8).collect();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            punter_send(
+                &mut from_child,
+                &mut to_child,
+                &data,
+                PunterFileType::Seq,
+                false,
+                false,
+                true,
+            ),
+        )
+        .await;
+        eprintln!("punter_send result: {:?}", res);
+        let _ = child.kill().await;
+    }
+
+    // Live interop the other direction: the gateway RECEIVES from CCGMS's real
+    // sender (punter_xmit, sends 300 bytes = i*7+1, type SEQ). Set
+    // CCGMS_SEND_BIN to the compiled sender binary path to run; else skipped.
+    #[tokio::test]
+    async fn ccgms_real_sender_interop() {
+        let bin = match std::env::var("CCGMS_SEND_BIN") {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("CCGMS_SEND_BIN not set; skipping");
+                return;
+            }
+        };
+        use tokio::process::Command;
+        let mut child = Command::new(&bin)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn ccgms sender");
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            punter_receive(&mut from_child, &mut to_child, false, false, true),
+        )
+        .await;
+        let _ = child.kill().await;
+        let expected: Vec<u8> = (0..300u32).map(|i| (i * 7 + 1) as u8).collect();
+        match res {
+            Ok(Ok((data, ft))) => {
+                eprintln!("punter_receive: {} bytes, type {:?}", data.len(), ft);
+                assert_eq!(data, expected, "received data must match CCGMS sender");
+                assert_eq!(ft, PunterFileType::Seq);
+            }
+            other => panic!("punter_receive failed: {:?}", other),
+        }
+    }
+
+    // — Handshake code wire format —
+
+    #[test]
+    fn handshake_codes_are_uppercase_on_the_wire() {
+        // Real C64 peers (confirmed against captured CCGMS) transmit the codes
+        // uppercase: GOO = 0x47 0x4F 0x4F, etc.  We must emit the same or a
+        // real receiver never recognises us.
+        assert_eq!(Code::Goo.bytes(), b"GOO");
+        assert_eq!(Code::Bad.bytes(), b"BAD");
+        assert_eq!(Code::Ack.bytes(), b"ACK");
+        assert_eq!(Code::Sb.bytes(), b"S/B");
+        assert_eq!(Code::Syn.bytes(), b"SYN");
+        assert_eq!(Code::Goo.bytes(), &[0x47, 0x4F, 0x4F]);
+    }
+
+    #[test]
+    fn from_window_matches_either_case() {
+        // We send uppercase, but tolerate a lowercase peer on receive.
+        assert_eq!(Code::from_window(b"GOO"), Some(Code::Goo));
+        assert_eq!(Code::from_window(b"goo"), Some(Code::Goo));
+        assert_eq!(Code::from_window(b"S/B"), Some(Code::Sb));
+        assert_eq!(Code::from_window(b"s/b"), Some(Code::Sb));
+        assert_eq!(Code::from_window(b"xyz"), None);
+    }
 
     // — Checksum vectors —
 
@@ -1306,7 +1467,7 @@ mod tests {
         let mut state = ReadState::default();
 
         let start = std::time::Instant::now();
-        let res = read_block(&mut rd, &mut wr, false, &mut state, 7, &t).await;
+        let res = read_block(&mut rd, &mut wr, false, &mut state, 7, &t, false).await;
         let elapsed = start.elapsed();
 
         assert!(res.is_err(), "silent peer must fail the block read");
@@ -1496,7 +1657,7 @@ mod tests {
         });
 
         let mut state = ReadState::default();
-        let got = read_block(&mut rb_rd, &mut rb_wr, false, &mut state, size, &t)
+        let got = read_block(&mut rb_rd, &mut rb_wr, false, &mut state, size, &t, false)
             .await
             .expect("read_block should recover from the stray ack");
         assert_eq!(got, real_for_assert);
@@ -1593,11 +1754,13 @@ mod reference_interop {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    const GOO: [u8; 3] = *b"goo";
-    const BAD: [u8; 3] = *b"bad";
-    const ACK: [u8; 3] = *b"ack";
-    const SB: [u8; 3] = *b"s/b";
-    const SYN: [u8; 3] = *b"syn";
+    // Uppercase: the bytes a real C64 puts on the wire (confirmed against
+    // captured CCGMS — `0x47 'G' 0x4F 'O' 0x4F 'O'`).  See `Code::bytes`.
+    const GOO: [u8; 3] = *b"GOO";
+    const BAD: [u8; 3] = *b"BAD";
+    const ACK: [u8; 3] = *b"ACK";
+    const SB: [u8; 3] = *b"S/B";
+    const SYN: [u8; 3] = *b"SYN";
 
     // Independently coded from the asm `checksum` routine: additive is a 16-bit
     // wrapping sum; cyclic XORs the byte into the low byte then rotates the
