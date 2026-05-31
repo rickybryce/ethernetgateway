@@ -1,0 +1,4 @@
+# Runtime artifacts and third-party code — not committed.
+run/
+*.log
+tcpser/
