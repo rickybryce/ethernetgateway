@@ -579,11 +579,15 @@ async fn receive_phase(
 /// read just fails the checksum upstream → BAD), or errors on abort / repeated
 /// failure.  Mirrors `recmodem` (`punter.src` line 379).
 ///
-/// `t.block_timeout` is a *per-byte* budget, mirroring `recmodem`'s timer,
-/// which `rcm5` clears before every character: a slow-but-steady sender
-/// completes as long as each byte arrives within `block_timeout` of the one
-/// before it.  The first missing byte ends the read; a short buffer simply
-/// fails the checksum upstream → BAD → resend.
+/// `t.block_timeout` is a *per-byte* budget for the bytes after the first,
+/// mirroring `recmodem`'s timer, which `rcm5` clears before every character:
+/// a slow-but-steady sender completes as long as each byte arrives within
+/// `block_timeout` of the one before it.  The first byte after our S/B uses a
+/// shorter `retry_interval` window so a peer that never saw the S/B is
+/// re-prompted promptly — this bounds an unresponsive peer to
+/// ~max_retries × retry_interval instead of × block_timeout, consistent with
+/// the handshake waits.  The first missing byte ends the read; a short buffer
+/// simply fails the checksum upstream → BAD → resend.
 async fn read_block(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -593,12 +597,16 @@ async fn read_block(
     t: &Tunables,
 ) -> Result<Vec<u8>, String> {
     let size = size as usize;
+    // First-byte wait: short enough to re-prompt a peer that missed our S/B,
+    // but never longer than the per-byte budget.
+    let first_wait = t.block_timeout.min(t.retry_interval.max(1));
     for _attempt in 0..=t.max_retries {
         send_code(writer, Code::Sb, is_tcp).await?;
         let mut buf: Vec<u8> = Vec::with_capacity(size);
-        for _ in 0..size {
+        for i in 0..size {
+            let wait = if i == 0 { first_wait } else { t.block_timeout };
             let r = tokio::time::timeout(
-                tokio::time::Duration::from_secs(t.block_timeout),
+                tokio::time::Duration::from_secs(wait),
                 nvt_read_byte(reader, is_tcp, state),
             )
             .await;
@@ -1286,6 +1294,34 @@ mod tests {
         let (out, ft) = round_trip_opts(&[], PunterFileType::Unknown, true).await;
         assert_eq!(out, Vec::<u8>::new());
         assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    #[tokio::test]
+    async fn read_block_gives_up_bounded_on_a_silent_peer() {
+        // A connected-but-silent peer must make read_block fail in about
+        // max_retries × retry_interval (the short first-byte window), not
+        // max_retries × block_timeout.
+        let t = Tunables {
+            negotiation_timeout: 5,
+            block_timeout: 5, // would dominate if the first byte used it
+            max_retries: 3,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let (_hold, mut rd) = duplex(64); // held open, never written → reads block
+        let (mut wr, _drain) = duplex(256);
+        let mut state = ReadState::default();
+
+        let start = std::time::Instant::now();
+        let res = read_block(&mut rd, &mut wr, false, &mut state, 7, &t).await;
+        let elapsed = start.elapsed();
+
+        assert!(res.is_err(), "silent peer must fail the block read");
+        // 4 attempts × ~1s ≈ 4s; comfortably under 4 × block_timeout (20s).
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "read_block took {elapsed:?}; first-byte wait should bound it"
+        );
     }
 
     #[tokio::test]
