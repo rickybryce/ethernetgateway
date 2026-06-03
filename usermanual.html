@@ -1460,17 +1460,23 @@ The honest reality: there's no way for the server to know for certain whether
 a given client actually follows these rules during an XMODEM/YMODEM transfer.
 Strict clients (PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT) do; many
 retro clients (IMP8, CCGMS, StrikeTerm, NovaTerm, some AltairDuino firmware)
-don't — they treat a TCP connection to port 23 as raw bytes. We pick a
-default based on the detected terminal type because it correlates well in
-practice:
+don't — they treat a TCP connection to port 23 as raw bytes. Rather than guess
+from the terminal type, the gateway keys the default on a signal it can
+actually observe: <em>whether the client engaged in telnet option negotiation
+during the opening handshake</em>. A client that answered our
+<code>WILL</code>/<code>DO</code> options (the strict clients above) gets IAC
+escaping <strong>on</strong>; a client that stayed silent — raw-TCP retro
+clients, and anything on a serial line, which skips negotiation entirely — gets
+it <strong>off</strong>. That observed behaviour correlates closely with the
+detected terminal type, so in practice the defaults line up like this:
 </p>
 
 <table>
-    <thead><tr><th>Terminal detected</th><th>Typical client</th><th>Auto default</th></tr></thead>
+    <thead><tr><th>Terminal (typical)</th><th>Typical client</th><th>Negotiates?</th><th>Auto default</th></tr></thead>
     <tbody>
-        <tr><td>ANSI</td><td>PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT, xterm</td><td>IAC <strong>on</strong></td></tr>
-        <tr><td>PETSCII</td><td>Commodore 64/128 (IMP8, CCGMS, StrikeTerm, NovaTerm)</td><td>IAC <strong>off</strong></td></tr>
-        <tr><td>ASCII</td><td>Dumb terminals, AltairDuino, custom hardware</td><td>IAC <strong>off</strong></td></tr>
+        <tr><td>ANSI</td><td>PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT, xterm</td><td>yes</td><td>IAC <strong>on</strong></td></tr>
+        <tr><td>PETSCII</td><td>Commodore 64/128 (IMP8, CCGMS, StrikeTerm, NovaTerm)</td><td>no (raw TCP)</td><td>IAC <strong>off</strong></td></tr>
+        <tr><td>ASCII</td><td>Dumb terminals, AltairDuino, custom hardware</td><td>no (raw TCP)</td><td>IAC <strong>off</strong></td></tr>
     </tbody>
 </table>
 
@@ -1484,7 +1490,8 @@ If the auto default is wrong for your client — the most visible symptom is
 consistent block-CRC failures in one direction — press <span class="kbd">I</span>
 on the File Transfer menu to flip both transforms and retry. The choice is
 session-local; it isn't persisted to <code>egateway.conf</code>, so the next
-connection from the same terminal type gets the same auto default again.
+connection from the same client gets the same auto default again (the client
+negotiates — or stays silent — the same way each time).
 </p>
 
 <aside class="note">
@@ -1688,7 +1695,7 @@ directions. Example invocations:
 <aside class="tip">
 <span class="label">Full Kermit reference</span>
 A standalone reference page <code>kermit.html</code> documents every
-G subcommand, the full capability table, all 17 <code>kermit_*</code>
+G subcommand, the full capability table, all 18 <code>kermit_*</code>
 configuration keys with defaults (including <code>kermit_idle_timeout</code>
 which accepts <code>0</code> to disable the server-mode disconnect),
 additional examples, and spec citations. See it on the project website
