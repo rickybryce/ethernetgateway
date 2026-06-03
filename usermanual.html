@@ -2620,7 +2620,7 @@ When a signal arrives:
     <li>An <code>AtomicBool</code> flag is set.</li>
     <li>A watcher thread fires a tokio <code>Notify</code> to wake the async runtime.</li>
     <li>Listeners stop accepting new connections.</li>
-    <li>A broadcast notification is sent to every active telnet and SSH session: "Server is shutting down. Goodbye!"</li>
+    <li>A broadcast notification is sent to every active telnet and SSH session: "Server shutting down. Goodbye."</li>
     <li>The serial modem thread exits cleanly, releasing the port.</li>
     <li>The GUI window closes automatically.</li>
     <li>The process exits.</li>
