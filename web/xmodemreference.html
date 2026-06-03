@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XMODEM Protocol Reference &mdash; Ethernet Gateway v0.6.0</title>
+    <meta name="description" content="Step-by-step reference for the Ethernet Gateway XMODEM family: how CRC-16 and checksum negotiation works, how 128-byte (XMODEM), 1024-byte (XMODEM-1K), and YMODEM block-0 transfers move data, for both uploads (gateway receives) and downloads (gateway sends).">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">XMODEM Protocol Reference</p>
+            <div class="hdr-version">v0.6.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">XMODEM</span>
+                <span class="hdr-badge">XMODEM-1K</span>
+                <span class="hdr-badge">YMODEM</span>
+                <span class="hdr-badge">CRC-16</span>
+                <span class="hdr-badge">Checksum</span>
+                <span class="hdr-badge">Commodore 64</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#bytes">Control Bytes</a>
+            <a href="#variants">Variants</a>
+            <a href="#crc">CRC vs Checksum</a>
+            <a href="#upload">Upload</a>
+            <a href="#download">Download</a>
+            <a href="#block">Block Anatomy</a>
+            <a href="#errors">Errors</a>
+            <a href="#tunables">Tunables</a>
+            <a href="kermit.html">Kermit</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">A protocol-level walkthrough of how the gateway negotiates and moves data with the XMODEM family &mdash; the same code path serves XMODEM, XMODEM-1K, and YMODEM.</p>
+
+                <p>
+                    XMODEM (Ward Christensen, 1977) is the simplest of the file-transfer
+                    protocols the gateway speaks: a <strong>stop-and-wait, block-at-a-time</strong>
+                    scheme where the sender transmits one fixed-size block, waits for the
+                    receiver to acknowledge it, and only then sends the next. Every retro
+                    terminal program ever written understands it, which is why it is the
+                    lowest common denominator for moving files to and from a Commodore 64,
+                    a CP/M box, or an AltairDuino.
+                </p>
+                <p>
+                    The gateway implements three members of the family on a single shared
+                    send/receive engine (<code>src/xmodem.rs</code>):
+                </p>
+                <table class="data-table">
+                    <tr><th>Variant</th><th>Block</th><th>Header byte</th><th>Adds</th></tr>
+                    <tr><td><strong>XMODEM</strong></td><td>128 bytes</td><td><code>SOH</code> (0x01)</td><td>The 1977 original.</td></tr>
+                    <tr><td><strong>XMODEM-1K</strong></td><td>1024 bytes</td><td><code>STX</code> (0x02)</td><td>8&times; bigger blocks &rarr; less per-block overhead.</td></tr>
+                    <tr><td><strong>YMODEM</strong></td><td>1024 bytes</td><td><code>STX</code> + a block 0</td><td>A <code>SOH</code> &ldquo;block 0&rdquo; carrying filename, size, and mtime.</td></tr>
+                </table>
+                <p>
+                    Two things are negotiated at the start of every transfer and are worth
+                    keeping straight: the <strong>error-check method</strong> (CRC-16 or the
+                    older 8-bit checksum) and, on receive, the <strong>block size</strong>
+                    (decided per block from the header byte). Both are covered in detail below.
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Who drives what:</strong> in XMODEM the <em>receiver</em> always
+                    speaks first &mdash; it pokes the sender with a request byte to kick the
+                    transfer off and to choose the error-check method. That makes the role
+                    of &ldquo;gateway as receiver&rdquo; (upload) and &ldquo;gateway as
+                    sender&rdquo; (download) genuinely different, so they are documented
+                    separately.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CONTROL BYTES                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="bytes">
+                <div class="section-title">Control Bytes</div>
+                <p class="intro">The handful of bytes that drive the handshake.</p>
+                <table class="data-table">
+                    <tr><th>Byte</th><th>Hex</th><th>Name</th><th>Meaning</th></tr>
+                    <tr><td><code>SOH</code></td><td>0x01</td><td>Start of Header</td><td>A 128-byte block follows.</td></tr>
+                    <tr><td><code>STX</code></td><td>0x02</td><td>Start of Text</td><td>A 1024-byte block follows.</td></tr>
+                    <tr><td><code>EOT</code></td><td>0x04</td><td>End of Transmission</td><td>No more data &mdash; the file is complete.</td></tr>
+                    <tr><td><code>ACK</code></td><td>0x06</td><td>Acknowledge</td><td>Block received intact; send the next one.</td></tr>
+                    <tr><td><code>NAK</code></td><td>0x15</td><td>Negative Acknowledge</td><td>Bad block (or &ldquo;start in checksum mode&rdquo;); resend.</td></tr>
+                    <tr><td><code>C</code></td><td>0x43</td><td>(ASCII &lsquo;C&rsquo;)</td><td>Receiver request: &ldquo;start, and use CRC-16.&rdquo;</td></tr>
+                    <tr><td><code>CAN</code></td><td>0x18</td><td>Cancel</td><td>Two in a row aborts the transfer.</td></tr>
+                    <tr><td><code>SUB</code></td><td>0x1A</td><td>Substitute</td><td>Padding for the final short block.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- VARIANTS                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="variants">
+                <div class="section-title">The Three Variants</div>
+
+                <div class="cat">XMODEM (128-byte blocks)</div>
+                <p class="dim-text">
+                    The original. Each block is announced with <code>SOH</code> and carries
+                    exactly 128 bytes of payload. Small blocks mean a corrupted block is
+                    cheap to resend, which is why it survives on noisy links, but the
+                    per-block ACK round-trip caps throughput.
+                </p>
+
+                <div class="cat">XMODEM-1K (1024-byte blocks)</div>
+                <p class="dim-text">
+                    Identical framing, but each block is announced with <code>STX</code> and
+                    carries 1024 bytes &mdash; eight times the payload for the same header and
+                    one ACK round-trip, so it is markedly faster on a clean link. The two
+                    sizes can be <strong>mixed within one transfer</strong>: the receiver
+                    branches on the header byte (<code>SOH</code> vs <code>STX</code>) for
+                    every block, so a sender may stream 1K blocks and drop to a 128-byte
+                    block for a short final chunk.
+                </p>
+
+                <div class="cat">YMODEM (block 0 + 1K data)</div>
+                <p class="dim-text">
+                    XMODEM-1K plus metadata. Before the data, the sender transmits a
+                    <strong>block 0</strong> &mdash; an <code>SOH</code> block whose block
+                    number is <code>0x00</code> (complement <code>0xFF</code>) &mdash; whose
+                    128-byte payload holds the filename, the exact file size, and optionally
+                    the modification time, all NUL-separated. Because the receiver learns the
+                    real size up front, it can truncate the file to the byte rather than
+                    guessing where the padding starts &mdash; which is the only way to receive
+                    a file that legitimately <em>ends</em> in <code>0x1A</code> bytes (many
+                    binaries do) without corruption.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CRC vs CHECKSUM                               -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="crc">
+                <div class="section-title">CRC-16 vs. Checksum</div>
+                <p class="intro">Two ways to detect a corrupted block &mdash; negotiated by the receiver's very first byte.</p>
+
+                <table class="data-table">
+                    <tr><th></th><th>Checksum (1977)</th><th>CRC-16 (later)</th></tr>
+                    <tr><td>Trailer size</td><td><strong>1 byte</strong></td><td><strong>2 bytes</strong></td></tr>
+                    <tr><td>Computation</td><td>Sum of the data bytes, mod 256</td><td>CRC-16/CCITT, polynomial <code>0x1021</code></td></tr>
+                    <tr><td>Requested by</td><td>Receiver sends <code>NAK</code> (0x15)</td><td>Receiver sends <code>C</code> (0x43)</td></tr>
+                    <tr><td>Catches</td><td>Most single-byte errors</td><td>Far more multi-byte / burst errors</td></tr>
+                </table>
+
+                <p>
+                    The choice is made entirely by <strong>which byte the receiver sends to
+                    start the transfer</strong>. A <code>C</code> says &ldquo;I speak CRC-16,
+                    please use it&rdquo;; a <code>NAK</code> says &ldquo;fall back to the
+                    plain checksum.&rdquo; CRC is strongly preferred &mdash; it catches error
+                    patterns a simple sum misses &mdash; so the gateway always <em>asks</em>
+                    for CRC first and only drops to checksum for genuinely ancient senders
+                    that never implemented it.
+                </p>
+
+                <div class="callout callout-tip">
+                    <strong>Auto-detect safety net:</strong> a few vintage senders ignore the
+                    <code>C</code> request and just start sending checksum blocks anyway. On
+                    the <em>first</em> block the gateway validates the trailer in the mode it
+                    asked for and, if that fails, re-checks it under the other method. If the
+                    alternate matches, it silently locks the whole session to that method
+                    (pushing back the one stray trailer byte). So a CRC request that meets a
+                    checksum sender still completes cleanly.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- UPLOAD                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="upload">
+                <div class="section-title">Upload &mdash; Gateway as Receiver</div>
+                <p class="intro">You send a file from your terminal <em>to</em> the gateway. The gateway is the receiver, so it drives the handshake.</p>
+
+                <div class="cat">Step 1 &mdash; Pick the file and protocol</div>
+                <p class="dim-text">
+                    From the File Transfer menu press <strong>U</strong>, type a filename,
+                    and choose <strong>X</strong> on the upload-protocol screen. The single
+                    <strong>X</strong> entry accepts plain XMODEM, XMODEM-1K, and YMODEM &mdash;
+                    the gateway auto-detects which one your terminal actually uses.
+                </p>
+                <div class="menu-block">
+                    <div class="sep">------------------------------------</div>
+                    <div>&nbsp;&nbsp;<span class="title">SELECT UPLOAD PROTOCOL</span></div>
+                    <div class="sep">------------------------------------</div>
+                    <br>
+                    <div>&nbsp;&nbsp;<span class="key">X</span>&nbsp;&nbsp;<span class="label">XMODEM/YMODEM&nbsp;&nbsp;128/1K, auto</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">Z</span>&nbsp;&nbsp;<span class="label">ZMODEM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;1K, autostart</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">K</span>&nbsp;&nbsp;<span class="label">KERMIT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;any flavor, auto</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">P</span>&nbsp;&nbsp;<span class="label">PUNTER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;C1 CCGMS/Novaterm</span></div>
+                </div>
+
+                <div class="cat">Step 2 &mdash; Negotiate the error-check method</div>
+                <div class="instructions">
+                    <h3>The gateway pokes the sender</h3>
+                    <ol>
+                        <li>The gateway immediately sends <code>C</code> (0x43) to request <strong>CRC-16</strong>, and repeats it on an interval (<code>xmodem_negotiation_retry_interval</code>, default 7&nbsp;s) so a sender that starts late still hears it.</li>
+                        <li>If the sender begins transmitting before roughly <strong>two-thirds</strong> of the negotiation window (<code>xmodem_negotiation_timeout</code>, default 45&nbsp;s) elapses, the transfer proceeds in CRC mode.</li>
+                        <li>If that window passes with no block, the gateway switches to sending <code>NAK</code> (0x15) for the remainder &mdash; the <strong>checksum</strong> request &mdash; rescuing pre-CRC clients.</li>
+                        <li>If the whole window expires with no response, the gateway gives up with a negotiation-timeout error.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 3 &mdash; Read the first block (and discover the variant)</div>
+                <div class="instructions">
+                    <h3>The first byte decides everything</h3>
+                    <ol>
+                        <li><code>STX</code> (0x02) &rarr; this is a <strong>1024-byte</strong> block (XMODEM-1K).</li>
+                        <li><code>SOH</code> (0x01) with block number <code>0x00</code> and complement <code>0xFF</code> &rarr; this is a <strong>YMODEM block 0</strong>. The gateway parses the filename + size, validates its CRC, sends <code>ACK</code>, then sends a second <code>C</code> to start the data phase.</li>
+                        <li><code>SOH</code> (0x01) with any other block number &rarr; an ordinary <strong>128-byte</strong> data block.</li>
+                        <li>On this first data block the <strong>auto-detect</strong> check (above) runs: if the trailer doesn't validate in the requested method, the other method is tried and the session locks to whichever matches.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 4 &mdash; Acknowledge each block, in order</div>
+                <div class="instructions">
+                    <h3>The stop-and-wait loop</h3>
+                    <ol>
+                        <li>For every block the gateway reads: header byte, block number, its one's-complement, the data (128 or 1024 bytes per the header), then the trailer (2 CRC bytes, or 1 checksum byte).</li>
+                        <li>It validates three things: the complement matches the block number, the CRC/checksum is correct, and the block number is the one expected next.</li>
+                        <li>All good &rarr; the gateway sends <code>ACK</code> (0x06) and the sender advances to the next block.</li>
+                        <li>Anything wrong &rarr; the gateway sends <code>NAK</code> (0x15) and the sender <strong>resends the same block</strong>.</li>
+                        <li>A re-sent copy of an already-accepted block (its number matches one of the last two seen) is simply <code>ACK</code>'d again without being stored &mdash; this recovers from a lost <code>ACK</code> without duplicating data.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 5 &mdash; End of transfer</div>
+                <div class="instructions">
+                    <h3>EOT and saving</h3>
+                    <ol>
+                        <li>When the file is done the sender transmits <code>EOT</code> (0x04); the gateway answers with a final <code>ACK</code>.</li>
+                        <li><strong>YMODEM only:</strong> the gateway then sends one more <code>C</code> and consumes the end-of-batch &ldquo;null block 0&rdquo; (an all-zero filename) that signals &ldquo;no more files,&rdquo; and <code>ACK</code>s it.</li>
+                        <li>The file is written to the transfer directory. <strong>YMODEM</strong> truncates to the exact size from block 0; <strong>plain XMODEM / XMODEM-1K</strong> have no size field, so trailing <code>SUB</code> (0x1A) padding is stripped.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DOWNLOAD                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="download">
+                <div class="section-title">Download &mdash; Gateway as Sender</div>
+                <p class="intro">You pull a file <em>from</em> the gateway to your terminal. Here the gateway is the sender, so it waits for your terminal to drive the handshake.</p>
+
+                <div class="cat">Step 1 &mdash; Pick the file and exact protocol</div>
+                <p class="dim-text">
+                    Press <strong>D</strong>, pick the file from the numbered list, then
+                    choose the protocol. On download you select the variant explicitly,
+                    because the gateway must commit to a block size before it starts sending.
+                </p>
+                <div class="menu-block">
+                    <div class="sep">------------------------------------</div>
+                    <div>&nbsp;&nbsp;<span class="title">SELECT PROTOCOL</span></div>
+                    <div class="sep">------------------------------------</div>
+                    <br>
+                    <div>&nbsp;&nbsp;<span class="key">X</span>&nbsp;&nbsp;<span class="label">XMODEM&nbsp;&nbsp;&nbsp;&nbsp;128-byte blocks</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">1</span>&nbsp;&nbsp;<span class="label">XMODEM-1K&nbsp;1024-byte blocks</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">Y</span>&nbsp;&nbsp;<span class="label">YMODEM&nbsp;&nbsp;&nbsp;&nbsp;name+size hdr, 1K</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">Z</span>&nbsp;&nbsp;<span class="label">ZMODEM&nbsp;&nbsp;&nbsp;&nbsp;autostart, 1K</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">K</span>&nbsp;&nbsp;<span class="label">KERMIT&nbsp;&nbsp;&nbsp;&nbsp;any flavor, auto</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">P</span>&nbsp;&nbsp;<span class="label">PUNTER&nbsp;&nbsp;&nbsp;&nbsp;C1 CCGMS/Novaterm</span></div>
+                </div>
+
+                <div class="cat">Step 2 &mdash; Wait for the receiver's mode request</div>
+                <div class="instructions">
+                    <h3>The receiver chooses CRC or checksum</h3>
+                    <ol>
+                        <li>The gateway waits (up to <code>xmodem_negotiation_timeout</code>, default 45&nbsp;s) for your terminal to send its opening byte.</li>
+                        <li><code>C</code> (0x43) &rarr; the gateway sends every trailer as a <strong>2-byte CRC-16</strong>.</li>
+                        <li><code>NAK</code> (0x15) &rarr; the gateway sends every trailer as a <strong>1-byte checksum</strong>.</li>
+                        <li>If neither arrives in time, the gateway aborts with a negotiation-timeout error.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 3 &mdash; (YMODEM only) Send block 0</div>
+                <div class="instructions">
+                    <h3>Announce the filename and size</h3>
+                    <ol>
+                        <li>For YMODEM the gateway first sends <strong>block 0</strong>: an <code>SOH</code> block, number <code>0x00</code>, complement <code>0xFF</code>, carrying the filename and exact byte size.</li>
+                        <li>It waits for the receiver's <code>ACK</code>, then a <code>C</code>, which together start the data phase. Plain XMODEM and XMODEM-1K skip this step entirely.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 4 &mdash; Stream the data blocks</div>
+                <div class="instructions">
+                    <h3>One block, one ACK, repeat</h3>
+                    <ol>
+                        <li>Blocks are numbered from <strong>1</strong>, wrapping <code>255 &rarr; 0 &rarr; 1</code>&hellip; on long files. Each is: header, block number, its complement, the data, then the trailer in the negotiated method.</li>
+                        <li><strong>XMODEM (X):</strong> every block is a 128-byte <code>SOH</code> block.</li>
+                        <li><strong>XMODEM-1K (1):</strong> blocks are 1024-byte <code>STX</code> blocks; the gateway may drop to a 128-byte <code>SOH</code> block for a short <em>final</em> chunk rather than padding a whole 1K block.</li>
+                        <li>The last block is padded to its full size with <code>SUB</code> (0x1A) when the file doesn't end on a block boundary.</li>
+                        <li>After sending a block the gateway waits for <code>ACK</code>. A <code>NAK</code> (or a read timeout, <code>xmodem_block_timeout</code>, default 20&nbsp;s) makes it <strong>resend the same block</strong>, up to <code>xmodem_max_retries</code> (default 10) times.</li>
+                    </ol>
+                </div>
+
+                <div class="cat">Step 5 &mdash; End of transfer</div>
+                <div class="instructions">
+                    <h3>EOT handshake</h3>
+                    <ol>
+                        <li>After the last data block the gateway sends <code>EOT</code> (0x04).</li>
+                        <li>Per the classic spec a receiver may <code>NAK</code> the first <code>EOT</code>; the gateway resends it and completes once it sees the <code>ACK</code>.</li>
+                        <li>The transfer summary (bytes / blocks / elapsed time) is then shown.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- BLOCK ANATOMY                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="block">
+                <div class="section-title">Block Anatomy</div>
+                <p class="intro">Exactly what goes on the wire for one block.</p>
+
+                <table class="data-table">
+                    <tr><th>Field</th><th>Bytes</th><th>Notes</th></tr>
+                    <tr><td>Header</td><td>1</td><td><code>SOH</code> (128-byte block) or <code>STX</code> (1024-byte block)</td></tr>
+                    <tr><td>Block number</td><td>1</td><td>1, 2, 3 &hellip; wrapping at 256. (Block 0 = YMODEM header.)</td></tr>
+                    <tr><td>Complement</td><td>1</td><td>One's-complement of the block number (<code>255 - n</code>) &mdash; a cheap header sanity check.</td></tr>
+                    <tr><td>Data</td><td>128 or 1024</td><td>The payload, padded with <code>SUB</code> (0x1A) on the final short block.</td></tr>
+                    <tr><td>Trailer</td><td>2 (CRC) or 1 (checksum)</td><td>CRC-16/CCITT (poly <code>0x1021</code>), or the 8-bit sum, per negotiation.</td></tr>
+                </table>
+
+                <p>So a single CRC-mode block looks like this on the wire:</p>
+                <pre><code><span class="output-text">128-byte CRC block (133 bytes total):</span>
+  01  3C  C3  [ ...128 data bytes... ]  9A  7F
+  ^   ^   ^                             ^^^^^^
+  SOH #60 ~#60                          CRC-16
+
+<span class="output-text">128-byte checksum block (132 bytes total):</span>
+  01  3C  C3  [ ...128 data bytes... ]  8E
+  ^   ^   ^                             ^^
+  SOH #60 ~#60                          sum
+
+<span class="output-text">1024-byte CRC block (1029 bytes total):</span>
+  02  05  FA  [ ...1024 data bytes... ]  CRC CRC
+  ^   ^   ^
+  STX #5  ~#5</code></pre>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ERRORS                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="errors">
+                <div class="section-title">Error Handling &amp; Limits</div>
+                <table class="data-table">
+                    <tr><th>Situation</th><th>What happens</th></tr>
+                    <tr><td>Bad CRC / checksum, bad complement, or wrong block number</td><td>Receiver sends <code>NAK</code>; sender resends the same block.</td></tr>
+                    <tr><td>Lost <code>ACK</code> (duplicate block arrives)</td><td>The duplicate is <code>ACK</code>'d again but not stored, keeping the streams in sync.</td></tr>
+                    <tr><td>No response within the block timeout</td><td>The waiting side retries, up to <code>xmodem_max_retries</code> times.</td></tr>
+                    <tr><td>Too many retries</td><td>The transfer is cancelled with three <code>CAN</code> (0x18) bytes.</td></tr>
+                    <tr><td>Deliberate abort</td><td><strong>Two</strong> consecutive <code>CAN</code> bytes from either side abort the session (a lone <code>CAN</code> is treated as line noise).</td></tr>
+                    <tr><td>File exceeds 8&nbsp;MB</td><td>The receiver aborts with three <code>CAN</code> bytes.</td></tr>
+                    <tr><td>Telnet binary data</td><td>Over telnet, <code>0xFF</code> (IAC) and bare <code>CR</code> are escaped per RFC&nbsp;854 when IAC mode is on &mdash; toggle it with <strong>I</strong> on the File Transfer menu. SSH and serial links skip this.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TUNABLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="tunables">
+                <div class="section-title">Tunables</div>
+                <p class="intro">One shared set of keys covers XMODEM, XMODEM-1K, and YMODEM (they share the code path). Editable from the telnet <em>Configuration &rarr; File Transfer</em> menu, the GUI / web <em>File Transfer &rarr; More&hellip;</em> popup, or <code>egateway.conf</code> &mdash; changes apply on the next transfer, no restart.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>xmodem_negotiation_timeout</code></td><td>45 s</td><td>How long to wait for the far end to start.</td></tr>
+                    <tr><td><code>xmodem_negotiation_retry_interval</code></td><td>7 s</td><td>Gap between <code>C</code> / <code>NAK</code> pokes during the handshake.</td></tr>
+                    <tr><td><code>xmodem_block_timeout</code></td><td>20 s</td><td>Per-block read deadline once the transfer is live.</td></tr>
+                    <tr><td><code>xmodem_max_retries</code></td><td>10</td><td>Resends of one block before giving up.</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong>See also:</strong> the
+                    <a href="index.html#file-transfer">File Transfer section of the User Manual</a>
+                    for the menu walkthrough, and the
+                    <a href="kermit.html">Kermit Reference</a> for the
+                    7-bit-clean alternative. ZMODEM is the faster choice on clean modern
+                    links; XMODEM is the universal fallback.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

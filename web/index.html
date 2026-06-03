@@ -873,6 +873,14 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Padding byte</td><td>0x1A (SUB), stripped on receive</td></tr>
                 </table>
 
+                <div class="callout callout-info">
+                    <strong>XMODEM reference:</strong>
+                    For a step-by-step account of how negotiation works and how data moves
+                    on the wire &mdash; CRC-16 vs. checksum, 128-byte / 1K / YMODEM framing,
+                    and the full handshake for both uploads and downloads &mdash; see the
+                    <a href="xmodemreference.html"><strong>XMODEM Protocol Reference page</strong></a>.
+                </div>
+
                 <div class="cat">IAC &amp; CR-NUL Transforms</div>
                 <p class="dim-text">
                     Telnet NVT (RFC 854) reserves byte 0xFF as the IAC command marker
@@ -1804,6 +1812,17 @@ ssh_gateway_auth = password</span></code></pre>
                 <p class="intro">Companion documents that go deeper than this manual.</p>
 
                 <div class="compat-grid" style="grid-template-columns: 1fr 1fr;">
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM Protocol Reference</a></h3>
+                        <p>
+                            A step-by-step walkthrough of the XMODEM family: how the
+                            receiver negotiates CRC-16 vs. the older checksum, how 128-byte
+                            (XMODEM), 1024-byte (XMODEM-1K), and YMODEM block-0 transfers are
+                            framed, and the full handshake for both uploads (gateway
+                            receives) and downloads (gateway sends), including block anatomy,
+                            error handling, and the timeout tunables.
+                        </p>
+                    </div>
                     <div class="compat-card">
                         <h3><a href="kermit.html">Kermit Protocol Reference</a></h3>
                         <p>
