@@ -4364,6 +4364,368 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ─── lrzsz interop: recorded-wire replay ─────────────────
+    //
+    // Mirrors the ZMODEM recorded-wire replay in src/zmodem.rs.  The
+    // fixtures in `tests/fixtures/xmodem_*.bin` / `ymodem_*.bin` were
+    // produced once by `record_lrzsz_xmodem_fixtures` (an `#[ignore]`
+    // test that drives real `sx`/`sb`) and are checked in, so these
+    // replay tests run in CI on every platform with NO lrzsz needed.
+    //
+    // Why this catches what the in-process round-trips can't: a pure
+    // round-trip uses our sender AND our receiver, so a shared framing
+    // bug stays green on both sides.  Replaying bytes a *real* sender
+    // emitted exposes any divergence between our decoder and the wire
+    // format lrzsz actually produces.  The live `sx`/`sb` `#[ignore]`
+    // tests above remain the ground-truth source (and the only cover
+    // for our SEND path, which needs an interactive peer); these
+    // fixtures lock the RECEIVE path deterministically.
+    //
+    // Both XMODEM modes are covered: CRC (receiver requests with 'C')
+    // and checksum (sender produced 128-byte blocks with a 1-byte
+    // sum).  The replay receiver always opens with 'C'; for the
+    // checksum fixture its first-block auto-detect (receive_block_body
+    // `auto_detect=true`) recognises the sum, locks the session to
+    // checksum, and pushes back the stray trailer byte — so a single
+    // prefill path decodes both.
+
+    /// Drive `xmodem_receive` against a pre-recorded sender-side byte
+    /// stream.  The capture is prefilled into the receiver's reader and
+    /// the write half dropped so the receiver sees EOF after the last
+    /// byte; our outbound 'C'/NAK/ACK responses are drained and
+    /// discarded, since the capture already contains every block the
+    /// original sender produced.
+    async fn replay_xmodem_capture(
+        capture: &[u8],
+    ) -> Result<(Vec<u8>, Option<YmodemReceiveMeta>), String> {
+        let (mut inbound_writer, mut inbound_reader) =
+            tokio::io::duplex(capture.len() + 8192);
+        inbound_writer
+            .write_all(capture)
+            .await
+            .expect("prefill inbound");
+        drop(inbound_writer);
+
+        let (mut discard_reader, mut outbound_writer) =
+            tokio::io::duplex(16 * 1024);
+        let drain_task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match discard_reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        });
+
+        let result =
+            xmodem_receive(&mut inbound_reader, &mut outbound_writer, false, false, false)
+                .await;
+        drop(outbound_writer);
+        let _ = drain_task.await;
+        result
+    }
+
+    #[tokio::test]
+    async fn test_lrzsz_replay_xmodem_crc() {
+        let capture = include_bytes!("../tests/fixtures/xmodem_crc.bin");
+        let expected = include_bytes!("../tests/fixtures/xmodem_crc.payload");
+        let (mut got, meta) =
+            replay_xmodem_capture(capture).await.expect("CRC replay failed");
+        while got.last() == Some(&SUB) {
+            got.pop();
+        }
+        assert_eq!(got, expected, "CRC capture must decode to the original payload");
+        assert!(meta.is_none(), "plain XMODEM yields no YMODEM block-0 metadata");
+    }
+
+    #[tokio::test]
+    async fn test_lrzsz_replay_xmodem_checksum() {
+        // The receiver opens with 'C'; first-block auto-detect locks it
+        // to checksum mode against this real `sx` 1-byte-sum stream.
+        let capture = include_bytes!("../tests/fixtures/xmodem_checksum.bin");
+        let expected = include_bytes!("../tests/fixtures/xmodem_checksum.payload");
+        let (mut got, _) =
+            replay_xmodem_capture(capture).await.expect("checksum replay failed");
+        while got.last() == Some(&SUB) {
+            got.pop();
+        }
+        assert_eq!(
+            got, expected,
+            "checksum capture must decode to the original payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lrzsz_replay_xmodem_1k() {
+        let capture = include_bytes!("../tests/fixtures/xmodem_1k.bin");
+        let expected = include_bytes!("../tests/fixtures/xmodem_1k.payload");
+        let (mut got, _) =
+            replay_xmodem_capture(capture).await.expect("1K replay failed");
+        while got.last() == Some(&SUB) {
+            got.pop();
+        }
+        assert_eq!(got, expected, "STX/1K capture must decode to the original payload");
+    }
+
+    #[tokio::test]
+    async fn test_lrzsz_replay_ymodem() {
+        let capture = include_bytes!("../tests/fixtures/ymodem_single.bin");
+        let expected = include_bytes!("../tests/fixtures/ymodem_single.payload");
+        let (got, meta) =
+            replay_xmodem_capture(capture).await.expect("YMODEM replay failed");
+        // YMODEM truncates by the block-0 size, so the trailing 0x1A
+        // bytes survive — no SUB stripping, exact compare.
+        assert_eq!(got, expected, "YMODEM capture must decode to the original payload");
+        assert_eq!(
+            meta.expect("YMODEM must surface block-0 metadata").size,
+            Some(expected.len() as u64),
+            "YMODEM block-0 size must match the payload length",
+        );
+    }
+
+    /// Capture the wire bytes a real `sx` emits for a plain-XMODEM
+    /// transfer.  Hand-rolls the lock-step receiver side (send the mode
+    /// trigger, then ACK each block) so we can force checksum mode
+    /// (trigger = NAK) as well as CRC (trigger = 'C') — our production
+    /// `xmodem_receive` always opens with 'C', so it can't elicit a
+    /// checksum stream from `sx`.  `extra_args` lets `-k` force 1K/STX
+    /// blocks.  Returns only the sender → receiver bytes (what replay
+    /// feeds back in).
+    #[cfg(unix)]
+    async fn capture_plain_xmodem(
+        extra_args: &[&str],
+        trigger: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "xmodem_rec_{:02x}_{}",
+            trigger,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let payload_path = tmp.join("payload.bin");
+        std::fs::write(&payload_path, payload).unwrap();
+
+        let mut cmd = Command::new("sx");
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        let mut sx = cmd
+            .arg(&payload_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn sx");
+
+        let mut sx_stdin = sx.stdin.take().unwrap();
+        let mut sx_stdout = sx.stdout.take().unwrap();
+
+        let trailer_len = if trigger == CRC_REQUEST { 2 } else { 1 };
+        let mut captured: Vec<u8> = Vec::new();
+
+        // Request the mode; sx (stop-and-wait) sends block 1 in response.
+        sx_stdin.write_all(&[trigger]).await.expect("send trigger");
+
+        let mut hdr = [0u8; 1];
+        loop {
+            sx_stdout.read_exact(&mut hdr).await.expect("read header");
+            captured.push(hdr[0]);
+            match hdr[0] {
+                EOT => {
+                    sx_stdin.write_all(&[ACK]).await.expect("ack eot");
+                    break;
+                }
+                SOH | STX => {
+                    let block_size = if hdr[0] == STX {
+                        XMODEM_1K_BLOCK_SIZE
+                    } else {
+                        XMODEM_BLOCK_SIZE
+                    };
+                    // num + ~num + data + trailer
+                    let mut rest = vec![0u8; 2 + block_size + trailer_len];
+                    sx_stdout
+                        .read_exact(&mut rest)
+                        .await
+                        .expect("read block body");
+                    captured.extend_from_slice(&rest);
+                    sx_stdin.write_all(&[ACK]).await.expect("ack block");
+                }
+                other => panic!("unexpected header byte 0x{:02X} from sx", other),
+            }
+        }
+
+        let _ = sx.wait().await;
+        let _ = std::fs::remove_dir_all(&tmp);
+        captured
+    }
+
+    /// Refresh the checked-in lrzsz XMODEM/YMODEM fixtures.  Two-step
+    /// opt-in mirrors the ZMODEM recorder: `#[ignore]` keeps it off the
+    /// default pass, and the env-var keeps it off bulk `--ignored` runs
+    /// where it would silently rewrite committed fixtures.  Run with:
+    ///
+    ///   XMODEM_RECORD_FIXTURES=1 cargo test --release \
+    ///       record_lrzsz_xmodem_fixtures -- --ignored --exact --nocapture
+    ///
+    /// Each capture is round-tripped through `replay_xmodem_capture`
+    /// before it's written, so a buggy recorder fails here rather than
+    /// committing a bad fixture.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn record_lrzsz_xmodem_fixtures() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        if std::env::var("XMODEM_RECORD_FIXTURES").is_err() {
+            eprintln!(
+                "record_lrzsz_xmodem_fixtures: skipped (set XMODEM_RECORD_FIXTURES=1 to refresh)"
+            );
+            return;
+        }
+
+        for bin in ["sx", "sb"] {
+            if Command::new(bin)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|s| !s.success())
+                .unwrap_or(true)
+            {
+                panic!("{} (lrzsz) not found on PATH — install lrzsz before refreshing fixtures", bin);
+            }
+        }
+
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let fixtures_dir =
+            std::path::Path::new(&manifest_dir).join("tests/fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+
+        // Sanity-check a plain-XMODEM capture by replaying it through
+        // our real receiver before committing it.
+        async fn check_plain(capture: &[u8], payload: &[u8], base: &str) {
+            let (mut got, _) = replay_xmodem_capture(capture)
+                .await
+                .unwrap_or_else(|e| panic!("{}: replay failed: {}", base, e));
+            while got.last() == Some(&SUB) {
+                got.pop();
+            }
+            assert_eq!(got, payload, "{}: capture must round-trip to payload", base);
+        }
+
+        // ── XMODEM CRC: every byte value, two exact 128-byte blocks ──
+        let crc_payload: Vec<u8> = (0u8..=255).collect();
+        let crc_cap = capture_plain_xmodem(&[], CRC_REQUEST, &crc_payload).await;
+        check_plain(&crc_cap, &crc_payload, "xmodem_crc").await;
+
+        // ── XMODEM checksum: varied bytes, partial final block (SUB
+        //    padding) — and a 1-byte sum trailer the receiver must
+        //    auto-detect from a 'C' open. ──
+        let csum_payload: Vec<u8> = (0..200u32)
+            .map(|i| (i.wrapping_mul(13).wrapping_add(5) & 0xFF) as u8)
+            .collect();
+        let csum_cap = capture_plain_xmodem(&[], NAK, &csum_payload).await;
+        check_plain(&csum_cap, &csum_payload, "xmodem_checksum").await;
+
+        // ── XMODEM-1K: STX/1024-byte blocks (sx -k), three exact 1K ──
+        let onek_payload: Vec<u8> = (0..3072u32)
+            .map(|i| (i.wrapping_mul(11) & 0xFF) as u8)
+            .collect();
+        let onek_cap = capture_plain_xmodem(&["-k"], CRC_REQUEST, &onek_payload).await;
+        check_plain(&onek_cap, &onek_payload, "xmodem_1k").await;
+
+        // ── YMODEM single file: block-0 (name + size) then data.  The
+        //    block-0 / end-of-batch handshake is interactive, so drive
+        //    it with our real receiver and tee the inbound stream. ──
+        let ym_payload: Vec<u8> = {
+            let mut v: Vec<u8> = (0..500u32)
+                .map(|i| (i.wrapping_mul(19) & 0xFF) as u8)
+                .collect();
+            // End in 0x1A to prove size-based truncation (not SUB strip).
+            v.push(0x1A);
+            v.push(0x1A);
+            v
+        };
+        let ym_cap = {
+            let tmp = std::env::temp_dir()
+                .join(format!("ymodem_rec_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            // sb sends this basename as the YMODEM filename.
+            let payload_path = tmp.join("ymodem_fixture.bin");
+            std::fs::write(&payload_path, &ym_payload).unwrap();
+
+            let mut sb = Command::new("sb")
+                .arg(&payload_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to spawn sb");
+            let mut sb_stdin = sb.stdin.take().unwrap();
+            let mut sb_stdout = sb.stdout.take().unwrap();
+
+            let (mut tee_write, mut tee_read) = tokio::io::duplex(1 << 20);
+            let tee_task = tokio::spawn(async move {
+                let mut captured: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match sb_stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            captured.extend_from_slice(&buf[..n]);
+                            if tee_write.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                captured
+            });
+
+            let recv_result =
+                xmodem_receive(&mut tee_read, &mut sb_stdin, false, false, false).await;
+            let _ = sb.wait().await;
+            let captured = tee_task.await.unwrap();
+            let (received, meta) =
+                recv_result.expect("xmodem_receive against sb failed");
+            assert_eq!(received, ym_payload, "ymodem: capture must round-trip");
+            assert_eq!(
+                meta.and_then(|m| m.size),
+                Some(ym_payload.len() as u64),
+                "ymodem: block-0 size must match"
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+            captured
+        };
+
+        for (base, cap, payload) in [
+            ("xmodem_crc", &crc_cap, &crc_payload),
+            ("xmodem_checksum", &csum_cap, &csum_payload),
+            ("xmodem_1k", &onek_cap, &onek_payload),
+            ("ymodem_single", &ym_cap, &ym_payload),
+        ] {
+            std::fs::write(fixtures_dir.join(format!("{}.bin", base)), cap).unwrap();
+            std::fs::write(fixtures_dir.join(format!("{}.payload", base)), payload)
+                .unwrap();
+            println!(
+                "  recorded {}.bin ({} wire bytes for {} payload bytes)",
+                base,
+                cap.len(),
+                payload.len()
+            );
+        }
+    }
+
     // ─── proptest fuzz: parse_ymodem_block_zero_payload ─────────
     //
     // The block-0 parser sees adversarial bytes from any sender that

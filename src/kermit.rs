@@ -11258,6 +11258,17 @@ mod tests {
     // shipped: stop-and-wait, sliding-window, and streaming.  Each
     // configures `egateway.conf` keys via `update_config_value` so
     // the receiver advertises the matching capabilities.
+    //
+    // PINNED PEER: validated against C-Kermit 10.0.416 Beta.12
+    // (2025/03/22, Linux+SSL 64-bit).  Kermit 10.0 is a long beta line
+    // with no final GA, so the build string is the real pin -- a later
+    // Beta.NN can shift protocol-negotiation defaults and perturb these
+    // tests.  The transfers use plain loopback TCP (`-j 127.0.0.1:port`),
+    // so the OpenSSL-version warning this build prints is cosmetic here.
+    // C-Kermit drives only the *native Kermit* protocol itself; its
+    // XMODEM/YMODEM/ZMODEM are external-command shellouts to lrzsz
+    // (sb/rb/sx/rx), so there is no ckermit-based X/Y-modem interop --
+    // those live in src/xmodem.rs as direct lrzsz subprocess tests.
 
     #[cfg(unix)]
     async fn run_ckermit_interop(
