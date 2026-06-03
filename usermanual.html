@@ -262,7 +262,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
     <li><span class="num">7.</span> <a href="#ch7">Security</a></li>
     <li><span class="num">8.</span> <a href="#ch8">File Transfer</a>
         <ol>
-            <li><a href="#ch8-upload">Uploads — Auto-Detection</a></li>
+            <li><a href="#ch8-upload">Uploads — Protocol Selection</a></li>
             <li><a href="#ch8-download">Downloads — Protocol Prompt</a></li>
             <li><a href="#ch8-zmodem">ZMODEM Autostart Detection</a></li>
             <li><a href="#ch8-tuning">Protocol Timeout Tunables</a></li>
@@ -604,7 +604,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the standalone Kermit-server TCP listener at startup.</td></tr>
         <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>Kermit-server listen port.</td></tr>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>Allow the serial-modem dial target <code>ATDT KERMIT</code> (or <code>kermit-server</code>) to drop into the Kermit server. Off by default — bypasses the telnet auth gate.</td></tr>
-        <tr><td><code>punter_block_size</code></td><td>usize</td><td><code>255</code></td><td>Punter C1 block size in bytes (8–255). 248-byte payload + 7-byte header at the default; lower toward ~40 on noisy lines.</td></tr>
+        <tr><td><code>punter_block_size</code></td><td>u16</td><td><code>255</code></td><td>Punter C1 block size in bytes (8–255). 248-byte payload + 7-byte header at the default; lower toward ~40 on noisy lines.</td></tr>
         <tr><td><code>punter_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the file-type handshake to complete.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block read timeout once a transfer is live.</td></tr>
         <tr><td><code>punter_max_retries</code></td><td>u32</td><td><code>10</code></td><td>Retry cap per block before the session aborts.</td></tr>
@@ -1304,17 +1304,47 @@ From the main menu press <span class="kbd">F</span>:
   K  Kermit server mode (idle and wait for client commands)
   I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
 
-<h2 id="ch8-upload">8.3 Uploads — Auto-Detection</h2>
+<h2 id="ch8-upload">8.3 Uploads — Protocol Selection &amp; Auto-Detection</h2>
 
 <p>
-Press <span class="kbd">U</span>, enter a filename, and the server prints:
+Press <span class="kbd">U</span> and enter a filename. Before the transfer
+starts, the gateway asks which protocol to use:
 </p>
 
-<pre><code>Begin XMODEM send now.</code></pre>
+<pre><code>────────────────────────────────────
+  SELECT UPLOAD PROTOCOL
+────────────────────────────────────
+
+  X  XMODEM/YMODEM  128/1K, auto
+  Z  ZMODEM         1K, autostart
+  K  KERMIT         any flavor, auto
+  P  PUNTER         C1 CCGMS/Novaterm
+
+  Pick one, or ESC to cancel:</code></pre>
 
 <p>
-Now start the send from your terminal program (XMODEM, XMODEM-1K, or YMODEM).
-The gateway auto-detects which protocol the sender is using. The logic is:
+The choice is immediate — one key, no Enter required. ESC (or
+<span class="kbd">&larr;</span> on PETSCII, byte 0x5F) cancels. The gateway
+then prints the matching <em>Start … send</em> prompt and waits for your
+terminal to begin. For the XMODEM/YMODEM family it prints:
+</p>
+
+<pre><code>Start XMODEM/YMODEM send from your terminal now.</code></pre>
+
+<p>
+The four families differ in how the incoming transfer is handled:
+</p>
+
+<ul>
+    <li><strong>XMODEM/YMODEM</strong> (key <code>X</code> or <code>Y</code>) — accepts classic XMODEM (128-byte <code>SOH</code>), XMODEM-1K (1024-byte <code>STX</code>), or YMODEM (block-0 filename/size header) and <em>auto-detects which one the sender is using</em>; the logic is detailed below.</li>
+    <li><strong>ZMODEM</strong> (key <code>Z</code>) — receives a ZMODEM stream, including a multi-file batch (colliding names are declined via ZSKIP).</li>
+    <li><strong>Kermit</strong> (key <code>K</code>) — receives any Kermit flavor; the peer's capabilities are read from its Send-Init.</li>
+    <li><strong>Punter</strong> (key <code>P</code>) — receives a single-file Punter C1 transfer (§8.9). The file is saved under the name you entered, with a <code>.prg</code>/<code>.seq</code>/<code>.usr</code> extension appended to match the sender-declared CBM type when your filename has none.</li>
+</ul>
+
+<p>
+Within the <strong>XMODEM/YMODEM</strong> family the gateway auto-detects the
+exact variant. The logic is:
 </p>
 
 <ol>
@@ -1354,12 +1384,12 @@ protocol to use:
   SELECT PROTOCOL
 ────────────────────────────────────
 
-  X  XMODEM       (128-byte blocks)
-  1  XMODEM-1K    (1024-byte blocks)
-  Y  YMODEM       (filename + size header, 1K)
-  Z  ZMODEM       (autostart, 1K subpackets)
-  K  KERMIT       (any flavor, auto-detected)
-  P  PUNTER       (C1, Commodore; PRG/SEQ auto-detected)
+  X  XMODEM     128-byte blocks
+  1  XMODEM-1K  1024-byte blocks
+  Y  YMODEM     name+size hdr, 1K
+  Z  ZMODEM     autostart, 1K
+  K  KERMIT     any flavor, auto
+  P  PUNTER     C1 CCGMS/Novaterm
 
   Pick one, or ESC to cancel:</code></pre>
 
@@ -1379,7 +1409,7 @@ The selection affects what the sender does:
     <li><strong>YMODEM</strong> — the sender begins with a block-0 <code>SOH 0x00 0xFF</code> header containing the filename and size, waits for <code>'C'</code> acknowledgement, then transmits 1K data blocks just like XMODEM-1K.</li>
     <li><strong>ZMODEM</strong> — the sender emits a <code>ZRQINIT</code> hex header, then negotiates flags via <code>ZRINIT</code>/<code>ZSINIT</code>, sends a <code>ZFILE</code> subpacket with filename + size + mtime + mode, streams <code>ZDATA</code> with CRC-16 or CRC-32 subpackets, and finishes with <code>ZEOF</code> + <code>ZFIN</code>. ZSKIP allows the receiver to decline individual files in a batch.</li>
     <li><strong>Kermit</strong> — the sender first exchanges <code>S</code>/<code>I</code> negotiation packets (block-check type, packet length, window size, capabilities), then sends one or more <code>F</code>/<code>D</code>/<code>Z</code> file groups with optional <code>A</code> attribute packets for size/mtime/mode/resume, and ends the batch with <code>B</code>. Long packets and sliding windows are negotiated based on what the peer offers.</li>
-    <li><strong>Punter</strong> — the gateway first sends a file-type block (PRG vs SEQ), then streams the data blocks, each carrying a 248-byte payload behind a 7-byte header and protected by both a 16-bit additive checksum and a 16-bit cyclic checksum. Handshaking is driven by the 3-byte ASCII codes GOO / BAD / ACK / S/B / SYN. The outbound file type is auto-detected from the filename extension (text-like <code>.seq</code>/<code>.txt</code>/<code>.doc</code> &rarr; SEQ, else PRG).</li>
+    <li><strong>Punter</strong> — the gateway first sends a file-type block (PRG, SEQ, or USR), then streams the data blocks, each carrying a 248-byte payload behind a 7-byte header and protected by both a 16-bit additive checksum and a 16-bit cyclic checksum. Handshaking is driven by the 3-byte ASCII codes GOO / BAD / ACK / S/B / SYN. The outbound file type is auto-detected from the filename extension (text-like <code>.seq</code>/<code>.txt</code>/<code>.doc</code> &rarr; SEQ, <code>.usr</code> &rarr; USR, else PRG).</li>
 </ul>
 
 <h2 id="ch8-zmodem">8.5 ZMODEM Autostart Detection</h2>
@@ -1696,7 +1726,7 @@ C1 is a stop-and-wait, block-at-a-time protocol coordinated entirely by
 <ol>
     <li><strong>Two-phase handshake.</strong> The transfer opens with a file-type block, then proceeds to the data blocks. Each block is protected by <em>two</em> independent 16-bit checksums &mdash; an additive checksum and a cyclic checksum &mdash; so a block is only accepted (<code>GOO</code>) when both agree; otherwise the receiver answers <code>BAD</code> and the sender retransmits.</li>
     <li><strong>Block layout.</strong> Blocks are up to 255 bytes &mdash; a 248-byte payload plus a 7-byte header. The block size is configurable from 8&ndash;255 (default 255) via <code>punter_block_size</code>; lower it toward ~40 on a noisy line so each retransmit costs less.</li>
-    <li><strong>File-type detection on download.</strong> When sending a file to the C64, the outbound file type is auto-detected from the filename: text-like extensions (<code>.seq</code>, <code>.txt</code>, <code>.doc</code>) are sent as <strong>SEQ</strong>; everything else is sent as <strong>PRG</strong>.</li>
+    <li><strong>File-type detection on download.</strong> When sending a file to the C64, the outbound file type is auto-detected from the filename: text-like extensions (<code>.seq</code>, <code>.txt</code>, <code>.doc</code>) are sent as <strong>SEQ</strong>, <code>.usr</code> as <strong>USR</strong>, and everything else as <strong>PRG</strong>.</li>
 </ol>
 
 <h3>Selecting Punter</h3>
@@ -2806,12 +2836,18 @@ numeric values fall back to the default.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist that normally gates the telnet server when <code>security_enabled</code> is <code>false</code>. Lets any source address connect without auth. Use only on isolated networks &mdash; for any internet-exposed deployment, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
+        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>0 = disabled</td><td>Per-session idle timeout. Applies to every prompt, including login.</td></tr>
         <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Bind a dedicated TCP listener that drops every accepted connection straight into Kermit server mode. Bypasses the telnet menu and auth gate (same risk profile as <code>allow_atdt_kermit</code>). See chapter 8 and the standalone <code>kermit.html</code> reference. The full <code>kermit_*</code> family is documented in <code>kermit.html</code>.</td></tr>
         <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>&ge; 1</td><td>TCP port for the standalone Kermit-server listener.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>&ge; 1</td><td>Concurrent telnet-session cap.</td></tr>
-        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Telnet password. Stored plaintext.</td></tr>
+        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Unified login password — shared by telnet, SSH, and the configuration web UI. Stored plaintext.</td></tr>
+        <tr><td><code>punter_block_size</code></td><td>u16</td><td><code>255</code></td><td>8&ndash;255</td><td>Punter C1 total block size in bytes (7-byte header included; 248-byte payload at the default). Lower toward ~40 on a noisy line to shrink the retransmit unit.</td></tr>
+        <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>&ge; 1 (seconds)</td><td>Per-block read timeout once a Punter transfer is live.</td></tr>
+        <tr><td><code>punter_max_retries</code></td><td>u32</td><td><code>10</code></td><td>&ge; 1</td><td>Retry cap per block (BAD / SYN re-sends) before the session aborts.</td></tr>
+        <tr><td><code>punter_negotiation_retry_interval</code></td><td>u64</td><td><code>5</code></td><td>&ge; 1 (seconds)</td><td>Gap between handshake-code re-sends during Punter negotiation.</td></tr>
+        <tr><td><code>punter_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>&ge; 1 (seconds)</td><td>Seconds to wait for the Punter file-type handshake before giving up.</td></tr>
         <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Require login on telnet and SSH. Also required to accept public-IP telnet.</td></tr>
         <tr><td><code>serial_<em>x</em>_baud</code></td><td>u32</td><td><code>9600</code></td><td>&ge; 300</td><td>Serial baud rate.  <em>x</em> = <code>a</code> or <code>b</code> (per port).</td></tr>
         <tr><td><code>serial_<em>x</em>_databits</code></td><td>u8</td><td><code>8</code></td><td>5, 6, 7, or 8</td><td>Data bits.</td></tr>
@@ -2823,6 +2859,7 @@ numeric values fall back to the default.
         <tr><td><code>serial_<em>x</em>_mode</code></td><td>string</td><td><code>modem</code></td><td><code>modem</code> or <code>console</code></td><td><code>modem</code> = Hayes AT emulator on this port. <code>console</code> = expose this port via <strong>G&nbsp;&nbsp;Serial Gateway</strong> as a telnet-serial bridge (§9.13).</td></tr>
         <tr><td><code>serial_<em>x</em>_flowcontrol</code></td><td>string</td><td><code>none</code></td><td>none / hardware / software</td><td>Wire-level flow control for this port.</td></tr>
         <tr><td><code>serial_<em>x</em>_parity</code></td><td>string</td><td><code>none</code></td><td>none / odd / even</td><td>Parity bit.</td></tr>
+        <tr><td><code>serial_<em>x</em>_petscii_translate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Saved <code>AT+PETSCII</code> state &mdash; PETSCII translation on direct-TCP dials (Appendix&nbsp;B). Editable from the AT command and the telnet / web / GUI config surfaces.</td></tr>
         <tr><td><code>serial_<em>x</em>_port</code></td><td>string</td><td>empty</td><td>OS-specific path</td><td>Serial device. <code>/dev/ttyUSB0</code>, <code>COM3</code>, etc.</td></tr>
         <tr><td><code>serial_<em>x</em>_quiet</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Saved <code>ATQ</code> quiet mode.</td></tr>
         <tr><td><code>serial_<em>x</em>_s_regs</code></td><td>string</td><td>see note</td><td>CSV of 27 u8 values</td><td>S0–S26, comma-separated. Default: <code>5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1</code>.</td></tr>
@@ -2839,8 +2876,7 @@ numeric values fall back to the default.
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>&ge; 1</td><td>Telnet listen port.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>
         <tr><td><code>username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>Unified login username — shared by telnet, SSH, and the configuration web UI.</td></tr>
-        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Unified login password — shared by telnet, SSH, and the configuration web UI.  Stored plaintext.</td></tr>
-        <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Detailed XMODEM protocol logging.</td></tr>
+        <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Detailed per-block / per-subpacket protocol logging across XMODEM, YMODEM, ZMODEM, Kermit, and Punter.</td></tr>
         <tr><td><code>weather_zip</code></td><td>string</td><td>empty</td><td>5 digits</td><td>Last-used US ZIP. Updated automatically.</td></tr>
         <tr><td><code>web_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the configuration web server on <code>web_port</code>.  Off by default; mirrors the GUI settings page in a browser.  See §5.6 / §6.4.</td></tr>
         <tr><td><code>web_port</code></td><td>u16</td><td><code>8080</code></td><td>&ge; 1</td><td>Web-server listen port.</td></tr>
