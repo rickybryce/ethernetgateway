@@ -16323,6 +16323,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_detect_terminal_type_opening_negotiation() {
+        // Pins the documented session-start IAC negotiation (user
+        // manual §5): on a non-serial connection the server advertises
+        // server-echo + suppress-go-ahead and requests SGA / terminal-
+        // type / window-size from the client, in this exact order,
+        // before the BACKSPACE detection prompt.  detect_terminal_type
+        // then blocks reading the BACKSPACE byte, so the task is
+        // aborted once the opening bytes are observed.
+        let (session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        let task = tokio::spawn(async move {
+            let mut session = session;
+            let _ = session.detect_terminal_type().await;
+        });
+
+        use tokio::io::AsyncReadExt;
+        let mut opening = [0u8; 15];
+        peer.read_exact(&mut opening).await.unwrap();
+        assert_eq!(
+            opening,
+            [
+                IAC, WILL, OPT_ECHO,
+                IAC, WILL, OPT_SGA,
+                IAC, DO, OPT_SGA,
+                IAC, DO, OPT_TTYPE,
+                IAC, DO, OPT_NAWS,
+            ]
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn test_ayt_gets_yes_reply() {
         let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
         use tokio::io::AsyncWriteExt;
