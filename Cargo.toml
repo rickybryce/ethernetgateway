@@ -16,7 +16,7 @@ exclude = [
     "/target",
     "/proptest-regressions",
     "/.github",
-    "/index.html",
+    "/web",
     "*.AppImage",
     "egateway.conf",
     "CLAUDE.md",
