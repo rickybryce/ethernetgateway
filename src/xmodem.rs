@@ -170,9 +170,28 @@ pub(crate) async fn xmodem_receive(
                     }
                     // Peek at block_num / complement so we can detect
                     // YMODEM block 0 (filename header) vs. an ordinary
-                    // first data block.
-                    let block_num = nvt_read_byte(reader, is_tcp, state).await?;
-                    let block_complement = nvt_read_byte(reader, is_tcp, state).await?;
+                    // first data block.  Bound both reads so a sender that
+                    // emits SOH/STX then stalls can't hang the session at
+                    // the negotiation→first-block boundary (the negotiation
+                    // timeout above only covered the header byte itself).
+                    let block_num = match tokio::time::timeout(
+                        std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
+                        nvt_read_byte(reader, is_tcp, state),
+                    )
+                    .await
+                    {
+                        Ok(r) => r?,
+                        Err(_) => return Err("XMODEM: timed out reading first block header".into()),
+                    };
+                    let block_complement = match tokio::time::timeout(
+                        std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
+                        nvt_read_byte(reader, is_tcp, state),
+                    )
+                    .await
+                    {
+                        Ok(r) => r?,
+                        Err(_) => return Err("XMODEM: timed out reading first block header".into()),
+                    };
                     if byte == SOH
                         && block_num == 0
                         && block_complement == 0xFF
@@ -374,13 +393,22 @@ pub(crate) async fn xmodem_receive(
                             // the CRC or the block number — lax senders
                             // may skip parts of this handshake, and any
                             // read error just ends the session normally.
-                            let _ = nvt_read_byte(reader, is_tcp, state).await;
-                            let _ = nvt_read_byte(reader, is_tcp, state).await;
-                            for _ in 0..XMODEM_BLOCK_SIZE + 2 {
-                                if nvt_read_byte(reader, is_tcp, state).await.is_err() {
-                                    break;
-                                }
-                            }
+                            // Best-effort drain, bounded so a sender that
+                            // emits the end-of-batch SOH then stalls can't
+                            // hang the (already-completed) session.
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(block_timeout),
+                                async {
+                                    let _ = nvt_read_byte(reader, is_tcp, state).await;
+                                    let _ = nvt_read_byte(reader, is_tcp, state).await;
+                                    for _ in 0..XMODEM_BLOCK_SIZE + 2 {
+                                        if nvt_read_byte(reader, is_tcp, state).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                },
+                            )
+                            .await;
                             raw_write_byte(writer, ACK, is_tcp).await?;
                             if verbose { glog!("XMODEM recv: YMODEM end-of-batch ACKed"); }
                         }

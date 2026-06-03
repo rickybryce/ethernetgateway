@@ -5920,6 +5920,12 @@ impl TelnetSession {
         let erase_char = self.erase_char;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let is_ascii = self.terminal_type == TerminalType::Ascii;
+        // Idle bound for the live bridge: if neither side sends a byte
+        // within this window, tear the session down so a half-open client
+        // (laptop asleep, NAT drop) can't pin it — and its max_sessions
+        // slot — forever.  Copied out before the reader borrow below; zero
+        // disables it, matching the rest of the session's idle policy.
+        let idle_timeout = self.idle_timeout;
 
         let mut ssh_buf = [0u8; 4096];
         let mut filter_buf: Vec<u8> = Vec::new();
@@ -5952,6 +5958,12 @@ impl TelnetSession {
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep(idle_timeout), if !idle_timeout.is_zero() => {
+                    // Idle in both directions past the timeout window —
+                    // disconnect so a half-open client can't pin the
+                    // session and leak its max_sessions slot.
+                    break;
+                }
                 byte = read_byte_iac_filtered(reader, true) => {
                     match byte {
                         Ok(Some(b)) if is_esc_key(b, is_petscii) => {
@@ -6199,6 +6211,10 @@ impl TelnetSession {
 
         let erase_char = self.erase_char;
         let mut remote_buf = [0u8; 4096];
+        // Idle bound for the live bridge (see gateway_ssh): disconnect a
+        // half-open client so it can't pin the session's max_sessions slot.
+        // Zero disables it, matching the session's idle policy.
+        let idle_timeout = self.idle_timeout;
         let mut filter_buf: Vec<u8> = Vec::new();
         let mut ansi_state: u8 = 0;
         let mut last_was_esc = false;
@@ -6247,6 +6263,12 @@ impl TelnetSession {
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep(idle_timeout), if !idle_timeout.is_zero() => {
+                    // Idle in both directions past the timeout window —
+                    // disconnect so a half-open client can't pin the
+                    // session and leak its max_sessions slot.
+                    break;
+                }
                 event = read_gateway_event(reader) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
@@ -6685,6 +6707,10 @@ impl TelnetSession {
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let erase_char = self.erase_char;
+        // Idle bound for the bridge (see gateway_ssh): disconnect a
+        // half-open client so it can't pin the session's max_sessions
+        // slot.  Zero disables it.
+        let idle_timeout = self.idle_timeout;
         let mut last_was_esc = false;
         let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
 
@@ -6692,6 +6718,12 @@ impl TelnetSession {
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep(idle_timeout), if !idle_timeout.is_zero() => {
+                    // Idle in both directions past the timeout window —
+                    // disconnect so a half-open client can't pin the
+                    // session and leak its max_sessions slot.
+                    break;
+                }
                 event = read_gateway_event(reader) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
@@ -14346,6 +14378,21 @@ mod tests {
             "  D  Download a file",
             "  X  Delete a file",
             "  C  Change directory",
+            // Upload protocol picker (reached from the File Transfer
+            // menu's U).  The key letter stands in for the color-wrapped
+            // cyan() key, matching how the rest of this test models width.
+            "  X  XMODEM/YMODEM  128/1K, auto",
+            "  Z  ZMODEM         1K, autostart",
+            "  K  KERMIT         any flavor, auto",
+            "  P  PUNTER         C1 CCGMS/Novaterm",
+            // Download protocol picker (reached from D).  PUNTER's
+            // "C1 CCGMS/Novaterm" row is the tightest of these at 37 chars.
+            "  X  XMODEM     128-byte blocks",
+            "  1  XMODEM-1K  1024-byte blocks",
+            "  Y  YMODEM     name+size hdr, 1K",
+            "  Z  ZMODEM     autostart, 1K",
+            "  K  KERMIT     any flavor, auto",
+            "  P  PUNTER     C1 CCGMS/Novaterm",
             // Navigation footers
             "  R=Refresh Q=Back H=Help",
             // Auth prompts

@@ -488,27 +488,47 @@ struct Subpacket {
     end_marker: u8,
 }
 
+/// Read one subpacket byte (raw or ZDLE-escaped) bounded by `secs` so a
+/// peer that stalls mid-subpacket can't hang the receive forever.  The
+/// enclosing ZDATA/ZFILE/ZSINIT header is already frame-timeout-bounded
+/// by its caller; this extends the same bound across the subpacket body
+/// and its CRC tail.  Bounding is per-byte (not per-subpacket) so a large
+/// subpacket on a slow link is never cut short — only a genuine stall trips it.
+async fn read_subpacket_byte(
+    fut: impl std::future::Future<Output = Result<u8, String>>,
+    secs: u64,
+) -> Result<u8, String> {
+    match tokio::time::timeout(tokio::time::Duration::from_secs(secs), fut).await {
+        Ok(r) => r,
+        Err(_) => Err("ZMODEM: timed out reading subpacket".to_string()),
+    }
+}
+
 /// Best-effort drain of the rest of an in-progress subpacket after a
 /// size-cap or unrecoverable error.  Reads forward until ZDLE+end-
 /// marker followed by the CRC bytes (so the wire is positioned at the
 /// next header), bounded by `MAX_SUBPACKET_DATA` extra bytes so a
-/// pathological peer can't tar-pit us indefinitely.  Errors during
-/// drain are swallowed — the caller is already returning Err and the
-/// outer receive loop will MARK-hunt to resync.
+/// pathological peer can't tar-pit us indefinitely.  Each read is also
+/// bounded by `frame_timeout` so a mid-drain stall can't hang.  Errors
+/// during drain are swallowed — the caller is already returning Err and
+/// the outer receive loop will MARK-hunt to resync.
 async fn drain_to_subpacket_end(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
     state: &mut ReadState,
     crc_kind: CrcKind,
+    frame_timeout: u64,
 ) {
     for _ in 0..MAX_SUBPACKET_DATA {
-        let Ok(b) = nvt_read_byte(reader, is_tcp, state).await else {
+        let Ok(b) = read_subpacket_byte(nvt_read_byte(reader, is_tcp, state), frame_timeout).await
+        else {
             return;
         };
         if b != ZDLE {
             continue;
         }
-        let Ok(e) = nvt_read_byte(reader, is_tcp, state).await else {
+        let Ok(e) = read_subpacket_byte(nvt_read_byte(reader, is_tcp, state), frame_timeout).await
+        else {
             return;
         };
         if matches!(e, ZCRCE | ZCRCG | ZCRCQ | ZCRCW) {
@@ -519,7 +539,10 @@ async fn drain_to_subpacket_end(
                 CrcKind::Crc32 => 4,
             };
             for _ in 0..crc_bytes {
-                if read_escaped_byte(reader, is_tcp, state).await.is_err() {
+                if read_subpacket_byte(read_escaped_byte(reader, is_tcp, state), frame_timeout)
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -538,6 +561,7 @@ async fn read_subpacket(
     state: &mut ReadState,
     crc_kind: CrcKind,
     max_len: usize,
+    frame_timeout: u64,
 ) -> Result<Subpacket, String> {
     let mut data = Vec::with_capacity(SUBPACKET_DATA_SIZE);
     loop {
@@ -551,15 +575,15 @@ async fn read_subpacket(
             // marker is found in that window the peer is so far out
             // of spec that letting MARK-hunt take over is the right
             // recovery anyway.
-            drain_to_subpacket_end(reader, is_tcp, state, crc_kind).await;
+            drain_to_subpacket_end(reader, is_tcp, state, crc_kind, frame_timeout).await;
             return Err("ZMODEM: subpacket exceeds size limit".into());
         }
-        let b = nvt_read_byte(reader, is_tcp, state).await?;
+        let b = read_subpacket_byte(nvt_read_byte(reader, is_tcp, state), frame_timeout).await?;
         if b != ZDLE {
             data.push(b);
             continue;
         }
-        let e = nvt_read_byte(reader, is_tcp, state).await?;
+        let e = read_subpacket_byte(nvt_read_byte(reader, is_tcp, state), frame_timeout).await?;
         match e {
             ZCRCE | ZCRCG | ZCRCQ | ZCRCW => {
                 // Validate CRC (computed over data + end marker).  Push
@@ -570,8 +594,12 @@ async fn read_subpacket(
                 data.push(e);
                 let crc_result = match crc_kind {
                     CrcKind::Crc16 => {
-                        let hi = read_escaped_byte(reader, is_tcp, state).await?;
-                        let lo = read_escaped_byte(reader, is_tcp, state).await?;
+                        let hi =
+                            read_subpacket_byte(read_escaped_byte(reader, is_tcp, state), frame_timeout)
+                                .await?;
+                        let lo =
+                            read_subpacket_byte(read_escaped_byte(reader, is_tcp, state), frame_timeout)
+                                .await?;
                         let expected = ((hi as u16) << 8) | (lo as u16);
                         let actual = crc16(&data);
                         if actual != expected {
@@ -586,7 +614,11 @@ async fn read_subpacket(
                     CrcKind::Crc32 => {
                         let mut crc_bytes = [0u8; 4];
                         for slot in crc_bytes.iter_mut() {
-                            *slot = read_escaped_byte(reader, is_tcp, state).await?;
+                            *slot = read_subpacket_byte(
+                                read_escaped_byte(reader, is_tcp, state),
+                                frame_timeout,
+                            )
+                            .await?;
                         }
                         let expected = u32::from_le_bytes(crc_bytes);
                         let actual = crc32(&data);
@@ -872,6 +904,7 @@ where
                     &mut state,
                     hdr.crc_kind,
                     32, // ZATTNLEN cap per spec
+                    cfg.zmodem_frame_timeout,
                 )
                 .await;
                 send_zack(writer, is_tcp, 0, verbose).await?;
@@ -933,7 +966,7 @@ where
     let max_retries = cfg.zmodem_max_retries;
 
     // Read ZFILE subpacket: filename \0 size [modtime [mode [...]]] \0
-    let sub = read_subpacket(reader, is_tcp, state, crc_kind, MAX_SUBPACKET_DATA).await?;
+    let sub = read_subpacket(reader, is_tcp, state, crc_kind, MAX_SUBPACKET_DATA, frame_timeout).await?;
     let info = parse_zfile_info(&sub.data)?;
     let filename = info.filename;
     let expected_size = info.length;
@@ -1034,6 +1067,7 @@ where
                         state,
                         hdr.crc_kind,
                         MAX_SUBPACKET_DATA,
+                        frame_timeout,
                     )
                     .await
                     {
@@ -1073,11 +1107,17 @@ where
                             continue 'data_loop;
                         }
                         ZCRCE => continue 'data_loop,
-                        // `read_subpacket` already filters end markers to
-                        // the four ZCRC* values; any other byte would
-                        // have been returned as an error from that
-                        // function before we got here.
-                        _ => unreachable!(),
+                        // `read_subpacket` only ever returns the four
+                        // ZCRC* end markers, so this is unreachable in
+                        // practice — but return an error (after cancelling)
+                        // rather than panicking the session if that filter
+                        // and this match ever drift apart.
+                        _ => {
+                            send_cancel(writer, is_tcp).await.ok();
+                            return Err(
+                                "ZMODEM: unexpected subpacket end marker".into(),
+                            );
+                        }
                     }
                 }
             }
@@ -1924,7 +1964,7 @@ mod tests {
         w.write_all(&wire).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc32, 4096)
+        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc32, 4096, 30)
             .await
             .unwrap();
         assert_eq!(sub.data, data);
@@ -1943,7 +1983,7 @@ mod tests {
         w.write_all(&wire).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc32, 4096).await;
+        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc32, 4096, 30).await;
         assert!(res.is_err(), "expected err on corrupt CRC-32 subpacket");
     }
 
@@ -1958,7 +1998,7 @@ mod tests {
         w.write_all(&bogus).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 100).await;
+        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 100, 30).await;
         match res {
             Err(e) if e.contains("size limit") => {}
             Err(e) => panic!("expected size-limit error, got Err({:?})", e),
@@ -1996,7 +2036,7 @@ mod tests {
         w.write_all(&bytes).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096)
+        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096, 30)
             .await
             .unwrap();
         assert_eq!(sub.data, data);
@@ -2012,7 +2052,7 @@ mod tests {
         w.write_all(&bytes).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096)
+        let sub = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096, 30)
             .await
             .unwrap();
         assert_eq!(sub.data, data);
@@ -2030,7 +2070,7 @@ mod tests {
         w.write_all(&bytes).await.unwrap();
         drop(w);
         let mut state = ReadState::default();
-        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096).await;
+        let res = read_subpacket(&mut r, false, &mut state, CrcKind::Crc16, 4096, 30).await;
         assert!(res.is_err());
     }
 
@@ -3769,7 +3809,7 @@ mod tests {
                     let _ = w.write_all(&bytes).await;
                     drop(w);
                     let mut state = ReadState::default();
-                    let _ = read_subpacket(&mut r, false, &mut state, crc_kind, 4096).await;
+                    let _ = read_subpacket(&mut r, false, &mut state, crc_kind, 4096, 30).await;
                 });
             }
 

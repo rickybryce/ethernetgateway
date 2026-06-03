@@ -72,6 +72,7 @@ fn test_binary_telnet_browser_e2e() {
          ssh_enabled = false\n\
          enable_console = false\n\
          security_enabled = false\n\
+         disable_ip_safety = true\n\
          transfer_dir = {}\n",
         telnet_port,
         xfer.display()

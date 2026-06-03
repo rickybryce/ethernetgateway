@@ -74,7 +74,10 @@ pub(crate) fn sanitize_for_terminal(s: &str) -> String {
     s.chars()
         .filter(|&c| {
             let b = c as u32;
-            c == '\t' || (b >= 0x20 && b != 0x7F && b != 0xFF)
+            // Allow tab and printable bytes; drop C0 controls, DEL, 0xFF,
+            // and the C1 control range (U+0080–U+009F) which some 8-bit
+            // terminals interpret as CSI/OSC introducers.
+            c == '\t' || (b >= 0x20 && b != 0x7F && b != 0xFF && !(0x80..=0x9F).contains(&b))
         })
         .collect()
 }

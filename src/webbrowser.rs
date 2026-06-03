@@ -110,11 +110,91 @@ fn is_tls_error(e: &ureq::Error) -> bool {
     msg.contains("corrupt message") || msg.contains("InvalidContentType")
 }
 
+/// True if `ip` is an address the text browser must never reach — a basic
+/// SSRF guard so a telnet/SSH user (or an attacker-controlled redirect)
+/// can't pivot to the gateway's own services (e.g. the web-config server
+/// on 127.0.0.1), cloud metadata (169.254.169.254), or other LAN hosts.
+fn is_internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64.0.0/10
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|m| is_internal_ip(IpAddr::V4(m)))
+        }
+    }
+}
+
+/// True when the operator has opted out of IP-safety (the same flag that
+/// opens the inbound listeners to any address) or we're in an in-crate
+/// test that fetches from a loopback fixture server.
+fn internal_fetch_allowed() -> bool {
+    cfg!(test) || crate::config::get_config().disable_ip_safety
+}
+
+/// Reject a URL whose host is — or resolves to — an internal/loopback
+/// address, unless `internal_fetch_allowed()`.  Applied to the initial
+/// request and the post-redirect landing URL so a telnet/SSH user can't
+/// use the browser to reach the gateway's own services or the LAN.
+fn guard_public_url(url_str: &str) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    if internal_fetch_allowed() {
+        return Ok(());
+    }
+    let parsed =
+        url::Url::parse(url_str).map_err(|_| "Blocked: unparseable URL".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Blocked: URL has no host".to_string())?;
+    // IP literal — check directly, no DNS.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if is_internal_ip(ip) {
+            Err(format!("Blocked: {} is an internal address", host))
+        } else {
+            Ok(())
+        };
+    }
+    // Hostname — reject if ANY resolved address is internal (defends
+    // against a name that points at an internal IP).
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    match (host, port).to_socket_addrs() {
+        Ok(addrs) => {
+            for a in addrs {
+                if is_internal_ip(a.ip()) {
+                    return Err(format!(
+                        "Blocked: {} resolves to an internal address",
+                        host
+                    ));
+                }
+            }
+            Ok(())
+        }
+        // Resolution failure: let the real fetch surface the DNS error.
+        Err(_) => Ok(()),
+    }
+}
+
 /// Fetch a URL and render it as wrapped plain text with numbered links.
 ///
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (33 for PETSCII, 73 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
+    guard_public_url(url)?;
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
@@ -133,6 +213,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
         Err(e) if url.starts_with("https://") && is_tls_error(&e) => {
             tls_downgraded = true;
             let http_url = format!("http://{}", &url["https://".len()..]);
+            guard_public_url(&http_url)?;
             agent
                 .get(&http_url)
                 .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -144,6 +225,9 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
     };
 
     let final_url = response.get_uri().to_string();
+    // A redirect may have landed us on an internal host even though the
+    // initial URL was public — reject before reading/rendering its body.
+    guard_public_url(&final_url)?;
 
     // Check content type
     let content_type = response
@@ -246,6 +330,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     } else {
         resolve_url(base_url, &form.action)
     };
+    guard_public_url(&action_url)?;
 
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
@@ -264,6 +349,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             Err(e) if action_url.starts_with("https://") && is_tls_error(&e) => {
                 tls_downgraded = true;
                 let http_url = format!("http://{}", &action_url["https://".len()..]);
+                guard_public_url(&http_url)?;
                 agent
                     .post(&http_url)
                     .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -274,6 +360,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         };
 
         let final_url = response.get_uri().to_string();
+        guard_public_url(&final_url)?;
         let content_type = response
             .headers()
             .get("content-type")
@@ -875,6 +962,11 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
             .next()
             .ok_or_else(|| "Could not resolve host".to_string())?
     };
+    // SSRF guard: gopher resolves and connects directly, so block an
+    // internal/loopback target before we dial it.
+    if !internal_fetch_allowed() && is_internal_ip(sock_addr.ip()) {
+        return Err(format!("Blocked: {} is an internal address", host));
+    }
     let stream = std::net::TcpStream::connect_timeout(
         &sock_addr,
         std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS),
@@ -1096,6 +1188,32 @@ pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_internal_ip_classification() {
+        use std::net::IpAddr;
+        // Internal / loopback / link-local (incl. cloud metadata) / ULA /
+        // CGNAT — the browser must never reach these.
+        for s in [
+            "127.0.0.1", "10.1.2.3", "172.16.5.5", "192.168.1.1",
+            "169.254.169.254", "0.0.0.0", "100.64.0.1", "::1", "fc00::1",
+            "fe80::1",
+        ] {
+            assert!(
+                is_internal_ip(s.parse::<IpAddr>().unwrap()),
+                "{} should be classified internal",
+                s
+            );
+        }
+        // Public addresses — must be allowed.
+        for s in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(
+                !is_internal_ip(s.parse::<IpAddr>().unwrap()),
+                "{} should be classified public",
+                s
+            );
+        }
+    }
 
     #[test]
     fn test_normalize_url_adds_https() {
