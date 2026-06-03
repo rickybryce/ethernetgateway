@@ -22,6 +22,10 @@ const MAX_BODY_SIZE: usize = 1024 * 1024;
 const MAX_RENDERED_LINES: usize = 5000;
 /// HTTP request timeout in seconds.
 const HTTP_TIMEOUT_SECS: u64 = 15;
+/// Maximum HTTP redirects to follow.  We follow them manually (ureq's
+/// auto-follow is disabled) so each hop is SSRF-checked before we connect;
+/// 10 matches ureq's former default.
+const MAX_REDIRECTS: usize = 10;
 
 /// Result of fetching and rendering a web page.
 pub(crate) struct WebPage {
@@ -114,6 +118,13 @@ fn is_tls_error(e: &ureq::Error) -> bool {
 /// SSRF guard so a telnet/SSH user (or an attacker-controlled redirect)
 /// can't pivot to the gateway's own services (e.g. the web-config server
 /// on 127.0.0.1), cloud metadata (169.254.169.254), or other LAN hosts.
+///
+/// Known limitation: on the HTTP path the host is resolved here and then
+/// again by ureq at connect time, so a hostile resolver could hand this
+/// check a public IP and ureq an internal one (DNS rebinding).  Closing
+/// that would need ureq's unstable custom-resolver API and only matters
+/// when the browser is exposed to untrusted callers, so it's left as-is.
+/// The gopher path has no such gap — it checks the exact address it dials.
 fn is_internal_ip(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {
@@ -133,8 +144,10 @@ fn is_internal_ip(ip: std::net::IpAddr) -> bool {
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                // IPv4-mapped (::ffff:0:0/96) and the deprecated IPv4-
+                // compatible (::/96) form — classify by the embedded v4.
                 || v6
-                    .to_ipv4_mapped()
+                    .to_ipv4()
                     .is_some_and(|m| is_internal_ip(IpAddr::V4(m)))
         }
     }
@@ -194,40 +207,58 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (33 for PETSCII, 73 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
-    guard_public_url(url)?;
+    // Follow redirects manually (auto-follow disabled below) so EVERY hop
+    // is SSRF-checked before we connect — otherwise ureq would follow a
+    // public→internal redirect and dial the internal host before our guard
+    // saw it.  (DNS rebinding between this check and ureq's own connect-time
+    // resolution remains theoretically possible; it only matters for an
+    // untrusted caller with a hostile resolver — documented on is_internal_ip.)
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .build(),
     );
 
-    // Try the request; if HTTPS fails with a TLS error, retry with HTTP
+    let mut current = url.to_string();
     let mut tls_downgraded = false;
-    let response = match agent
-        .get(url)
-        .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
-        .header("Accept", "text/html, text/plain;q=0.9, */*;q=0.1")
-        .call()
-    {
-        Ok(r) => r,
-        Err(e) if url.starts_with("https://") && is_tls_error(&e) => {
-            tls_downgraded = true;
-            let http_url = format!("http://{}", &url["https://".len()..]);
-            guard_public_url(&http_url)?;
-            agent
-                .get(&http_url)
-                .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
-                .header("Accept", "text/html, text/plain;q=0.9, */*;q=0.1")
-                .call()
-                .map_err(|e2| format!("{}", e2))?
+    let mut hops = 0usize;
+    let (response, final_url) = loop {
+        guard_public_url(&current)?;
+        let resp = match agent
+            .get(&current)
+            .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
+            .header("Accept", "text/html, text/plain;q=0.9, */*;q=0.1")
+            .call()
+        {
+            Ok(r) => r,
+            // HTTPS TLS failure: retry the same resource over HTTP
+            // (re-guarded at the top of the next iteration).
+            Err(e) if current.starts_with("https://") && is_tls_error(&e) => {
+                tls_downgraded = true;
+                current = format!("http://{}", &current["https://".len()..]);
+                continue;
+            }
+            Err(e) => return Err(format!("{}", e)),
+        };
+        // Redirect: resolve + guard the next hop before following it.
+        if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
+                let next = resolve_url(&current, loc);
+                if next != current {
+                    hops += 1;
+                    if hops > MAX_REDIRECTS {
+                        return Err("Too many redirects".to_string());
+                    }
+                    current = next;
+                    continue;
+                }
+            }
+            // 3xx with no usable / self-referential Location — render as-is.
         }
-        Err(e) => return Err(format!("{}", e)),
+        break (resp, current.clone());
     };
-
-    let final_url = response.get_uri().to_string();
-    // A redirect may have landed us on an internal host even though the
-    // initial URL was public — reject before reading/rendering its body.
-    guard_public_url(&final_url)?;
 
     // Check content type
     let content_type = response
