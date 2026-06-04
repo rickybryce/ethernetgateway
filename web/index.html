@@ -729,6 +729,16 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     answer Y or N. All menus and text fit within the 40-column limit for
                     PETSCII terminals.
                 </div>
+
+                <div class="callout">
+                    <strong>How detection works on the wire:</strong> terminal type is also
+                    learned from telnet option negotiation (the <code>TTYPE</code> option),
+                    and the gateway negotiates echo, suppress-go-ahead, and window size at
+                    connect. For a detailed guide to the whole negotiation process &mdash;
+                    the IAC commands, the WILL/WONT/DO/DONT verbs, and every option's purpose
+                    &mdash; see the
+                    <a href="telnetreference.html"><strong>Telnet Negotiation Reference</strong></a>.
+                </div>
             </div>
 
             <hr class="divider">
@@ -879,6 +889,31 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     on the wire &mdash; CRC-16 vs. checksum, 128-byte / 1K / YMODEM framing,
                     and the full handshake for both uploads and downloads &mdash; see the
                     <a href="xmodemreference.html"><strong>XMODEM Protocol Reference page</strong></a>.
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>YMODEM reference:</strong>
+                    For YMODEM's additions &mdash; the block-0 filename/size/mtime/mode
+                    header, batch transfers and the end-of-batch block, and exact size-based
+                    truncation, with step-by-step upload and download handshakes &mdash; see the
+                    <a href="ymodemreference.html"><strong>YMODEM Protocol Reference page</strong></a>.
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>ZMODEM reference:</strong>
+                    For ZMODEM's streaming design &mdash; ZDLE escaping, hex/binary headers,
+                    CRC-16/CRC-32, the ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN handshake,
+                    autostart, and position-based resume &mdash; see the
+                    <a href="zmodemreference.html"><strong>ZMODEM Protocol Reference page</strong></a>.
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>Kermit transfer reference:</strong>
+                    For Kermit's packet format, the Send-Init parameter handshake, and the
+                    F/A/D/Z/B transfer sequence step by step (uploads and downloads), see the
+                    <a href="kermitreference.html"><strong>Kermit Transfer Reference page</strong></a> &mdash;
+                    or the comprehensive <a href="kermit.html"><strong>Kermit Protocol Reference</strong></a>
+                    for server mode and full configuration.
                 </div>
 
                 <div class="cat">IAC &amp; CR-NUL Transforms</div>
@@ -1502,83 +1537,17 @@ ssh_gateway_auth = password</span></code></pre>
                 </p>
 
                 <div class="cat" id="at-commands">AT Command Reference</div>
-                <table class="data-table">
-                    <tr><th>Command</th><th>Description</th></tr>
-                    <tr><td><code>AT</code></td><td>Connection test (returns OK)</td></tr>
-                    <tr><td><code>A/</code></td><td>Repeat last command (no AT prefix, no CR required)</td></tr>
-                    <tr><td><code>ATZ</code></td><td>Reset to stored configuration</td></tr>
-                    <tr><td><code>AT&amp;F</code></td><td>Factory reset (gateway-friendly defaults)</td></tr>
-                    <tr><td><code>AT&amp;W</code></td><td>Save current settings to config file</td></tr>
-                    <tr><td><code>AT&amp;V</code></td><td>Display current modem configuration</td></tr>
-                    <tr><td><code>ATI</code> / <code>ATI0</code>&ndash;<code>ATI7</code></td><td>Identification variants: product code, ROM checksum, ROM test, firmware, OEM, country, diagnostics, product info</td></tr>
-                    <tr><td><code>ATE0</code> / <code>ATE1</code></td><td>Disable / enable command echo</td></tr>
-                    <tr><td><code>ATV0</code> / <code>ATV1</code></td><td>Numeric / verbose result codes</td></tr>
-                    <tr><td><code>ATQ0</code> / <code>ATQ1</code></td><td>Enable / suppress result codes (quiet mode)</td></tr>
-                    <tr><td><code>ATX0</code>&ndash;<code>ATX4</code></td><td>Result-code verbosity (X4 default: full extended set with baud in CONNECT)</td></tr>
-                    <tr><td><code>AT&amp;C0</code> / <code>AT&amp;C1</code></td><td>DCD always on / DCD reflects carrier (default)</td></tr>
-                    <tr><td><code>AT&amp;D0</code>&ndash;<code>AT&amp;D3</code></td><td>DTR handling (0 = ignore, gateway default)</td></tr>
-                    <tr><td><code>AT&amp;K0</code>&ndash;<code>AT&amp;K4</code></td><td>Modem-layer flow control (0 = none, gateway default)</td></tr>
-                    <tr><td><code>AT+PETSCII=0</code> / <code>AT+PETSCII=1</code></td><td>Vendor extension (V.250 <code>+</code> namespace): PETSCII translation on direct-TCP dials. <code>+PETSCII=1</code> case-swaps letters, strips ANSI <code>ESC&nbsp;[</code> sequences, and normalizes inbound punctuation (back-tick and UTF-8 smart quotes/dashes/ellipsis fold to plain ASCII) so an ASCII BBS (e.g. <code>telehack.com</code>) reads correctly on a C64. Default off; persists immediately and is editable from the telnet, web, and GUI config surfaces.</td></tr>
-                    <tr><td><code>ATH</code></td><td>Hang up / close connection</td></tr>
-                    <tr><td><code>ATO</code></td><td>Return to online mode (after +++ escape)</td></tr>
-                    <tr><td><code>ATA</code></td><td>Answer incoming call</td></tr>
-                    <tr><td><code>ATDT host:port</code></td><td>Dial (tone) &mdash; TCP connect to host</td></tr>
-                    <tr><td><code>ATDP host:port</code></td><td>Dial (pulse) &mdash; TCP connect to host</td></tr>
-                    <tr><td><code>ATD host:port</code></td><td>Dial (generic) &mdash; TCP connect to host</td></tr>
-                    <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut to this gateway's main menu</td></tr>
-                    <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (requires <code>allow_atdt_kermit</code>; off by default). Aliases: <code>ATDT kermit</code>, <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. See the <a href="kermit.html">Kermit Reference</a>.</td></tr>
-                    <tr><td><code>ATDL</code></td><td>Redial last number</td></tr>
-                    <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial stored number from slot <em>n</em> (0&ndash;3; default 0)</td></tr>
-                    <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or host <em>s</em> in slot <em>n</em> (0&ndash;3). Persisted with <code>AT&amp;W</code>.</td></tr>
-                    <tr><td><code>AT?</code></td><td>Show AT command help</td></tr>
-                    <tr><td><code>ATS?</code></td><td>Show S-register help</td></tr>
-                    <tr><td><code>ATS<em>n</em>?</code></td><td>Query S-register <em>n</em> (range S0&ndash;S26)</td></tr>
-                    <tr><td><code>ATS<em>n</em>=<em>v</em></code></td><td>Set S-register <em>n</em> to value <em>v</em></td></tr>
-                </table>
-
-                <div class="callout">
-                    <strong>Command chaining:</strong> multiple AT commands can ride on one line — <code>ATE0Q1V1</code>, <code>ATIE0</code>, <code>ATE0DT bbs.example.com:23</code>. The emulator parses left-to-right, applies each subcommand, and emits a single <code>OK</code> at the end (or <code>ERROR</code> at the first failure). Dial commands (<code>D…</code>), answer (<code>A</code>), online (<code>O</code>), and store-number (<code>&amp;Z<em>n</em>=…</code>) terminate the chain because their value or action runs to end-of-line. Spaces between subcommands are tolerated.
-                </div>
-
-                <div class="callout">
-                    <strong>Dial-string modifiers</strong> (phone-number context only): <code>,</code> pauses for <em>S8</em> seconds, <code>W</code> adds <em>S6</em> seconds (wait for dial tone), <code>;</code> returns to command mode after connect, <code>*</code> and <code>#</code> are preserved as DTMF digits, <code>P</code>/<code>T</code>/<code>@</code>/<code>!</code> are accepted and ignored. Hostnames like <code>pine.example.com</code> are <em>not</em> stripped because they don't match the phone-digit pattern.
-                </div>
-
+                <p class="dim-text">
+                    The serial modem emulator speaks the full Hayes AT command set. Every
+                    command, the S-registers, the <code>+++</code> escape sequence, result
+                    codes and <code>ATX</code> levels, dialing and dial-string modifiers, the
+                    <code>AT+PETSCII</code> Commodore extension, command chaining, and worked
+                    examples are documented on a dedicated reference page:
+                </p>
                 <div class="callout callout-info">
-                    <strong>Unrecognized commands</strong> (<code>ATB</code>, <code>ATC</code>, <code>ATL</code>, <code>ATM</code>, <code>AT&amp;B</code>, <code>AT&amp;G</code>, <code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>, <code>AT&amp;Y</code>, etc.) return <code>OK</code> so legacy init strings don't halt mid-setup on commands we can't implement in a software emulator.
-                </div>
-
-                <div class="callout">
-                    <strong>Escape Sequence:</strong> While connected (online mode), send
-                    <code>+++</code> with appropriate guard time pauses to return to
-                    command mode without disconnecting. The escape character and guard time
-                    are configurable via S-registers S2 and S12. Use <code>ATO</code> to
-                    return to online mode.
-                </div>
-
-                <div class="cat" id="s-registers">S-Register Reference</div>
-                <table class="data-table">
-                    <tr><th>Reg</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>S0</td><td>5</td><td>Auto-answer ring count (0 = disabled)</td></tr>
-                    <tr><td>S1</td><td>0</td><td>Ring counter (read-only)</td></tr>
-                    <tr><td>S2</td><td>43</td><td>Escape character (ASCII 43 = '+')</td></tr>
-                    <tr><td>S3</td><td>13</td><td>Carriage return character</td></tr>
-                    <tr><td>S4</td><td>10</td><td>Line feed character</td></tr>
-                    <tr><td>S5</td><td>8</td><td>Backspace character</td></tr>
-                    <tr><td>S6</td><td>2</td><td>Wait for dial tone (seconds)</td></tr>
-                    <tr><td>S7</td><td><strong>15</strong></td><td>Wait for carrier (seconds) &mdash; Hayes default is 50; reduced here so failed TCP dials return quickly. Capped internally at 60s.</td></tr>
-                    <tr><td>S8</td><td>2</td><td>Comma pause time (seconds)</td></tr>
-                    <tr><td>S9</td><td>6</td><td>Carrier detect response (1/10 sec)</td></tr>
-                    <tr><td>S10</td><td>14</td><td>Carrier loss disconnect (1/10 sec)</td></tr>
-                    <tr><td>S11</td><td>95</td><td>DTMF tone duration (milliseconds)</td></tr>
-                    <tr><td>S12</td><td>50</td><td>Escape guard time (1/50 sec; 50 = 1 second)</td></tr>
-                    <tr><td>S13&ndash;S24</td><td>0</td><td>Reserved. Stored and persisted so legacy init strings that probe these registers don't halt with ERROR, but they have no effect on the emulator.</td></tr>
-                    <tr><td>S25</td><td>5</td><td>DTR detect time (1/100 sec). Reserved &mdash; we don't drive DTR.</td></tr>
-                    <tr><td>S26</td><td>1</td><td>RTS-to-CTS delay (1/100 sec). Reserved &mdash; we don't drive RTS/CTS.</td></tr>
-                </table>
-
-                <div class="callout">
-                    <strong>Keep S3, S4, and S5 at distinct values.</strong> Command-mode line editing dispatches on the raw byte: the CR branch is checked before BS, so setting <code>S3 = 8</code> would cause backspace to terminate the line. Leaving S3/S4/S5 at their Hayes defaults (13/10/8) avoids this.
+                    <strong>&rarr; <a href="atcommandreference.html">AT Command Reference</a></strong>
+                    &mdash; the complete command-by-command reference for the serial modem
+                    emulator, with usage examples and the <code>+++</code> escape sequence.
                 </div>
 
                 <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>
@@ -1824,6 +1793,37 @@ ssh_gateway_auth = password</span></code></pre>
                         </p>
                     </div>
                     <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM Protocol Reference</a></h3>
+                        <p>
+                            What YMODEM adds on top of XMODEM-1K: the block-0 header
+                            carrying filename, exact size, mtime, and mode; batch transfers
+                            with the end-of-batch null block; and exact size-based truncation
+                            (so files that end in 0x1A survive). Covers the full handshake
+                            for both uploads and downloads.
+                        </p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM Protocol Reference</a></h3>
+                        <p>
+                            The Forsberg 1988 streaming protocol: ZDLE escaping,
+                            hex / binary16 / binary32 headers, CRC-16 and CRC-32, the
+                            ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN handshake, batch transfers,
+                            autostart detection, and position-based resume / ZSKIP &mdash;
+                            with step-by-step download and upload flows.
+                        </p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit Transfer Reference</a></h3>
+                        <p>
+                            The focused transfer walkthrough: packet anatomy, the Send-Init
+                            parameter handshake (QCTL/QBIN/REPT quoting, CHKT block-check
+                            types, CAPAS capability intersection), and the F/A/D/Z/B sequence
+                            for both uploads and downloads &mdash; matching the X/Y/Z pages.
+                            For server mode, the G-subcommand table, and every config key,
+                            see the comprehensive reference below.
+                        </p>
+                    </div>
+                    <div class="compat-card">
                         <h3><a href="kermit.html">Kermit Protocol Reference</a></h3>
                         <p>
                             A protocol-level walkthrough of the Kermit file transfer
@@ -1844,6 +1844,17 @@ ssh_gateway_auth = password</span></code></pre>
                             Baudot/ITA2, ZX Spectrum, and TRS-80. Useful when decoding
                             raw byte streams during debugging or when porting the
                             gateway to talk to a new vintage terminal.
+                        </p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet Negotiation Reference</a></h3>
+                        <p>
+                            A detailed guide to how telnet works here: the IAC command
+                            bytes, the WILL/WONT/DO/DONT verbs and what each means, the
+                            purpose of every option the gateway handles (ECHO, SGA, TTYPE,
+                            NAWS, STATUS, TIMING-MARK), subnegotiation, the RFC 1143 Q-method
+                            that prevents negotiation loops, and the inbound-server vs
+                            outbound-gateway policies &mdash; with example exchanges.
                         </p>
                     </div>
                 </div>

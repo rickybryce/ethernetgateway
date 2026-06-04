@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kermit Transfer Reference &mdash; Ethernet Gateway v0.6.0</title>
+    <meta name="description" content="Step-by-step reference for the Ethernet Gateway Kermit implementation: the packet format, the Send-Init parameter handshake (QCTL/QBIN/REPT quoting, CHKT block-check types, CAPAS capabilities), and the F/A/D/Z/B transfer sequence — for both uploads (gateway receives) and downloads (gateway sends). For the full server-mode and configuration reference see kermit.html.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Kermit Transfer Reference</p>
+            <div class="hdr-version">v0.6.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Kermit</span>
+                <span class="hdr-badge">Send-Init</span>
+                <span class="hdr-badge">Long Packets</span>
+                <span class="hdr-badge">Sliding Windows</span>
+                <span class="hdr-badge">7-bit Safe</span>
+                <span class="hdr-badge">Server Mode</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#packets">Packets</a>
+            <a href="#sendinit">Send-Init</a>
+            <a href="#upload">Upload</a>
+            <a href="#download">Download</a>
+            <a href="#capabilities">Capabilities</a>
+            <a href="#tunables">Tunables</a>
+            <a href="kermit.html">Full Reference</a>
+            <a href="zmodemreference.html">ZMODEM</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">Kermit is the survivor protocol &mdash; designed for links that lose, mangle, or 7-bit-strip bytes, and the one to reach for when XMODEM/ZMODEM won't go through.</p>
+
+                <p>
+                    Kermit (Frank da Cruz &amp; Bill Catchings, Columbia University, 1981)
+                    moves files as small, fully <strong>printable</strong> packets with an
+                    aggressively negotiated feature set. Everything that could trip up a
+                    hostile transport is quoted into the printable ASCII range, so a Kermit
+                    transfer survives 7-bit gateways, XON/XOFF flow control, and terminal
+                    servers that eat control characters &mdash; conditions that defeat the
+                    XMODEM family and ZMODEM. The gateway implements a spec-complete Kermit
+                    (following da Cruz &amp; Catchings, <em>Kermit, A File Transfer
+                    Protocol</em>, 1987) plus the modern long-packet, sliding-window, and
+                    streaming extensions used by C-Kermit, in <code>src/kermit.rs</code>.
+                </p>
+                <p>
+                    The gateway is both a Kermit <strong>client</strong> (push/pull from the
+                    File Transfer menu) and a Kermit <strong>server</strong> (idle, answering
+                    a peer's <code>GET</code> / <code>SEND</code> / directory commands). This
+                    page walks the <strong>transfer mechanics</strong> &mdash; how a session
+                    negotiates and how data moves, for uploads and downloads.
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Looking for server mode, the G-subcommand table, the full
+                    capability list, or every configuration key?</strong> Those live on the
+                    comprehensive <a href="kermit.html"><strong>Kermit Protocol Reference</strong></a>.
+                    This page is the focused transfer walkthrough, matching the
+                    <a href="xmodemreference.html">XMODEM</a>,
+                    <a href="ymodemreference.html">YMODEM</a>, and
+                    <a href="zmodemreference.html">ZMODEM</a> references.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PACKETS                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="packets">
+                <div class="section-title">Packet Anatomy</div>
+                <p class="intro">Every byte on the wire belongs to a packet, and every packet is printable.</p>
+
+                <pre><code>MARK  LEN  SEQ  TYPE  DATA ...  CHECK
+ 01    ' '..  0-63  S/F/A/D/Z/B/Y/N/...   1-3 bytes</code></pre>
+
+                <table class="data-table">
+                    <tr><th>Field</th><th>Bytes</th><th>Meaning</th></tr>
+                    <tr><td><code>MARK</code></td><td>1</td><td>Start-of-packet sentinel, normally <code>0x01</code> (Ctrl-A).</td></tr>
+                    <tr><td><code>LEN</code></td><td>1</td><td>Length of the rest of the packet, <code>tochar</code>-encoded (value + 0x20). A <code>LEN</code> of zero signals a <strong>long packet</strong> whose real length follows in two extended bytes.</td></tr>
+                    <tr><td><code>SEQ</code></td><td>1</td><td>Sequence number 0&ndash;63 (mod 64), <code>tochar</code>-encoded. Drives ACK matching and sliding windows.</td></tr>
+                    <tr><td><code>TYPE</code></td><td>1</td><td>A single letter naming the packet (table below).</td></tr>
+                    <tr><td><code>DATA</code></td><td>0&ndash;n</td><td>The payload, with control / 8-bit / repeated bytes quoted into printable form.</td></tr>
+                    <tr><td><code>CHECK</code></td><td>1&ndash;3</td><td>Block check: 1 byte (6-bit sum), 2 bytes (12-bit sum), or 3 bytes (CRC-16) per the negotiated <code>CHKT</code>.</td></tr>
+                </table>
+
+                <p>The packet types used in a transfer:</p>
+                <table class="data-table">
+                    <tr><th>Type</th><th>Name</th><th>Meaning</th></tr>
+                    <tr><td><code>S</code></td><td>Send-Init</td><td>Opens a session; its data field <em>is</em> the parameter list.</td></tr>
+                    <tr><td><code>F</code></td><td>File header</td><td>Announces the next file's name.</td></tr>
+                    <tr><td><code>A</code></td><td>Attributes</td><td>Optional: size, modification time, mode, type.</td></tr>
+                    <tr><td><code>D</code></td><td>Data</td><td>A chunk of file data.</td></tr>
+                    <tr><td><code>Z</code></td><td>EOF</td><td>End of the current file.</td></tr>
+                    <tr><td><code>B</code></td><td>EOT (Break)</td><td>End of the whole batch &mdash; no more files.</td></tr>
+                    <tr><td><code>Y</code></td><td>ACK</td><td>Packet accepted (carries negotiated params when acking an <code>S</code>).</td></tr>
+                    <tr><td><code>N</code></td><td>NAK</td><td>Packet missing or bad &mdash; resend it.</td></tr>
+                    <tr><td><code>E</code></td><td>Error</td><td>Fatal error; the data field is a human-readable reason.</td></tr>
+                </table>
+                <p class="dim-text">
+                    (<code>R</code> get-request, <code>G</code> generic and <code>C</code>
+                    host commands, and <code>I</code> init drive <strong>server mode</strong>
+                    &mdash; see the <a href="kermit.html">full reference</a>.)
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SEND-INIT                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="sendinit">
+                <div class="section-title">The Send-Init Handshake</div>
+                <p class="intro">Before any data, the two ends trade an S packet and agree on a working feature set.</p>
+
+                <p>
+                    A Kermit session opens with a <strong>Send-Init</strong> (<code>S</code>)
+                    packet whose data field is a string of <code>tochar</code>-encoded
+                    parameters. The other end answers with a <code>Y</code> (ACK) packet
+                    carrying <em>its</em> parameters, and each side then adopts the safe
+                    common subset &mdash; the smaller packet length, the lower window size,
+                    the intersection of the capability bits. The key fields:
+                </p>
+                <table class="data-table">
+                    <tr><th>Field</th><th>Meaning</th><th>Gateway default</th></tr>
+                    <tr><td><code>MAXL</code></td><td>Maximum packet length (classic, &le; 94)</td><td>extended via long packets</td></tr>
+                    <tr><td><code>TIME</code></td><td>Timeout the peer should use</td><td>&mdash;</td></tr>
+                    <tr><td><code>QCTL</code></td><td>Control-character quote prefix</td><td><code>#</code></td></tr>
+                    <tr><td><code>QBIN</code></td><td>8th-bit quote prefix (for 7-bit links)</td><td><code>&amp;</code> (when asked)</td></tr>
+                    <tr><td><code>CHKT</code></td><td>Block-check type (1 / 2 / 3)</td><td><code>3</code> (CRC-16)</td></tr>
+                    <tr><td><code>REPT</code></td><td>Repeat-count compression prefix</td><td><code>~</code></td></tr>
+                    <tr><td><code>CAPAS</code></td><td>Capability bitmask (long / sliding / attributes)</td><td>all advertised</td></tr>
+                    <tr><td><code>WINDO</code></td><td>Sliding-window size</td><td><code>4</code></td></tr>
+                    <tr><td><code>MAXLX1/2</code></td><td>Extended (long) max packet length</td><td>up to <code>4096</code></td></tr>
+                </table>
+
+                <div class="cat">Block-check types (CHKT)</div>
+                <table class="data-table">
+                    <tr><th>CHKT</th><th>Check</th><th>Notes</th></tr>
+                    <tr><td><code>1</code></td><td>6-bit checksum (1 byte)</td><td>The universal baseline; weakest.</td></tr>
+                    <tr><td><code>2</code></td><td>12-bit checksum (2 bytes)</td><td>Middle ground for slow microcontrollers.</td></tr>
+                    <tr><td><code>3</code></td><td>CRC-16/KERMIT (3 bytes)</td><td>Reflected CCITT, poly <code>0x8408</code>. The default.</td></tr>
+                </table>
+
+                <div class="cat">Quoting &mdash; how Kermit stays printable</div>
+                <ul>
+                    <li><strong>QCTL (<code>#</code>):</strong> a control byte is sent as <code>#</code> followed by the byte with bit&nbsp;6 flipped, so it prints.</li>
+                    <li><strong>QBIN (<code>&amp;</code>):</strong> on a 7-bit link, a high-bit byte is sent as <code>&amp;</code> plus its low 7 bits &mdash; this is what makes Kermit 8-bit-clean over a 7-bit path.</li>
+                    <li><strong>REPT (<code>~</code>):</strong> a run of identical bytes is collapsed to <code>~</code>, a count, and the byte &mdash; cheap compression for padding and sparse files.</li>
+                </ul>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- UPLOAD                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="upload">
+                <div class="section-title">Upload &mdash; Gateway as Receiver</div>
+                <p class="intro">You send a file to the gateway with Kermit. The remote end initiates; the gateway answers and consumes the file.</p>
+
+                <pre><code><span class="prompt-char">term</span>     -> S  (Send-Init: peer's params)
+<span class="prompt-char">gateway</span>  &lt;- Y  (ACK: gateway's params -> common subset)
+<span class="prompt-char">term</span>     -> F  (filename)          <span class="output-text">gateway -> Y</span>
+<span class="prompt-char">term</span>     -> A  (size, mtime, mode) <span class="output-text">gateway -> Y</span>  (optional)
+<span class="prompt-char">term</span>     -> D  (data) x N          <span class="output-text">gateway -> Y each (or windowed)</span>
+<span class="prompt-char">term</span>     -> Z  (EOF)               <span class="output-text">gateway -> Y</span>
+<span class="prompt-char">term</span>     -> B  (EOT, no more files)<span class="output-text">gateway -> Y</span></code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>Start the receive: press <strong>U</strong> on the File Transfer menu, enter a name, and choose <strong>K</strong> &mdash; or use the gateway's <strong>Kermit server mode</strong> and have the peer <code>SEND</code> to it.</li>
+                        <li>The peer sends an <code>S</code> (Send-Init) with its parameters. The gateway replies with a <code>Y</code> (ACK) carrying its own params; both sides settle on the common subset (block-check type, packet length, window size, capabilities).</li>
+                        <li>The peer sends an <code>F</code> packet with the filename; the gateway validates the path (no traversal) and <code>ACK</code>s.</li>
+                        <li>If the peer supports attributes it sends an <code>A</code> packet (size, modification time, mode); the gateway records it and <code>ACK</code>s.</li>
+                        <li>The peer streams <code>D</code> (data) packets. The gateway un-quotes each (<code>#</code> / <code>&amp;</code> / <code>~</code>), verifies the block check, and <code>ACK</code>s &mdash; or, with sliding windows, acknowledges several outstanding packets at once and asks for selective retransmit of any that are missing or bad.</li>
+                        <li>The peer sends <code>Z</code> (EOF); the gateway closes the file, applying mtime / mode from the <code>A</code> packet when present.</li>
+                        <li>The peer sends <code>B</code> (EOT) to end the batch; the gateway <code>ACK</code>s and the session ends. (More <code>F</code>&hellip;<code>Z</code> groups before the <code>B</code> mean more files.)</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DOWNLOAD                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="download">
+                <div class="section-title">Download &mdash; Gateway as Sender</div>
+                <p class="intro">You pull a file from the gateway with Kermit. The gateway initiates the Send-Init and pushes the file.</p>
+
+                <pre><code><span class="prompt-char">gateway</span>  -> S  (Send-Init: gateway's params)
+<span class="prompt-char">term</span>     &lt;- Y  (ACK: peer's params -> common subset)
+<span class="prompt-char">gateway</span>  -> F  (filename)          <span class="output-text">term -> Y</span>
+<span class="prompt-char">gateway</span>  -> A  (size, mtime, mode) <span class="output-text">term -> Y</span>  (if attributes negotiated)
+<span class="prompt-char">gateway</span>  -> D  (data) x N          <span class="output-text">term -> Y each (or windowed/streamed)</span>
+<span class="prompt-char">gateway</span>  -> Z  (EOF)               <span class="output-text">term -> Y</span>
+<span class="prompt-char">gateway</span>  -> B  (EOT)               <span class="output-text">term -> Y</span></code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>Press <strong>D</strong>, pick the file, and choose <strong>K</strong>. (From server mode, the peer issues a <code>GET</code> and the gateway sends in response &mdash; same data flow.)</li>
+                        <li>The gateway sends an <code>S</code> (Send-Init) advertising its parameters and capabilities. The receiver <code>ACK</code>s with its own; the gateway adopts the common subset.</li>
+                        <li>The gateway sends an <code>F</code> packet with the filename, then &mdash; if attributes were negotiated &mdash; an <code>A</code> packet with the size, mtime, and mode.</li>
+                        <li>The gateway sends <code>D</code> (data) packets, quoting bytes as the negotiated <code>QCTL</code> / <code>QBIN</code> / <code>REPT</code> require. On a reliable link with <strong>streaming</strong> negotiated it does not pause for per-packet ACKs; otherwise it waits for each <code>Y</code> (or keeps a sliding window of them in flight).</li>
+                        <li>A missing or bad packet is requested again by sequence number (selective retransmit); the gateway resends up to <code>kermit_max_retries</code> times.</li>
+                        <li>The gateway sends <code>Z</code> (EOF), then <code>B</code> (EOT) once the last file is done. The receiver <code>ACK</code>s and the session ends.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CAPABILITIES                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="capabilities">
+                <div class="section-title">Negotiated Capabilities</div>
+                <p class="intro">What the gateway advertises in its Send-Init &mdash; each used only if the peer also offers it.</p>
+                <table class="data-table">
+                    <tr><th>Capability</th><th>Effect</th></tr>
+                    <tr><td><strong>Long packets</strong></td><td>Packets up to <code>kermit_max_packet_length</code> (default 4096, max 9024) instead of the classic 94-byte cap &mdash; far less per-packet overhead.</td></tr>
+                    <tr><td><strong>Sliding windows</strong></td><td>Up to <code>kermit_window_size</code> (default 4; max 31) packets in flight at once, with selective retransmit &mdash; hides round-trip latency.</td></tr>
+                    <tr><td><strong>Streaming</strong></td><td>On a reliable link (TCP / SSH) the sender skips per-packet ACKs entirely &mdash; a big speed win.</td></tr>
+                    <tr><td><strong>Attribute packets</strong></td><td>Carry file size, mtime, mode, type, and ~10 other typed fields so metadata survives the transfer.</td></tr>
+                    <tr><td><strong>Repeat compression</strong></td><td>Runs of identical bytes collapse to the <code>~</code> prefix + count.</td></tr>
+                    <tr><td><strong>Locking shifts</strong></td><td>SO/SI region quoting for 8-bit transit on 7-bit links (off by default; per-byte <code>&amp;</code> prefixing covers the same need).</td></tr>
+                    <tr><td><strong>RESEND (resume)</strong></td><td>Resume a partial upload via attribute disposition (off by default; see the full reference).</td></tr>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>Negotiation is an intersection.</strong> The gateway never forces
+                    a capability on a peer that didn't ask for it &mdash; the working feature
+                    set is always the AND of both ends, so a humble vintage Kermit and a
+                    modern C-Kermit each get a clean transfer at their own level.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TUNABLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="tunables">
+                <div class="section-title">Tunables</div>
+                <p class="intro">The core transfer keys. The full <code>kermit_*</code> family (18 keys, including the quoting and server-mode settings) is documented on the <a href="kermit.html">full reference</a>.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>kermit_negotiation_timeout</code></td><td>300 s</td><td>Time to complete the Send-Init handshake.</td></tr>
+                    <tr><td><code>kermit_packet_timeout</code></td><td>10 s</td><td>Per-packet read deadline after Send-Init.</td></tr>
+                    <tr><td><code>kermit_max_retries</code></td><td>5</td><td>NAK / timeout retransmits per packet.</td></tr>
+                    <tr><td><code>kermit_max_packet_length</code></td><td>4096</td><td>Advertised long-packet length (10&ndash;9024).</td></tr>
+                    <tr><td><code>kermit_window_size</code></td><td>4</td><td>Sliding-window depth (1&ndash;31; 1 = stop-and-wait).</td></tr>
+                    <tr><td><code>kermit_block_check_type</code></td><td>3</td><td>1 = 6-bit, 2 = 12-bit, 3 = CRC-16/KERMIT.</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong>See also:</strong> the comprehensive
+                    <a href="kermit.html">Kermit Protocol Reference</a> (server mode, the full
+                    G-subcommand table, every config key, C-Kermit interop, spec citations),
+                    the <a href="xmodemreference.html">XMODEM</a> /
+                    <a href="ymodemreference.html">YMODEM</a> /
+                    <a href="zmodemreference.html">ZMODEM</a> references, and the
+                    <a href="index.html#file-transfer">File Transfer section of the User Manual</a>.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AT Command Reference &mdash; Ethernet Gateway v0.6.0</title>
+    <meta name="description" content="Complete Hayes AT command reference for the Ethernet Gateway serial modem emulator: every command, the S-registers, the +++ escape sequence, result codes and ATX levels, dialing and dial-string modifiers, the AT+PETSCII vendor extension, command chaining, and worked examples.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">AT Command Reference</p>
+            <div class="hdr-version">v0.6.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Hayes AT</span>
+                <span class="hdr-badge">S-Registers</span>
+                <span class="hdr-badge">+++</span>
+                <span class="hdr-badge">AT+PETSCII</span>
+                <span class="hdr-badge">Dial over TCP</span>
+                <span class="hdr-badge">Commodore 64</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#core">Core</a>
+            <a href="#ident">Identify</a>
+            <a href="#codes">Result Codes</a>
+            <a href="#hardware">Hardware</a>
+            <a href="#petscii">AT+PETSCII</a>
+            <a href="#dialing">Dialing</a>
+            <a href="#sregisters">S-Registers</a>
+            <a href="#escape">+++ Escape</a>
+            <a href="#chaining">Chaining</a>
+            <a href="#examples">Examples</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">The gateway's serial ports emulate a Hayes Smartmodem. A vintage computer drives them with the same AT commands it would send a real modem &mdash; except a &ldquo;dial&rdquo; opens a TCP connection instead of a phone call.</p>
+
+                <p>
+                    Each of the two serial ports, when in <strong>Modem (AT Command)
+                    Mode</strong>, presents a Hayes-compatible command interface. Your retro
+                    machine's terminal program talks to it exactly as if it were a
+                    Smartmodem 2400 or compatible: type <code>AT</code> commands in
+                    <strong>command mode</strong>, &ldquo;dial&rdquo; to open a connection,
+                    exchange data in <strong>online mode</strong>, and use the
+                    <code>+++</code> escape to slip back to command mode without dropping the
+                    link. There is no phone line &mdash; <code>ATDT&nbsp;host:port</code> is a
+                    <code>TcpStream::connect()</code>.
+                </p>
+
+                <div class="cat">Command basics</div>
+                <ul>
+                    <li>Every command line begins with the <strong>attention prefix</strong> <code>AT</code> (or <code>at</code> &mdash; commands are case-insensitive) and ends with a carriage return.</li>
+                    <li>The lone exception is <code>A/</code>, which <strong>repeats the last command</strong> with no <code>AT</code> and no carriage return.</li>
+                    <li>The modem answers with a <strong>result code</strong> &mdash; <code>OK</code>, <code>CONNECT</code>, <code>ERROR</code>, etc. &mdash; in words (verbose) or as a digit (numeric), controlled by <code>ATV</code>.</li>
+                    <li>Several commands can be <strong>chained</strong> on one line (<code>ATE0Q0V1</code>); see <a href="#chaining">Command Chaining</a>.</li>
+                    <li>Numeric command parameters default to <code>0</code> when omitted: <code>ATH</code> = <code>ATH0</code>, <code>ATE</code> = <code>ATE0</code>.</li>
+                    <li>Settings are held in RAM; <code>AT&amp;W</code> persists them to <code>egateway.conf</code> and <code>ATZ</code> reloads that saved profile.</li>
+                </ul>
+
+                <div class="callout callout-info">
+                    <strong>Where these apply:</strong> AT commands work on either serial
+                    port while it is in modem mode, and on the
+                    <code>ATDT&nbsp;ethernet-gateway</code> loopback. Each port keeps its own
+                    independent AT / S-register state and its own <code>AT&amp;W</code>
+                    profile (<code>serial_a_*</code> / <code>serial_b_*</code>). For the
+                    hardware-setup and menu walkthrough, see the
+                    <a href="index.html#serial-modem">Serial Modem section of the User Manual</a>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CORE                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="core">
+                <div class="section-title">Core Commands</div>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Effect</th></tr>
+                    <tr><td><code>AT</code></td><td>Attention / line check. Returns <code>OK</code> &mdash; the classic &ldquo;is the modem there?&rdquo; probe.</td></tr>
+                    <tr><td><code>A/</code></td><td>Repeat the last command line. No <code>AT</code> prefix, no carriage return &mdash; the modem acts the instant it sees the slash. Handy for re-dialing.</td></tr>
+                    <tr><td><code>AT?</code></td><td>Print the built-in AT command help.</td></tr>
+                    <tr><td><code>ATZ</code></td><td>Reset to the stored profile (the last <code>AT&amp;W</code>, read from <code>egateway.conf</code>). Drops any active connection.</td></tr>
+                    <tr><td><code>AT&amp;F</code></td><td>Restore the gateway-friendly factory defaults. Does <em>not</em> overwrite the stored profile, but does drop any active connection.</td></tr>
+                    <tr><td><code>AT&amp;W</code> / <code>AT&amp;W0</code></td><td>Save the current settings (echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, <code>+PETSCII</code>, and the four stored numbers) to <code>egateway.conf</code>.</td></tr>
+                    <tr><td><code>AT&amp;V</code></td><td>Display the current configuration &mdash; a line of mode flags, a line of all S-registers, and a line of stored numbers.</td></tr>
+                    <tr><td><code>ATH</code> / <code>ATH0</code></td><td>Hang up &mdash; close any active connection and return to command mode.</td></tr>
+                    <tr><td><code>ATA</code></td><td>Answer an incoming &ldquo;call&rdquo; (a ring from the Ring Emulator) immediately, before <code>S0</code> rings elapse.</td></tr>
+                    <tr><td><code>ATO</code> / <code>ATO0</code></td><td>Return to online (data) mode after a <code>+++</code> escape, resuming the preserved connection.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- IDENTIFICATION                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="ident">
+                <div class="section-title">Identification (ATI)</div>
+                <p class="intro">The <code>ATI</code><em>n</em> family reports product and firmware strings &mdash; some terminal programs probe these to recognise the modem.</p>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Response</th></tr>
+                    <tr><td><code>ATI</code> / <code>ATI0</code></td><td><code>Hayes-compatible Ethernet Gateway Modem Emulator v0.6.0</code></td></tr>
+                    <tr><td><code>ATI1</code></td><td><code>000</code> &mdash; ROM checksum (virtual)</td></tr>
+                    <tr><td><code>ATI2</code></td><td><code>OK</code> &mdash; ROM self-test</td></tr>
+                    <tr><td><code>ATI3</code></td><td><code>Ethernet Gateway v0.6.0 (Hayes-compatible)</code></td></tr>
+                    <tr><td><code>ATI4</code></td><td><code>Hayes-compatible virtual modem over TCP</code></td></tr>
+                    <tr><td><code>ATI5</code></td><td><code>B00</code> &mdash; OEM / country code</td></tr>
+                    <tr><td><code>ATI6</code></td><td><code>No link diagnostics available</code></td></tr>
+                    <tr><td><code>ATI7</code></td><td><code>Product: ethernet-gateway (software emulator)</code></td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- RESULT CODES                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="codes">
+                <div class="section-title">Echo, Result Codes &amp; ATX Levels</div>
+
+                <div class="cat">Echo / verbosity / quiet</div>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Effect</th></tr>
+                    <tr><td><code>ATE0</code> / <code>ATE1</code></td><td>Command echo off / on. <strong>Default on.</strong> Turn it off (<code>ATE0</code>) for scripted init strings so you don't see your own typing echoed back.</td></tr>
+                    <tr><td><code>ATV0</code> / <code>ATV1</code></td><td>Result codes as numeric digits / verbose words. <strong>Default verbose.</strong></td></tr>
+                    <tr><td><code>ATQ0</code> / <code>ATQ1</code></td><td>Result codes enabled / suppressed (quiet). <strong>Default enabled.</strong> <code>ATQ1</code> silences <em>all</em> result codes &mdash; useful when a program is confused by them.</td></tr>
+                </table>
+
+                <div class="cat">Result codes</div>
+                <p class="dim-text">In verbose mode the modem returns the word; in numeric mode (<code>ATV0</code>) the digit. Which codes can appear depends on the <code>ATX</code> level (below).</p>
+                <table class="data-table">
+                    <tr><th>Verbose</th><th>Numeric</th><th>Meaning</th></tr>
+                    <tr><td><code>OK</code></td><td>0</td><td>Command accepted.</td></tr>
+                    <tr><td><code>CONNECT</code></td><td>1</td><td>Connected (no speed reported &mdash; X0, or a non-standard rate).</td></tr>
+                    <tr><td><code>RING</code></td><td>2</td><td>An incoming call is ringing.</td></tr>
+                    <tr><td><code>NO CARRIER</code></td><td>3</td><td>Connection failed, ended, or was refused.</td></tr>
+                    <tr><td><code>ERROR</code></td><td>4</td><td>Command not understood or out of range.</td></tr>
+                    <tr><td><code>CONNECT &lt;baud&gt;</code></td><td>5/10/12/16/28/87</td><td>Connected, with speed (X1+). Codes: 1200=5, 2400=10, 9600=12, 19200=16, 38400=28, 115200=87, 300=1.</td></tr>
+                    <tr><td><code>NO DIALTONE</code></td><td>6</td><td>Only at X2 and above; otherwise folds into <code>NO CARRIER</code>.</td></tr>
+                    <tr><td><code>BUSY</code></td><td>7</td><td>Only at X3 and above; otherwise <code>NO CARRIER</code>.</td></tr>
+                    <tr><td><code>NO ANSWER</code></td><td>8</td><td>Only at X3 and above; otherwise <code>NO CARRIER</code>.</td></tr>
+                </table>
+
+                <div class="cat">ATX result-code level</div>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Extended codes</th><th>CONNECT format</th></tr>
+                    <tr><td><code>ATX0</code></td><td>Basic only; <code>BUSY</code> / <code>NO DIALTONE</code> / <code>NO ANSWER</code> all collapse to <code>NO CARRIER</code></td><td><code>CONNECT</code> (no baud)</td></tr>
+                    <tr><td><code>ATX1</code></td><td>Basic + speed reporting</td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+                    <tr><td><code>ATX2</code></td><td>Adds <code>NO DIALTONE</code></td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+                    <tr><td><code>ATX3</code></td><td>Adds <code>BUSY</code> / <code>NO ANSWER</code></td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+                    <tr><td><code>ATX4</code> <em>(default)</em></td><td>Full extended set</td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- HARDWARE                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="hardware">
+                <div class="section-title">Hardware Pin State (&amp;C, &amp;D, &amp;K)</div>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Meaning</th></tr>
+                    <tr><td><code>AT&amp;C0</code></td><td>DCD (carrier-detect) always asserted.</td></tr>
+                    <tr><td><code>AT&amp;C1</code> <em>(Hayes default)</em></td><td>DCD reflects the connection state.</td></tr>
+                    <tr><td><code>AT&amp;D0</code> <em>(gateway default)</em></td><td>Ignore DTR entirely.</td></tr>
+                    <tr><td><code>AT&amp;D1</code></td><td>DTR drop &rarr; return to command mode.</td></tr>
+                    <tr><td><code>AT&amp;D2</code> <em>(Hayes default)</em></td><td>DTR drop &rarr; hang up.</td></tr>
+                    <tr><td><code>AT&amp;D3</code></td><td>DTR drop &rarr; hang up and reset.</td></tr>
+                    <tr><td><code>AT&amp;K0</code> <em>(gateway default)</em></td><td>No modem-layer flow control.</td></tr>
+                    <tr><td><code>AT&amp;K1</code></td><td>Auto-detect (accepted and stored; no wire-level effect).</td></tr>
+                    <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
+                    <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
+                </table>
+
+                <div class="callout">
+                    <strong>Gateway-friendly default deviations.</strong> The emulator ships
+                    with <code>&amp;D0</code> (not <code>&amp;D2</code>) and <code>&amp;K0</code>
+                    (not <code>&amp;K3</code>) because many C64 / CP/M clients don't wire DTR
+                    or implement flow control &mdash; the Hayes defaults would cause spurious
+                    disconnects. <code>S7</code> is also lowered to 15 s. All are overridable
+                    (<code>AT&amp;D2</code>, <code>AT&amp;K3</code>, <code>ATS7=50</code>) and
+                    persist with <code>AT&amp;W</code>.
+                </div>
+                <div class="callout callout-warn">
+                    <strong>Signal pins are not physically driven.</strong> <code>&amp;C</code>,
+                    <code>&amp;D</code>, and <code>&amp;K</code> are parsed, stored, persisted,
+                    and shown by <code>AT&amp;V</code>, but the emulator does not toggle the
+                    real RS-232 DCD / DTR / DSR / RI pins. Actual wire flow control is set by
+                    each port's <code>serial_<em>x</em>_flowcontrol</code> config key, not by
+                    <code>&amp;K</code>. If your terminal program insists on DCD before it will
+                    talk, look for its &ldquo;ignore carrier&rdquo; / &ldquo;force DTR&rdquo;
+                    option.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- AT+PETSCII                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="petscii">
+                <div class="section-title">AT+PETSCII &mdash; Commodore Translation</div>
+                <p class="intro">A gateway-specific vendor extension that makes ASCII BBSes readable on a PETSCII Commodore when you dial them directly over TCP.</p>
+
+                <table class="data-table">
+                    <tr><th>Command</th><th>Effect</th></tr>
+                    <tr><td><code>AT+PETSCII=0</code> <em>(default)</em></td><td>Off &mdash; direct-TCP dials (<code>ATDT host:port</code>) are raw ASCII passthrough.</td></tr>
+                    <tr><td><code>AT+PETSCII=1</code></td><td>On &mdash; translate between PETSCII and ASCII on direct-TCP dials.</td></tr>
+                </table>
+
+                <p>With <code>AT+PETSCII=1</code>, on a direct-TCP dial the emulator:</p>
+                <ul>
+                    <li><strong>Case-swaps letters in both directions</strong>, because a C64 in upper/graphics mode maps the cases opposite to ASCII &mdash; so an ASCII BBS like <code>telehack.com</code> reads in the right case.</li>
+                    <li>Maps <strong>ASCII Backspace &harr; PETSCII Delete</strong> (0x14) so the C64 <span class="kbd">INST/DEL</span> key edits correctly, including while you type the <code>AT</code> command line itself.</li>
+                    <li><strong>Strips inbound ANSI escape sequences</strong> (<code>ESC&nbsp;[ &hellip;</code> cursor / colour codes) so they don't spray as garbage on a screen that can't render them.</li>
+                    <li><strong>Normalizes punctuation</strong> the C64 can't show: the back-tick and UTF-8 &ldquo;smart&rdquo; single quotes fold to <code>'</code>, smart double quotes to <code>"</code>, tilde / en- / em-dashes to <code>-</code>, the ellipsis to <code>...</code>; other undisplayable high bytes are dropped or shown as <code>?</code>.</li>
+                </ul>
+
+                <div class="callout callout-info">
+                    <strong>Notes.</strong> It applies <em>only</em> to direct-TCP dials &mdash;
+                    <code>ATDT ethernet-gateway</code> already detects PETSCII terminals through
+                    the telnet menu and renders accordingly. It is set-only
+                    (<code>=0</code>/<code>=1</code>), persists immediately (and re-saves with
+                    <code>AT&amp;W</code>), reloads on <code>ATZ</code>, resets to off on
+                    <code>AT&amp;F</code>, and is reported by <code>AT&amp;V</code> as
+                    <code>+PETSCII:n</code>. It lives in the ITU-T V.250 <code>+</code>
+                    extended-command namespace (not <code>AT&amp;P</code>, which means
+                    pulse-dial ratio on real modems). Also editable from the telnet, web, and
+                    GUI config surfaces.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DIALING                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="dialing">
+                <div class="section-title">Dialing &amp; Stored Numbers</div>
+                <p class="intro">A &ldquo;dial&rdquo; is a TCP connect. The dial string is a <code>host:port</code>, a stored slot, or a phone number mapped in <code>dialup.conf</code>.</p>
+                <table class="data-table">
+                    <tr><th>Command</th><th>Effect</th></tr>
+                    <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial &mdash; open a TCP connection to <em>host:port</em>. The default for all TCP dials.</td></tr>
+                    <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial &mdash; identical to <code>ATDT</code> over TCP (there's no audible difference).</td></tr>
+                    <tr><td><code>ATD <em>host:port</em></code></td><td>Generic dial (no <code>T</code>/<code>P</code> selector).</td></tr>
+                    <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut &mdash; &ldquo;dial&rdquo; this gateway's own main menu, so the serial device gets file transfer, browser, AI chat, etc. with no network detour.</td></tr>
+                    <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>). Requires <code>allow_atdt_kermit = true</code>; off by default. See the <a href="kermit.html">Kermit Reference</a>.</td></tr>
+                    <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
+                    <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial the stored number in slot <em>n</em> (0&ndash;3; bare <code>ATDS</code> = slot 0).</td></tr>
+                    <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or <code>host:port</code> string <em>s</em> in slot <em>n</em> (0&ndash;3). Hostname case is preserved. Persisted with <code>AT&amp;W</code>.</td></tr>
+                </table>
+
+                <div class="cat">Dial-string modifiers</div>
+                <p class="dim-text">Honoured only when the dial string looks like a phone number (digits + formatting). A hostname such as <code>pine.example.com</code> is dialled verbatim &mdash; modifiers are not stripped from it (except a trailing <code>;</code>).</p>
+                <table class="data-table">
+                    <tr><th>Modifier</th><th>Effect</th></tr>
+                    <tr><td><code>,</code></td><td>Pause <code>S8</code> seconds (default 2) per comma before continuing.</td></tr>
+                    <tr><td><code>W</code></td><td>Wait for dial tone &mdash; adds <code>S6</code> seconds to the pre-delay.</td></tr>
+                    <tr><td><code>;</code></td><td>Return to command mode after connect instead of going online (applies to hostnames too).</td></tr>
+                    <tr><td><code>*</code> <code>#</code></td><td>DTMF digits &mdash; preserved in the dial target for <code>dialup.conf</code> lookup.</td></tr>
+                    <tr><td><code>P</code> <code>T</code> <code>@</code> <code>!</code></td><td>Pulse / tone / quiet-answer / hookflash selectors &mdash; accepted and ignored.</td></tr>
+                </table>
+                <div class="callout callout-info">
+                    <strong>Phone-number mapping.</strong> An all-digit dial string is looked
+                    up in <code>dialup.conf</code> (digits only &mdash; dashes, spaces, and
+                    parens are ignored), which maps numbers to <code>host:port</code> targets.
+                    The built-in entry <code>1001000</code> always reaches the local gateway
+                    menu and can't be deleted. An unmapped number returns <code>NO CARRIER</code>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- S-REGISTERS                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="sregisters">
+                <div class="section-title">S-Registers</div>
+                <p class="intro">S-registers hold numeric timing and behaviour parameters. Query with <code>ATS<em>n</em>?</code>, set with <code>ATS<em>n</em>=<em>v</em></code> (0&ndash;255), list help with <code>ATS?</code>. <code>AT&amp;W</code> saves all 27; <code>ATZ</code> restores them; <code>AT&amp;F</code> resets to factory.</p>
+                <table class="data-table">
+                    <tr><th>Reg</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>S0</code></td><td>5</td><td>Auto-answer ring count (0 = don't auto-answer).</td></tr>
+                    <tr><td><code>S1</code></td><td>0</td><td>Ring counter (read-only).</td></tr>
+                    <tr><td><code>S2</code></td><td>43</td><td>Escape character (43 = <code>+</code>). Values &gt; 127 disable the <code>+++</code> escape.</td></tr>
+                    <tr><td><code>S3</code></td><td>13</td><td>Carriage-return character.</td></tr>
+                    <tr><td><code>S4</code></td><td>10</td><td>Line-feed character.</td></tr>
+                    <tr><td><code>S5</code></td><td>8</td><td>Backspace character.</td></tr>
+                    <tr><td><code>S6</code></td><td>2</td><td>Wait-for-dial-tone seconds (the <code>W</code> modifier).</td></tr>
+                    <tr><td><code>S7</code></td><td><strong>15</strong></td><td>Wait-for-carrier seconds. Hayes default is 50; lowered here so failed TCP dials return fast. Capped internally at 60.</td></tr>
+                    <tr><td><code>S8</code></td><td>2</td><td>Comma pause time (seconds).</td></tr>
+                    <tr><td><code>S9</code></td><td>6</td><td>Carrier-detect response time (1/10 s).</td></tr>
+                    <tr><td><code>S10</code></td><td>14</td><td>Carrier-loss disconnect time (1/10 s).</td></tr>
+                    <tr><td><code>S11</code></td><td>95</td><td>DTMF tone duration (ms).</td></tr>
+                    <tr><td><code>S12</code></td><td>50</td><td>Escape guard time (1/50 s; 50 = 1.0 s). 0 disables the escape.</td></tr>
+                    <tr><td><code>S13&ndash;S24</code></td><td>0</td><td>Reserved placeholders &mdash; stored and persisted so legacy init strings don't error, but with no effect.</td></tr>
+                    <tr><td><code>S25</code></td><td>5</td><td>DTR detect time (1/100 s). Reserved &mdash; no DTR pin.</td></tr>
+                    <tr><td><code>S26</code></td><td>1</td><td>RTS-to-CTS delay (1/100 s). Reserved &mdash; no RTS/CTS pins.</td></tr>
+                </table>
+                <div class="callout callout-warn">
+                    <strong>Keep S3 / S4 / S5 distinct.</strong> Command-mode line editing
+                    dispatches on the raw byte and checks the CR branch before the backspace
+                    branch &mdash; so setting <code>S3 = 8</code> would make backspace
+                    terminate the line. The Hayes defaults (13 / 10 / 8) are safe; leave them
+                    be.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- +++ ESCAPE                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="escape">
+                <div class="section-title">The +++ Escape Sequence</div>
+                <p class="intro">How to get back to command mode <em>without</em> hanging up.</p>
+                <p>
+                    While online (passing data), typing <code>+++</code> framed by a guard
+                    time of silence on both sides drops you to command mode with the
+                    connection still alive. From there, <code>ATO</code> resumes the data
+                    session and <code>ATH</code> hangs up. This is the exact Hayes guard-time
+                    behaviour:
+                </p>
+                <ul>
+                    <li>The escape character is <code>S2</code> (default 43 = <code>+</code>).</li>
+                    <li>The guard time is <code>S12 / 50</code> seconds (default <code>S12 = 50</code> &rarr; 1.0 s) of silence required both <em>before</em> the first <code>+</code> and <em>after</em> the third.</li>
+                    <li>Setting <code>S12 = 0</code>, or <code>S2 &gt; 127</code>, disables escape detection entirely.</li>
+                    <li>Exactly three escape characters are required &mdash; fewer or more pass through as data.</li>
+                    <li>Any non-escape byte sent in the middle cancels the sequence (it's treated as data).</li>
+                </ul>
+                <pre><code><span class="output-text">(online, exchanging data)</span>
+   ...wait ~1 second of silence...
++++
+   ...wait ~1 second of silence...
+OK                       <span class="output-text">now in command mode, link preserved</span>
+ATO                      <span class="output-text">resume the data session</span>
+   -- or --
+ATH                      <span class="output-text">hang up for good</span></code></pre>
+                <div class="callout">
+                    <strong>Escape won't trigger on bit-banged C64 serial?</strong> A stray
+                    byte picked up while &ldquo;idle&rdquo; resets the guard timer. Lower
+                    <code>S12</code> (e.g. <code>ATS12=25</code> for a half-second guard) to
+                    tighten the window, or enable the gateway byte-trace
+                    (<code>EGATEWAY_GATEWAY_DEBUG</code>) to see exactly what broke it.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CHAINING                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="chaining">
+                <div class="section-title">Command Chaining &amp; Unknown Commands</div>
+                <p>
+                    Multiple commands can ride on a single <code>AT</code> line, the way real
+                    Hayes modems accept init strings. The emulator parses left-to-right,
+                    applies each subcommand, and emits a single <code>OK</code> at the end
+                    (or <code>ERROR</code> at the first failure &mdash; subcommands before the
+                    failure still apply; those after do not run). Spaces between subcommands
+                    are tolerated.
+                </p>
+                <p>Some subcommands <strong>terminate the chain</strong> because they consume the rest of the line or leave command mode:</p>
+                <ul>
+                    <li><code>D&hellip;</code> &mdash; any dial command goes online and consumes the rest of the line.</li>
+                    <li><code>A</code> &mdash; answer; leaves command mode.</li>
+                    <li><code>O</code> / <code>O0</code> &mdash; return to online mode.</li>
+                    <li><code>&amp;Z<em>n</em>=&hellip;</code> &mdash; the stored-number value runs to end of line.</li>
+                </ul>
+                <p>
+                    S-register set values stop at the first non-digit, so
+                    <code>ATS0=2E0</code> sets <code>S0=2</code> then turns echo off &mdash;
+                    no separator needed.
+                </p>
+                <div class="callout callout-info">
+                    <strong>Unknown commands return <code>OK</code>.</strong> Commands the
+                    emulator has no hardware to implement &mdash; <code>ATB</code>,
+                    <code>ATC</code>, <code>ATL</code> (speaker volume), <code>ATM</code>
+                    (speaker), <code>AT&amp;B</code>, <code>AT&amp;G</code>,
+                    <code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>,
+                    <code>AT&amp;Y</code>, and the like &mdash; are silently accepted with
+                    <code>OK</code> so legacy init strings run to completion instead of
+                    halting mid-setup with <code>ERROR</code>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- EXAMPLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="examples">
+                <div class="section-title">Worked Examples</div>
+                <p class="intro">Common things you'll actually type. Lines without a result code shown assume verbose mode (the default).</p>
+
+                <div class="cat">Check the modem and connect to a BBS</div>
+                <pre><code>AT                       <span class="output-text">OK</span>
+ATDT bbs.example.com:23
+<span class="output-text">CONNECT 9600</span>
+<span class="output-text">(you're online &mdash; the BBS appears)</span></code></pre>
+
+                <div class="cat">Reach this gateway's own menu</div>
+                <pre><code>ATDT ethernet-gateway
+<span class="output-text">CONNECT 9600</span>
+<span class="output-text">(the Ethernet Gateway main menu appears)</span></code></pre>
+
+                <div class="cat">Store a favourite and redial it</div>
+                <pre><code>AT&amp;Z0=bbs.example.com:23   <span class="output-text">OK</span>
+AT&amp;W                        <span class="output-text">OK   (persist it)</span>
+ATDS0                       <span class="output-text">CONNECT 9600</span></code></pre>
+
+                <div class="cat">A typical init string (chained, one OK)</div>
+                <pre><code>ATE0Q0V1X4               <span class="output-text">OK</span>
+<span class="output-text">(echo off, result codes on, verbose, full extended codes)</span></code></pre>
+
+                <div class="cat">Escape to command mode, then resume or hang up</div>
+                <pre><code>+++                      <span class="output-text">OK   (still connected)</span>
+ATO                      <span class="output-text">CONNECT 9600   (back online)</span>
+<span class="output-text">...or...</span>
+ATH                      <span class="output-text">NO CARRIER   (hung up)</span></code></pre>
+
+                <div class="cat">Tune behaviour with S-registers</div>
+                <pre><code>ATS0=2                   <span class="output-text">OK   (auto-answer after 2 rings)</span>
+ATS7=50                  <span class="output-text">OK   (wait up to 50s for a slow connect)</span>
+ATS0?                    <span class="output-text">002  (query: 3-digit decimal)</span>
+AT&amp;W                     <span class="output-text">OK   (persist)</span></code></pre>
+
+                <div class="cat">Dial an ASCII BBS from a Commodore 64</div>
+                <pre><code>AT+PETSCII=1             <span class="output-text">OK   (translate ASCII &harr; PETSCII)</span>
+ATDT telehack.com:23
+<span class="output-text">CONNECT 9600</span>
+<span class="output-text">(text now reads in the correct case on the C64)</span></code></pre>
+
+                <div class="cat">Re-issue the last command</div>
+                <pre><code>ATDT bbs.example.com:23
+<span class="output-text">NO CARRIER   (busy &mdash; try again)</span>
+A/                       <span class="output-text">(repeats the dial, no AT/Enter needed)</span></code></pre>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section">
+                <div class="section-title">See Also</div>
+                <div class="callout callout-info">
+                    The <a href="index.html#serial-modem">Serial Modem section of the User
+                    Manual</a> covers port setup, modes, the Ring Emulator, and Console Mode.
+                    For file transfers over a dialed connection, see the
+                    <a href="xmodemreference.html">XMODEM</a>,
+                    <a href="ymodemreference.html">YMODEM</a>,
+                    <a href="zmodemreference.html">ZMODEM</a>, and
+                    <a href="kermitreference.html">Kermit</a> references.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telnet Negotiation Reference &mdash; Ethernet Gateway v0.6.0</title>
+    <meta name="description" content="A guide to the telnet option-negotiation process in the Ethernet Gateway: the IAC command bytes, the WILL/WONT/DO/DONT verbs and what each means, the purpose of every option the gateway handles (ECHO, SGA, TTYPE, NAWS, STATUS, TIMING-MARK), subnegotiation, the RFC 1143 Q-method that prevents loops, and the inbound-server vs outbound-gateway negotiation policies.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Telnet Negotiation Reference</p>
+            <div class="hdr-version">v0.6.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Telnet</span>
+                <span class="hdr-badge">IAC</span>
+                <span class="hdr-badge">WILL / DO</span>
+                <span class="hdr-badge">RFC 1143</span>
+                <span class="hdr-badge">TTYPE</span>
+                <span class="hdr-badge">NAWS</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#verbs">The Verbs</a>
+            <a href="#commands">Command Bytes</a>
+            <a href="#options">Options</a>
+            <a href="#subneg">Subnegotiation</a>
+            <a href="#dataphase">Data Phase</a>
+            <a href="#qmethod">Q-Method</a>
+            <a href="#server">Server</a>
+            <a href="#gateway">Gateway</a>
+            <a href="#session">Full Session</a>
+            <a href="#examples">Examples</a>
+            <a href="#glossary">Glossary</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">Telnet isn't just a raw byte pipe &mdash; it carries an in-band negotiation language so the two ends can agree on options like echo, window size, and terminal type. This page explains that language and how the gateway speaks it.</p>
+
+                <p>
+                    A telnet connection is a stream of ordinary data bytes with one special
+                    value woven through it: <code>0xFF</code>, the <strong>IAC</strong>
+                    (&ldquo;Interpret As Command&rdquo;) byte. When a receiver sees
+                    <code>IAC</code> it knows the next byte (or few) is a command, not data.
+                    Commands let the two ends turn features on and off by mutual agreement
+                    &mdash; this is <strong>option negotiation</strong>, defined by RFC&nbsp;854
+                    and refined by RFC&nbsp;1143.
+                </p>
+                <p>
+                    The model is deliberately symmetric and conservative: an option is only
+                    used if <em>both</em> ends agree, either side may refuse, and a refusal
+                    is always final. That is what lets a 1980s terminal and a modern client
+                    share one protocol &mdash; each enables only what it understands and
+                    politely declines the rest. Because a literal <code>0xFF</code> can occur
+                    in real data, it is escaped on the wire as <code>IAC IAC</code> and
+                    collapsed back to a single <code>0xFF</code> by the receiver.
+                </p>
+                <div class="callout callout-info">
+                    <strong>Two places this happens in the gateway:</strong> when it acts as
+                    a telnet <strong>server</strong> (your client connects in), and when its
+                    <strong>outbound telnet gateway</strong> proxies you to a remote host.
+                    The verbs and options are the same; the policy differs, and both are
+                    covered below.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- VERBS                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="verbs">
+                <div class="section-title">The Four Verbs: WILL / WONT / DO / DONT</div>
+                <p class="intro">Every option has two independent sides &mdash; &ldquo;my side&rdquo; and &ldquo;your side.&rdquo; Two verbs talk about each.</p>
+
+                <p>
+                    An <code>IAC</code> command of the form <code>IAC &lt;verb&gt; &lt;option&gt;</code>
+                    asserts or requests something. <strong>WILL / WONT</strong> talk about the
+                    <em>sender's own</em> side of an option; <strong>DO / DONT</strong> talk
+                    about what the sender wants from the <em>other</em> side:
+                </p>
+                <table class="data-table">
+                    <tr><th>Verb</th><th>Byte</th><th>Means</th><th>Valid replies</th></tr>
+                    <tr><td><code>WILL</code></td><td>251</td><td>&ldquo;I will enable this option on my end.&rdquo;</td><td><code>DO</code> (yes, please) or <code>DONT</code> (no)</td></tr>
+                    <tr><td><code>WONT</code></td><td>252</td><td>&ldquo;I won't / am disabling this option on my end.&rdquo;</td><td><code>DONT</code> (acknowledged)</td></tr>
+                    <tr><td><code>DO</code></td><td>253</td><td>&ldquo;Please enable this option on your end.&rdquo;</td><td><code>WILL</code> (ok) or <code>WONT</code> (refused)</td></tr>
+                    <tr><td><code>DONT</code></td><td>254</td><td>&ldquo;Don't enable / disable this option on your end.&rdquo;</td><td><code>WONT</code> (acknowledged)</td></tr>
+                </table>
+
+                <p>The two rules that keep negotiation sane:</p>
+                <ul>
+                    <li><strong>Enabling requires agreement.</strong> A <code>WILL</code> is only in effect once answered with <code>DO</code>; a <code>DO</code> only once answered with <code>WILL</code>. Either end may answer with the negative and the option stays off.</li>
+                    <li><strong>Disabling is always granted.</strong> You can never force an option on a peer: a <code>WONT</code> must be met with <code>DONT</code>, and a <code>DONT</code> with <code>WONT</code>. Refusals are never argued with.</li>
+                </ul>
+                <div class="callout">
+                    <strong>The classic confusion:</strong> &ldquo;who echoes?&rdquo; is decided
+                    by the <em>server</em> sending <code>WILL ECHO</code> (&ldquo;I will do the
+                    echoing&rdquo;), which the client accepts with <code>DO ECHO</code>. It is
+                    <em>not</em> the client telling the server to echo &mdash; that asymmetry
+                    trips up nearly everyone at first.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- COMMAND BYTES                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="commands">
+                <div class="section-title">IAC Command Bytes</div>
+                <p class="intro">The full command vocabulary. A command is <code>IAC</code> followed by one of these.</p>
+
+                <div class="cat">Negotiation &amp; subnegotiation</div>
+                <table class="data-table">
+                    <tr><th>Name</th><th>Dec</th><th>Hex</th><th>Purpose</th></tr>
+                    <tr><td><code>IAC</code></td><td>255</td><td>0xFF</td><td>Interpret As Command &mdash; the escape that introduces every command (and, doubled, a literal 0xFF in data).</td></tr>
+                    <tr><td><code>WILL</code></td><td>251</td><td>0xFB</td><td>Offer / assert an option on the sender's side.</td></tr>
+                    <tr><td><code>WONT</code></td><td>252</td><td>0xFC</td><td>Refuse / disable an option on the sender's side.</td></tr>
+                    <tr><td><code>DO</code></td><td>253</td><td>0xFD</td><td>Request an option on the receiver's side.</td></tr>
+                    <tr><td><code>DONT</code></td><td>254</td><td>0xFE</td><td>Refuse / disable an option on the receiver's side.</td></tr>
+                    <tr><td><code>SB</code></td><td>250</td><td>0xFA</td><td>Subnegotiation Begin &mdash; start an option's parameter block.</td></tr>
+                    <tr><td><code>SE</code></td><td>240</td><td>0xF0</td><td>Subnegotiation End &mdash; <code>IAC SE</code> closes the block.</td></tr>
+                </table>
+
+                <div class="cat">Two-byte function commands</div>
+                <p class="dim-text">These have no option byte. The gateway consumes them so they never leak to your terminal; <code>AYT</code> gets a visible reply.</p>
+                <table class="data-table">
+                    <tr><th>Name</th><th>Dec</th><th>Purpose</th></tr>
+                    <tr><td><code>NOP</code></td><td>241</td><td>No operation (keep-alive).</td></tr>
+                    <tr><td><code>DM</code></td><td>242</td><td>Data Mark (the SYNCH sentinel).</td></tr>
+                    <tr><td><code>BRK</code></td><td>243</td><td>Break.</td></tr>
+                    <tr><td><code>IP</code></td><td>244</td><td>Interrupt Process.</td></tr>
+                    <tr><td><code>AO</code></td><td>245</td><td>Abort Output.</td></tr>
+                    <tr><td><code>AYT</code></td><td>246</td><td>Are You There &mdash; the gateway answers with a visible &ldquo;yes&rdquo; so a human probing the link gets a reply.</td></tr>
+                    <tr><td><code>EC</code></td><td>247</td><td>Erase Character.</td></tr>
+                    <tr><td><code>EL</code></td><td>248</td><td>Erase Line.</td></tr>
+                    <tr><td><code>GA</code></td><td>249</td><td>Go Ahead &mdash; the half-duplex line-turnaround signal (suppressed once <code>SGA</code> is on; consumed if received).</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OPTIONS                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="options">
+                <div class="section-title">The Options &amp; Their Purpose</div>
+                <p class="intro">Each option is one numbered feature. Here is what every option the gateway handles is <em>for</em>, and how the gateway treats it.</p>
+
+                <div class="cat">ECHO &mdash; option 1 (RFC 857)</div>
+                <p class="dim-text">
+                    Decides <strong>which side echoes typed characters</strong> back to the
+                    screen. When the gateway sends <code>WILL ECHO</code>, it takes
+                    responsibility for echoing &mdash; so the client should stop local-echoing,
+                    and the gateway can suppress echo for password fields and run
+                    character-at-a-time apps. As a server the gateway asserts
+                    <code>WILL ECHO</code> at connect; as an outbound proxy it accepts a remote
+                    host's <code>WILL ECHO</code> with <code>DO ECHO</code> (a BBS that echoes
+                    for you).
+                </p>
+
+                <div class="cat">SGA &mdash; Suppress Go-Ahead, option 3 (RFC 858)</div>
+                <p class="dim-text">
+                    Turns off the ancient half-duplex <code>GA</code> &ldquo;your turn&rdquo;
+                    signal. Suppressing it puts the link into <strong>full-duplex,
+                    character-at-a-time</strong> mode &mdash; the modern default. The gateway
+                    both offers it (<code>WILL SGA</code>) and asks for it (<code>DO SGA</code>),
+                    and never emits a <code>GA</code> itself. Paired with <code>WILL ECHO</code>
+                    this is what makes a session feel like a normal terminal.
+                </p>
+
+                <div class="cat">TTYPE &mdash; Terminal Type, option 24 (RFC 1091)</div>
+                <p class="dim-text">
+                    Lets the client tell the server <strong>what kind of terminal it is</strong>.
+                    The gateway sends <code>DO TTYPE</code>; once the client agrees
+                    (<code>WILL TTYPE</code>) the gateway asks for the name with a
+                    <code>SB TTYPE SEND</code> subnegotiation, and the client answers
+                    <code>SB TTYPE IS "&lt;name&gt;"</code>. The gateway maps that name to its
+                    three classes &mdash; <strong>PETSCII</strong> (Commodore),
+                    <strong>ANSI</strong>, or <strong>ASCII/DUMB</strong> &mdash; so it can
+                    skip the manual BACKSPACE detection prompt entirely.
+                </p>
+
+                <div class="cat">NAWS &mdash; Window Size, option 31 (RFC 1073)</div>
+                <p class="dim-text">
+                    &ldquo;Negotiate About Window Size&rdquo; &mdash; lets the client report its
+                    <strong>terminal width and height</strong>. The gateway sends
+                    <code>DO NAWS</code>; the client agrees (<code>WILL NAWS</code>) and sends
+                    <code>SB NAWS &lt;width&gt;&lt;height&gt;</code> (two 16-bit values), and
+                    re-sends it whenever the window is resized. The gateway uses the size for
+                    screen layout and forwards live resizes through the outbound gateway in
+                    cooperative mode.
+                </p>
+
+                <div class="cat">STATUS &mdash; option 5 (RFC 859)</div>
+                <p class="dim-text">
+                    A way to <strong>ask the other end which options it thinks are on</strong>.
+                    On a <code>DO STATUS</code> the gateway agrees (<code>WILL STATUS</code>);
+                    a later <code>SB STATUS SEND</code> triggers a dump of the current option
+                    state. Rarely used in practice, but supported.
+                </p>
+
+                <div class="cat">TIMING-MARK &mdash; option 6 (RFC 860)</div>
+                <p class="dim-text">
+                    A <strong>one-shot synchronization mark</strong>: &ldquo;tell me when
+                    you've processed everything up to here.&rdquo; On a
+                    <code>DO TIMING-MARK</code> the gateway flushes its queued output and then
+                    replies <code>WILL TIMING-MARK</code> &mdash; that reply <em>is</em> the
+                    mark. No persistent state is kept.
+                </p>
+
+                <div class="cat">Everything else</div>
+                <p class="dim-text">
+                    Any option the gateway doesn't implement is <strong>politely refused</strong>:
+                    an incoming <code>WILL</code> is answered with <code>DONT</code>, and an
+                    incoming <code>DO</code> with <code>WONT</code>. Nothing is left
+                    un-acknowledged, so a peer never hangs waiting on a reply.
+                </p>
+
+                <div class="cat" id="wellknown">Well-Known Options at a Glance</div>
+                <p class="dim-text">Where the gateway sits in the wider telnet option landscape. &ldquo;Refused&rdquo; means it is acknowledged with <code>WONT</code>/<code>DONT</code> and left off &mdash; it does no harm, the feature just isn't used.</p>
+                <table class="data-table">
+                    <tr><th>Opt</th><th>Name</th><th>RFC</th><th>Gateway</th></tr>
+                    <tr><td>0</td><td>BINARY (Transmit-Binary)</td><td>856</td><td><strong>Refused</strong> &mdash; uses IAC-escaping instead (see Data Phase).</td></tr>
+                    <tr><td>1</td><td>ECHO</td><td>857</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>3</td><td>SGA (Suppress Go-Ahead)</td><td>858</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>5</td><td>STATUS</td><td>859</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>6</td><td>TIMING-MARK</td><td>860</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>24</td><td>TERMINAL-TYPE (TTYPE)</td><td>1091</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>31</td><td>NAWS (Window Size)</td><td>1073</td><td><strong>Supported</strong></td></tr>
+                    <tr><td>32</td><td>TERMINAL-SPEED</td><td>1079</td><td>Refused</td></tr>
+                    <tr><td>33</td><td>TOGGLE-FLOW-CONTROL</td><td>1372</td><td>Refused</td></tr>
+                    <tr><td>34</td><td>LINEMODE</td><td>1184</td><td>Refused (the gateway does its own line editing in char-at-a-time mode).</td></tr>
+                    <tr><td>36</td><td>ENVIRON</td><td>1408</td><td>Refused</td></tr>
+                    <tr><td>39</td><td>NEW-ENVIRON</td><td>1572</td><td>Refused (a stray subnegotiation is consumed and ignored).</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SUBNEGOTIATION                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="subneg">
+                <div class="section-title">Subnegotiation (SB &hellip; SE)</div>
+                <p class="intro">When an option needs to carry data &mdash; a terminal-type string, a window size &mdash; that data rides in a subnegotiation block.</p>
+                <p>
+                    A subnegotiation is framed as
+                    <code>IAC SB &lt;option&gt; &lt;parameters&gt; IAC SE</code>. Only options
+                    that were already enabled by <code>WILL</code>/<code>DO</code> may
+                    subnegotiate. The two the gateway uses:
+                </p>
+                <table class="data-table">
+                    <tr><th>Block</th><th>Meaning</th></tr>
+                    <tr><td><code>IAC SB TTYPE SEND IAC SE</code></td><td>Server &rarr; client: &ldquo;send me your terminal type.&rdquo;</td></tr>
+                    <tr><td><code>IAC SB TTYPE IS "xterm" IAC SE</code></td><td>Client &rarr; server: &ldquo;I am an xterm.&rdquo;</td></tr>
+                    <tr><td><code>IAC SB NAWS &lt;w&gt;&lt;w&gt;&lt;h&gt;&lt;h&gt; IAC SE</code></td><td>Client &rarr; server: width and height, each a 16-bit value (high byte first).</td></tr>
+                </table>
+                <div class="callout callout-warn">
+                    <strong>Bounded for safety.</strong> A subnegotiation body is capped at
+                    <strong>8&nbsp;KiB</strong>. A malicious or broken peer that sends a huge
+                    <code>SB</code> with no terminating <code>IAC SE</code> can't exhaust memory
+                    &mdash; the body is bounded and the session bails rather than buffering
+                    without limit. Any literal <code>0xFF</code> inside a subnegotiation is
+                    <code>IAC IAC</code>-escaped like everywhere else.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DATA PHASE / NVT                              -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="dataphase">
+                <div class="section-title">The NVT &amp; the Data Phase</div>
+                <p class="intro">Negotiation decides the rules; the data phase is where actual bytes flow under them. Both ends pretend to be the same imaginary device &mdash; the Network Virtual Terminal.</p>
+
+                <p>
+                    Telnet's core abstraction is the <strong>NVT (Network Virtual
+                    Terminal)</strong>: a canonical, lowest-common-denominator terminal that
+                    both ends agree to emulate so neither needs to know the other's real
+                    hardware. The NVT is a 7-bit ASCII device with a printer and a keyboard,
+                    and it imposes three wire conventions on ordinary data &mdash; the same
+                    three the gateway's raw I/O layer applies on every byte:
+                </p>
+                <table class="data-table">
+                    <tr><th>Convention</th><th>On the wire</th><th>Why</th></tr>
+                    <tr><td>End of line</td><td><code>CR LF</code> (0x0D 0x0A)</td><td>The NVT newline is the pair, not a lone LF.</td></tr>
+                    <tr><td>Bare carriage return</td><td><code>CR NUL</code> (0x0D 0x00)</td><td>A <code>CR</code> not meant to start a new line is followed by <code>NUL</code> so the far end doesn't treat the next byte as a line start. The receiver strips the <code>NUL</code>.</td></tr>
+                    <tr><td>Literal 0xFF</td><td><code>IAC IAC</code> (0xFF 0xFF)</td><td>Since <code>0xFF</code> is the command escape, a real <code>0xFF</code> data byte is doubled and collapsed back on receipt.</td></tr>
+                </table>
+                <p class="dim-text">
+                    The gateway implements all three: outbound writes stuff <code>CR</code>
+                    &rarr; <code>CR NUL</code> and escape <code>0xFF</code> &rarr;
+                    <code>IAC IAC</code>; inbound reads strip the <code>NUL</code> and
+                    un-double the <code>IAC</code>. SSH and serial links skip them &mdash; SSH
+                    has no in-band command byte, and a serial wire isn't an NVT.
+                </p>
+
+                <div class="cat">Why not BINARY mode?</div>
+                <p class="dim-text">
+                    The <strong>BINARY</strong> option (0, RFC&nbsp;856) exists to <em>suspend</em>
+                    these NVT rules so all 256 byte values pass literally &mdash; the &ldquo;clean
+                    8-bit pipe&rdquo; you'd want for a file transfer. The gateway deliberately
+                    does <strong>not</strong> negotiate BINARY (it refuses
+                    <code>DO BINARY</code> with <code>WONT</code>). Instead it stays in NVT
+                    mode and relies on <code>IAC IAC</code> escaping and <code>CR NUL</code>
+                    stuffing to carry arbitrary bytes safely. That keeps one consistent code
+                    path for every client &mdash; including the many retro clients that don't
+                    implement BINARY &mdash; and it is exactly the transform that
+                    XMODEM/YMODEM transfers over telnet must respect (the <strong>I</strong>
+                    toggle on the File Transfer menu). See the
+                    <a href="xmodemreference.html">XMODEM Protocol Reference</a> for how that
+                    interacts with binary file data.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- Q-METHOD                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="qmethod">
+                <div class="section-title">The RFC 1143 Q-Method</div>
+                <p class="intro">How the gateway avoids negotiation loops when both ends change their minds at once.</p>
+                <p>
+                    Naive negotiation has a famous failure mode: if each side answers every
+                    request, and both request the same option at the same time, they can
+                    bounce <code>WILL</code>/<code>DO</code> back and forth forever. RFC&nbsp;1143
+                    solves it with a small state machine kept <strong>per option, per side</strong>.
+                    Each side is in one of six states:
+                </p>
+                <table class="data-table">
+                    <tr><th>State</th><th>Meaning</th></tr>
+                    <tr><td><code>NO</code></td><td>Option is off and idle.</td></tr>
+                    <tr><td><code>YES</code></td><td>Option is on and idle.</td></tr>
+                    <tr><td><code>WANTYES</code></td><td>We asked to turn it on; awaiting the agreement.</td></tr>
+                    <tr><td><code>WANTNO</code></td><td>We asked to turn it off; awaiting the acknowledgement.</td></tr>
+                    <tr><td><code>WANTYES / WANTNO (opposite queued)</code></td><td>A change-of-mind is queued behind the in-flight request, applied when it resolves.</td></tr>
+                </table>
+                <p>
+                    The practical payoff: the gateway only ever sends a request when the state
+                    actually changes, and it treats a peer's spontaneous <code>WILL TTYPE</code>
+                    (in answer to its own <code>DO TTYPE</code>) as an <strong>acknowledgement</strong>
+                    rather than a fresh offer to answer again. No loops, no double-acks, and a
+                    clean resolution even when a mind-change is already in flight.
+                </p>
+
+                <div class="cat">A simultaneous request, resolved</div>
+                <p class="dim-text">Without the state machine, both ends offering at once would echo forever. With it:</p>
+                <pre><code><span class="output-text">both ends decide they want TTYPE on, at the same instant</span>
+<span class="prompt-char">S:</span> IAC DO TTYPE        <span class="output-text">gateway: state NO -> WANTYES</span>
+<span class="prompt-char">C:</span> IAC WILL TTYPE      <span class="output-text">client's own offer, crossing on the wire</span>
+<span class="output-text">gateway receives WILL TTYPE while in WANTYES:</span>
+<span class="output-text">  -> treats it as the agreement, state -> YES</span>
+<span class="output-text">  -> does NOT emit another DO (which would loop)</span>
+<span class="prompt-char">S:</span> <span class="output-text">(silent &mdash; option is now on, settled)</span></code></pre>
+                <p class="dim-text">
+                    The mirror case &mdash; a queued change of mind &mdash; works the same way:
+                    if the gateway is in <code>WANTYES</code> and decides it wants the option
+                    off again, that flips it to <code>WANTYES&nbsp;(opposite&nbsp;queued)</code>;
+                    when the in-flight request resolves, the queued <code>WONT</code>/<code>DONT</code>
+                    is sent exactly once. The connection always converges.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SERVER                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="server">
+                <div class="section-title">Inbound: Gateway as Telnet Server</div>
+                <p class="intro">What the gateway sends the instant your client connects.</p>
+                <p>
+                    On every non-serial connection the gateway opens with a fixed five-command
+                    burst, then waits briefly for the replies:
+                </p>
+                <pre><code>IAC WILL ECHO     <span class="output-text">"I'll do the echoing"</span>
+IAC WILL SGA      <span class="output-text">"full-duplex, no go-aheads from me"</span>
+IAC DO   SGA      <span class="output-text">"please suppress go-ahead too"</span>
+IAC DO   TTYPE    <span class="output-text">"tell me your terminal type"</span>
+IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></code></pre>
+                <p class="dim-text">
+                    A cooperating client answers <code>DO ECHO</code> / <code>WILL SGA</code> /
+                    <code>DO SGA</code> / <code>WILL TTYPE</code> / <code>WILL NAWS</code> and
+                    then sends its <code>SB TTYPE IS</code> and <code>SB NAWS</code> data. If
+                    <code>TTYPE</code> identified the terminal, the gateway skips the manual
+                    &ldquo;press BACKSPACE&rdquo; detection; otherwise it falls back to that
+                    prompt. Raw clients that ignore the burst still work &mdash; the
+                    unanswered options simply stay off.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- GATEWAY                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="gateway">
+                <div class="section-title">Outbound: The Telnet Gateway Proxy</div>
+                <p class="intro">When you dial a remote host through the gateway, its negotiation policy depends on the configured mode.</p>
+                <table class="data-table">
+                    <tr><th>Mode</th><th>Negotiation behaviour</th></tr>
+                    <tr><td><strong>Reactive</strong> <em>(default)</em></td><td>Parse IAC both ways but send no proactive offers. Accept a remote <code>WILL ECHO</code> with <code>DO ECHO</code>; refuse every other peer-initiated option (<code>WILL &rarr; DONT</code>, <code>DO &rarr; WONT</code>); escape outbound <code>0xFF</code> as <code>IAC IAC</code>. Works with real telnet servers <em>and</em> raw-TCP services on port 23.</td></tr>
+                    <tr><td><strong>Cooperative</strong></td><td>Everything reactive does, plus proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code> at connect; answers <code>SB TTYPE SEND</code> with your terminal type (PETSCII / ANSI / DUMB) and <code>DO NAWS</code> with your real window size, forwarding live resizes. Turn this on for modern BBSes.</td></tr>
+                    <tr><td><strong>Raw TCP</strong></td><td>The entire IAC layer is disabled &mdash; no parsing inbound, no escaping outbound &mdash; for destinations that aren't really telnet. (Bytes to <em>your</em> local client are still IAC-escaped so your own telnet client isn't confused.)</td></tr>
+                </table>
+                <div class="callout callout-info">
+                    Set the mode from the GUI / web <em>Server &rarr; More</em> popup or the
+                    telnet <em>Configuration &rarr; Gateway Configuration</em> menu &mdash; see
+                    the <a href="index.html#gateways">Gateways section of the User Manual</a>.
+                    The same RFC&nbsp;1143 Q-method drives the cooperative mode's option state.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- FULL SESSION                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="session">
+                <div class="section-title">A Full Session, Start to Finish</div>
+                <p class="intro">Putting it together: everything that happens from TCP connect to disconnect, in order.</p>
+                <div class="instructions">
+                    <h3>Timeline</h3>
+                    <ol>
+                        <li><strong>TCP connect.</strong> Your client opens a socket to the gateway's telnet port (default 2323).</li>
+                        <li><strong>Opening burst.</strong> The gateway immediately sends <code>WILL ECHO</code>, <code>WILL SGA</code>, <code>DO SGA</code>, <code>DO TTYPE</code>, <code>DO NAWS</code>, then pauses briefly for replies.</li>
+                        <li><strong>Client replies.</strong> A cooperating client answers (<code>DO ECHO</code>, <code>WILL SGA</code> / <code>DO SGA</code>, <code>WILL TTYPE</code>, <code>WILL NAWS</code>) and may push its <code>SB NAWS</code> size right away. A raw client stays silent &mdash; those options simply remain off.</li>
+                        <li><strong>Terminal type.</strong> The gateway sends <code>SB TTYPE SEND</code>; the client returns <code>SB TTYPE IS "&lt;name&gt;"</code>, which the gateway maps to PETSCII / ANSI / ASCII.</li>
+                        <li><strong>Fallback detection.</strong> If <code>TTYPE</code> didn't identify the terminal, the gateway prints <em>&ldquo;Press BACKSPACE to detect terminal&rdquo;</em> and classifies by the byte received (0x14 = PETSCII, 0x08/0x7F = ANSI, else ASCII).</li>
+                        <li><strong>Colour prompt.</strong> The gateway asks whether to use colour (no default &mdash; Y or N).</li>
+                        <li><strong>Authentication.</strong> If <code>security_enabled</code>, the login prompt runs (with the shared per-IP lockout).</li>
+                        <li><strong>Interactive use.</strong> The main menu and all features run in the data phase as NVT bytes &mdash; <code>CR NUL</code> stuffing and <code>IAC IAC</code> escaping applied throughout, echo handled by the gateway.</li>
+                        <li><strong>File transfer (if any).</strong> XMODEM/YMODEM honour the IAC / CR-NUL transforms per the <strong>I</strong> toggle; ZMODEM and Kermit layer their own escaping on top.</li>
+                        <li><strong>Disconnect.</strong> On exit (or idle timeout) the gateway closes the session and the TCP socket drops.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- EXAMPLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="examples">
+                <div class="section-title">Example Exchanges</div>
+                <p class="intro">A few negotiations as they actually appear on the wire (<code>S:</code> = server / gateway, <code>C:</code> = client).</p>
+
+                <div class="cat">Server takes over echo + full-duplex</div>
+                <pre><code><span class="prompt-char">S:</span> IAC WILL ECHO      IAC WILL SGA   IAC DO SGA
+<span class="prompt-char">C:</span> IAC DO   ECHO      IAC DO   SGA   IAC WILL SGA
+<span class="output-text">   -> server echoes; both sides full-duplex</span></code></pre>
+
+                <div class="cat">Terminal-type discovery</div>
+                <pre><code><span class="prompt-char">S:</span> IAC DO TTYPE
+<span class="prompt-char">C:</span> IAC WILL TTYPE
+<span class="prompt-char">S:</span> IAC SB TTYPE SEND IAC SE
+<span class="prompt-char">C:</span> IAC SB TTYPE IS "xterm-256color" IAC SE
+<span class="output-text">   -> detected as ANSI; BACKSPACE prompt skipped</span></code></pre>
+
+                <div class="cat">Window size, including a later resize</div>
+                <pre><code><span class="prompt-char">S:</span> IAC DO NAWS
+<span class="prompt-char">C:</span> IAC WILL NAWS
+<span class="prompt-char">C:</span> IAC SB NAWS 0 80 0 24 IAC SE     <span class="output-text">80 x 24</span>
+<span class="output-text">   ...user resizes the window...</span>
+<span class="prompt-char">C:</span> IAC SB NAWS 0 132 0 50 IAC SE    <span class="output-text">now 132 x 50</span></code></pre>
+
+                <div class="cat">An option the gateway doesn't support</div>
+                <pre><code><span class="prompt-char">C:</span> IAC WILL LINEMODE
+<span class="prompt-char">S:</span> IAC DONT LINEMODE        <span class="output-text">politely refused, stays off</span></code></pre>
+
+                <div class="cat">&ldquo;Are you there?&rdquo;</div>
+                <pre><code><span class="prompt-char">C:</span> IAC AYT
+<span class="prompt-char">S:</span> [Yes]                    <span class="output-text">visible reply for a human probing the link</span></code></pre>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- GLOSSARY                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="glossary">
+                <div class="section-title">Glossary</div>
+                <table class="data-table">
+                    <tr><th>Term</th><th>Meaning</th></tr>
+                    <tr><td><strong>NVT</strong></td><td>Network Virtual Terminal &mdash; the canonical imaginary terminal both ends emulate so neither needs to know the other's real hardware.</td></tr>
+                    <tr><td><strong>IAC</strong></td><td>Interpret As Command (<code>0xFF</code>) &mdash; the escape byte that introduces every telnet command and, doubled, a literal <code>0xFF</code> in data.</td></tr>
+                    <tr><td><strong>Option</strong></td><td>A numbered, individually negotiable feature (ECHO = 1, SGA = 3, TTYPE = 24, &hellip;).</td></tr>
+                    <tr><td><strong>Verb</strong></td><td>One of <code>WILL</code> / <code>WONT</code> / <code>DO</code> / <code>DONT</code> &mdash; the four ways to assert or request an option.</td></tr>
+                    <tr><td><strong>Subnegotiation</strong></td><td>An <code>IAC SB &hellip; IAC SE</code> block that carries an enabled option's parameters (a terminal-type string, a window size).</td></tr>
+                    <tr><td><strong>Q-Method</strong></td><td>RFC&nbsp;1143's per-option state machine (NO / YES / WANTYES / WANTNO + queued change) that prevents negotiation loops.</td></tr>
+                    <tr><td><strong>Go-Ahead (GA)</strong></td><td>The half-duplex &ldquo;your turn&rdquo; line-turnaround signal, suppressed once SGA is enabled.</td></tr>
+                    <tr><td><strong>SYNCH / Data Mark</strong></td><td>An out-of-band attention mechanism (TCP urgent data + the <code>DM</code> command). Recognised and consumed, not specially acted on here.</td></tr>
+                    <tr><td><strong>CR NUL</strong></td><td>How a bare carriage return is encoded on an NVT link (<code>0x0D 0x00</code>); the <code>NUL</code> is stripped on receive.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section">
+                <div class="section-title">See Also</div>
+                <div class="callout callout-info">
+                    The <a href="index.html#terminals">Terminals</a> and
+                    <a href="index.html#gateways">Gateways</a> sections of the User Manual
+                    cover terminal detection and the outbound telnet/SSH proxy. For the
+                    file-transfer-over-telnet byte transforms (IAC escaping and CR-NUL
+                    stuffing during XMODEM/YMODEM), see the
+                    <a href="xmodemreference.html">XMODEM Protocol Reference</a>.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

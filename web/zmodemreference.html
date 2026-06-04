@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZMODEM Protocol Reference &mdash; Ethernet Gateway v0.6.0</title>
+    <meta name="description" content="Step-by-step reference for the Ethernet Gateway ZMODEM implementation (Forsberg 1988): ZDLE escaping, hex/binary16/binary32 headers, CRC-16 and CRC-32, the ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN handshake, batch transfers, autostart, position-based resume, and ZSKIP — for both downloads (gateway sends) and uploads (gateway receives).">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">ZMODEM Protocol Reference</p>
+            <div class="hdr-version">v0.6.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">ZMODEM</span>
+                <span class="hdr-badge">ZDLE</span>
+                <span class="hdr-badge">CRC-32</span>
+                <span class="hdr-badge">Batch</span>
+                <span class="hdr-badge">Autostart</span>
+                <span class="hdr-badge">Resume</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#frames">Frames</a>
+            <a href="#zdle">ZDLE</a>
+            <a href="#download">Download</a>
+            <a href="#upload">Upload</a>
+            <a href="#batch">Batch &amp; Autostart</a>
+            <a href="#recovery">Recovery</a>
+            <a href="#tunables">Tunables</a>
+            <a href="xmodemreference.html">XMODEM</a>
+            <a href="ymodemreference.html">YMODEM</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">ZMODEM (Chuck Forsberg, 1988) is the modern, streaming, batch-capable evolution of the XMODEM family &mdash; and the one most terminal programs start automatically.</p>
+
+                <p>
+                    Where XMODEM and YMODEM send one fixed block and wait for an
+                    acknowledgement, ZMODEM is built around <strong>frames and
+                    subpackets</strong> with <strong>position-based recovery</strong>: data
+                    is identified by its byte offset in the file, so the receiver recovers
+                    from an error by telling the sender <em>where</em> to resume rather than
+                    which block to resend. It adds, over YMODEM:
+                </p>
+                <ul>
+                    <li><strong>CRC-32</strong> (as well as CRC-16) for far stronger error detection.</li>
+                    <li><strong>ZDLE escaping</strong> so the stream survives links that eat control bytes or XON/XOFF flow control.</li>
+                    <li><strong>Autostart</strong> &mdash; the sender can kick off a transfer from any menu; the gateway detects it and switches to receive.</li>
+                    <li><strong>Crash recovery / resume</strong> via <code>ZRPOS</code>, and per-file <strong>skip</strong> via <code>ZSKIP</code> in a batch.</li>
+                </ul>
+
+                <p>
+                    The gateway implements the full Forsberg 1988 spec in
+                    <code>src/zmodem.rs</code>: ZDLE escaping, hex / binary16 / binary32
+                    headers, CRC-16 and CRC-32, and batch send and receive. Its
+                    <code>ZRINIT</code> advertises <code>CANFDX | CANOVIO | CANFC32</code>
+                    (full-duplex, overlapped I/O, CRC-32 capable), but the data path runs
+                    <strong>stop-and-wait</strong> &mdash; every data subpacket is
+                    <code>ZCRCW</code>-terminated and ACK-gated. That is slightly slower than
+                    true streaming in theory, but rock-solid over a telnet or SSH hop where
+                    buffering and flow control are unpredictable.
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Coming from XMODEM/YMODEM?</strong> ZMODEM shares none of their
+                    block framing &mdash; it is a different wire protocol. The
+                    <a href="xmodemreference.html">XMODEM</a> and
+                    <a href="ymodemreference.html">YMODEM</a> pages cover the simpler
+                    block-and-wait scheme; ZMODEM is the right choice on clean modern links
+                    and is what Qodem, SyncTERM, ZOC, and ExtraPuTTY use by default.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- FRAMES                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="frames">
+                <div class="section-title">Frames, Headers &amp; Subpackets</div>
+                <p class="intro">Everything on the wire is either a header or a data subpacket.</p>
+
+                <div class="cat">Header encodings</div>
+                <p class="dim-text">
+                    A header carries a frame type plus a 4-byte argument (a file position, a
+                    capability mask, a length). It comes in three encodings, all introduced
+                    by the <code>ZPAD ZDLE</code> sync (<code>*</code> <code>*</code>
+                    <code>0x18</code> &hellip;), which is also what makes autostart possible:
+                </p>
+                <table class="data-table">
+                    <tr><th>Encoding</th><th>Intro</th><th>Check</th><th>Used for</th></tr>
+                    <tr><td><strong>Hex</strong></td><td><code>** ZDLE B</code></td><td>CRC-16</td><td>Handshake frames &mdash; human-readable, robust.</td></tr>
+                    <tr><td><strong>Binary16</strong></td><td><code>* ZDLE A</code></td><td>CRC-16</td><td>Data frames with CRC-16.</td></tr>
+                    <tr><td><strong>Binary32</strong></td><td><code>* ZDLE C</code></td><td>CRC-32</td><td>Data frames with CRC-32 (when <code>CANFC32</code> is negotiated).</td></tr>
+                </table>
+                <p class="dim-text">
+                    The <code>A</code> / <code>B</code> / <code>C</code> suffix is exactly
+                    what the autostart prefix <code>**&#92;x18[ABC]</code> encodes.
+                </p>
+
+                <div class="cat">Frame types</div>
+                <table class="data-table">
+                    <tr><th>Frame</th><th>Hex</th><th>Sent by</th><th>Meaning</th></tr>
+                    <tr><td><code>ZRQINIT</code></td><td>0x00</td><td>Sender</td><td>&ldquo;Request init&rdquo; &mdash; opens a transfer (and triggers autostart).</td></tr>
+                    <tr><td><code>ZRINIT</code></td><td>0x01</td><td>Receiver</td><td>&ldquo;Ready&rdquo; &mdash; carries the capability flags.</td></tr>
+                    <tr><td><code>ZSINIT</code></td><td>0x02</td><td>Sender</td><td>Optional sender init flags / attention string.</td></tr>
+                    <tr><td><code>ZACK</code></td><td>0x03</td><td>Either</td><td>Acknowledge (e.g. a flow-control checkpoint).</td></tr>
+                    <tr><td><code>ZFILE</code></td><td>0x04</td><td>Sender</td><td>File header &mdash; followed by a name/size subpacket.</td></tr>
+                    <tr><td><code>ZSKIP</code></td><td>0x05</td><td>Receiver</td><td>&ldquo;Skip this file&rdquo; &mdash; decline one file in a batch.</td></tr>
+                    <tr><td><code>ZNAK</code></td><td>0x06</td><td>Either</td><td>Last header was garbled &mdash; resend it.</td></tr>
+                    <tr><td><code>ZABORT</code></td><td>0x07</td><td>Either</td><td>Abort the whole session.</td></tr>
+                    <tr><td><code>ZFIN</code></td><td>0x08</td><td>Either</td><td>Finish &mdash; tear the session down (both sides exchange it).</td></tr>
+                    <tr><td><code>ZRPOS</code></td><td>0x09</td><td>Receiver</td><td>&ldquo;Resume at this byte offset&rdquo; &mdash; accept, recover, or resume.</td></tr>
+                    <tr><td><code>ZDATA</code></td><td>0x0A</td><td>Sender</td><td>Data frame at a byte offset; subpackets follow.</td></tr>
+                    <tr><td><code>ZEOF</code></td><td>0x0B</td><td>Sender</td><td>End of file &mdash; argument is the final length.</td></tr>
+                </table>
+
+                <div class="cat">Subpacket terminators</div>
+                <p class="dim-text">
+                    Data rides in subpackets; the byte that ends each one tells the receiver
+                    what to do next. The gateway sends data using <code>ZCRCW</code>
+                    (ACK-gated), which is what gives it its safe stop-and-wait cadence.
+                </p>
+                <table class="data-table">
+                    <tr><th>Terminator</th><th>Byte</th><th>Meaning</th></tr>
+                    <tr><td><code>ZCRCE</code></td><td><code>h</code></td><td>End of frame, no more data this frame, no ACK.</td></tr>
+                    <tr><td><code>ZCRCG</code></td><td><code>i</code></td><td>More data follows, streaming &mdash; no ACK.</td></tr>
+                    <tr><td><code>ZCRCQ</code></td><td><code>j</code></td><td>More data follows, ACK required (mid-frame flow control).</td></tr>
+                    <tr><td><code>ZCRCW</code></td><td><code>k</code></td><td>End of frame, more data next frame, ACK required. <em>(What the gateway uses.)</em></td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ZDLE                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="zdle">
+                <div class="section-title">ZDLE Escaping</div>
+                <p class="intro">How ZMODEM keeps control bytes from being eaten by the link.</p>
+                <p>
+                    <code>ZDLE</code> (ZMODEM Data Link Escape, <code>0x18</code> &mdash; the
+                    same byte as <code>CAN</code>) is the escape marker. Any byte in the data
+                    or CRC that could be intercepted by the transport &mdash; <code>ZDLE</code>
+                    itself, <code>DLE</code> (0x10), the XON/XOFF flow-control pair
+                    (0x11 / 0x13) and their high-bit twins (0x91 / 0x93), and a
+                    <code>CR</code> in certain positions &mdash; is rewritten on the wire as
+                    <code>ZDLE</code> followed by the byte with bit&nbsp;6 flipped
+                    (<code>byte XOR 0x40</code>). The receiver reverses the transform.
+                </p>
+                <p class="dim-text">
+                    This is why ZMODEM survives XON/XOFF-flow-controlled serial links and
+                    telnet hops that would choke on a raw <code>0x11</code>: those bytes
+                    never appear literally in the escaped stream. (Over telnet the gateway
+                    additionally handles the <code>0xFF</code> IAC transform; ZDLE and IAC
+                    escaping are independent layers.)
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DOWNLOAD                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="download">
+                <div class="section-title">Download &mdash; Gateway as Sender</div>
+                <p class="intro">You pull a file from the gateway. The gateway sends; your terminal's receiver drives the conversation with ZRINIT / ZRPOS.</p>
+
+                <p>The single-file handshake (the <code>ZFILE &rarr; ZEOF</code> cycle repeats per file in a batch):</p>
+                <pre><code><span class="prompt-char">gateway</span>  -> ZRQINIT                       <span class="output-text">open the session</span>
+<span class="prompt-char">term</span>     &lt;- ZRINIT (CANFDX|CANOVIO|CANFC32)  <span class="output-text">receiver ready + caps</span>
+<span class="prompt-char">gateway</span>  -> ZFILE + subpacket("name\0size\0", ZCRCW)
+<span class="prompt-char">term</span>     &lt;- ZRPOS(0)                     <span class="output-text">accept; start at byte 0</span>
+<span class="prompt-char">gateway</span>  -> ZDATA(0) + 1024-byte subpackets (ZCRCW, ACK-gated) ... until EOF
+<span class="prompt-char">gateway</span>  -> ZEOF(length)                 <span class="output-text">final file size</span>
+<span class="prompt-char">term</span>     &lt;- ZRINIT                       <span class="output-text">ready for next file</span>
+<span class="prompt-char">gateway</span>  -> ZFIN
+<span class="prompt-char">term</span>     &lt;- ZFIN
+<span class="prompt-char">gateway</span>  -> "OO"                          <span class="output-text">over and out</span></code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>From the File Transfer menu press <strong>D</strong>, pick the file, and choose <strong>Z</strong>. The gateway opens with <code>ZRQINIT</code> (most terminals also auto-receive the moment they see it).</li>
+                        <li>The terminal answers <code>ZRINIT</code>, advertising its capabilities; the gateway notes whether CRC-32 is available.</li>
+                        <li>The gateway sends a <code>ZFILE</code> header followed by a subpacket carrying the <strong>filename and exact size</strong> (and mtime / mode when known), terminated with <code>ZCRCW</code>.</li>
+                        <li>The receiver replies <code>ZRPOS(0)</code> to accept and start at byte 0 &mdash; or <code>ZSKIP</code> to decline this file, or a non-zero <code>ZRPOS</code> to <strong>resume</strong> a partial file.</li>
+                        <li>The gateway sends a <code>ZDATA</code> header at that offset, then streams 1024-byte data subpackets, each <code>ZCRCW</code>-terminated and waiting for the receiver's <code>ZACK</code> before the next &mdash; the stop-and-wait cadence.</li>
+                        <li>If the receiver detects an error it sends <code>ZRPOS(offset)</code>; the gateway seeks back to that byte offset and resumes from there.</li>
+                        <li>At end of file the gateway sends <code>ZEOF(length)</code>. The receiver answers <code>ZRINIT</code> (ready for the next file).</li>
+                        <li>With no more files the gateway sends <code>ZFIN</code>; the receiver returns <code>ZFIN</code>; the gateway sends the <code>"OO"</code> over-and-out trailer and the session ends.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- UPLOAD                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="upload">
+                <div class="section-title">Upload &mdash; Gateway as Receiver</div>
+                <p class="intro">You send a file to the gateway. The gateway receives, so it drives with ZRINIT / ZRPOS / ZSKIP.</p>
+
+                <pre><code><span class="prompt-char">gateway</span>  -> ZRINIT (CANFDX|CANOVIO|CANFC32)  <span class="output-text">ready + caps</span>
+<span class="prompt-char">term</span>     &lt;- ZFILE + subpacket("name\0size\0")
+<span class="prompt-char">gateway</span>  -> ZRPOS(0)   <span class="output-text">accept</span>   (or ZSKIP to decline a colliding name)
+<span class="prompt-char">term</span>     &lt;- ZDATA + data subpackets ... 
+<span class="prompt-char">gateway</span>  -> ZRPOS(offset)                 <span class="output-text">only on a CRC error: rewind</span>
+<span class="prompt-char">term</span>     &lt;- ZEOF(length)
+<span class="prompt-char">gateway</span>  -> ZRINIT                        <span class="output-text">ready for next file</span>
+<span class="prompt-char">term</span>     &lt;- ZFIN
+<span class="prompt-char">gateway</span>  -> ZFIN
+<span class="prompt-char">term</span>     &lt;- "OO"</code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>Start a receive one of two ways: press <strong>U</strong>, enter a name, and choose <strong>Z</strong> &mdash; or simply start a ZMODEM send in your terminal from any menu and let <strong>autostart</strong> catch it (see below).</li>
+                        <li>The gateway sends <code>ZRINIT</code> advertising <code>CANFDX | CANOVIO | CANFC32</code>.</li>
+                        <li>The sender transmits a <code>ZFILE</code> header and a subpacket with the filename, size, and optional mtime / mode. The gateway parses it and validates the path (no traversal).</li>
+                        <li>The gateway replies <code>ZRPOS(0)</code> to accept. In a batch, a colliding filename is declined with <code>ZSKIP</code> so the sender moves on.</li>
+                        <li>The sender streams <code>ZDATA</code> subpackets. The gateway checks each subpacket's CRC (16 or 32); on a bad one it sends <code>ZRPOS</code> with the last good byte offset, and the sender resumes there.</li>
+                        <li>The sender sends <code>ZEOF(length)</code>; the gateway answers <code>ZRINIT</code> for the next file. mtime and mode from the <code>ZFILE</code> subpacket are applied to the saved file when present.</li>
+                        <li>The sender sends <code>ZFIN</code>; the gateway returns <code>ZFIN</code>; the sender sends <code>"OO"</code> and the session closes.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- BATCH & AUTOSTART                              -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="batch">
+                <div class="section-title">Batch &amp; Autostart</div>
+
+                <div class="cat">Batch transfers</div>
+                <p class="dim-text">
+                    A batch is the <code>ZFILE &rarr; ZDATA &rarr; ZEOF</code> cycle repeated
+                    once per file, with the receiver answering <code>ZRINIT</code> after each
+                    <code>ZEOF</code> to signal &ldquo;ready for the next.&rdquo; The single
+                    <code>ZFIN</code> / <code>ZFIN</code> / <code>"OO"</code> exchange closes
+                    the whole session. Either side can decline an individual file with
+                    <code>ZSKIP</code> without aborting the batch.
+                </p>
+
+                <div class="cat">Autostart</div>
+                <p class="dim-text">
+                    Most terminals (Qodem, ZOC, SyncTERM, ExtraPuTTY) begin a ZMODEM send by
+                    emitting the autostart sequence &mdash;
+                    <code>**&#92;x18B</code>, <code>**&#92;x18A</code>, or
+                    <code>**&#92;x18C</code> (a hex / binary16 / binary32 <code>ZRQINIT</code>)
+                    &mdash; directly into whatever menu the user is sitting at, expecting the
+                    far end to &ldquo;just receive.&rdquo; The gateway's idle input loop
+                    watches for that <code>ZPAD ZPAD ZDLE</code> prefix and, on a match:
+                </p>
+                <ol>
+                    <li>logs &ldquo;ZMODEM autostart detected; switching to receive,&rdquo;</li>
+                    <li>drains any residual <code>ZRQINIT</code> bytes (the sender re-sends once we <code>ZRINIT</code>),</li>
+                    <li>hands off to the normal receive flow &mdash; using the sender's filename after path validation, applying mtime / mode if present,</li>
+                    <li>and returns to whichever menu the user was on when the transfer fired.</li>
+                </ol>
+                <div class="callout callout-tip">
+                    <strong>No autostart prefix?</strong> Some MS-DOS-era and scripted
+                    <code>sz</code> senders don't emit it. Drive the transfer manually
+                    instead: File Transfer &rarr; <strong>U</strong> / <strong>D</strong>
+                    &rarr; <strong>Z</strong>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- RECOVERY                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="recovery">
+                <div class="section-title">Error Recovery, Resume &amp; Skip</div>
+                <table class="data-table">
+                    <tr><th>Situation</th><th>What happens</th></tr>
+                    <tr><td>Bad subpacket CRC (16 or 32)</td><td>The receiver sends <code>ZRPOS</code> with the last good byte offset; the sender seeks there and resumes. Recovery is by <strong>position</strong>, not block number.</td></tr>
+                    <tr><td>Garbled header</td><td>Answered with <code>ZNAK</code> (or a repeated request); the frame is re-sent.</td></tr>
+                    <tr><td>Resume a partial file</td><td>On <code>ZFILE</code> the receiver may answer a <strong>non-zero</strong> <code>ZRPOS</code>; the gateway-as-sender honors it and starts mid-file.</td></tr>
+                    <tr><td>Decline one file</td><td><code>ZSKIP</code> &mdash; the gateway sends it to refuse a colliding name on receive, and honors it on send by advancing to the next file.</td></tr>
+                    <tr><td>Abort</td><td><code>ZABORT</code>, or the <code>CAN</code> (0x18) run a terminal sends on Ctrl-X; the session tears down cleanly.</td></tr>
+                    <tr><td>Stall</td><td>A frame that doesn't complete within <code>zmodem_frame_timeout</code> is retried up to <code>zmodem_max_retries</code> times.</td></tr>
+                    <tr><td>File exceeds 8&nbsp;MB</td><td>The transfer is aborted &mdash; the same cap as the other protocols.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TUNABLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="tunables">
+                <div class="section-title">Tunables</div>
+                <p class="intro">ZMODEM has its own independent timeout set (separate from the XMODEM family). Editable from the telnet <em>Configuration &rarr; File Transfer</em> menu, the GUI / web <em>File Transfer &rarr; More&hellip;</em> popup, or <code>egateway.conf</code> &mdash; changes apply on the next transfer, no restart.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>zmodem_negotiation_timeout</code></td><td>45 s</td><td>Time to complete the <code>ZRQINIT</code> / <code>ZRINIT</code> handshake.</td></tr>
+                    <tr><td><code>zmodem_negotiation_retry_interval</code></td><td>5 s</td><td>Gap between <code>ZRINIT</code> / <code>ZRQINIT</code> re-sends during the handshake.</td></tr>
+                    <tr><td><code>zmodem_frame_timeout</code></td><td>30 s</td><td>Per-frame read timeout once the transfer is live (headers and subpackets).</td></tr>
+                    <tr><td><code>zmodem_max_retries</code></td><td>10</td><td>Retry cap for <code>ZRQINIT</code> / <code>ZRPOS</code> / <code>ZDATA</code> frames before a <code>ZABORT</code>.</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong>See also:</strong> the
+                    <a href="xmodemreference.html">XMODEM</a> and
+                    <a href="ymodemreference.html">YMODEM</a> references for the
+                    block-and-wait protocols, the
+                    <a href="index.html#file-transfer">File Transfer section of the User Manual</a>
+                    for the menu walkthrough, and the
+                    <a href="kermit.html">Kermit Reference</a> for the 7-bit-clean
+                    alternative. ZMODEM is the fastest choice on clean modern links.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>
