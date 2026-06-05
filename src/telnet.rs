@@ -2433,12 +2433,36 @@ impl TelnetSession {
     }
 
     async fn drain_input(&mut self) {
+        self.drain_input_until_quiet(50, None).await;
+    }
+
+    /// Read and discard pending input until the line is quiet for `quiet_ms`,
+    /// optionally capped at `max_ms` total wall-clock so a peer that is still
+    /// actively streaming can't stall us forever.
+    ///
+    /// The default `drain_input` uses a short 50ms gap, fine for clearing the
+    /// dribble left by a menu keystroke.  Before a *file transfer* we drain
+    /// with a longer gap (see the transfer-start call sites): at 1200 baud a
+    /// 50ms gap is only ~6 char-times, so a peer flushing its serial buffer in
+    /// a late burst — e.g. CCGMS after a silent Punter cancel, which sends no
+    /// wire byte to signal the abort — can dribble stale bytes past a 50ms
+    /// drain and have them mistaken for the next transfer's opening handshake.
+    /// This drain runs after we print "start within N seconds" but before the
+    /// human has started their sender, so a longer gap never eats a legitimate
+    /// opening code.
+    async fn drain_input_until_quiet(&mut self, quiet_ms: u64, max_ms: Option<u64>) {
+        let deadline = max_ms
+            .map(|m| std::time::Instant::now() + std::time::Duration::from_millis(m));
         while let Ok(Ok(Some(_))) = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(quiet_ms),
             self.session_read_byte(),
         )
         .await
-        {}
+        {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
+        }
     }
 
     /// Handle a detected ZMODEM autostart prefix (`**\x18[ABC]`) on the
@@ -4093,7 +4117,13 @@ impl TelnetSession {
         if config::get_config().verbose {
             glog!("Upload: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol);
         }
-        self.drain_input().await;
+        // See the download path: Punter's silent cancel can leave stale bytes
+        // in the pipe, so drain with a longer quiet gap before receiving.
+        if matches!(protocol, UploadProtocol::Punter) {
+            self.drain_input_until_quiet(250, Some(2000)).await;
+        } else {
+            self.drain_input().await;
+        }
 
         let verbose = config::get_config().verbose;
         let start = std::time::Instant::now();
@@ -4721,7 +4751,15 @@ impl TelnetSession {
         if config::get_config().verbose {
             glog!("Download: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol);
         }
-        self.drain_input().await;
+        // Punter has no in-band cancel, so a restart after a C64-side abort can
+        // strand stale bytes in the pipe; drain with a longer quiet gap to
+        // clear them before this transfer's handshake (capped so a peer still
+        // streaming can't stall the start).  Other protocols keep the short gap.
+        if matches!(protocol, DownloadProtocol::Punter) {
+            self.drain_input_until_quiet(250, Some(2000)).await;
+        } else {
+            self.drain_input().await;
+        }
 
         let start = std::time::Instant::now();
         let cfg = config::get_config();
@@ -16345,6 +16383,47 @@ mod tests {
         peer.read_to_end(&mut out).await.unwrap();
         // 0xFF data byte must be escaped as IAC IAC (0xFF 0xFF).
         assert_eq!(out, vec![b'A', 0xFF, 0xFF, b'B']);
+    }
+
+    #[tokio::test]
+    async fn test_drain_input_until_quiet_clears_buffered_then_stops() {
+        // Stale bytes a prior aborted Punter transfer would strand in the pipe.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Petscii);
+        use tokio::io::AsyncWriteExt;
+        peer.write_all(b"SYNS/BS/BS/B").await.unwrap();
+        // Drain with a short gap (keeps the test fast); the line then goes
+        // quiet so the drain returns.
+        session.drain_input_until_quiet(40, Some(1000)).await;
+        // A fresh byte sent after the drain must be the next thing the session
+        // reads — proving the stale bytes were all consumed.
+        peer.write_all(b"Z").await.unwrap();
+        let got = session.session_read_byte().await.unwrap();
+        assert_eq!(got, Some(b'Z'), "drain should have consumed all stale bytes");
+    }
+
+    #[tokio::test]
+    async fn test_drain_input_until_quiet_caps_an_endless_stream() {
+        // A peer that never stops talking must not stall the drain past the cap.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Petscii);
+        use tokio::io::AsyncWriteExt;
+        let pump = tokio::spawn(async move {
+            // Stream steadily for longer than the cap; ignore the eventual
+            // closed-pipe error once the session stops reading.
+            for _ in 0..2000 {
+                if peer.write_all(b"S/B").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+        let start = std::time::Instant::now();
+        session.drain_input_until_quiet(40, Some(300)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(900),
+            "drain must honor the max cap against an endless stream (took {elapsed:?})"
+        );
+        pump.abort();
     }
 
     #[tokio::test]
