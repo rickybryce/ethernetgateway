@@ -3267,28 +3267,7 @@ impl TelnetSession {
     async fn handle_main_command(&mut self, input: &str) -> Result<bool, std::io::Error> {
         match input {
             "h" => {
-                let mut lines = vec![
-                    "  A  AI Chat: ask questions to an AI",
-                    "  B  Browser: browse the web",
-                    "  C  Configuration: server settings",
-                    "     and other options",
-                ];
-                lines.extend_from_slice(&[
-                    "  F  File Transfer: upload/download",
-                    "     files using the XMODEM protocol",
-                    "  G  Serial Gateway: pick Port A or B",
-                    "     and bridge to its wire (when",
-                    "     that port is in console mode)",
-                    "  R  Troubleshooting: diagnose",
-                    "     terminal input issues",
-                    "  S  SSH Gateway: connect to a",
-                    "     remote server via SSH",
-                    "  T  Telnet Gateway: connect to a",
-                    "     remote server via telnet",
-                    "  W  Weather: check weather by zip",
-                    "  X  Exit: disconnect from server",
-                ]);
-                self.show_help_page("HELP", &lines).await?;
+                self.show_help_page("HELP", Self::main_help_lines()).await?;
             }
             "r" => {
                 self.troubleshooting().await?;
@@ -3524,57 +3503,8 @@ impl TelnetSession {
                 self.current_menu = Menu::Main;
             }
             "h" => {
-                self.show_help_page("FILE TRANSFER HELP", &[
-                    "  Menu items:",
-                    "  U  Upload a file to the server",
-                    "  D  Download a file from server",
-                    "  X  Delete a file on the server",
-                    "  C  Change to a subdirectory",
-                    "  K  Kermit server mode (idle for",
-                    "     remote get/send/dir/finish)",
-                    "  I  Toggle IAC escaping on/off",
-                    "  R  Refresh the screen",
-                    "  Q  Back to the main menu",
-                    "",
-                    "  Picking a protocol on upload:",
-                    "    X  XMODEM or YMODEM - variant",
-                    "       auto-detected from block 0.",
-                    "    Z  ZMODEM - full Forsberg",
-                    "       batch with ZSKIP handling.",
-                    "",
-                    "  Picking a protocol on download:",
-                    "    X  Classic XMODEM (128 B)",
-                    "    1  XMODEM-1K (1024 B blocks,",
-                    "       SOH fallback if peer NAKs)",
-                    "    Y  YMODEM (filename + size",
-                    "       header, then 1K data)",
-                    "    Z  ZMODEM (auto-starts in",
-                    "       most modern terminals)",
-                    "",
-                    "  IAC escaping (I toggle):",
-                    "    Telnet reserves byte 0xFF as",
-                    "    the IAC marker. When trans-",
-                    "    ferring binary files that may",
-                    "    contain 0xFF, enable IAC",
-                    "    escaping so the stream",
-                    "    survives the wire intact.",
-                    "    Both sides must agree on the",
-                    "    setting. Default is ON for",
-                    "    telnet clients, OFF for SSH",
-                    "    (which has no IAC layer).",
-                    "",
-                    "  Limits:",
-                    "    Maximum file size: 8 MB.",
-                    "    Filenames: 64 chars max,",
-                    "    letters/digits/._- only, may",
-                    "    not start with a dot or",
-                    "    contain '..' (path traversal",
-                    "    protection).",
-                    "",
-                    "  Timeouts and retry intervals",
-                    "  are tunable in Configuration >",
-                    "  File Transfer > X / Y / Z.",
-                ]).await?;
+                self.show_help_page("FILE TRANSFER HELP", Self::file_transfer_menu_help_lines())
+                    .await?;
             }
             "r" => {} // Refresh — just re-render
             _ => {
@@ -4588,13 +4518,8 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 "h" => {
-                    self.show_help_page("DOWNLOAD HELP", &[
-                        "  #    Enter file number to download",
-                        "  P    Previous page of files",
-                        "  N    Next page of files",
-                        "  Q    Back to file transfer menu",
-                        "  ESC  Return to main menu",
-                    ]).await?;
+                    self.show_help_page("DOWNLOAD HELP", Self::download_help_lines())
+                        .await?;
                 }
                 other => {
                     if let Ok(num) = other.parse::<usize>() {
@@ -5305,13 +5230,8 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 "h" => {
-                    self.show_help_page("DELETE HELP", &[
-                        "  #    Enter file number to delete",
-                        "  P    Previous page of files",
-                        "  N    Next page of files",
-                        "  Q    Back to file transfer menu",
-                        "  ESC  Return to main menu",
-                    ]).await?;
+                    self.show_help_page("DELETE HELP", Self::delete_help_lines())
+                        .await?;
                 }
                 other => {
                     if let Ok(num) = other.parse::<usize>() {
@@ -7077,49 +6997,8 @@ impl TelnetSession {
                 'p' => { if has_prev { scroll = scroll.saturating_sub(page_h); } }
                 'q' => { return Ok(None); }
                 'h' => {
-                    self.show_help_page("AI CHAT HELP", &[
-                        "  Navigation:",
-                        "  P    Previous page of answer",
-                        "  N    Next page of answer",
-                        "  Q    Done, return to main menu",
-                        "",
-                        "  Or type a new question and",
-                        "  press Enter to ask again.",
-                        "  The model keeps conversational",
-                        "  context within a single AI Chat",
-                        "  session.",
-                        "",
-                        "  About the service:",
-                        "  Powered by Groq (groq.com), a",
-                        "  free LLM inference API. The",
-                        "  model is Llama 3.3 70B",
-                        "  Versatile, a capable general-",
-                        "  purpose assistant.",
-                        "",
-                        "  Getting a key:",
-                        "  1. Visit console.groq.com and",
-                        "     create a free account.",
-                        "  2. Generate an API key (starts",
-                        "     with gsk_...).",
-                        "  3. Set it in Configuration >",
-                        "     Other Settings > A, or paste",
-                        "     into egateway.conf as",
-                        "     groq_api_key = gsk_...",
-                        "  4. Restart the server.",
-                        "",
-                        "  Rate limits:",
-                        "  Free-tier limits are generous",
-                        "  for interactive use but rate-",
-                        "  throttle on sustained high",
-                        "  traffic. See groq.com for the",
-                        "  current limits.",
-                        "",
-                        "  Privacy:",
-                        "  Questions and answers are sent",
-                        "  to Groq's API and subject to",
-                        "  their terms of service. Don't",
-                        "  paste sensitive information.",
-                    ]).await?;
+                    self.show_help_page("AI CHAT HELP", Self::ai_chat_help_lines())
+                        .await?;
                 }
                 _ => {
                     // Not a navigation command — send the whole line to
@@ -7533,23 +7412,8 @@ impl TelnetSession {
                     self.dialup_delete_entry(&entries).await?;
                 }
                 "h" => {
-                    self.show_help_page("DIALUP MAPPING HELP", &[
-                        "  Map phone numbers to host:port",
-                        "  targets.  This table is shared",
-                        "  across both ports' modems - one",
-                        "  dialup.conf consulted by Port A",
-                        "  and Port B alike.",
-                        "",
-                        "  Dial a number with ATDT, ATDP,",
-                        "  or ATD (all work the same) and",
-                        "  the server connects to the",
-                        "  mapped host:port for you.",
-                        "",
-                        "  You can still dial host:port",
-                        "  directly - mappings are optional.",
-                        "",
-                        "  Mappings are saved in dialup.conf.",
-                    ]).await?;
+                    self.show_help_page("DIALUP MAPPING HELP", Self::dialup_help_lines())
+                        .await?;
                 }
                 "q" => return Ok(()),
                 _ => {
@@ -8804,7 +8668,14 @@ impl TelnetSession {
         if console_mode {
             return self.console_show_help().await;
         }
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::modem_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("MODEM EMULATOR HELP", lines).await
+    }
+
+    /// Hayes modem-emulator help, split by terminal width.  Associated fn so a
+    /// unit test asserts the REAL lines fit 40 cols (see `punter_help_lines`).
+    fn modem_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  This server emulates a Hayes-",
                 "  compatible modem on this serial",
@@ -8932,12 +8803,18 @@ impl TelnetSession {
                 "  AT&B/&G/&J/&S/&T/&Y) return OK so legacy",
                 "  init strings run to completion.",
             ]
-        };
-        self.show_help_page("MODEM EMULATOR HELP", lines).await
+        }
     }
 
     async fn console_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::console_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("SERIAL CONSOLE HELP", lines).await
+    }
+
+    /// Serial-console (telnet-serial bridge) help, split by terminal width.
+    /// Associated fn so a unit test asserts the REAL lines fit 40 cols.
+    fn console_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  This menu configures the serial",
                 "  port as a raw telnet-serial",
@@ -8998,8 +8875,7 @@ impl TelnetSession {
                 "  Emulator mode.  Each port (A, B) toggles",
                 "  independently.",
             ]
-        };
-        self.show_help_page("SERIAL CONSOLE HELP", lines).await
+        }
     }
 
     // ─── CONFIGURATION ──────────────────────────────────────
@@ -9091,87 +8967,9 @@ impl TelnetSession {
                     self.config_reset_defaults().await?;
                 }
                 "h" => {
-                    let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
-                        &[
-                            "  Configuration submenus:",
-                            "",
-                            "  E  Security: require login,",
-                            "     set usernames and passwords",
-                            "",
-                            "  G  Gateway: configure outbound",
-                            "     Telnet and SSH Gateway menus",
-                            "",
-                            "  M  Serial Configuration: pick",
-                            "     Port A or B and set its",
-                            "     mode (Modem / Console),",
-                            "     device, baud, AT settings.",
-                            "",
-                            "  S  Server: enable/disable",
-                            "     services, set ports, and",
-                            "     restart the server",
-                            "",
-                            "  F  File Transfer: per-protocol",
-                            "     XMODEM, YMODEM, ZMODEM setup",
-                            "     plus the transfer directory",
-                            "",
-                            "  O  Other: AI key, logging,",
-                            "     and general settings",
-                            "",
-                            "  R  Reset all settings to",
-                            "     default values (asks first)",
-                            "",
-                            "  What needs a restart:",
-                            "    S (ports, enable/disable)",
-                            "    E (credentials, login",
-                            "       requirement)",
-                            "    O > G (GUI on startup)",
-                            "",
-                            "  Everything else applies at",
-                            "  the next session / transfer.",
-                        ]
-                    } else {
-                        &[
-                            "  Configuration submenus:",
-                            "",
-                            "  E  Security: require login, set",
-                            "     usernames and passwords",
-                            "",
-                            "  G  Gateway: configure the outbound",
-                            "     Telnet and SSH Gateway menus",
-                            "     (proxy to remote servers)",
-                            "",
-                            "  M  Serial Configuration: pick Port A",
-                            "     or Port B and set its mode (Modem",
-                            "     Emulator or Serial Console),",
-                            "     device, baud, AT/S-register state,",
-                            "     and dialup mapping.  Each port has",
-                            "     independent settings.",
-                            "",
-                            "  S  Server: enable/disable services,",
-                            "     set ports, and restart the server",
-                            "",
-                            "  F  File Transfer: per-protocol",
-                            "     XMODEM/YMODEM/ZMODEM tuning",
-                            "     plus the shared transfer directory",
-                            "",
-                            "  O  Other: AI key, logging, and",
-                            "     general settings",
-                            "",
-                            "  R  Reset all settings to their",
-                            "     factory defaults (confirms first)",
-                            "",
-                            "  Which changes need a restart:",
-                            "    S changes (ports, enable/disable)",
-                            "    E changes (credentials, login toggle)",
-                            "    O > G toggle (GUI on startup)",
-                            "",
-                            "  Everything else (file-transfer",
-                            "  timings, gateway mode, modem AT",
-                            "  settings, AI key, homepage, weather",
-                            "  zip) applies at the next session or",
-                            "  transfer without a restart.",
-                        ]
-                    };
+                    let lines = Self::config_submenu_help_lines(
+                        self.terminal_type == TerminalType::Petscii,
+                    );
                     self.show_help_page("CONFIGURATION HELP", lines).await?;
                 }
                 "q" => return Ok(()),
@@ -12616,26 +12414,14 @@ impl TelnetSession {
 
         if page_view {
             let is_petscii = self.terminal_type == TerminalType::Petscii;
+            // Intro (dim): link-number explanation, width-specific wording.
             if is_petscii {
-                // Compact help for 40-col screens
                 self.send_line(&format!("  {}",
                     self.dim("[1] [2] etc. next to text")
                 )).await?;
                 self.send_line(&format!("  {}",
                     self.dim("are links to other pages.")
                 )).await?;
-                self.send_line("").await?;
-                self.send_line("  N/P  Next/Previous page").await?;
-                self.send_line("  T/E  Jump to Top/End").await?;
-                self.send_line("  S    Search text in page").await?;
-                self.send_line("  G    Go to URL or search").await?;
-                self.send_line("  L    Follow link (any #)").await?;
-                self.send_line("  F    Fill out forms").await?;
-                self.send_line("  K    Save bookmark").await?;
-                self.send_line("  B    Back to previous page").await?;
-                self.send_line("  R    Reload current page").await?;
-                self.send_line("  Q    Close page").await?;
-                self.send_line("  ESC  Exit browser").await?;
             } else {
                 self.send_line(&format!("  {}",
                     self.dim("[1], [2], etc. next to text are links")
@@ -12643,23 +12429,15 @@ impl TelnetSession {
                 self.send_line(&format!("  {}",
                     self.dim("to other pages.")
                 )).await?;
-                self.send_line("").await?;
-                self.send_line("  N / P  Next page / Previous page").await?;
-                self.send_line("  T / E  Jump to Top / End of page").await?;
-                self.send_line("  S      Search for text in page").await?;
-                self.send_line("  G      Go to a URL or search query").await?;
-                self.send_line("  L      Follow a link (any number)").await?;
-                self.send_line("  F      Fill out and submit forms").await?;
-                self.send_line("  K      Save page as bookmark").await?;
-                self.send_line("  B      Back to previous page").await?;
-                self.send_line("  R      Reload current page").await?;
-                self.send_line("  Q      Close page (browser home)").await?;
-                self.send_line("  ESC    Exit browser to main menu").await?;
+            }
+            self.send_line("").await?;
+            for line in Self::browser_page_help_lines(is_petscii) {
+                self.send_line(line).await?;
             }
         } else {
-            self.send_line("  G  Go to a URL or search query").await?;
-            self.send_line("  K  Open saved bookmarks").await?;
-            self.send_line("  Q  Exit browser to main menu").await?;
+            for line in Self::browser_menu_help_lines() {
+                self.send_line(line).await?;
+            }
             self.send_line("").await?;
             self.send_line(&format!("  {}",
                 self.dim("Examples:")
@@ -12680,6 +12458,323 @@ impl TelnetSession {
         self.flush().await?;
         self.wait_for_key().await?;
         Ok(())
+    }
+
+    /// In-page browser key bindings, split by terminal width.  Plain
+    /// (uncolored) lines the display iterates and a unit test asserts fit 40
+    /// cols on PETSCII (see `punter_help_lines`).
+    fn browser_page_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
+            &[
+                "  N/P  Next/Previous page",
+                "  T/E  Jump to Top/End",
+                "  S    Search text in page",
+                "  G    Go to URL or search",
+                "  L    Follow link (any #)",
+                "  F    Fill out forms",
+                "  K    Save bookmark",
+                "  B    Back to previous page",
+                "  R    Reload current page",
+                "  Q    Close page",
+                "  ESC  Exit browser",
+            ]
+        } else {
+            &[
+                "  N / P  Next page / Previous page",
+                "  T / E  Jump to Top / End of page",
+                "  S      Search for text in page",
+                "  G      Go to a URL or search query",
+                "  L      Follow a link (any number)",
+                "  F      Fill out and submit forms",
+                "  K      Save page as bookmark",
+                "  B      Back to previous page",
+                "  R      Reload current page",
+                "  Q      Close page (browser home)",
+                "  ESC    Exit browser to main menu",
+            ]
+        }
+    }
+
+    /// Browser landing-menu key bindings (shown when no page is loaded).
+    fn browser_menu_help_lines() -> &'static [&'static str] {
+        &[
+            "  G  Go to a URL or search query",
+            "  K  Open saved bookmarks",
+            "  Q  Exit browser to main menu",
+        ]
+    }
+
+    /// Main-menu help (single width — fits 40 cols so it serves PETSCII too).
+    fn main_help_lines() -> &'static [&'static str] {
+        &[
+            "  A  AI Chat: ask questions to an AI",
+            "  B  Browser: browse the web",
+            "  C  Configuration: server settings",
+            "     and other options",
+            "  F  File Transfer: upload/download",
+            "     files using the XMODEM protocol",
+            "  G  Serial Gateway: pick Port A or B",
+            "     and bridge to its wire (when",
+            "     that port is in console mode)",
+            "  R  Troubleshooting: diagnose",
+            "     terminal input issues",
+            "  S  SSH Gateway: connect to a",
+            "     remote server via SSH",
+            "  T  Telnet Gateway: connect to a",
+            "     remote server via telnet",
+            "  W  Weather: check weather by zip",
+            "  X  Exit: disconnect from server",
+        ]
+    }
+
+    /// Configuration submenu help, split by terminal width.
+    fn config_submenu_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
+            &[
+                "  Configuration submenus:",
+                "",
+                "  E  Security: require login,",
+                "     set usernames and passwords",
+                "",
+                "  G  Gateway: configure outbound",
+                "     Telnet and SSH Gateway menus",
+                "",
+                "  M  Serial Configuration: pick",
+                "     Port A or B and set its",
+                "     mode (Modem / Console),",
+                "     device, baud, AT settings.",
+                "",
+                "  S  Server: enable/disable",
+                "     services, set ports, and",
+                "     restart the server",
+                "",
+                "  F  File Transfer: per-protocol",
+                "     XMODEM, YMODEM, ZMODEM setup",
+                "     plus the transfer directory",
+                "",
+                "  O  Other: AI key, logging,",
+                "     and general settings",
+                "",
+                "  R  Reset all settings to",
+                "     default values (asks first)",
+                "",
+                "  What needs a restart:",
+                "    S (ports, enable/disable)",
+                "    E (credentials, login",
+                "       requirement)",
+                "    O > G (GUI on startup)",
+                "",
+                "  Everything else applies at",
+                "  the next session / transfer.",
+            ]
+        } else {
+            &[
+                "  Configuration submenus:",
+                "",
+                "  E  Security: require login, set",
+                "     usernames and passwords",
+                "",
+                "  G  Gateway: configure the outbound",
+                "     Telnet and SSH Gateway menus",
+                "     (proxy to remote servers)",
+                "",
+                "  M  Serial Configuration: pick Port A",
+                "     or Port B and set its mode (Modem",
+                "     Emulator or Serial Console),",
+                "     device, baud, AT/S-register state,",
+                "     and dialup mapping.  Each port has",
+                "     independent settings.",
+                "",
+                "  S  Server: enable/disable services,",
+                "     set ports, and restart the server",
+                "",
+                "  F  File Transfer: per-protocol",
+                "     XMODEM/YMODEM/ZMODEM tuning",
+                "     plus the shared transfer directory",
+                "",
+                "  O  Other: AI key, logging, and",
+                "     general settings",
+                "",
+                "  R  Reset all settings to their",
+                "     factory defaults (confirms first)",
+                "",
+                "  Which changes need a restart:",
+                "    S changes (ports, enable/disable)",
+                "    E changes (credentials, login toggle)",
+                "    O > G toggle (GUI on startup)",
+                "",
+                "  Everything else (file-transfer",
+                "  timings, gateway mode, modem AT",
+                "  settings, AI key, homepage, weather",
+                "  zip) applies at the next session or",
+                "  transfer without a restart.",
+            ]
+        }
+    }
+
+    /// File-transfer *menu* help (the F-menu's H screen — distinct from the
+    /// per-protocol file-transfer *settings* help in `file_transfer_help_lines`).
+    fn file_transfer_menu_help_lines() -> &'static [&'static str] {
+        &[
+            "  Menu items:",
+            "  U  Upload a file to the server",
+            "  D  Download a file from server",
+            "  X  Delete a file on the server",
+            "  C  Change to a subdirectory",
+            "  K  Kermit server mode (idle for",
+            "     remote get/send/dir/finish)",
+            "  I  Toggle IAC escaping on/off",
+            "  R  Refresh the screen",
+            "  Q  Back to the main menu",
+            "",
+            "  Picking a protocol on upload:",
+            "    X  XMODEM or YMODEM - variant",
+            "       auto-detected from block 0.",
+            "    Z  ZMODEM - full Forsberg",
+            "       batch with ZSKIP handling.",
+            "",
+            "  Picking a protocol on download:",
+            "    X  Classic XMODEM (128 B)",
+            "    1  XMODEM-1K (1024 B blocks,",
+            "       SOH fallback if peer NAKs)",
+            "    Y  YMODEM (filename + size",
+            "       header, then 1K data)",
+            "    Z  ZMODEM (auto-starts in",
+            "       most modern terminals)",
+            "",
+            "  IAC escaping (I toggle):",
+            "    Telnet reserves byte 0xFF as",
+            "    the IAC marker. When trans-",
+            "    ferring binary files that may",
+            "    contain 0xFF, enable IAC",
+            "    escaping so the stream",
+            "    survives the wire intact.",
+            "    Both sides must agree on the",
+            "    setting. Default is ON for",
+            "    telnet clients, OFF for SSH",
+            "    (which has no IAC layer).",
+            "",
+            "  Limits:",
+            "    Maximum file size: 8 MB.",
+            "    Filenames: 64 chars max,",
+            "    letters/digits/._- only, may",
+            "    not start with a dot or",
+            "    contain '..' (path traversal",
+            "    protection).",
+            "",
+            "  Timeouts and retry intervals",
+            "  are tunable in Configuration >",
+            "  File Transfer > X / Y / Z.",
+        ]
+    }
+
+    /// Download file-picker help.
+    fn download_help_lines() -> &'static [&'static str] {
+        &[
+            "  #    Enter file number to download",
+            "  P    Previous page of files",
+            "  N    Next page of files",
+            "  Q    Back to file transfer menu",
+            "  ESC  Return to main menu",
+        ]
+    }
+
+    /// Delete file-picker help.
+    fn delete_help_lines() -> &'static [&'static str] {
+        &[
+            "  #    Enter file number to delete",
+            "  P    Previous page of files",
+            "  N    Next page of files",
+            "  Q    Back to file transfer menu",
+            "  ESC  Return to main menu",
+        ]
+    }
+
+    /// AI-chat help.
+    fn ai_chat_help_lines() -> &'static [&'static str] {
+        &[
+            "  Navigation:",
+            "  P    Previous page of answer",
+            "  N    Next page of answer",
+            "  Q    Done, return to main menu",
+            "",
+            "  Or type a new question and",
+            "  press Enter to ask again.",
+            "  The model keeps conversational",
+            "  context within a single AI Chat",
+            "  session.",
+            "",
+            "  About the service:",
+            "  Powered by Groq (groq.com), a",
+            "  free LLM inference API. The",
+            "  model is Llama 3.3 70B",
+            "  Versatile, a capable general-",
+            "  purpose assistant.",
+            "",
+            "  Getting a key:",
+            "  1. Visit console.groq.com and",
+            "     create a free account.",
+            "  2. Generate an API key (starts",
+            "     with gsk_...).",
+            "  3. Set it in Configuration >",
+            "     Other Settings > A, or paste",
+            "     into egateway.conf as",
+            "     groq_api_key = gsk_...",
+            "  4. Restart the server.",
+            "",
+            "  Rate limits:",
+            "  Free-tier limits are generous",
+            "  for interactive use but rate-",
+            "  throttle on sustained high",
+            "  traffic. See groq.com for the",
+            "  current limits.",
+            "",
+            "  Privacy:",
+            "  Questions and answers are sent",
+            "  to Groq's API and subject to",
+            "  their terms of service. Don't",
+            "  paste sensitive information.",
+        ]
+    }
+
+    /// Dialup-mapping help.
+    fn dialup_help_lines() -> &'static [&'static str] {
+        &[
+            "  Map phone numbers to host:port",
+            "  targets.  This table is shared",
+            "  across both ports' modems - one",
+            "  dialup.conf consulted by Port A",
+            "  and Port B alike.",
+            "",
+            "  Dial a number with ATDT, ATDP,",
+            "  or ATD (all work the same) and",
+            "  the server connects to the",
+            "  mapped host:port for you.",
+            "",
+            "  You can still dial host:port",
+            "  directly - mappings are optional.",
+            "",
+            "  Mappings are saved in dialup.conf.",
+        ]
+    }
+
+    /// Bookmarks-list help.
+    fn bookmarks_help_lines() -> &'static [&'static str] {
+        &[
+            "  #    Enter bookmark number to open",
+            "  D    Delete a bookmark by number",
+            "  ESC  Cancel and go back",
+        ]
+    }
+
+    /// Web-form help.
+    fn form_help_lines() -> &'static [&'static str] {
+        &[
+            "  #    Enter a field number to",
+            "       edit its value",
+            "  S    Submit the form",
+            "  Q    Cancel and go back",
+        ]
     }
 
     async fn web_save_bookmark(&mut self) -> Result<(), std::io::Error> {
@@ -12740,11 +12835,8 @@ impl TelnetSession {
         };
 
         if input == "h" {
-            self.show_help_page("BOOKMARKS HELP", &[
-                "  #    Enter bookmark number to open",
-                "  D    Delete a bookmark by number",
-                "  ESC  Cancel and go back",
-            ]).await?;
+            self.show_help_page("BOOKMARKS HELP", Self::bookmarks_help_lines())
+                .await?;
         } else if input == "d" {
             // Delete mode
             self.send(&format!("  {} (1-{}): ", self.cyan("Delete #"), display_max)).await?;
@@ -12934,12 +13026,8 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 "h" => {
-                    self.show_help_page("FORM HELP", &[
-                        "  #    Enter a field number to",
-                        "       edit its value",
-                        "  S    Submit the form",
-                        "  Q    Cancel and go back",
-                    ]).await?;
+                    self.show_help_page("FORM HELP", Self::form_help_lines())
+                        .await?;
                 }
                 other => {
                     if let Ok(num) = other.parse::<usize>() {
@@ -15674,153 +15762,36 @@ mod tests {
     /// All help page content lines must fit PETSCII width (40 cols).
     #[test]
     fn test_help_lines_fit_petscii() {
-        let help_lines = [
-            // Main menu help
-            "  A  AI Chat: ask questions to an AI",
-            "  B  Browser: browse the web",
-            "  C  Configuration: server settings",
-            "     and other options",
-            "  F  File Transfer: upload/download",
-            "     files using the XMODEM protocol",
-            "  G  Serial Gateway: pick Port A or B",
-            "     and bridge to its wire (when",
-            "     that port is in console mode)",
-            "  R  Troubleshooting: diagnose",
-            "     terminal input issues",
-            "  S  SSH Gateway: connect to a",
-            "     remote server via SSH",
-            "  T  Telnet Gateway: connect to a",
-            "     remote server via telnet",
-            "  W  Weather: check weather by zip",
-            "  X  Exit: disconnect from server",
-            // Configuration submenu help (post-dual-port refactor)
-            "  E  Security: require login,",
-            "     set usernames and passwords",
-            "  M  Serial Configuration: pick",
-            "     Port A or B and set its",
-            "     mode (Modem / Console),",
-            "     device, baud, AT settings.",
-            "  S  Server: enable/disable",
-            "     services, set ports, and",
-            "     restart the server",
-            "  F  File Transfer: per-protocol",
-            "     XMODEM, YMODEM, ZMODEM setup",
-            "  O  Other: AI key, logging,",
-            "     and general settings",
-            "  R  Reset all settings to their",
-            "     default values",
-            // Server config help (Web server keys added when the
-            // configuration web UI joined the listener set).
-            "  W  Toggle the configuration web",
-            "     server (HTTP/Basic auth on",
-            "     the same login as telnet)",
-            "  B  Change the web server port",
-            // Other settings help
-            "  A  Groq API key for AI Chat",
-            "     (get one free at groq.com)",
-            "  B  Default homepage URL for",
-            "     the built-in web browser",
-            "  W  Default zip code for the",
-            "     weather feature",
-            "  V  Toggle verbose transfer log",
-            "  G  Toggle GUI on startup",
-            "     (requires restart)",
-            "  R  Restart the server",
-            // Security help (post unified-credentials merge — one
-            // username/password covers telnet, SSH, and the web UI;
-            // the legacy S/W menu items went away).
-            "  Configure login security.",
-            "  L  Toggle whether a login is",
-            "     required to access server",
-            "  U  Set the login username",
-            "  P  Set the login password",
-            "  R  Restart the server",
-            "  One username/password covers",
-            "  telnet, SSH, and the web UI.",
-            "  Changes are saved immediately",
-            "  but require a server restart.",
-            // XMODEM settings help
-            "  Configure XMODEM family transfer",
-            "  settings. Shared with XMODEM-1K",
-            "  and YMODEM.",
-            "  N  Negotiation timeout: how",
-            "     long to wait for transfer",
-            "     to begin",
-            "  I  Retry interval: C/NAK poke",
-            "     gap (spec ~10 s, def 7 s)",
-            "  B  Block timeout: how long to",
-            "     wait for each block",
-            "  M  Max retries per block",
-            "  R  Restart the server",
-            "  Takes effect on next transfer.",
-            // File transfer help
-            "  U  Upload a file to the server",
-            "  D  Download a file from server",
-            "  X  Delete a file on the server",
-            "  C  Change to a subdirectory",
-            "  I  Toggle IAC escaping for",
-            "     binary file transfers",
-            "  R  Refresh the screen",
-            "  Q  Back to the main menu",
-            // Download / delete help
-            "  #    Enter file number to download",
-            "  #    Enter file number to delete",
-            "  P    Previous page of files",
-            "  N    Next page of files",
-            "  Q    Back to file transfer menu",
-            "  ESC  Return to main menu",
-            // AI chat help
-            "  P    Previous page of answer",
-            "  N    Next page of answer",
-            "  Q    Done, return to main menu",
-            // Bookmarks help
-            "  #    Enter bookmark number to open",
-            "  D    Delete a bookmark by number",
-            "  ESC  Cancel and go back",
-            // Form help
-            "  #    Enter a field number to",
-            "       edit its value",
-            "  S    Submit the form",
-            "  Q    Cancel and go back",
-            // Dialup mapping help
-            "  Map phone numbers to host:port",
-            "  targets for the modem emulator.",
-            "  Dial a number with ATDT, ATDP,",
-            "  or ATD (all work the same) and",
-            "  the server connects to the",
-            "  mapped host:port for you.",
-            "  You can still dial host:port",
-            "  directly - mappings are optional.",
-            "  Mappings are saved in dialup.conf.",
-            // Serial console help (PETSCII variant)
-            "  This menu configures the serial",
-            "  port as a raw telnet-serial",
-            "  bridge.  No AT commands, no",
-            "  dialing - just byte passthrough",
-            "  between the telnet session and",
-            "  the connected hardware.",
-            "  Settings on this menu:",
-            "  E  Open or close the device",
-            "  S  Pick the serial device path",
-            "  B  Match the baud rate of the",
-            "     attached hardware",
-            "  P  Data bits, parity, stop bits",
-            "  F  Flow control: none, software",
-            "     (XON/XOFF), or hardware",
-            "     (RTS/CTS)",
-            "  Using the bridge:",
-            "  Pick Serial Gateway from the",
-            "  main menu to enter the bridge.",
-            "  Press <- <- (PETSCII) or",
-            "  ESC ESC (ANSI/ASCII) to leave.",
-            "  A single ESC is forwarded so",
-            "  editors like vi keep working.",
-            "  Switching modes:",
-            "  Press T in this menu to return",
-            "  to Modem Emulator mode.  Each",
-            "  port toggles independently.",
+        // Single source of truth: iterate the REAL line tables for every help
+        // screen (PETSCII variant) so this catch-all can't drift from what is
+        // actually displayed.  Per-screen `*_help_lines_fit_petscii` tests give
+        // targeted failures; this guards every screen, including the ones with
+        // no individual test (main menu, config submenu, download/delete/AI/
+        // dialup/bookmarks/form pickers, serial console).
+        let groups: [&[&str]; 21] = [
+            TelnetSession::main_help_lines(),
+            TelnetSession::config_submenu_help_lines(true),
+            TelnetSession::config_help_lines(true),
+            TelnetSession::other_help_lines(true),
+            TelnetSession::security_help_lines(true),
+            TelnetSession::xmodem_help_lines(true),
+            TelnetSession::zmodem_help_lines(true),
+            TelnetSession::kermit_help_lines(true),
+            TelnetSession::punter_help_lines(true),
+            TelnetSession::file_transfer_help_lines(true),
+            TelnetSession::file_transfer_menu_help_lines(),
+            TelnetSession::download_help_lines(),
+            TelnetSession::delete_help_lines(),
+            TelnetSession::ai_chat_help_lines(),
+            TelnetSession::dialup_help_lines(),
+            TelnetSession::modem_help_lines(true),
+            TelnetSession::console_help_lines(true),
+            TelnetSession::browser_page_help_lines(true),
+            TelnetSession::browser_menu_help_lines(),
+            TelnetSession::bookmarks_help_lines(),
+            TelnetSession::form_help_lines(),
         ];
-        for line in &help_lines {
+        for line in groups.iter().flat_map(|g| g.iter()) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "help line '{}' is {} chars, exceeds {}",
@@ -15836,24 +15807,7 @@ mod tests {
     /// in with the dual-port refactor.
     #[test]
     fn test_modem_help_lines_fit_petscii() {
-        let lines = [
-            "  This server emulates a Hayes-",
-            "  compatible modem on this serial",
-            "  port. Connect retro hardware",
-            "  and use AT commands.  The other",
-            "  port is configured separately.",
-            "  ATDT ethernet-gateway",
-            "    Connect to this gateway",
-            "  ATDT host:port",
-            "    Dial a remote telnet host",
-            "  ATDL Redial last number",
-            "  AT&V Show settings",
-            "  AT&W Save settings",
-            "  +++  Return to command mode",
-            "  ATO  Return online",
-            "  ATH  Hang up",
-        ];
-        for line in &lines {
+        for line in TelnetSession::modem_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "modem help '{}' is {} chars, exceeds {}",
@@ -16338,26 +16292,13 @@ mod tests {
 
     #[test]
     fn test_web_help_lines_fit_petscii() {
-        let lines = [
-            "  BROWSER HELP",
-            "  [1] [2] etc. next to text",
-            "  are links to other pages.",
-            "  N/P  Next/Previous page",
-            "  T/E  Jump to Top/End",
-            "  S    Search text in page",
-            "  G    Go to URL or search",
-            "  L    Follow link (any #)",
-            "  F    Fill out forms",
-            "  K    Save bookmark",
-            "  B    Back to previous page",
-            "  R    Reload current page",
-            "  Q    Close page",
-            "  ESC  Exit browser",
-            "  G  Go to a URL or search query",
-            "  K  Open saved bookmarks",
-            "  Q  Exit browser to main menu",
+        // The dim intro lines and the yellow "BROWSER HELP" title are sent
+        // inline; the drift-prone key-binding lines live in these two fns.
+        let groups: [&[&str]; 2] = [
+            TelnetSession::browser_page_help_lines(true),
+            TelnetSession::browser_menu_help_lines(),
         ];
-        for line in &lines {
+        for line in groups.iter().flat_map(|g| g.iter()) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "help line '{}' is {} chars, exceeds {}",
