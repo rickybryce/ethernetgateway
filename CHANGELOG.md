@@ -5,7 +5,7 @@ All notable changes to **ethernet-gateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.1] - Unreleased
 
 ### Added
 - **Punter (C1) file-transfer protocol** — the protocol CCGMS /
@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   30) bounds consecutive corrupt-block resend rounds separately from
   `punter_max_retries`, since a real C64 peer never caps resends and a
   low shared cap made the gateway give up first and strand it.
+
+### Security
+- **Updated `russh` 0.60.2 → 0.60.3** to clear two high-severity
+  (CVSS 7.5) allocation-DoS advisories in the SSH stack:
+  RUSTSEC-2026-0154 (`russh` unbounded 32-bit allocation) and
+  RUSTSEC-2026-0153 (`russh-cryptovec` unchecked `CryptoVec`
+  allocation/growth). A malicious SSH client could otherwise drive
+  unbounded memory allocation on the SSH listener.
 
 ## [0.6.0] - 2026-05-24
 
@@ -1069,6 +1077,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - S-register persistence via `AT&W`.
 
 [Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.0...HEAD
+[0.6.1]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.0...HEAD
 [0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
 [0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3
 [0.5.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.2
