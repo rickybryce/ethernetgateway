@@ -665,6 +665,22 @@ async fn receive_phase(
 /// preserves slow-link tolerance for a block already arriving.  The first
 /// missing byte ends the read; a short buffer simply fails the checksum
 /// upstream → BAD → resend.
+///
+/// Cancel-safety: the `byte_wait` timeout drops the in-flight `nvt_read_byte`
+/// future on expiry.  That is safe for `ReadState` — `pushback` is read
+/// synchronously at entry and only written after both reads succeed, so a
+/// dropped future never tears it, and a 1-byte `read_exact` can't lose a
+/// partial prefix.  The one residual is TCP-only: `nvt_read_byte` /
+/// `raw_read_byte` make two sequential reads for an `IAC IAC` escape or a
+/// CR-NUL lookahead, so a timeout landing *between* those two reads consumes
+/// but loses the first byte (the `IAC`, or the `0x0D`).  This requires a
+/// multi-second gap *inside* a single escape pair — both bytes are emitted by
+/// one `raw_write_bytes`/`write_all`, so TCP effectively never splits them
+/// that long.  Even if it did, the lost/stale byte mis-frames the block → the
+/// dual checksum fails → BAD → full resend; a persistent desync trips
+/// `max_bad_rounds` and aborts loudly.  A misframed block coincidentally
+/// passing both the additive and cyclic checksums is astronomically unlikely,
+/// so this degrades to a failed transfer, never silent file corruption.
 async fn read_block(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
