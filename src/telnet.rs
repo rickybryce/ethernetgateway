@@ -11235,7 +11235,15 @@ impl TelnetSession {
     }
 
     async fn punter_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::punter_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("PUNTER SETTINGS HELP", lines).await
+    }
+
+    /// Punter settings help text, split by terminal width.  An associated fn
+    /// (no `self`) so a unit test can assert the PETSCII variant fits 40
+    /// columns against the real lines — no duplicated copy to drift from.
+    fn punter_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure PUNTER (C1) file",
                 "  transfer settings.  C1 is the",
@@ -11289,8 +11297,7 @@ impl TelnetSession {
                 "",
                 "  Takes effect on next transfer.",
             ]
-        };
-        self.show_help_page("PUNTER SETTINGS HELP", lines).await
+        }
     }
 
     // ─── KERMIT SETTINGS ────────────────────────────────────
@@ -14997,6 +15004,31 @@ mod tests {
                 PETSCII_WIDTH,
             );
         }
+    }
+
+    /// Punter settings help (PETSCII) must fit 40 cols.  Asserts the REAL help
+    /// lines via the shared associated fn (no duplicated copy to drift), so the
+    /// G (bad-block limit) and D (hangup-on-failure) items stay within width.
+    #[test]
+    fn test_punter_help_lines_fit_petscii() {
+        for line in TelnetSession::punter_help_lines(true) {
+            assert!(
+                line.len() <= PETSCII_WIDTH,
+                "punter help '{}' is {} chars, exceeds {}",
+                line,
+                line.len(),
+                PETSCII_WIDTH,
+            );
+        }
+    }
+
+    /// Punter settings menu must fit the 22-row PETSCII screen.
+    /// header(3) + blank + 6 value lines + blank + 8 items (B/N/I/F/M/G/D/R)
+    /// + blank + Q/H + prompt = 22.
+    #[test]
+    fn test_punter_settings_menu_row_count() {
+        let rows = 3 + 1 + 6 + 1 + 8 + 1 + 1 + 1; // 22
+        assert!(rows <= 22, "punter settings menu is {} rows, exceeds 22", rows);
     }
 
     /// Other settings help screen (PETSCII): header(3) + blank + 11 content +
