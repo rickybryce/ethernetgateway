@@ -940,6 +940,31 @@ where
     Ok(files)
 }
 
+/// Receiver error-recovery step, Forsberg receiver model (rz): count one
+/// error against the retry budget; if it's exhausted, cancel the session;
+/// otherwise re-send ZRPOS so the sender retransmits from the last good
+/// position `pos`.  Used uniformly for every recoverable data-phase error —
+/// bad/late header, bad subpacket, position mismatch — so a single counter
+/// bounds them all (the caller resets it to 0 on progress).
+async fn nak_or_abort(
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    errors: &mut u32,
+    max_retries: u32,
+    pos: u32,
+    verbose: bool,
+) -> Result<(), String> {
+    *errors += 1;
+    if *errors >= max_retries {
+        send_cancel(writer, is_tcp).await.ok();
+        return Err(format!(
+            "ZMODEM: too many errors during receive ({})",
+            *errors
+        ));
+    }
+    send_zrpos(writer, is_tcp, pos, verbose).await
+}
+
 /// Receive the body of a single file after its ZFILE header has already
 /// been read.  Reads the ZFILE subpacket (filename, declared size) and
 /// consults the caller's decide callback: if the caller accepts the
@@ -1011,7 +1036,11 @@ where
 
     let mut file_data: Vec<u8> = Vec::new();
     let mut expected_pos: u32 = 0;
-    let mut zrpos_attempts: u32 = 0;
+    // Single error counter (Forsberg receiver model): bumped on any
+    // data-phase error (bad/late header, bad subpacket, position mismatch),
+    // reset on progress (a good subpacket), bounded by max_retries.  Each
+    // error re-sends ZRPOS via `nak_or_abort` to request retransmission.
+    let mut errors: u32 = 0;
     // Count of subpackets processed — used to throttle verbose
     // per-subpacket logs the same way `xmodem.rs` throttles block
     // logs (first few + on any error).
@@ -1032,17 +1061,20 @@ where
                 if verbose {
                     glog!("ZMODEM recv: header read error: {}", e);
                 }
-                zrpos_attempts += 1;
-                if zrpos_attempts >= max_retries {
-                    send_cancel(writer, is_tcp).await.ok();
-                    return Err("ZMODEM: too many header errors during receive".into());
-                }
-                send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
+                nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
                 continue;
             }
             Err(_) => {
-                send_cancel(writer, is_tcp).await.ok();
-                return Err("ZMODEM: timeout waiting for data".into());
+                // Data-phase timeout: re-prompt with ZRPOS (bounded) rather
+                // than abort — the sender retransmits from the last good
+                // position.  This is the Forsberg receiver retry loop; an
+                // immediate abort here strands a transfer a single re-prompt
+                // would recover.
+                if verbose {
+                    glog!("ZMODEM recv: data-phase timeout, re-sending ZRPOS");
+                }
+                nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
+                continue;
             }
         };
 
@@ -1057,7 +1089,7 @@ where
                             expected_pos
                         );
                     }
-                    send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
+                    nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
                     continue;
                 }
                 loop {
@@ -1076,11 +1108,15 @@ where
                             if verbose {
                                 glog!("ZMODEM recv: subpacket error: {}", e);
                             }
-                            send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
+                            nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
                             continue 'data_loop;
                         }
                     };
                     subpackets_seen += 1;
+                    // Progress — a good subpacket clears the consecutive-error
+                    // budget so a long transfer over a noisy link isn't capped
+                    // by cumulative (vs. consecutive) errors.
+                    errors = 0;
                     if verbose && subpackets_seen <= 3 {
                         glog!(
                             "ZMODEM recv: subpacket #{} OK ({} bytes, marker=0x{:02X}, pos={})",
@@ -1138,7 +1174,7 @@ where
                             file_data.len()
                         );
                     }
-                    send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
+                    nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
                     continue;
                 }
                 break;
@@ -1157,7 +1193,7 @@ where
                         other
                     );
                 }
-                send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
+                nak_or_abort(writer, is_tcp, &mut errors, max_retries, expected_pos, verbose).await?;
             }
         }
     }
@@ -1486,6 +1522,9 @@ pub(crate) async fn zmodem_send(
                     Ok(Ok(h)) if h.frame == ZACK => {
                         let ack_pos = h.position() as usize;
                         if ack_pos == pos + chunk_len {
+                            // Progress — clear the consecutive-retransmit budget
+                            // (sz bounds consecutive errors, not cumulative).
+                            zdata_attempts = 0;
                             pos += chunk_len;
                             continue;
                         }
@@ -2413,6 +2452,129 @@ mod tests {
             Err(e) => panic!("expected 'aborted' error, got Err({:?})", e),
             Ok(_) => panic!("expected abort error, receiver returned Ok"),
         }
+    }
+
+    /// Drive the receiver's ZRINIT→ZFILE handshake from a mock sender, then
+    /// return control to the caller's per-test loop.  Sends ZFILE for
+    /// `filename` and leaves the wire positioned for the data phase.
+    async fn mock_send_zfile(
+        m_read: &mut (impl AsyncRead + Unpin),
+        m_write: &mut (impl AsyncWrite + Unpin),
+        st: &mut ReadState,
+        filename: &str,
+    ) -> bool {
+        loop {
+            match read_header(m_read, false, st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+        let mut info = filename.as_bytes().to_vec();
+        info.push(0);
+        info.extend_from_slice(b"64 0 0 0 0 64\0");
+        let mut zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
+        zfile.extend_from_slice(&build_subpacket(&info, ZCRCW));
+        m_write.write_all(&zfile).await.is_ok()
+    }
+
+    /// Strict spec (Z-R2): a corrupt subpacket is recovered via ZRPOS, but
+    /// the receiver's error counter must BOUND the retries — a permanently
+    /// corrupt stream aborts rather than looping forever.  A reactive mock
+    /// answers every ZRPOS with a CRC-broken subpacket; the receiver must
+    /// terminate with an error well inside a wall-clock guard (not hang).
+    #[tokio::test]
+    async fn test_receiver_bounds_persistent_subpacket_corruption() {
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (mut r_read, mut r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let mock = tokio::spawn(async move {
+            let mut st = ReadState::default();
+            if !mock_send_zfile(&mut m_read, &mut m_write, &mut st, "corrupt.bin").await {
+                return;
+            }
+            // Answer every ZRPOS with a CRC-broken ZDATA subpacket.
+            loop {
+                match read_header(&mut m_read, false, &mut st, false).await {
+                    Ok(h) if h.frame == ZRPOS => {
+                        let zdata = build_bin16_header(ZDATA, [0, 0, 0, 0]);
+                        if m_write.write_all(&zdata).await.is_err() {
+                            return;
+                        }
+                        let mut sub = build_subpacket(&[0u8; 64], ZCRCQ);
+                        sub[0] ^= 0x01; // break the CRC without changing framing
+                        if m_write.write_all(&sub).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => return, // receiver cancelled / closed the link
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true),
+        )
+        .await;
+        mock.abort();
+        match result {
+            Ok(Ok(_)) => panic!("receiver must not succeed on a permanently-corrupt stream"),
+            Ok(Err(e)) => assert!(
+                e.to_lowercase().contains("too many") || e.to_lowercase().contains("error"),
+                "expected a bounded-error abort, got: {e}",
+            ),
+            Err(_) => panic!("receiver looped on persistent corruption (retry bound missing)"),
+        }
+    }
+
+    /// Strict spec (Z-R1): a data-phase timeout must re-send ZRPOS to
+    /// re-prompt the sender (bounded), NOT abort on the first timeout.  A
+    /// mock sends ZFILE then stalls; under the paused clock the receiver's
+    /// reads time out repeatedly and it must emit more than the single
+    /// initial ZRPOS before giving up.
+    #[tokio::test(start_paused = true)]
+    async fn test_receiver_reprompts_with_zrpos_on_data_timeout() {
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (mut r_read, mut r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        // Inline mock: finish the handshake, then count ZRPOS re-prompts.
+        // Advance virtual time BEFORE each read so the stalled receiver's
+        // data-phase read times out and (per the fix) re-sends ZRPOS; the
+        // advance-first ordering guarantees a frame is queued before we read,
+        // so the read never parks on the paused clock.
+        let mut st = ReadState::default();
+        assert!(
+            mock_send_zfile(&mut m_read, &mut m_write, &mut st, "stall.bin").await,
+            "mock ZRINIT/ZFILE handshake failed",
+        );
+        let mut zrpos_count = 0u32;
+        loop {
+            tokio::time::advance(std::time::Duration::from_secs(35)).await;
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRPOS => zrpos_count += 1,
+                Ok(_) => continue,
+                Err(_) => break, // receiver cancelled and dropped the link
+            }
+            if zrpos_count > 30 {
+                break; // safety — must be bounded by max_retries long before this
+            }
+        }
+
+        let result = recv.await.unwrap();
+        assert!(result.is_err(), "a permanently-stalled sender must eventually abort");
+        assert!(
+            zrpos_count >= 2,
+            "receiver must re-prompt with ZRPOS on a data-phase timeout (got {zrpos_count}); \
+             an immediate abort would emit only the initial ZRPOS",
+        );
     }
 
     #[tokio::test]
