@@ -723,7 +723,7 @@ fn collect_form_updates(
         "kermit_resume_max_age_hours",
         "punter_block_size", "punter_negotiation_timeout",
         "punter_block_timeout", "punter_max_retries",
-        "punter_negotiation_retry_interval",
+        "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "ssh_gateway_auth",
     ];
     for key in plain_keys {
@@ -744,6 +744,7 @@ fn collect_form_updates(
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
         "allow_atdt_kermit",
+        "punter_hangup_on_failure",
         "serial_a_enabled", "serial_b_enabled",
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
@@ -1247,7 +1248,8 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{atd}</div>\
          <h3>Punter (C1)</h3>\
          <div class=\"row\">{pbs} {pneg}</div>\
-         <div class=\"row\">{pblk} {pret} {pint}</div>\
+         <div class=\"row\">{pblk} {pret} {pbad} {pint}</div>\
+         <div class=\"row\">{phang}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
@@ -1279,7 +1281,9 @@ fn render_more_popups(cfg: &Config) -> String {
         pneg = numfield("punter_negotiation_timeout", "Neg (s)", cfg.punter_negotiation_timeout),
         pblk = numfield("punter_block_timeout", "Block (s)", cfg.punter_block_timeout),
         pret = numfield("punter_max_retries", "Retries", cfg.punter_max_retries),
+        pbad = numfield("punter_max_bad_rounds", "Bad rounds", cfg.punter_max_bad_rounds),
         pint = numfield("punter_negotiation_retry_interval", "Poke (s)", cfg.punter_negotiation_retry_interval),
+        phang = checkbox("punter_hangup_on_failure", "Hang up (drop carrier) on a failed transfer", cfg.punter_hangup_on_failure),
     ));
 
     // Per-port serial popups.

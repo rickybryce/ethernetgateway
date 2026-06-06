@@ -371,7 +371,16 @@ fn backpatch_next_sizes(blocks: &mut [Vec<u8>]) {
 struct Tunables {
     negotiation_timeout: u64,
     block_timeout: u64,
+    /// Per-stage handshake-code / block re-send count (read_block S/B resends,
+    /// end-off ACK/SYN/S-B resends).  The recovery action for a *missed* code.
     max_retries: u32,
+    /// Consecutive corrupt-block resend rounds tolerated before giving up.
+    /// Deliberately decoupled from (and larger than) `max_retries`: a real C64
+    /// peer never caps these — it re-requests a block until it arrives clean or
+    /// the user aborts at the keyboard — and C1 has no in-band abort, so a low
+    /// cap makes the gateway quit first and strand the peer.  See
+    /// `receive_phase`/`send_phase`.
+    max_bad_rounds: u32,
     retry_interval: u64,
     block_payload: usize,
 }
@@ -386,6 +395,7 @@ impl Tunables {
             negotiation_timeout: cfg.punter_negotiation_timeout,
             block_timeout: cfg.punter_block_timeout,
             max_retries: cfg.punter_max_retries,
+            max_bad_rounds: cfg.punter_max_bad_rounds,
             retry_interval: cfg.punter_negotiation_retry_interval,
             block_payload: total - DATAPOS,
         }
@@ -609,10 +619,15 @@ async fn receive_phase(
             if verbose {
                 glog!("PUNTER recv: checksum mismatch, requesting resend");
             }
-            // rec2: demand a resend of the same-sized block.
+            // rec2: demand a resend of the same-sized block.  A real C1 sender
+            // (`transmit`/`tranhand`) re-sends a block as many times as we BAD
+            // it, with no outer cap, so we tolerate up to `max_bad_rounds`
+            // (well above `max_retries`) before giving up — otherwise the
+            // gateway quits first and, since C1 has no in-band abort, leaves
+            // the C64 sender spinning.
             signal = Code::Bad;
             bad_rounds = bad_rounds.saturating_add(1);
-            if bad_rounds > t.max_retries {
+            if bad_rounds > t.max_bad_rounds {
                 return Err(format!(
                     "Punter receive: {} consecutive bad blocks, giving up",
                     bad_rounds
@@ -628,12 +643,17 @@ async fn receive_phase(
 /// read just fails the checksum upstream → BAD), or errors on abort / repeated
 /// failure.  Mirrors `recmodem` (`punter.src` line 379).
 ///
-/// `t.block_timeout` is a *per-byte* budget for the bytes after the first,
-/// mirroring `recmodem`'s timer, which `rcm5` clears before every character:
-/// a slow-but-steady sender completes as long as each byte arrives within
-/// `block_timeout` of the one before it.  The first byte after our S/B uses a
-/// shorter `retry_interval` window so a peer that missed our S/B is re-prompted
-/// promptly.
+/// The per-byte budget is a short window — `min(block_timeout, retry_interval)`
+/// — applied uniformly to every byte, mirroring `recmodem`, which `rcm5` clears
+/// and re-arms with the *same* short timeout before every character (it does
+/// not grant a fresh full block_timeout per byte).  Once a block is flowing,
+/// bytes arrive back-to-back; a gap means a dropped byte, and we want to detect
+/// it in a few seconds (→ BAD → resend), not sit silent for the full
+/// `block_timeout` (which, used per-byte, made a single mid-block drop look
+/// like a ~20 s hang).  The window is still generous — seconds-per-byte is
+/// enormous slack even at 300 baud — so slow-but-steady links are unaffected.
+/// It doubles as the first-byte wait so a peer that missed our S/B is
+/// re-prompted promptly.
 ///
 /// Unlike the handshake waits (which bound total time via a probe budget), the
 /// S/B re-send here is **count-based** (`max_retries`): each re-send is the
@@ -641,10 +661,10 @@ async fn receive_phase(
 /// alone needs at least two passes (one to consume the "ack", one to read the
 /// resent block) — so the loop count must not collapse with the time budget
 /// (it would, e.g., whenever `retry_interval >= block_timeout`).  The dead-peer
-/// bound is therefore ~`max_retries × retry_interval`; the per-byte
-/// `block_timeout` preserves slow-link tolerance for a block already arriving.
-/// The first missing byte ends the read; a short buffer simply fails the
-/// checksum upstream → BAD → resend.
+/// bound is therefore ~`max_retries × byte_wait`; the per-byte `byte_wait`
+/// preserves slow-link tolerance for a block already arriving.  The first
+/// missing byte ends the read; a short buffer simply fails the checksum
+/// upstream → BAD → resend.
 async fn read_block(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -655,16 +675,17 @@ async fn read_block(
     verbose: bool,
 ) -> Result<Vec<u8>, String> {
     let size = size as usize;
-    // First-byte wait: short enough to re-prompt a peer that missed our S/B,
-    // but never longer than the per-byte budget.
-    let first_wait = t.block_timeout.min(t.retry_interval.max(1));
+    // Uniform short per-byte window: long enough to re-prompt a peer that
+    // missed our S/B (first byte) and to ride out real link latency between
+    // bytes, but far short of the full block_timeout so a dropped byte
+    // mid-block becomes a fast BAD/resend instead of a ~block_timeout stall.
+    let byte_wait = t.block_timeout.min(t.retry_interval.max(1));
     for _attempt in 0..=t.max_retries {
         send_code(writer, Code::Sb, is_tcp, verbose).await?;
         let mut buf: Vec<u8> = Vec::with_capacity(size);
-        for i in 0..size {
-            let wait = if i == 0 { first_wait } else { t.block_timeout };
+        for _i in 0..size {
             let r = tokio::time::timeout(
-                tokio::time::Duration::from_secs(wait),
+                tokio::time::Duration::from_secs(byte_wait),
                 nvt_read_byte(reader, is_tcp, state),
             )
             .await;
@@ -899,7 +920,12 @@ async fn send_phase(
                     glog!("PUNTER send: resend requested for block {}", idx);
                 }
                 resend_rounds = resend_rounds.saturating_add(1);
-                if resend_rounds > t.max_retries {
+                // As on the receive side: a real C1 receiver re-requests a
+                // block without limit, so honour up to `max_bad_rounds` resends
+                // (> `max_retries`) before quitting — a low cap makes the
+                // gateway bail first and strand the C64, which can't be told to
+                // stop (C1 has no in-band abort).
+                if resend_rounds > t.max_bad_rounds {
                     return Err(format!(
                         "Punter send: {} consecutive resend requests for block {}, giving up",
                         resend_rounds, idx
@@ -1463,6 +1489,7 @@ mod tests {
             negotiation_timeout: 5,
             block_timeout: 5, // would dominate if the first byte used it
             max_retries: 3,
+            max_bad_rounds: 30,
             retry_interval: 1,
             block_payload: MAX_PAYLOAD,
         };
@@ -1493,6 +1520,7 @@ mod tests {
             negotiation_timeout: 1,
             block_timeout: 1,
             max_retries: 2,
+            max_bad_rounds: 30,
             retry_interval: 1,
             block_payload: MAX_PAYLOAD,
         };
@@ -1511,6 +1539,7 @@ mod tests {
             negotiation_timeout: 1,
             block_timeout: 1,
             max_retries: 2,
+            max_bad_rounds: 30,
             retry_interval: 1,
             block_payload: MAX_PAYLOAD,
         };
@@ -1531,6 +1560,7 @@ mod tests {
             negotiation_timeout: 2,
             block_timeout: 1,
             max_retries: 5,
+            max_bad_rounds: 30,
             retry_interval: 1,
             block_payload: MAX_PAYLOAD,
         };
@@ -1634,6 +1664,7 @@ mod tests {
             negotiation_timeout: 1,
             block_timeout: 1,
             max_retries: 3,
+            max_bad_rounds: 30,
             retry_interval: 0,
             block_payload: MAX_PAYLOAD,
         };
@@ -1876,31 +1907,61 @@ mod reference_interop {
         buf
     }
 
+    /// A one-block fault the reference applies during the DATA phase:
+    /// `(position, times)` — disrupt the data block at array position `position`
+    /// on its first `times` transmissions, then let it through.  When the
+    /// reference is the *sender* it corrupts the block's body (so the gateway
+    /// receiver's checksum demands a resend); when it's the *receiver* it sends
+    /// `BAD` despite a good checksum (so the gateway sender resends).  Either
+    /// way it drives the cross-codec BAD/resend recovery the clean round-trips
+    /// never reach.  `times` above the old fixed cap (10) but below
+    /// `punter_max_bad_rounds` (30) proves the gateway now perseveres instead
+    /// of bailing and stranding the peer.
+    type Fault = (usize, u32);
+
     // — independent RECEIVER (mirrors rechand/receive) —
 
-    async fn ref_receive(s: &mut TcpStream) -> (Vec<u8>, u8) {
-        let type_payload = ref_recv_phase(s, 8).await;
+    async fn ref_receive(s: &mut TcpStream, fault: Option<Fault>) -> (Vec<u8>, u8) {
+        // Faults only apply to the data phase, not the single type block.
+        let type_payload = ref_recv_phase(s, 8, None).await;
         let ftype = type_payload.first().copied().unwrap_or(3);
-        let data = ref_recv_phase(s, 7).await;
+        let data = ref_recv_phase(s, 7, fault).await;
         (data, ftype)
     }
 
-    async fn ref_recv_phase(s: &mut TcpStream, first_size: usize) -> Vec<u8> {
+    async fn ref_recv_phase(s: &mut TcpStream, first_size: usize, fault: Option<Fault>) -> Vec<u8> {
         let mut out = Vec::new();
         let mut next = first_size;
+        let mut signal = GOO; // GOO = good/advance; BAD = demand a resend
+        let mut idx = 0usize; // 0-based position of the block we're about to read
+        let mut faults_done = 0u32;
         loop {
-            // send GOO, wait for the sender's ACK (skip its spec-mode GOO).
-            put(s, GOO).await;
+            // send GOO/BAD, wait for the sender's ACK (skip its spec-mode GOO).
+            put(s, signal).await;
             get_code(s, &[ACK]).await;
             // send S/B, then read the announced-size block.
             put(s, SB).await;
             let blk = get_block(s, next).await;
             assert!(checksum_ok(&blk), "reference receiver: gateway sent a bad checksum");
+            // Optionally reject this (checksum-good) block to force the gateway
+            // sender to resend it — a noisy-receiver stand-in.  Keep `next` and
+            // `idx` unchanged so the same-size block is re-read next round.
+            let reject = match fault {
+                Some((pos, times)) => idx == pos && faults_done < times,
+                None => false,
+            };
+            if reject {
+                faults_done += 1;
+                signal = BAD;
+                continue;
+            }
             if blk.len() > 7 {
                 out.extend_from_slice(&blk[7..]);
             }
             let final_block = blk[6] == 0xFF;
             next = blk[4] as usize;
+            signal = GOO;
+            idx += 1;
             if final_block {
                 // end-off: ack final, S/B, then the SYN handshake.
                 put(s, GOO).await;
@@ -1916,14 +1977,21 @@ mod reference_interop {
 
     // — independent SENDER (mirrors tranhand/transmit) —
 
-    async fn ref_send(s: &mut TcpStream, data: &[u8], ftype: u8) {
-        ref_send_phase(s, &build_type_blocks(ftype), true).await;
-        ref_send_phase(s, &build_data_blocks(data), false).await;
+    async fn ref_send(s: &mut TcpStream, data: &[u8], ftype: u8, fault: Option<Fault>) {
+        // Faults only apply to the data phase, not the single type block.
+        ref_send_phase(s, &build_type_blocks(ftype), true, None).await;
+        ref_send_phase(s, &build_data_blocks(data), false, fault).await;
     }
 
-    async fn ref_send_phase(s: &mut TcpStream, blocks: &[Vec<u8>], spec: bool) {
+    async fn ref_send_phase(
+        s: &mut TcpStream,
+        blocks: &[Vec<u8>],
+        spec: bool,
+        fault: Option<Fault>,
+    ) {
         let mut idx = 0usize;
         let mut started = false;
+        let mut faults_done = 0u32;
         loop {
             if spec && !started {
                 put(s, GOO).await;
@@ -1951,7 +2019,18 @@ mod reference_interop {
             }
             put(s, ACK).await;
             get_code(s, &[SB]).await;
-            put_bytes(s, &blocks[idx]).await;
+            // Optionally corrupt this block's body on its first `times` sends so
+            // the gateway receiver's checksum catches it and demands a resend.
+            // Flip a byte (length unchanged) so framing stays aligned.
+            let mut blk = blocks[idx].clone();
+            if let Some((pos, times)) = fault {
+                if idx == pos && faults_done < times {
+                    let last = blk.len() - 1;
+                    blk[last] ^= 0xFF;
+                    faults_done += 1;
+                }
+            }
+            put_bytes(s, &blk).await;
         }
     }
 
@@ -1960,6 +2039,7 @@ mod reference_interop {
     async fn gateway_receives_from_reference(
         data: Vec<u8>,
         ftype: PunterFileType,
+        fault: Option<Fault>,
     ) -> (Vec<u8>, PunterFileType) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1972,7 +2052,7 @@ mod reference_interop {
         });
         let reference = tokio::spawn(async move {
             let mut sock = TcpStream::connect(addr).await.unwrap();
-            ref_send(&mut sock, &data, ftype_byte).await;
+            ref_send(&mut sock, &data, ftype_byte, fault).await;
         });
 
         reference.await.unwrap();
@@ -1982,6 +2062,7 @@ mod reference_interop {
     async fn gateway_sends_to_reference(
         data: Vec<u8>,
         ftype: PunterFileType,
+        fault: Option<Fault>,
     ) -> (Vec<u8>, u8) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1994,7 +2075,7 @@ mod reference_interop {
         });
         let reference = tokio::spawn(async move {
             let mut sock = TcpStream::connect(addr).await.unwrap();
-            ref_receive(&mut sock).await
+            ref_receive(&mut sock, fault).await
         });
 
         let got = reference.await.unwrap();
@@ -2018,7 +2099,7 @@ mod reference_interop {
             ((0..3000u32).map(|i| (i * 31 + 5) as u8).collect(), PunterFileType::Unknown),
         ] {
             let expect = data.clone();
-            let (got, got_ft) = with_timeout(gateway_receives_from_reference(data, ft)).await;
+            let (got, got_ft) = with_timeout(gateway_receives_from_reference(data, ft, None)).await;
             assert_eq!(got, expect, "payload mismatch (gateway receiving)");
             assert_eq!(got_ft, ft, "file type mismatch (gateway receiving)");
         }
@@ -2033,9 +2114,80 @@ mod reference_interop {
             ((0..3000u32).map(|i| (i * 17 + 9) as u8).collect(), PunterFileType::Usr),
         ] {
             let expect = data.clone();
-            let (got, got_ft) = with_timeout(gateway_sends_to_reference(data, ft)).await;
+            let (got, got_ft) = with_timeout(gateway_sends_to_reference(data, ft, None)).await;
             assert_eq!(got, expect, "payload mismatch (gateway sending)");
             assert_eq!(got_ft, ft.to_byte(), "file type mismatch (gateway sending)");
         }
+    }
+
+    // — Cross-codec BAD/resend recovery (the clean interop tests never hit it) —
+
+    #[tokio::test]
+    async fn gateway_receiver_recovers_from_one_corrupt_block() {
+        // The independent reference sender corrupts a data block on its first
+        // transmission; our receiver's checksum must catch it, send BAD, and
+        // accept the clean resend.  Proves the receive-side BAD path against an
+        // INDEPENDENT codec, not just our own sender.
+        let data: Vec<u8> = (0..2000u32).map(|i| (i * 11 + 3) as u8).collect();
+        let expect = data.clone();
+        let (got, ft) = with_timeout(gateway_receives_from_reference(
+            data,
+            PunterFileType::Seq,
+            Some((1, 1)),
+        ))
+        .await;
+        assert_eq!(got, expect, "gateway receiver must recover from one corrupt block");
+        assert_eq!(ft, PunterFileType::Seq);
+    }
+
+    #[tokio::test]
+    async fn gateway_sender_recovers_from_one_receiver_reject() {
+        // The independent reference receiver rejects a data block once (sends
+        // BAD despite a good checksum); our sender must resend and complete.
+        // Proves the send-side resend path against an INDEPENDENT codec.
+        let data: Vec<u8> = (0..2000u32).map(|i| (i * 5 + 1) as u8).collect();
+        let expect = data.clone();
+        let (got, ft) = with_timeout(gateway_sends_to_reference(
+            data,
+            PunterFileType::Prg,
+            Some((1, 1)),
+        ))
+        .await;
+        assert_eq!(got, expect, "gateway sender must recover from one rejected block");
+        assert_eq!(ft, PunterFileType::Prg.to_byte());
+    }
+
+    #[tokio::test]
+    async fn gateway_receiver_recovers_past_old_retry_cap() {
+        // 15 consecutive corruptions of the SAME block — more than the old
+        // fixed cap (DEFAULT_PUNTER_MAX_RETRIES = 10), fewer than the new
+        // dedicated bad-round cap (DEFAULT_PUNTER_MAX_BAD_ROUNDS = 30).  Under
+        // the old conflated cap the gateway gave up at round 11 and stranded
+        // the C64; now it perseveres like a real peer and recovers.
+        let data: Vec<u8> = (0..3000u32).map(|i| (i * 7 + 1) as u8).collect();
+        let expect = data.clone();
+        let (got, _) = with_timeout(gateway_receives_from_reference(
+            data,
+            PunterFileType::Seq,
+            Some((2, 15)),
+        ))
+        .await;
+        assert_eq!(got, expect, "gateway must recover after 15 bad rounds (cap is 30)");
+    }
+
+    #[tokio::test]
+    async fn gateway_sender_recovers_past_old_retry_cap() {
+        // Mirror on the send path: 15 consecutive receiver rejects of the same
+        // block must recover under the 30-round cap, where the old cap of 10
+        // would have made the gateway quit and leave the C64 hanging.
+        let data: Vec<u8> = (0..3000u32).map(|i| (i * 13 + 9) as u8).collect();
+        let expect = data.clone();
+        let (got, _) = with_timeout(gateway_sends_to_reference(
+            data,
+            PunterFileType::Prg,
+            Some((2, 15)),
+        ))
+        .await;
+        assert_eq!(got, expect, "gateway must recover after 15 rejects (cap is 30)");
     }
 }

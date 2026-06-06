@@ -180,6 +180,23 @@ const DEFAULT_PUNTER_NEGOTIATION_TIMEOUT: u64 = 45;
 const DEFAULT_PUNTER_BLOCK_TIMEOUT: u64 = 20;
 /// Punter max retries for a handshake code / block (resend GOO·BAD·ACK·S/B).
 const DEFAULT_PUNTER_MAX_RETRIES: u32 = 10;
+/// Punter consecutive bad/corrupt-block resend rounds tolerated before the
+/// gateway gives up on a transfer.  Kept separate from (and higher than)
+/// `max_retries` because a real C64 peer (CCGMS/Novaterm) places no outer cap
+/// on resend rounds — it keeps re-requesting a block until the data arrives
+/// clean or the user aborts on the keyboard.  C1 has no in-band abort, so if
+/// the gateway quits first it leaves the C64 spinning; a generous cap lets a
+/// noisy-but-working line recover instead of stranding the peer, while still
+/// bounding a hopeless systematic mismatch.  30 ≈ the C64's per-stage codecyc.
+const DEFAULT_PUNTER_MAX_BAD_ROUNDS: u32 = 30;
+/// Drop the connection (carrier) when a Punter transfer gives up, rather than
+/// returning to the menu.  C1 has no in-band abort, so a give-up otherwise
+/// leaves the C64 spinning in its own retry loop until its (long) internal
+/// timeout; closing the connection makes the modem bridge signal loss-of-
+/// carrier so the C64 exits its transfer at once.  Off by default — it tears
+/// down the whole session, a heavy hammer best reserved for callers who
+/// actually hit the strand.
+const DEFAULT_PUNTER_HANGUP_ON_FAILURE: bool = false;
 /// Seconds between successive handshake-code re-sends during the Punter
 /// negotiation phase.  Analogous to the XMODEM/ZMODEM retry intervals.
 const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
@@ -473,8 +490,15 @@ pub struct Config {
     pub punter_block_timeout: u64,
     /// Punter max retries for a handshake code / block.
     pub punter_max_retries: u32,
+    /// Punter consecutive bad-block resend rounds before giving up on the
+    /// transfer.  Separate from (and larger than) `punter_max_retries`.
+    pub punter_max_bad_rounds: u32,
     /// Seconds between handshake-code re-sends during Punter negotiation.
     pub punter_negotiation_retry_interval: u64,
+    /// Drop the connection when a Punter transfer gives up, so the C64 — which
+    /// C1 gives no in-band way to abort — sees loss-of-carrier instead of
+    /// hanging.  Off by default (it tears down the whole session).
+    pub punter_hangup_on_failure: bool,
     /// Run the HTTP configuration web server.  Mirrors the GUI's
     /// settings page in a browser.  Honors the same IP-safety
     /// allowlist as the telnet listener (private/loopback only,
@@ -555,7 +579,9 @@ impl Default for Config {
             punter_negotiation_timeout: DEFAULT_PUNTER_NEGOTIATION_TIMEOUT,
             punter_block_timeout: DEFAULT_PUNTER_BLOCK_TIMEOUT,
             punter_max_retries: DEFAULT_PUNTER_MAX_RETRIES,
+            punter_max_bad_rounds: DEFAULT_PUNTER_MAX_BAD_ROUNDS,
             punter_negotiation_retry_interval: DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL,
+            punter_hangup_on_failure: DEFAULT_PUNTER_HANGUP_ON_FAILURE,
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
             serial_a: SerialPortConfig::default(),
@@ -886,11 +912,20 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u32| v >= 1)
             .unwrap_or(DEFAULT_PUNTER_MAX_RETRIES),
+        punter_max_bad_rounds: map
+            .get("punter_max_bad_rounds")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u32| v >= 1)
+            .unwrap_or(DEFAULT_PUNTER_MAX_BAD_ROUNDS),
         punter_negotiation_retry_interval: map
             .get("punter_negotiation_retry_interval")
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u64| v >= 1)
             .unwrap_or(DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL),
+        punter_hangup_on_failure: map
+            .get("punter_hangup_on_failure")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_PUNTER_HANGUP_ON_FAILURE),
         web_enabled: map
             .get("web_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1357,17 +1392,28 @@ fn write_config_file(path: &str, cfg: &Config) {
 # punter_negotiation_timeout:        seconds to wait for the peer's first code.
 # punter_block_timeout:              per-block read timeout once under way.
 # punter_max_retries:                handshake-code / block retry limit.
+# punter_max_bad_rounds:             consecutive corrupt-block resend rounds
+#                                    tolerated before giving up (kept higher
+#                                    than max_retries; a real C64 peer never
+#                                    caps these, so a low value strands it).
 # punter_negotiation_retry_interval: seconds between code re-sends.
+# punter_hangup_on_failure:          drop the connection (carrier) when a
+#                                    transfer gives up so the C64 — which C1
+#                                    can't be told to abort — exits instead of
+#                                    hanging.  Ends the whole session; off by
+#                                    default.
 ");
     write_kv(&mut content, "punter_block_size", cfg.punter_block_size);
     write_kv(&mut content, "punter_negotiation_timeout", cfg.punter_negotiation_timeout);
     write_kv(&mut content, "punter_block_timeout", cfg.punter_block_timeout);
     write_kv(&mut content, "punter_max_retries", cfg.punter_max_retries);
+    write_kv(&mut content, "punter_max_bad_rounds", cfg.punter_max_bad_rounds);
     write_kv(
         &mut content,
         "punter_negotiation_retry_interval",
         cfg.punter_negotiation_retry_interval,
     );
+    write_kv(&mut content, "punter_hangup_on_failure", cfg.punter_hangup_on_failure);
     content.push('\n');
 
     content.push_str("\
@@ -1756,10 +1802,18 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.punter_max_retries = v;
             }
         }
+        "punter_max_bad_rounds" => {
+            if let Ok(v) = value.parse::<u32>() && v >= 1 {
+                cfg.punter_max_bad_rounds = v;
+            }
+        }
         "punter_negotiation_retry_interval" => {
             if let Ok(v) = value.parse::<u64>() && v >= 1 {
                 cfg.punter_negotiation_retry_interval = v;
             }
+        }
+        "punter_hangup_on_failure" => {
+            cfg.punter_hangup_on_failure = value.eq_ignore_ascii_case("true");
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "web_port" => {
@@ -1974,6 +2028,7 @@ mod tests {
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
         assert!(!cfg.allow_atdt_kermit);
+        assert!(!cfg.punter_hangup_on_failure);
         for port in [&cfg.serial_a, &cfg.serial_b] {
             assert!(!port.enabled);
             assert_eq!(port.mode, "modem");
@@ -2191,7 +2246,9 @@ mod tests {
             punter_negotiation_timeout: 50,
             punter_block_timeout: 25,
             punter_max_retries: 12,
+            punter_max_bad_rounds: 18,
             punter_negotiation_retry_interval: 6,
+            punter_hangup_on_failure: true,
             web_enabled: true,
             web_port: 9090,
             serial_a: SerialPortConfig {
@@ -2333,10 +2390,12 @@ mod tests {
         assert_eq!(loaded.punter_negotiation_timeout, original.punter_negotiation_timeout);
         assert_eq!(loaded.punter_block_timeout, original.punter_block_timeout);
         assert_eq!(loaded.punter_max_retries, original.punter_max_retries);
+        assert_eq!(loaded.punter_max_bad_rounds, original.punter_max_bad_rounds);
         assert_eq!(
             loaded.punter_negotiation_retry_interval,
             original.punter_negotiation_retry_interval
         );
+        assert_eq!(loaded.punter_hangup_on_failure, original.punter_hangup_on_failure);
         assert_eq!(loaded.serial_a, original.serial_a);
         assert_eq!(loaded.serial_b, original.serial_b);
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);

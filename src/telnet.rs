@@ -2616,6 +2616,29 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Option 4 (`punter_hangup_on_failure`): C1 has no in-band abort, so when
+    /// a Punter transfer gives up the C64 is left spinning in its own retry
+    /// loop until its (long) internal timeout.  Dropping the connection makes
+    /// the modem bridge signal loss-of-carrier so the C64 exits its transfer
+    /// at once.  Sends a short notice — no `wait_for_key`, since the peer is
+    /// mid-protocol and won't press a key — and returns `ConnectionAborted`.
+    /// `handle_file_transfer_command` propagates that kind up through `run()`,
+    /// whose caller unconditionally shuts down the writer (telnet TCP socket /
+    /// SSH channel), which is the carrier drop.
+    async fn punter_hangup(&mut self) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.amber("Dropping carrier to release the C64.")
+        ))
+        .await?;
+        self.flush().await?;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "Punter transfer failed; hanging up to release the peer",
+        ))
+    }
+
     /// Pause after an XMODEM/YMODEM transfer so the client's own
     /// transfer dialog finishes closing and the underlying terminal is
     /// visible again before we print status.  Drains trailing bytes
@@ -3447,12 +3470,21 @@ impl TelnetSession {
         match input {
             "u" => {
                 if let Err(e) = self.file_transfer_upload().await {
+                    // ConnectionAborted = a deliberate hangup (e.g. Punter
+                    // hangup-on-failure); propagate so the session ends and
+                    // the writer is shut down (carrier drop).
+                    if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                        return Err(e);
+                    }
                     self.show_error(&format!("Transfer error: {}", e))
                         .await?;
                 }
             }
             "d" => {
                 if let Err(e) = self.file_transfer_download().await {
+                    if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                        return Err(e);
+                    }
                     self.show_error(&format!("Transfer error: {}", e))
                         .await?;
                 }
@@ -4267,6 +4299,19 @@ impl TelnetSession {
             Ok(v) => v,
             Err(e) => {
                 self.post_transfer_settle().await;
+                // Option 4: with no in-band abort, a Punter give-up otherwise
+                // strands the C64.  Drop carrier instead of waiting on a
+                // keypress the hung peer will never send.
+                if matches!(protocol, UploadProtocol::Punter)
+                    && config::get_config().punter_hangup_on_failure
+                {
+                    self.send_line(&format!(
+                        "  {}",
+                        self.red(&format!("Transfer failed: {}", e))
+                    ))
+                    .await?;
+                    return self.punter_hangup().await;
+                }
                 self.show_error(&format!("Transfer failed: {}", e))
                     .await?;
                 return Ok(());
@@ -4867,6 +4912,13 @@ impl TelnetSession {
                     self.red(&format!("Transfer failed: {}", e))
                 ))
                 .await?;
+                // Option 4: with no in-band abort, a Punter give-up otherwise
+                // strands the C64.  Drop carrier so it sees loss-of-carrier.
+                if matches!(protocol, DownloadProtocol::Punter)
+                    && config::get_config().punter_hangup_on_failure
+                {
+                    return self.punter_hangup().await;
+                }
             }
         }
 
@@ -11027,6 +11079,11 @@ impl TelnetSession {
                 self.amber(&cfg.punter_max_retries.to_string())
             ))
             .await?;
+            self.send_line(&format!(
+                "  Bad-blk limit:  {} rounds",
+                self.amber(&cfg.punter_max_bad_rounds.to_string())
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -11052,6 +11109,17 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Set max retries",
                 self.cyan("M")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set bad-block limit",
+                self.cyan("G")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Hangup on fail: {}",
+                self.cyan("D"),
+                self.amber(if cfg.punter_hangup_on_failure { "on" } else { "off" })
             ))
             .await?;
             self.send_line(&format!(
@@ -11132,6 +11200,26 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "g" => {
+                    self.xmodem_set_numeric(
+                        "Bad-block limit",
+                        "punter_max_bad_rounds",
+                        cfg.punter_max_bad_rounds as u64,
+                        1,
+                        1000,
+                        "rounds",
+                    )
+                    .await?;
+                }
+                "d" => {
+                    // Shared generic bool-toggle helper (despite the name).
+                    self.kermit_toggle_bool(
+                        "Hangup on failure",
+                        "punter_hangup_on_failure",
+                        cfg.punter_hangup_on_failure,
+                    )
+                    .await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -11140,7 +11228,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press B, N, I, F, M, R, H, or Q.").await?;
+                    self.show_error("Press B, N, I, F, M, G, D, R, H, or Q.").await?;
                 }
             }
         }
@@ -11164,6 +11252,12 @@ impl TelnetSession {
                 "  F  Block timeout: per-block read",
                 "     timeout in transfer",
                 "  M  Max retries per code / block",
+                "  G  Bad-block limit: how many",
+                "     corrupt-block resends before",
+                "     giving up (vs M, per-code)",
+                "  D  Hang up on failure: drop",
+                "     carrier so a stranded C64",
+                "     exits (C1 has no abort)",
                 "  R  Restart the server",
                 "",
                 "  Takes effect on next transfer.",
@@ -11184,6 +11278,13 @@ impl TelnetSession {
                 "  F  Block timeout: per-block read",
                 "     timeout once a transfer is live",
                 "  M  Max retries: retry cap per code / block",
+                "  G  Bad-block limit: consecutive corrupt-block",
+                "     resends tolerated before giving up (kept higher",
+                "     than M; a real C64 peer never caps these, so a",
+                "     low value makes the gateway quit and strand it)",
+                "  D  Hang up on failure: drop carrier when a transfer",
+                "     gives up so a stranded C64 exits (C1 has no",
+                "     in-band abort). Ends the whole session.",
                 "  R  Restart the server",
                 "",
                 "  Takes effect on next transfer.",

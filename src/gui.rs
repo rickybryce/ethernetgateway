@@ -246,6 +246,7 @@ struct App {
     punter_negotiation_timeout_buf: String,
     punter_block_timeout_buf: String,
     punter_max_retries_buf: String,
+    punter_max_bad_rounds_buf: String,
     punter_negotiation_retry_interval_buf: String,
     /// Per-port baud text buffer, indexed by `SerialPortId::index()`.
     /// Two slots — one each for Port A and Port B — let the user type
@@ -319,6 +320,7 @@ impl App {
         let punter_negotiation_timeout_buf = cfg.punter_negotiation_timeout.to_string();
         let punter_block_timeout_buf = cfg.punter_block_timeout.to_string();
         let punter_max_retries_buf = cfg.punter_max_retries.to_string();
+        let punter_max_bad_rounds_buf = cfg.punter_max_bad_rounds.to_string();
         let punter_negotiation_retry_interval_buf =
             cfg.punter_negotiation_retry_interval.to_string();
         let serial_baud_buf = [
@@ -361,6 +363,7 @@ impl App {
             punter_negotiation_timeout_buf,
             punter_block_timeout_buf,
             punter_max_retries_buf,
+            punter_max_bad_rounds_buf,
             punter_negotiation_retry_interval_buf,
             serial_baud_buf,
             serial_ports,
@@ -404,6 +407,7 @@ impl App {
         if let Ok(v) = self.punter_negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_timeout = v; }
         if let Ok(v) = self.punter_block_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.punter_block_timeout = v; }
         if let Ok(v) = self.punter_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_retries = v; }
+        if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
         for id in crate::config::SERIAL_PORT_IDS {
             if let Ok(v) = self.serial_baud_buf[id.index()].parse::<u32>()
@@ -1157,6 +1161,7 @@ impl App {
                 50.0,
             );
             labeled_field(ui, "Retries:", &mut self.punter_max_retries_buf, 50.0);
+            labeled_field(ui, "Bad rounds:", &mut self.punter_max_bad_rounds_buf, 50.0);
             labeled_field(
                 ui,
                 "Retry interval (s):",
@@ -1164,6 +1169,12 @@ impl App {
                 50.0,
             );
         });
+        // Bound directly to cfg; the frame-level dirty check (cfg !=
+        // last_synced_cfg) detects the toggle and persists it on save.
+        ui.checkbox(
+            &mut self.cfg.punter_hangup_on_failure,
+            "Hang up (drop carrier) on a failed transfer \u{2014} frees a stranded C64 (C1 has no in-band abort)",
+        );
     }
 
     /// Flush numeric text buffers into `cfg`, persist to disk, refresh
@@ -1322,6 +1333,7 @@ impl App {
             self.cfg.punter_negotiation_timeout.to_string();
         self.punter_block_timeout_buf = self.cfg.punter_block_timeout.to_string();
         self.punter_max_retries_buf = self.cfg.punter_max_retries.to_string();
+        self.punter_max_bad_rounds_buf = self.cfg.punter_max_bad_rounds.to_string();
         self.punter_negotiation_retry_interval_buf =
             self.cfg.punter_negotiation_retry_interval.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
@@ -2302,6 +2314,7 @@ impl eframe::App for App {
                 || self.punter_negotiation_timeout_buf != self.last_synced_cfg.punter_negotiation_timeout.to_string()
                 || self.punter_block_timeout_buf != self.last_synced_cfg.punter_block_timeout.to_string()
                 || self.punter_max_retries_buf != self.last_synced_cfg.punter_max_retries.to_string()
+                || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
                 || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
                 || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
