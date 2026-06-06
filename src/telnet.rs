@@ -7624,7 +7624,14 @@ impl TelnetSession {
     }
 
     async fn serial_configuration_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = &[
+        self.show_help_page("SERIAL CONFIGURATION HELP", Self::serial_config_help_lines())
+            .await
+    }
+
+    /// Serial-configuration submenu help (single width — fits 40 so it serves
+    /// PETSCII too).  Associated fn so a unit test asserts it fits 40 cols.
+    fn serial_config_help_lines() -> &'static [&'static str] {
+        &[
             "  Each serial port has its own enabled",
             "  flag, role (Modem Emulator or Serial",
             "  Console), device path, baud rate, and",
@@ -7639,8 +7646,7 @@ impl TelnetSession {
             "  trace (byte-level logging of SSH/",
             "  Telnet gateway sessions). Takes effect",
             "  on the next gateway session.",
-        ];
-        self.show_help_page("SERIAL CONFIGURATION HELP", lines).await
+        ]
     }
 
     async fn modem_settings(
@@ -10060,7 +10066,14 @@ impl TelnetSession {
     }
 
     async fn gateway_config_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::gateway_config_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("GATEWAY CONFIG HELP", lines).await
+    }
+
+    /// Telnet/SSH-gateway configuration help, split by terminal width.
+    /// Associated fn so a unit test asserts the REAL lines fit 40 cols.
+    fn gateway_config_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure the outbound Telnet",
                 "  and SSH Gateway menus (the S",
@@ -10152,8 +10165,7 @@ impl TelnetSession {
                 "  effect on the next gateway connection.",
                 "  No server restart is required.",
             ]
-        };
-        self.show_help_page("GATEWAY CONFIG HELP", lines).await
+        }
     }
 
     async fn config_set_port(
@@ -12527,7 +12539,8 @@ impl TelnetSession {
         ]
     }
 
-    /// Configuration submenu help, split by terminal width.
+    /// Configuration submenu help, split by terminal width.  Associated fn so a
+    /// unit test asserts the REAL lines fit 40 cols.
     fn config_submenu_help_lines(petscii: bool) -> &'static [&'static str] {
         if petscii {
             &[
@@ -14795,26 +14808,11 @@ mod tests {
     /// needed.
     #[test]
     fn test_main_help_content_line_count() {
-        let lines = [
-            "  A  AI Chat: ask questions to an AI",
-            "  B  Browser: browse the web",
-            "  C  Configuration: server settings",
-            "     and other options",
-            "  F  File Transfer: upload/download",
-            "     files using the XMODEM protocol",
-            "  G  Serial Gateway: pick Port A or B",
-            "     and bridge to its wire (when",
-            "     that port is in console mode)",
-            "  R  Troubleshooting: diagnose",
-            "     terminal input issues",
-            "  S  SSH Gateway: connect to a",
-            "     remote server via SSH",
-            "  T  Telnet Gateway: connect to a",
-            "     remote server via telnet",
-            "  W  Weather: check weather by zip",
-            "  X  Exit: disconnect from server",
-        ];
-        assert_eq!(lines.len(), 17, "main help should have exactly 17 content lines");
+        assert_eq!(
+            TelnetSession::main_help_lines().len(),
+            17,
+            "main help should have exactly 17 content lines"
+        );
     }
 
     /// Shutdown broadcast message must be valid and end with CRLF.
@@ -14849,25 +14847,9 @@ mod tests {
     /// Dialup mapping help content must have exactly 15 lines and fit PETSCII.
     #[test]
     fn test_dialup_help_content() {
-        let lines = [
-            "  Map phone numbers to host:port",
-            "  targets.  This table is shared",
-            "  across both ports' modems - one",
-            "  dialup.conf consulted by Port A",
-            "  and Port B alike.",
-            "",
-            "  Dial a number with ATDT, ATDP,",
-            "  or ATD (all work the same) and",
-            "  the server connects to the",
-            "  mapped host:port for you.",
-            "",
-            "  You can still dial host:port",
-            "  directly - mappings are optional.",
-            "",
-            "  Mappings are saved in dialup.conf.",
-        ];
+        let lines = TelnetSession::dialup_help_lines();
         assert_eq!(lines.len(), 15, "dialup help should have exactly 15 content lines");
-        for line in &lines {
+        for line in lines {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "dialup help line '{}' is {} chars, exceeds {}",
@@ -15759,42 +15741,49 @@ mod tests {
         );
     }
 
-    /// All help page content lines must fit PETSCII width (40 cols).
-    #[test]
-    fn test_help_lines_fit_petscii() {
-        // Single source of truth: iterate the REAL line tables for every help
-        // screen (PETSCII variant) so this catch-all can't drift from what is
-        // actually displayed.  Per-screen `*_help_lines_fit_petscii` tests give
-        // targeted failures; this guards every screen, including the ones with
-        // no individual test (main menu, config submenu, download/delete/AI/
-        // dialup/bookmarks/form pickers, serial console).
-        let groups: [&[&str]; 21] = [
+    /// The complete set of help-line tables at the given width — the single
+    /// source for both the PETSCII (40) and ANSI (80) fit tests.
+    /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
+    /// new help screen is only width-checked once added below (bump the array
+    /// length to match).  Single-width tables ignore `petscii` (they fit 40).
+    fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 23] {
+        [
             TelnetSession::main_help_lines(),
-            TelnetSession::config_submenu_help_lines(true),
-            TelnetSession::config_help_lines(true),
-            TelnetSession::other_help_lines(true),
-            TelnetSession::security_help_lines(true),
-            TelnetSession::xmodem_help_lines(true),
-            TelnetSession::zmodem_help_lines(true),
-            TelnetSession::kermit_help_lines(true),
-            TelnetSession::punter_help_lines(true),
-            TelnetSession::file_transfer_help_lines(true),
+            TelnetSession::config_submenu_help_lines(petscii),
+            TelnetSession::config_help_lines(petscii),
+            TelnetSession::other_help_lines(petscii),
+            TelnetSession::security_help_lines(petscii),
+            TelnetSession::xmodem_help_lines(petscii),
+            TelnetSession::zmodem_help_lines(petscii),
+            TelnetSession::kermit_help_lines(petscii),
+            TelnetSession::punter_help_lines(petscii),
+            TelnetSession::file_transfer_help_lines(petscii),
             TelnetSession::file_transfer_menu_help_lines(),
             TelnetSession::download_help_lines(),
             TelnetSession::delete_help_lines(),
             TelnetSession::ai_chat_help_lines(),
             TelnetSession::dialup_help_lines(),
-            TelnetSession::modem_help_lines(true),
-            TelnetSession::console_help_lines(true),
-            TelnetSession::browser_page_help_lines(true),
+            TelnetSession::modem_help_lines(petscii),
+            TelnetSession::console_help_lines(petscii),
+            TelnetSession::browser_page_help_lines(petscii),
             TelnetSession::browser_menu_help_lines(),
             TelnetSession::bookmarks_help_lines(),
             TelnetSession::form_help_lines(),
-        ];
+            TelnetSession::gateway_config_help_lines(petscii),
+            TelnetSession::serial_config_help_lines(),
+        ]
+    }
+
+    /// Every help screen's PETSCII variant must fit 40 cols.  Catch-all that
+    /// guards screens without an individual `*_help_lines_fit_petscii` test
+    /// (main menu, config/gateway/serial submenus, the file pickers, etc.).
+    #[test]
+    fn test_help_lines_fit_petscii() {
+        let groups = all_help_line_groups(true);
         for line in groups.iter().flat_map(|g| g.iter()) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
-                "help line '{}' is {} chars, exceeds {}",
+                "PETSCII help line '{}' is {} chars, exceeds {}",
                 line,
                 line.len(),
                 PETSCII_WIDTH,
@@ -15802,9 +15791,27 @@ mod tests {
         }
     }
 
-    /// Modem help content lines must fit PETSCII width.  Mirrors the
-    /// live PETSCII help in `modem_show_help`; per-port wording came
-    /// in with the dual-port refactor.
+    /// Every help screen's ANSI/ASCII variant must fit 80 cols (screen layout:
+    /// 40 for PETSCII, 80 for ANSI/ASCII).  Exercises the `false` branch of the
+    /// dual-width tables, which the PETSCII test never touches; single-width
+    /// tables fit 40 so they pass here trivially.
+    #[test]
+    fn test_help_lines_fit_ansi() {
+        const ANSI_WIDTH: usize = 80;
+        let groups = all_help_line_groups(false);
+        for line in groups.iter().flat_map(|g| g.iter()) {
+            assert!(
+                line.len() <= ANSI_WIDTH,
+                "ANSI help line '{}' is {} chars, exceeds {}",
+                line,
+                line.len(),
+                ANSI_WIDTH,
+            );
+        }
+    }
+
+    /// Asserts the real `modem_help_lines` PETSCII variant fits 40 cols
+    /// (the same table `modem_show_help` renders).
     #[test]
     fn test_modem_help_lines_fit_petscii() {
         for line in TelnetSession::modem_help_lines(true) {
