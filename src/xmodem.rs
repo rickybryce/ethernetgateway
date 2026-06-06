@@ -321,7 +321,22 @@ pub(crate) async fn xmodem_receive(
         {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("Transfer timeout".into()),
+            Err(_) => {
+                // Spec receiver recovery (Forsberg/Christensen): a missing or
+                // late block is recovered by NAKing to re-prompt the sender —
+                // which retransmits the block it is still awaiting an ACK for —
+                // not by an immediate abort.  Share the block-error retry
+                // counter so a flapping link is bounded the same way; only
+                // after `max_retries` consecutive failures do we cancel.
+                error_count += 1;
+                if error_count > max_retries {
+                    raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                    return Err("Transfer timeout: no data after retries".into());
+                }
+                if verbose { glog!("XMODEM recv: inter-block timeout, NAK (retry {}/{})", error_count, max_retries); }
+                raw_write_byte(writer, NAK, is_tcp).await?;
+                continue;
+            }
         };
 
         if is_can_abort(byte, state) {
@@ -356,6 +371,15 @@ pub(crate) async fn xmodem_receive(
                     }
                     Ok(Err(ref e)) if e == "Duplicate block" => {
                         raw_write_byte(writer, ACK, is_tcp).await?;
+                    }
+                    // Spec: a valid block (good CRC + complement) carrying a
+                    // non-duplicate, unexpected sequence number is an
+                    // unrecoverable sync loss — XMODEM has no way to request a
+                    // specific block, so NAKing would only loop.  Cancel.
+                    Ok(Err(ref e)) if e == "Block number mismatch" => {
+                        if verbose { glog!("XMODEM recv: block sequence error, cancelling"); }
+                        raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                        return Err("Block sequence error".into());
                     }
                     Ok(Err(_)) | Err(_) => {
                         error_count += 1;
@@ -2585,6 +2609,95 @@ mod tests {
         raw_write_byte(&mut send_write, CAN, false).await.unwrap();
         let result = recv_task.await.unwrap();
         assert!(result.is_err());
+    }
+
+    /// Build a 128-byte SOH+CRC data block with the given block number and a
+    /// constant fill byte.  Shared by the spec-recovery tests below.
+    fn make_crc_data_block(block_num: u8, fill: u8) -> Vec<u8> {
+        let data = vec![fill; XMODEM_BLOCK_SIZE];
+        let crc = crc16_xmodem(&data);
+        let mut pkt = vec![SOH, block_num, !block_num];
+        pkt.extend_from_slice(&data);
+        pkt.push((crc >> 8) as u8);
+        pkt.push((crc & 0xFF) as u8);
+        pkt
+    }
+
+    /// Spec D1: in the data phase, a missing/late block must be recovered by
+    /// NAKing to re-prompt the sender (Forsberg/Christensen receiver retry
+    /// loop), NOT by an immediate abort.  Uses tokio's paused clock so the
+    /// inter-block timeout elapses instantly.
+    #[tokio::test(start_paused = true)]
+    async fn test_xmodem_receive_naks_and_recovers_on_interblock_timeout() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+
+        // Negotiation + block 1 (accepted).
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // Block 2 is "lost" — send nothing.  Let the receiver settle onto its
+        // inter-block timeout, advance virtual time past it, and confirm it
+        // NAKs (re-prompts) instead of aborting.  Reading the NAK also parks
+        // this task, so the paused clock auto-advances as a backstop.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(25)).await;
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "D1: receiver must NAK on an inter-block timeout, not abort",
+        );
+
+        // Deliver block 2 — the transfer recovers and completes.
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
+        expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
+        assert_eq!(data, expected, "data recovers after the D1 timeout NAK");
+    }
+
+    /// Spec D3: in the data phase, a valid block (good CRC + complement)
+    /// bearing a non-duplicate, unexpected sequence number is an
+    /// unrecoverable sync loss — the receiver must cancel (CAN×3), not NAK.
+    #[tokio::test]
+    async fn test_xmodem_receive_cancels_on_main_loop_sequence_error() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        // Block 1 accepted in the first-block path → ACK; expected advances to 2.
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        // Now a valid block numbered 3 (expecting 2): not a duplicate, not the
+        // expected block → fatal sequence error → cancel.
+        send_write.write_all(&make_crc_data_block(3, 0x42)).await.unwrap();
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            CAN,
+            "D3: receiver must cancel on a non-duplicate sequence error",
+        );
+
+        let result = recv_task.await.unwrap();
+        assert!(result.is_err(), "transfer must abort on a sequence error");
+        assert!(
+            result.unwrap_err().to_lowercase().contains("sequence"),
+            "error should name the sequence failure",
+        );
     }
 
     /// Test 9: YMODEM sender must retry block 0 (the filename header)
