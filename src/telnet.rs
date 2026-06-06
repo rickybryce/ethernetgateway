@@ -4304,9 +4304,12 @@ impl TelnetSession {
                 self.post_transfer_settle().await;
                 // Option 4: with no in-band abort, a Punter give-up otherwise
                 // strands the C64.  Drop carrier instead of waiting on a
-                // keypress the hung peer will never send.
+                // keypress the hung peer will never send — but only on a
+                // genuine give-up, NOT a user-initiated cancel (ESC →
+                // "Transfer cancelled"), which must return to the menu.
                 if matches!(protocol, UploadProtocol::Punter)
                     && config::get_config().punter_hangup_on_failure
+                    && !e.contains("cancelled")
                 {
                     self.send_line(&format!(
                         "  {}",
@@ -4916,9 +4919,13 @@ impl TelnetSession {
                 ))
                 .await?;
                 // Option 4: with no in-band abort, a Punter give-up otherwise
-                // strands the C64.  Drop carrier so it sees loss-of-carrier.
+                // strands the C64.  Drop carrier so it sees loss-of-carrier —
+                // but only on a genuine give-up, NOT a user-initiated cancel
+                // (ESC → "Transfer cancelled"), which must return to the menu
+                // like every other protocol rather than drop the whole session.
                 if matches!(protocol, DownloadProtocol::Punter)
                     && config::get_config().punter_hangup_on_failure
+                    && !e.contains("cancelled")
                 {
                     return self.punter_hangup().await;
                 }

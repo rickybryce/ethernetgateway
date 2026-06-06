@@ -1483,11 +1483,11 @@ mod tests {
     #[tokio::test]
     async fn read_block_gives_up_bounded_on_a_silent_peer() {
         // A connected-but-silent peer must make read_block fail in about
-        // max_retries × retry_interval (the short first-byte window), not
-        // max_retries × block_timeout.
+        // max_retries × retry_interval (the short uniform per-byte window),
+        // not max_retries × block_timeout.
         let t = Tunables {
             negotiation_timeout: 5,
-            block_timeout: 5, // would dominate if the first byte used it
+            block_timeout: 5, // would dominate if used as the per-byte wait
             max_retries: 3,
             max_bad_rounds: 30,
             retry_interval: 1,
@@ -1502,12 +1502,12 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(res.is_err(), "silent peer must fail the block read");
-        // Bounded by max_retries × retry_interval (the short first-byte wait):
+        // Bounded by max_retries × retry_interval (the short per-byte wait):
         // (3+1) S/B re-sends × ~1s ≈ 4s, NOT max_retries × block_timeout (20s).
         // Generous slack for CI jitter.
         assert!(
             elapsed < std::time::Duration::from_secs(10),
-            "read_block took {elapsed:?}; first-byte wait should bound it"
+            "read_block took {elapsed:?}; per-byte wait should bound it"
         );
     }
 
