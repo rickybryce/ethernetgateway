@@ -9416,7 +9416,14 @@ impl TelnetSession {
     }
 
     async fn other_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::other_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("OTHER SETTINGS HELP", lines).await
+    }
+
+    /// Other-settings help, split by terminal width.  Associated fn so a unit
+    /// test asserts the REAL lines fit 40 cols (see `punter_help_lines`).
+    fn other_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  A  Groq API key for AI Chat",
                 "     (get one free at groq.com)",
@@ -9443,8 +9450,7 @@ impl TelnetSession {
                 "  D  Toggle gateway debug trace",
                 "  R  Restart the server",
             ]
-        };
-        self.show_help_page("OTHER SETTINGS HELP", lines).await
+        }
     }
 
     // ─── SECURITY SETTINGS ───────────────────────────────────
@@ -9602,7 +9608,14 @@ impl TelnetSession {
     }
 
     async fn security_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::security_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("SECURITY HELP", lines).await
+    }
+
+    /// Login-security settings help, split by terminal width.  Associated fn so a
+    /// unit test asserts the REAL lines fit 40 cols (see `punter_help_lines`).
+    fn security_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure login security.",
                 "",
@@ -9681,8 +9694,7 @@ impl TelnetSession {
                 "  Changes are saved immediately but",
                 "  require a server restart to take effect.",
             ]
-        };
-        self.show_help_page("SECURITY HELP", lines).await
+        }
     }
 
     // ─── SERVER CONFIGURATION ───────────────────────────────
@@ -10485,7 +10497,14 @@ impl TelnetSession {
     }
 
     async fn config_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::config_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("SERVER CONFIGURATION HELP", lines).await
+    }
+
+    /// Server-configuration settings help, split by terminal width.  Associated
+    /// fn so a unit test asserts the REAL lines fit 40 cols (see `punter_help_lines`).
+    fn config_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Change settings for THIS server.",
                 "",
@@ -10542,8 +10561,7 @@ impl TelnetSession {
                 "  take effect; IP safety is the exception and",
                 "  applies on the next connection.",
             ]
-        };
-        self.show_help_page("SERVER CONFIGURATION HELP", lines).await
+        }
     }
 
     // ─── FILE TRANSFER SETTINGS ─────────────────────────────
@@ -10660,7 +10678,14 @@ impl TelnetSession {
     }
 
     async fn file_transfer_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::file_transfer_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("FILE TRANSFER HELP", lines).await
+    }
+
+    /// File-transfer settings help, split by terminal width.  Associated fn so a
+    /// unit test asserts the REAL lines fit 40 cols (see `punter_help_lines`).
+    fn file_transfer_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure file-transfer options.",
                 "",
@@ -10698,8 +10723,7 @@ impl TelnetSession {
                 "  Kermit, and Punter each have their own",
                 "  independent tunables.",
             ]
-        };
-        self.show_help_page("FILE TRANSFER HELP", lines).await
+        }
     }
 
     // ─── XMODEM SETTINGS ────────────────────────────────────
@@ -14923,28 +14947,7 @@ mod tests {
     /// Configuration help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_config_help_lines_fit_petscii() {
-        let lines = [
-            "  Change settings for THIS server.",
-            "  The SSH Gateway and Telnet",
-            "  Gateway options in the main",
-            "  menu are not affected.",
-            "  T  Enable or disable the telnet",
-            "     server listener",
-            "  P  Change the telnet port",
-            "  S  Enable or disable the SSH",
-            "     server listener",
-            "  O  Change the SSH port",
-            // Web-server menu help lines added when the config web
-            // UI joined the listener set.
-            "  W  Toggle the configuration web",
-            "     server (HTTP/Basic auth on",
-            "     the same login as telnet)",
-            "  B  Change the web server port",
-            "  R  Restart the server",
-            "  Changes are saved immediately",
-            "  but require a server restart.",
-        ];
-        for line in &lines {
+        for line in TelnetSession::config_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "config help '{}' is {} chars, exceeds {}",
@@ -14969,19 +14972,7 @@ mod tests {
     /// Security help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_security_help_lines_fit_petscii() {
-        let lines = [
-            "  Configure login security.",
-            "  L  Toggle whether a login is",
-            "     required to access server",
-            "  U  Set the login username",
-            "  P  Set the login password",
-            "  R  Restart the server",
-            "  One username/password covers",
-            "  telnet, SSH, and the web UI.",
-            "  Changes are saved immediately",
-            "  but require a server restart.",
-        ];
-        for line in &lines {
+        for line in TelnetSession::security_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "security help '{}' is {} chars, exceeds {}",
@@ -15011,20 +15002,7 @@ mod tests {
     /// Other settings help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_other_help_lines_fit_petscii() {
-        let lines = [
-            "  A  Groq API key for AI Chat",
-            "     (get one free at groq.com)",
-            "  B  Default homepage URL for",
-            "     the built-in web browser",
-            "  W  Default zip code for the",
-            "     weather feature",
-            "  V  Toggle verbose transfer log",
-            "  G  Toggle GUI on startup",
-            "     (requires restart)",
-            "  D  Toggle gateway debug trace",
-            "  R  Restart the server",
-        ];
-        for line in &lines {
+        for line in TelnetSession::other_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "other help '{}' is {} chars, exceeds {}",
@@ -15281,20 +15259,7 @@ mod tests {
     /// File transfer help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_file_transfer_help_lines_fit_petscii() {
-        let lines = [
-            "  Configure file-transfer options.",
-            "  D  Transfer directory: where",
-            "     uploads land and downloads",
-            "     are served from",
-            "  X  XMODEM settings",
-            "  Y  YMODEM settings",
-            "  Z  ZMODEM settings",
-            "  R  Restart the server",
-            "  XMODEM, XMODEM-1K, and YMODEM",
-            "  share the same timeouts.",
-            "  ZMODEM has its own.",
-        ];
-        for line in &lines {
+        for line in TelnetSession::file_transfer_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "file transfer help '{}' is {} chars, exceeds {}",
