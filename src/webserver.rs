@@ -282,17 +282,27 @@ async fn handle_connection(
             // out the 5-minute window after typing the right password.
             telnet::clear_lockout(&lockouts, peer_ip);
         } else {
-            let count = telnet::record_auth_failure(&lockouts, peer_ip);
-            glog!(
-                "Web: auth failed for {} (attempt {}/{})",
-                peer_ip,
-                count,
-                telnet::AUTH_MAX_ATTEMPTS,
-            );
-            if count >= telnet::AUTH_MAX_ATTEMPTS {
-                let body = b"429 Too Many Requests\nToo many failed logins. Try again later.\n";
-                write_locked_out(&mut stream, body).await?;
-                return Ok(());
+            // Only a *present but wrong* credential counts toward the
+            // brute-force limit.  A request with no Authorization header is
+            // the normal first half of the HTTP Basic challenge/response —
+            // every browser sends it (and repeats it for subresources like
+            // favicon) before it has any credentials to offer.  Counting
+            // those would let a browser lock its own user out before they
+            // typed a single password; a real attacker always sends a
+            // credential, so the lockout still bites the case that matters.
+            if request_presented_credential(&request) {
+                let count = telnet::record_auth_failure(&lockouts, peer_ip);
+                glog!(
+                    "Web: auth failed for {} (attempt {}/{})",
+                    peer_ip,
+                    count,
+                    telnet::AUTH_MAX_ATTEMPTS,
+                );
+                if count >= telnet::AUTH_MAX_ATTEMPTS {
+                    let body = b"429 Too Many Requests\nToo many failed logins. Try again later.\n";
+                    write_locked_out(&mut stream, body).await?;
+                    return Ok(());
+                }
             }
             let body = b"401 Unauthorized\n";
             write_response(
@@ -511,6 +521,16 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// Whether the request actually presented a credential (an `Authorization`
+/// header), as opposed to the credential-less request a browser sends as the
+/// first half of the HTTP Basic challenge.  Only a presented-but-wrong
+/// credential counts toward the brute-force lockout — counting the bare
+/// challenge preflight (and subresource probes that repeat it) would let a
+/// browser lock its own user out before they typed a password.
+fn request_presented_credential(req: &HttpRequest) -> bool {
+    req.headers.contains_key("authorization")
+}
+
 /// Verify Basic auth against the live telnet `username` / `password`.
 /// Returns true when auth is provided AND matches.
 fn is_authorized(req: &HttpRequest) -> bool {
@@ -654,8 +674,26 @@ async fn write_response(
 /// response has flushed.  Synchronous because it does filesystem I/O
 /// — wrap in `spawn_blocking`.
 fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
-    let text = std::str::from_utf8(body).unwrap_or("");
+    // Guard against a malformed submission (non-UTF-8 body, or a
+    // chunked/empty body that read_request surfaced as zero-length): with
+    // no fields, collect_form_updates would write every checkbox-boolean as
+    // `false`, silently disabling telnet/ssh/web/security in one shot.  The
+    // real config form always submits many fields, so an empty field set is
+    // never a legitimate save — refuse it (SaveAction::Save triggers no
+    // restart) instead of wiping the config.
+    let Ok(text) = std::str::from_utf8(body) else {
+        return (
+            "Save ignored: request body was not valid UTF-8.".to_string(),
+            SaveAction::Save,
+        );
+    };
     let fields = parse_form(text);
+    if fields.is_empty() {
+        return (
+            "Save ignored: empty or malformed form submission.".to_string(),
+            SaveAction::Save,
+        );
+    }
     let action = SaveAction::from_form(fields.get("action").map(String::as_str));
     let old_cfg = config::get_config();
     let (updates, notice) = collect_form_updates(&fields, &old_cfg);
@@ -1954,6 +1992,36 @@ mod tests {
     fn test_is_authorized_missing_header_fails() {
         // No Authorization header at all → auth fails.
         assert!(!is_authorized(&req_with_auth(None)));
+    }
+
+    #[test]
+    fn test_missing_auth_header_does_not_count_as_attempt() {
+        // The lockout only counts a present-but-wrong credential.  A
+        // credential-less request (the normal Basic challenge preflight, and
+        // the subresource probes that repeat it) must NOT be counted — else a
+        // browser locks its own user out before they type a password.
+        assert!(!request_presented_credential(&req_with_auth(None)));
+        // A request that carries a credential (even a wrong/garbage one) does
+        // count, so an actual brute-forcer still trips the lockout.
+        assert!(request_presented_credential(&req_with_auth(Some("Basic Zm9vOmJhcg=="))));
+        assert!(request_presented_credential(&req_with_auth(Some("Basic !!garbage!!"))));
+    }
+
+    #[test]
+    fn test_apply_form_post_rejects_empty_body() {
+        // An empty/chunked body must not be applied: collect_form_updates
+        // would write every checkbox-boolean false, disabling telnet/ssh/web/
+        // security in one shot.  Refuse with no restart and no config write.
+        let (notice, action) = apply_form_post(b"");
+        assert!(notice.contains("ignored"), "expected refusal notice, got {:?}", notice);
+        assert_eq!(action, SaveAction::Save);
+    }
+
+    #[test]
+    fn test_apply_form_post_rejects_non_utf8_body() {
+        let (notice, action) = apply_form_post(&[0xff, 0xfe, 0x00]);
+        assert!(notice.contains("ignored"), "expected refusal notice, got {:?}", notice);
+        assert_eq!(action, SaveAction::Save);
     }
 
     #[test]
