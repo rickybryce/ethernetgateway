@@ -307,6 +307,18 @@ pub(crate) async fn xmodem_receive(
 
     // Main receive loop
     let mut error_count: usize = 0;
+    // Forsberg receiver EOT verification (plain XMODEM): NAK the first EOT
+    // and accept end-of-file only on a resent, confirming EOT.  A lone 0x04
+    // from serial line noise in the inter-block gap is then re-prompted
+    // instead of silently truncating the file — the failure mode that
+    // matters on a real UART (the gateway's primary transport), not just on
+    // clean TCP.  Reset ONLY when a new (non-duplicate) block is accepted:
+    // a spurious EOT makes the sender resend the in-flight block (a new,
+    // expected block → accepted → reset → carry on), whereas a non-standard
+    // sender that answers NAK-of-EOT by resending its last block sends a
+    // duplicate (flag stays set → the following real EOT is ACKed → no
+    // infinite NAK loop).
+    let mut eot_naked = false;
     loop {
         if file_data.len() > MAX_FILE_SIZE {
             raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
@@ -368,6 +380,11 @@ pub(crate) async fn xmodem_receive(
                         file_data.extend_from_slice(&data);
                         raw_write_byte(writer, ACK, is_tcp).await?;
                         error_count = 0;
+                        // A fresh block arrived after an EOT we NAKed — that
+                        // EOT was spurious (noise) and the sender resent the
+                        // in-flight block.  Re-arm so the real end-of-file
+                        // EOT is verified afresh.
+                        eot_naked = false;
                     }
                     Ok(Err(ref e)) if e == "Duplicate block" => {
                         raw_write_byte(writer, ACK, is_tcp).await?;
@@ -392,7 +409,19 @@ pub(crate) async fn xmodem_receive(
                 }
             }
             EOT => {
-                if verbose { glog!("XMODEM recv: EOT received, ACKing"); }
+                // NAK the first EOT (plain XMODEM) and accept end-of-file
+                // only when the sender resends it — Forsberg's spurious-EOT
+                // guard, which matters on a noisy serial line.  YMODEM keeps
+                // immediate-ACK: its post-EOT 'C' + null-block-0 end-of-batch
+                // handshake already confirms completion, and the block-0 size
+                // field lets the receiver detect a short file regardless.
+                if !ymodem_mode && !eot_naked {
+                    eot_naked = true;
+                    if verbose { glog!("XMODEM recv: first EOT — NAKing to verify (Forsberg EOT confirmation)"); }
+                    raw_write_byte(writer, NAK, is_tcp).await?;
+                    continue;
+                }
+                if verbose { glog!("XMODEM recv: EOT confirmed, ACKing"); }
                 raw_write_byte(writer, ACK, is_tcp).await?;
                 if ymodem_mode {
                     // YMODEM end-of-batch handshake (Forsberg §7.4):
@@ -1964,6 +1993,29 @@ mod tests {
         payload
     }
 
+    /// Drive the sender side of a plain-XMODEM end-of-transfer against the
+    /// NAK-first-EOT receiver: send EOT, expect the verification NAK, resend
+    /// EOT, expect the final ACK.  Used by the hand-rolled-sender tests so
+    /// they exercise (and pin) Forsberg's spurious-EOT guard rather than the
+    /// old immediate-ACK behavior.
+    async fn finish_plain_eot(
+        send_read: &mut (impl AsyncRead + Unpin),
+        send_write: &mut (impl AsyncWrite + Unpin),
+    ) {
+        raw_write_byte(send_write, EOT, false).await.unwrap();
+        assert_eq!(
+            raw_read_byte(send_read, false).await.unwrap(),
+            NAK,
+            "receiver must NAK the first EOT (Forsberg verification)",
+        );
+        raw_write_byte(send_write, EOT, false).await.unwrap();
+        assert_eq!(
+            raw_read_byte(send_read, false).await.unwrap(),
+            ACK,
+            "receiver must ACK the confirming (resent) EOT",
+        );
+    }
+
     /// Test 1: sender must retry a block when NAK'd, and complete
     /// successfully when the receiver eventually ACKs.
     #[tokio::test]
@@ -2416,10 +2468,8 @@ mod tests {
             let a_dup = raw_read_byte(&mut send_read, false).await.unwrap();
             assert_eq!(a_dup, ACK, "receiver must ACK duplicate without error");
 
-            // Proceed to EOT.
-            raw_write_byte(&mut send_write, EOT, false).await.unwrap();
-            let a_eot = raw_read_byte(&mut send_read, false).await.unwrap();
-            assert_eq!(a_eot, ACK);
+            // Proceed to EOT (NAK-first verification handshake).
+            finish_plain_eot(&mut send_read, &mut send_write).await;
         });
 
         let (received, _) = xmodem_receive(
@@ -2657,13 +2707,59 @@ mod tests {
         // Deliver block 2 — the transfer recovers and completes.
         send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
         assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
-        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
-        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
 
         let (data, _) = recv_task.await.unwrap().unwrap();
         let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
         expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
         assert_eq!(data, expected, "data recovers after the D1 timeout NAK");
+    }
+
+    /// Forsberg EOT verification (the serial-noise guard): a spurious EOT in
+    /// the inter-block gap — e.g. a stray 0x04 from UART line noise — must be
+    /// NAKed, NOT accepted as end-of-file.  The transfer then recovers and the
+    /// file is NOT truncated.  This is the behavior that lets plain XMODEM
+    /// claim full Forsberg receiver compliance; YMODEM keeps immediate-ACK
+    /// (its size field + end-of-batch handshake already detect a short file).
+    #[tokio::test]
+    async fn test_xmodem_receive_naks_spurious_eot_then_recovers() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+
+        // Negotiation + block 1 (accepted).
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // Spurious EOT (line noise) — the receiver must NAK to verify, not
+        // accept it as end-of-file (which would truncate to just block 1).
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "a spurious EOT must be NAKed, not accepted as end-of-file",
+        );
+
+        // The sender resends the in-flight block (block 2) after the NAK; as a
+        // fresh expected block it's accepted and the EOT guard re-arms.
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // Genuine end-of-transfer: the real EOT is NAK-verified afresh.
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
+        expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
+        assert_eq!(
+            data, expected,
+            "both blocks must survive — a spurious EOT must not truncate the file",
+        );
     }
 
     /// Spec D3: in the data phase, a valid block (good CRC + complement)
@@ -3704,9 +3800,8 @@ mod tests {
             pkt.push((crc & 0xFF) as u8);
             send_write.write_all(&pkt).await.unwrap();
             assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
-            // EOT to end.
-            raw_write_byte(&mut send_write, EOT, false).await.unwrap();
-            assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+            // EOT to end (NAK-first verification handshake).
+            finish_plain_eot(&mut send_read, &mut send_write).await;
         });
 
         let (received, _) = xmodem_receive(
@@ -3767,7 +3862,11 @@ mod tests {
             // Another single CAN — should NOT abort because the SOH
             // and block body cleared the run.
             raw_write_byte(&mut send_write, CAN, false).await.unwrap();
-            // EOT to gracefully end the transfer.
+            // EOT to gracefully end the transfer.  NAK-first-EOT: the
+            // receiver NAKs the first EOT (drain to it past any stray
+            // bytes), then ACKs the resent one.
+            raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+            let _ = read_until(&mut send_read, NAK).await;
             raw_write_byte(&mut send_write, EOT, false).await.unwrap();
             let _ = read_until(&mut send_read, ACK).await;
         });
@@ -4650,6 +4749,15 @@ mod tests {
             captured.push(hdr[0]);
             match hdr[0] {
                 EOT => {
+                    // Mirror xmodem_receive's NAK-first-EOT: NAK the first
+                    // EOT so `sx` resends it, and capture that confirming
+                    // EOT into the fixture.  Without it the one-EOT capture
+                    // would no longer satisfy the (now NAK-first) replay
+                    // receiver, which reads a second EOT before finishing.
+                    sx_stdin.write_all(&[NAK]).await.expect("nak first eot");
+                    sx_stdout.read_exact(&mut hdr).await.expect("read confirming eot");
+                    assert_eq!(hdr[0], EOT, "sx should resend EOT after a NAK");
+                    captured.push(hdr[0]);
                     sx_stdin.write_all(&[ACK]).await.expect("ack eot");
                     break;
                 }
