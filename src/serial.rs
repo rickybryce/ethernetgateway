@@ -191,6 +191,11 @@ struct ModemState {
     plus_count: u8,
     plus_start: Instant,
     cmd_buffer: String,
+    /// Previous byte seen in command mode, used to collapse a CR+LF / LF+CR
+    /// line-ending pair into a single terminator (see `command_mode_tick`).
+    /// Reset to 0 after a swallowed pair-partner so consecutive line endings
+    /// don't chain.
+    prev_cmd_byte: u8,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
@@ -852,6 +857,7 @@ fn serial_thread(
         plus_count: 0,
         plus_start: now,
         cmd_buffer: String::new(),
+        prev_cmd_byte: 0,
         handle,
         shutdown,
         restart,
@@ -910,6 +916,28 @@ fn is_command_backspace(byte: u8, bs: u8, petscii: bool) -> bool {
     byte == bs || byte == 0x7F || (petscii && byte == 0x14)
 }
 
+/// Whether `byte` is a command-line terminator: the configured CR (S3) or
+/// LF (S4), or the historical ASCII pair 0x0D / 0x0A.  Accepting both the
+/// configured and hardcoded values keeps line-ending auto-detection working
+/// even when S3/S4 are customized.
+fn is_eol_byte(byte: u8, cr: u8, lf: u8) -> bool {
+    byte == cr || byte == lf || byte == 0x0D || byte == 0x0A
+}
+
+/// Whether `byte` is the second half of a CR+LF (or LF+CR) line ending given
+/// the previous command byte `prev`.  Such a byte is swallowed rather than
+/// treated as a fresh terminator, so a terminal that ends lines with *both*
+/// characters doesn't fire a spurious empty command and an extra blank-line
+/// echo.  The caller resets `prev` after a swallow so a `CRLFCRLF` run still
+/// counts as two separate lines instead of the whole run collapsing into one.
+fn is_paired_eol(byte: u8, prev: u8, cr: u8, lf: u8) -> bool {
+    let byte_is_cr = byte == cr || byte == 0x0D;
+    let byte_is_lf = byte == lf || byte == 0x0A;
+    let prev_is_cr = prev == cr || prev == 0x0D;
+    let prev_is_lf = prev == lf || prev == 0x0A;
+    (byte_is_lf && prev_is_cr) || (byte_is_cr && prev_is_lf)
+}
+
 fn command_mode_tick(state: &mut ModemState) {
     let mut buf = [0u8; 1];
     match state.port.read(&mut buf) {
@@ -922,10 +950,24 @@ fn command_mode_tick(state: &mut ModemState) {
             let lf = state.s_regs[4];
             let bs = state.s_regs[5];
 
+            // Remember the byte for CR+LF pair detection; reset to 0 below if
+            // we swallow this byte as the second half of a pair.
+            let prev = state.prev_cmd_byte;
+            state.prev_cmd_byte = byte;
+
             // Line terminator: configured CR (S3), configured LF (S4), or
             // the historical ASCII pair 0x0D / 0x0A.  This keeps line-ending
             // auto-detection working even when S3/S4 are customized.
-            if byte == cr || byte == lf || byte == 0x0D || byte == 0x0A {
+            if is_eol_byte(byte, cr, lf) {
+                // Collapse a CR+LF / LF+CR pair into a single terminator:
+                // swallow the second byte so a terminal that ends lines with
+                // both characters doesn't echo a spurious blank line and run
+                // an empty command.  Resetting prev keeps CRLFCRLF as two
+                // separate lines rather than collapsing the whole run.
+                if is_paired_eol(byte, prev, cr, lf) {
+                    state.prev_cmd_byte = 0;
+                    return;
+                }
                 if state.echo {
                     let _ = state.port.write_all(&[cr, lf]);
                 }
@@ -964,13 +1006,16 @@ fn command_mode_tick(state: &mut ModemState) {
                     let cmd = state.last_command.clone();
                     process_at_command(state, &cmd);
                 }
-            } else if byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+            } else if byte.is_ascii() && byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
                 if state.echo {
                     let _ = state.port.write_all(&[byte]);
                 }
                 state.cmd_buffer.push(byte as char);
             }
-            // Other control characters are ignored.
+            // Control characters (< 0x20) and non-ASCII bytes (>= 0x80) are
+            // ignored: AT commands are ASCII, and `byte as char` on a high
+            // byte would push a multi-byte UTF-8 sequence the byte-offset
+            // tokenizer in parse_at_command can't slice safely.
         }
         Ok(_) => {}
         Err(ref e)
@@ -1048,6 +1093,19 @@ fn parse_at_command(
     verbose: &mut bool,
     quiet: &mut bool,
 ) -> Vec<AtResult> {
+    // The tokenizer below slices `rest_upper`/`rest_orig` at byte offsets
+    // produced by `split_at_subcommand`, which counts ASCII bytes.  Any
+    // non-ASCII byte would make those offsets land mid-UTF-8 and panic the
+    // slice.  The Hayes AT grammar is ASCII-only (hostnames included), so a
+    // line carrying a byte >= 0x80 (PETSCII line noise, a C64 in lower/upper
+    // mode sending shifted letters as 0xC1-0xDA, etc.) is malformed —
+    // respond ERROR rather than panic.  command_mode_tick already filters
+    // these at input; this guard also covers the pure-function callers
+    // (tests, fuzzers) and any leftover bytes routed in from process_ring.
+    if !cmd.is_ascii() {
+        return vec![AtResult::Error];
+    }
+
     let upper = cmd.to_ascii_uppercase();
 
     if upper == "AT" {
@@ -2649,10 +2707,13 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
             break; // answer the call
         }
 
-        // Wait one ring interval, checking for ATA or shutdown every 100ms.
+        // Wait one ring interval, checking for ATA, shutdown, or a per-port
+        // restart every 100ms.  Watching restart_flag here (not just at the
+        // top of the outer loop) keeps a config-save responsive: without it a
+        // restart signalled mid-ring waits out the full RING_INTERVAL.
         let deadline = Instant::now() + RING_INTERVAL;
         while Instant::now() < deadline {
-            if state.shutdown.load(Ordering::SeqCst) {
+            if state.shutdown.load(Ordering::SeqCst) || restart_flag.load(Ordering::SeqCst) {
                 return;
             }
             // Check serial port for ATA (manual answer)
@@ -2666,7 +2727,10 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
                         manual_answer = true;
                         break;
                     }
-                } else if byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+                } else if byte.is_ascii() && byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+                    // ASCII printable only — see command_mode_tick: a high
+                    // byte pushed via `byte as char` would leave a multi-byte
+                    // sequence in cmd_buffer that a later parse can't slice.
                     state.cmd_buffer.push(byte as char);
                 }
             }
@@ -2842,6 +2906,70 @@ mod tests {
         let mut verbose = true;
         let mut quiet = false;
         parse_at_command(cmd, echo, &mut verbose, &mut quiet)
+    }
+
+    /// A command line carrying a non-ASCII byte (PETSCII line noise, or a
+    /// C64 in lower/upper mode sending a shifted letter as 0xC1-0xDA) must
+    /// NOT panic the byte-offset tokenizer — it returns ERROR.  Regression
+    /// for a `char boundary` slice panic in parse_at_command that, before
+    /// the guard, killed the whole serial-modem thread on a single high byte.
+    #[test]
+    fn test_non_ascii_command_does_not_panic() {
+        let mut echo = true;
+        // 0xC1 'as char' is U+00C1 (2 UTF-8 bytes) — exactly what
+        // `command_mode_tick` used to buffer for a raw high byte.
+        let mut cmd = String::from("AT");
+        cmd.push(0xC1u8 as char);
+        assert_eq!(parse(&cmd, &mut echo), vec![AtResult::Error]);
+
+        // High byte mid-line (after a valid subcommand) and a bare high byte
+        // both resolve to ERROR rather than slicing mid-char.
+        let mut mid = String::from("ATE0");
+        mid.push(0xD4u8 as char);
+        assert_eq!(parse(&mid, &mut echo), vec![AtResult::Error]);
+
+        let mut dial = String::from("ATDT");
+        dial.push(0xE9u8 as char); // 'é'
+        assert_eq!(parse(&dial, &mut echo), vec![AtResult::Error]);
+
+        // A real multi-byte char (emoji) is likewise rejected cleanly.
+        assert_eq!(parse("AT🦀", &mut echo), vec![AtResult::Error]);
+    }
+
+    #[test]
+    fn test_is_eol_byte() {
+        // Default S3=CR(13), S4=LF(10).
+        assert!(is_eol_byte(0x0D, 13, 10));
+        assert!(is_eol_byte(0x0A, 13, 10));
+        // Hardcoded ASCII pair always recognized even with custom S3/S4.
+        assert!(is_eol_byte(0x0D, 200, 201));
+        assert!(is_eol_byte(0x0A, 200, 201));
+        // Custom S3/S4 also recognized.
+        assert!(is_eol_byte(200, 200, 201));
+        assert!(is_eol_byte(201, 200, 201));
+        // Ordinary bytes are not terminators.
+        assert!(!is_eol_byte(b'A', 13, 10));
+        assert!(!is_eol_byte(0x20, 13, 10));
+    }
+
+    /// `is_paired_eol` recognizes the *second* byte of a CR+LF / LF+CR pair so
+    /// `command_mode_tick` can swallow it.  Drives the regression for the
+    /// double blank-line / empty-command a CRLF terminal used to trigger.
+    #[test]
+    fn test_is_paired_eol() {
+        let (cr, lf) = (13u8, 10u8);
+        // LF after CR and CR after LF are pair-partners → swallow.
+        assert!(is_paired_eol(lf, cr, cr, lf));
+        assert!(is_paired_eol(cr, lf, cr, lf));
+        // First byte of a line ending (prev is data, or the reset sentinel 0)
+        // is NOT a pair → it terminates the line.
+        assert!(!is_paired_eol(cr, b'Z', cr, lf));
+        assert!(!is_paired_eol(lf, b'Z', cr, lf));
+        assert!(!is_paired_eol(cr, 0, cr, lf));
+        assert!(!is_paired_eol(lf, 0, cr, lf));
+        // Same-class repeats (CR CR, LF LF) are two separate Enters, not pairs.
+        assert!(!is_paired_eol(cr, cr, cr, lf));
+        assert!(!is_paired_eol(lf, lf, cr, lf));
     }
 
     /// Helper: call parse_at_command with full settings access.

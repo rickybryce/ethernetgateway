@@ -7,7 +7,6 @@
 use html2text::render::{RichAnnotation, TaggedLine, TaggedLineElement};
 use html2text::{config, Element, Handle, RcDom};
 use std::io::Read;
-use ureq::ResponseExt;
 
 use crate::logger::glog;
 
@@ -363,26 +362,34 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     };
     guard_public_url(&action_url)?;
 
+    // Disable ureq's auto-redirect (matching fetch_and_render): a POST to a
+    // public action that returns a redirect to an internal address would
+    // otherwise have ureq dial the internal host before any guard ran, and
+    // the post-request final_url check only blocks rendering — not the
+    // connection.  We follow a redirect manually below, guarding the target.
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .build(),
     );
 
     if form.method == "post" {
         let mut tls_downgraded = false;
+        let mut post_url = action_url.clone();
         let response = match agent
-            .post(&action_url)
+            .post(&post_url)
             .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
             .send_form(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         {
             Ok(r) => r,
-            Err(e) if action_url.starts_with("https://") && is_tls_error(&e) => {
+            Err(e) if post_url.starts_with("https://") && is_tls_error(&e) => {
                 tls_downgraded = true;
-                let http_url = format!("http://{}", &action_url["https://".len()..]);
-                guard_public_url(&http_url)?;
+                post_url = format!("http://{}", &post_url["https://".len()..]);
+                guard_public_url(&post_url)?;
                 agent
-                    .post(&http_url)
+                    .post(&post_url)
                     .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
                     .send_form(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                     .map_err(|e2| format!("{}", e2))?
@@ -390,7 +397,28 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             Err(e) => return Err(format!("{}", e)),
         };
 
-        let final_url = response.get_uri().to_string();
+        // POST-redirect: follow it through fetch_and_render, which SSRF-guards
+        // every hop before connecting.  301/302/303 become a GET (standard
+        // browser POST-redirect-GET); 307/308 strictly want a re-POST, but we
+        // follow them as a guarded GET too — that's rare for form actions and
+        // far preferable to the unguarded auto-follow this replaced.
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc) =
+                response.headers().get("location").and_then(|v| v.to_str().ok())
+            {
+                let next = resolve_url(&post_url, loc);
+                if next != post_url {
+                    let mut page = fetch_and_render(&next, width)?;
+                    if tls_downgraded {
+                        prepend_tls_downgrade_notice(&mut page, width);
+                    }
+                    return Ok(page);
+                }
+            }
+            // 3xx with no usable / self-referential Location — render as-is.
+        }
+
+        let final_url = post_url.clone();
         guard_public_url(&final_url)?;
         let content_type = response
             .headers()
