@@ -1,0 +1,209 @@
+==============================================================================
+QTERM <-> Ethernet Gateway: file transfer quick reference
+==============================================================================
+
+QTERM is the CP/M terminal program used here on the SC126 (and similar Z80
+machines).  This note explains how to drop into QTERM's command mode and how
+to SEND a file to the gateway or RECEIVE a file from it, using the protocols
+QTERM and the gateway have in common.
+
+All details below were taken from the QTERM 4.3 source (the *.Z files), so the
+key bindings and prompt behavior match the build you are running.
+
+
+------------------------------------------------------------------------------
+1. ESCAPING TO QTERM COMMAND MODE
+------------------------------------------------------------------------------
+
+While connected (terminal mode), press the escape character:
+
+    Ctrl-\           (Control + backslash  =  ASCII 0x1C)   <- stock default
+
+  >> BUILD OVERRIDE: the qtermh1 and qtermh2 builds used here change the
+     escape character to  Ctrl-Y  (Control + Y = ASCII 0x19, decimal 25).
+     If you are running qtermh1 or qtermh2, press Ctrl-Y everywhere this
+     guide says Ctrl-\.  (Confirmed in qt-hb_1.z / qt-hb_2.z, which set the
+     byte at 0x01cf to 0x19.)
+
+QTERM swallows that byte and waits for a single command letter instead of
+sending it down the line.  Press one of these (the full escape-command table
+from QTERM.Z):
+
+    S    Send a file (QTERM -> gateway)        ? Help (also reminds you of the
+    R    Receive a file (gateway -> QTERM)         escape character)
+    D    Directory of the current/another drive
+    N    New disk / change the logged drive    .  Send a BREAK
+    Q    Quit QTERM                            ,  Hang up
+    T    Type a file       E Echo toggle       B  Baud rate
+    H    Half/full duplex  V VT100 toggle       (others: C J K L M O P U W X Y Z)
+
+If you press the escape character and then change your mind, pressing it a
+second time sends one literal copy down the line.
+
+Unsure which escape character your build uses?  Press it, then "?" -- the help
+screen prints the active escape character.
+
+
+------------------------------------------------------------------------------
+2. THE "Mode?" PROMPT  (this is the part that trips people up)
+------------------------------------------------------------------------------
+
+Both Send (S) and Receive (R) immediately ask:
+
+    Mode?
+
+QTERM reads the WHOLE line you type here.  It takes the protocol selector from
+the front of the line and the FILENAME (or drive) from the REST of the same
+line.  There is no separate "Filename?" prompt for these protocols.
+
+    Format:   <mode><flags><SPACE><filename-or-drive>
+
+  * The mode letter and its flags run together with NO space (e.g. "xk").
+  * Then a single SPACE.
+  * Then the filename (for single-file transfers) or just a drive (for batch).
+
+If you type only the mode (e.g. just "x") and press Enter, QTERM finds no
+filename on the line and prints:
+
+    No files to send
+
+That is the #1 cause of "it didn't ask me for a filename" -- you must put the
+filename on the Mode? line.
+
+
+------------------------------------------------------------------------------
+3. PROTOCOLS AND FLAGS
+------------------------------------------------------------------------------
+
+QTERM has two base protocols:
+
+    x    XMODEM   (CRC by default)
+    k    Kermit
+
+The XMODEM "x" mode accepts flag letters (from xmflgs in XUTIL.Z), appended
+directly after the x:
+
+    (none)   XMODEM-CRC, 128-byte blocks  (the default)
+    c        force plain CHECKSUM instead of CRC
+    k        1K packets  ->  XMODEM-1K   (faster)
+    y        YMODEM batch (filename carried by the protocol)
+    b        MODEM7 / Telink batch
+    a        beep/alarm when the transfer finishes
+    q        quieter progress display
+
+  ("y" and "b" are mutually exclusive -- setting one clears the other.)
+
+Common selectors:
+
+    x        XMODEM (CRC)
+    xc       XMODEM (checksum)
+    xk       XMODEM-1K
+    xy       YMODEM (batch)
+    xb       MODEM7 (batch)
+    k        Kermit
+
+
+What works against THIS gateway
+-------------------------------
+The gateway supports XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, and Punter.
+The overlap you can actually use from QTERM:
+
+    YES:  XMODEM (x), XMODEM-1K (xk), YMODEM (xy), Kermit (k)
+    NO:   ZMODEM and Punter  -- the gateway has them, QTERM does not.
+    AVOID: MODEM7 (xb) -- the gateway's receiver auto-detects YMODEM's block-0
+           filename header, not MODEM7's batch scheme.  Use x / xk / xy instead.
+
+Recommended default for an upload:  xk  (XMODEM-1K) -- the gateway auto-detects
+the 1K blocks and it is noticeably faster than plain XMODEM.
+
+
+------------------------------------------------------------------------------
+4. SENDING A FILE  (QTERM  ->  gateway)   == an "upload" to the gateway
+------------------------------------------------------------------------------
+
+Order of operations: start the gateway's RECEIVE side first, then send.
+
+  1. On the gateway: File Transfer menu -> Upload -> choose the protocol
+     (e.g. XMODEM).  The gateway now waits to receive.
+  2. In QTERM: press  Ctrl-\  then  S    (Ctrl-Y on qtermh1/qtermh2)
+  3. At  Mode?  type the selector + filename on one line, e.g.:
+
+        Mode? xk qtermh2.com        (send qtermh2.com via XMODEM-1K)
+        Mode? x  qtermh2.com        (plain XMODEM-CRC)
+        Mode? xy qtermh2.com        (YMODEM batch -- name sent automatically)
+        Mode? k  qtermh2.com        (Kermit)
+
+     Drive prefix is allowed:   Mode? xk b:qtermh2.com
+
+The file you name must exist on the SC126's own disk (QTERM sends from the
+SC126's CP/M drive, not from the host PC).  Use the D command to list files
+and confirm it is there before sending.
+
+
+------------------------------------------------------------------------------
+5. RECEIVING A FILE  (gateway  ->  QTERM)   == a "download" from the gateway
+------------------------------------------------------------------------------
+
+Order of operations: start the QTERM receive, then start the gateway send
+(or start the gateway send first for protocols that wait -- either works for
+XMODEM/YMODEM).
+
+  1. In QTERM: press  Ctrl-\  then  R    (Ctrl-Y on qtermh1/qtermh2)
+  2. At  Mode?  :
+
+     Single-file XMODEM -- XMODEM carries no filename, so YOU supply the
+     destination name:
+
+        Mode? x  game.com           (receive, save as GAME.COM)
+        Mode? xk game.com           (XMODEM-1K)
+
+     Batch (YMODEM / MODEM7) -- the name comes from the protocol, so give a
+     DRIVE only (where to drop the files):
+
+        Mode? xy b:                 (YMODEM batch -> drive B:)
+
+     Kermit -- Kermit carries the name; a drive is enough:
+
+        Mode? k  b:
+
+  3. On the gateway: File Transfer menu -> Download -> choose the matching
+     protocol and the file to send.
+
+
+------------------------------------------------------------------------------
+6. TROUBLESHOOTING
+------------------------------------------------------------------------------
+
+"No files to send"
+    You did not put a filename on the Mode? line, OR the file is not on the
+    SC126's current/selected drive.  Type e.g.  xk qtermh2.com  (with the
+    space), and use D to verify the file exists.  Use N to change drives.
+
+"Unknown mode"
+    The first character on the Mode? line was not x or k.  XMODEM is "x",
+    Kermit is "k"; flags like c/k/y/b/a/q go AFTER the x with no space.
+
+Transfer stalls or never starts
+    Make sure BOTH sides are set to the same protocol, and that the gateway's
+    Upload (when QTERM sends) or Download (when QTERM receives) is armed.
+    Turn on the gateway's Gateway Debug Trace -- the [cmd] and [gw-diag] log
+    lines show exactly what the gateway is receiving and which protocol/term
+    type it detected.
+
+Garbled text / no color before transferring
+    See the gateway's terminal-type detection -- if PETSCII translate is on
+    for the serial port it strips ANSI; the [gw-diag] block calls this out.
+
+
+------------------------------------------------------------------------------
+Quick card
+------------------------------------------------------------------------------
+    (escape = Ctrl-\ on stock QTERM, Ctrl-Y on qtermh1/qtermh2)
+    Escape:            Ctrl-\           (then a command letter)
+    Send a file:       Ctrl-\  S   ->  Mode? xk <filename>
+    Receive a file:    Ctrl-\  R   ->  Mode? xk <filename>   (or  xy b:  batch)
+    List files:        Ctrl-\  D
+    Change drive:      Ctrl-\  N
+    Help:              Ctrl-\  ?
+    Hang up / quit:    Ctrl-\  ,   /   Ctrl-\  Q
+==============================================================================
