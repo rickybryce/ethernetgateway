@@ -2981,7 +2981,7 @@ impl TelnetSession {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.drain_input().await;
 
-        self.log_terminal_diagnostic(&detect_method, Some(accepted));
+        self.log_terminal_diagnostic(&detect_method, accepted);
 
         Ok(())
     }
@@ -2999,14 +2999,14 @@ impl TelnetSession {
     /// sequences before they reach the caller, which is the most common
     /// reason ANSI color goes missing on a serial line, so it's called out
     /// explicitly.  Costs nothing when the flag and env var are both unset.
-    fn log_terminal_diagnostic(&self, detect_method: &str, color_answer: Option<bool>) {
+    fn log_terminal_diagnostic(&self, detect_method: &str, color_answer: bool) {
         if !gw_debug_enabled(config::get_gateway_debug()) {
             return;
         }
 
-        let session = if self.is_ssh {
-            "SSH".to_string()
-        } else if self.is_serial {
+        // Only telnet/serial callers reach here — `detect_terminal_type`
+        // (the sole caller) is gated behind `!self.is_ssh`.
+        let session = if self.is_serial {
             match self.serial_port_id {
                 Some(id) => format!("serial port {}", id.label()),
                 None => "serial".to_string(),
@@ -3022,10 +3022,9 @@ impl TelnetSession {
         };
 
         let color = match (self.terminal_type, color_answer) {
-            (TerminalType::Ascii, _) => "DISABLED — plain text".to_string(),
-            (_, Some(true)) => "ENABLED — caller answered Y".to_string(),
-            (_, Some(false)) => "DISABLED — caller answered N".to_string(),
-            (_, None) => "ENABLED".to_string(),
+            (TerminalType::Ascii, _) => "DISABLED — plain text",
+            (_, true) => "ENABLED — caller answered Y",
+            (_, false) => "DISABLED — caller answered N",
         };
 
         let ttype_line = match &self.ttype_raw {
@@ -10158,6 +10157,13 @@ impl TelnetSession {
             };
             self.send_line(&format!("  Telnet mode: {}", telnet_mode))
                 .await?;
+            let coop = if cfg.telnet_gateway_negotiate {
+                self.green("On")
+            } else {
+                self.red("Off")
+            };
+            self.send_line(&format!("  Cooperative: {}", coop))
+                .await?;
             let ssh_auth = if cfg.ssh_gateway_auth == "password" {
                 self.yellow("Password")
             } else {
@@ -10170,6 +10176,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle telnet mode (Telnet/Raw)",
                 self.cyan("T")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle cooperative (TTYPE/NAWS)",
+                self.cyan("C")
             ))
             .await?;
             self.send_line(&format!(
@@ -10204,6 +10215,19 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "c" => {
+                    let new_val = if cfg.telnet_gateway_negotiate {
+                        "false"
+                    } else {
+                        "true"
+                    };
+                    let v = new_val.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("telnet_gateway_negotiate", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "s" => {
                     let new_val = if cfg.ssh_gateway_auth == "password" {
                         "key"
@@ -10222,7 +10246,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, S, H, or Q.").await?;
+                    self.show_error("Press T, C, S, H, or Q.").await?;
                 }
             }
         }
@@ -13461,12 +13485,15 @@ pub fn start_server(
                             // Atomic claim: fetch_add returns the value
                             // BEFORE the increment, so concurrent
                             // accepts each see a unique slot.  This
-                            // mirrors `ssh.rs:234` and closes the
-                            // load-then-fetch_add TOCTOU window where
-                            // two threads could both observe
-                            // `current < max_sessions` and bust the
-                            // cap.  If we end up over the limit, roll
-                            // back the increment before rejecting.
+                            // closes the load-then-fetch_add TOCTOU
+                            // window where two threads could both
+                            // observe `current < max_sessions` and bust
+                            // the cap.  If we end up over the limit, roll
+                            // back the increment before rejecting.  (The
+                            // SSH server shares this counter; it claims a
+                            // slot per connection in `SshServer::
+                            // new_client` and rejects over-cap clients in
+                            // `auth_password`.)
                             let prev = session_count.fetch_add(1, Ordering::SeqCst);
                             if prev >= max_sessions {
                                 session_count.fetch_sub(1, Ordering::SeqCst);

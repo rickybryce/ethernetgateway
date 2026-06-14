@@ -327,6 +327,18 @@ impl russh::server::Handler for SshHandler {
         user: &str,
         password: &str,
     ) -> Result<russh::server::Auth, Self::Error> {
+        // SSH intentionally does NOT honor `security_enabled` or call
+        // `reject_insecure_ip` the way telnet/web do.  Those guards exist
+        // only to protect telnet/web's *optional-auth* mode: when
+        // `security_enabled = false` they accept connections with no
+        // credentials at all, so the insecure-IP check stops an
+        // accidentally-public gateway from being wide open.  SSH has no
+        // unauthenticated mode — `auth_password` is the only auth method we
+        // implement (russh defaults the rest to reject), the sole
+        // `Auth::Accept` below requires correct constant-time-compared
+        // credentials, and the transport is encrypted.  So the IP guard
+        // would be redundant here, not missing.
+        //
         // Reject immediately if at capacity.
         if self.session_count.load(Ordering::SeqCst) > self.max_sessions {
             return Ok(russh::server::Auth::reject());

@@ -51,8 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Persisted `gateway_debug` byte-trace flag**, toggleable from the
   GUI/web General frame and the telnet Other Settings / Serial
   Configuration menus. Read fresh per gateway session (no restart
-  needed); `EGATEWAY_GATEWAY_DEBUG` still forces it on. The trace now
-  timestamps each input byte.
+  needed); `EGATEWAY_GATEWAY_DEBUG` still forces it on. The trace
+  timestamps each input byte, emits a one-shot `[gw-diag]` terminal
+  diagnostic per session (detected type and how it was decided, the
+  announced TERMINAL-TYPE, the color decision, advertised telnet
+  options, NAWS window size, and — for serial callers — the port's baud
+  and PETSCII-translate state, the most common cause of missing ANSI
+  color on a serial line), and logs every AT command the modem emulator
+  runs alongside a plain-English description of its effect.
 - **Web protocol reference pages** served by the configuration web
   server — per-protocol references (XMODEM, YMODEM, ZMODEM, Kermit, the
   Hayes AT command set, and telnet), each documenting that protocol's
@@ -65,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Punter, editable from the telnet / web / GUI Punter settings. Because
   C1 has no in-band abort, a give-up otherwise leaves the C64 hung;
   enabling this drops carrier so it sees loss-of-carrier instead.
+- **Cooperative TTYPE/NAWS negotiation is now toggleable from the telnet
+  session's Gateway Configuration menu** (the `C` key), matching the web
+  configuration page and desktop GUI that already exposed
+  `telnet_gateway_negotiate`. The menu now shows its on/off state next to
+  the telnet-mode and SSH-auth rows.
 
 ### Fixed
 - AI chat: a follow-up question that merely starts with a menu command
@@ -82,6 +93,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart from the C64 side is tolerated (longer pre-transfer input
   drain), and corrupt-block recovery is bounded by its own larger round
   cap rather than quitting early and leaving the peer hung.
+- **Plain XMODEM now verifies EOT (Forsberg NAK-first-EOT).** The
+  receiver NAKs the first EOT and accepts end-of-file only on a resent,
+  confirming EOT, so a stray `0x04` from UART line noise in the
+  inter-block gap can no longer be mistaken for end-of-file and silently
+  truncate an upload to a C64 / CP/M / RC2014 peer. The duplicate-block
+  re-arm logic also keeps a non-standard "resend last block on NAK"
+  sender from looping. YMODEM keeps immediate-ACK on EOT — its block-0
+  size field and end-of-batch handshake already detect a short file.
+- **Serial AT parsing hardened.** A command-mode byte ≥ `0x80` (PETSCII
+  line noise, or a C64 in lower/upper-case mode sending shifted letters)
+  no longer panics the tokenizer and kills that port's modem thread:
+  `parse_at_command` returns `ERROR` on non-ASCII input and high bytes
+  are filtered at the command-buffer inputs. CR+LF / LF+CR pairs collapse
+  to a single terminator so a CRLF terminal no longer runs a spurious
+  empty command, and the ring-wait loop honors a per-port restart.
+- **Web configuration server lockout / POST hardening.** Credential-less
+  requests — the first half of an HTTP Basic challenge plus the
+  subresource probes that repeat it — no longer count toward the shared
+  per-IP brute-force lockout (only a present-but-wrong credential does),
+  so ordinary page loads can't lock out a first-time user. A malformed
+  `POST /save` body (non-UTF-8 or zero-length) is now refused instead of
+  writing an all-`false` field set that silently disabled
+  telnet / SSH / web / security in one shot.
 
 ### Changed
 - Removed the duplicate Port A/B status banner from the main
@@ -99,6 +133,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RUSTSEC-2026-0153 (`russh-cryptovec` unchecked `CryptoVec`
   allocation/growth). A malicious SSH client could otherwise drive
   unbounded memory allocation on the SSH listener.
+- **Closed a web-browser POST-redirect SSRF.** The text browser's
+  form-submit path used the HTTP client's automatic redirect, so a
+  public form action that 30x-redirected to an internal address
+  (loopback, link-local metadata, or LAN) was dialed before the SSRF
+  guard ran — the final-URL check blocked only rendering, not the
+  connection. POST redirects now follow through the same fully-guarded
+  fetch path as GET, so the connection itself is refused.
 
 ## [0.6.0] - 2026-05-24
 

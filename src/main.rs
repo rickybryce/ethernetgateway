@@ -246,7 +246,7 @@ fn register_signal_handlers(
             // repaint nudge, the GUI exits as soon as winit drains
             // its queue once — which it does promptly even when
             // minimized, because the UserEvent itself is the wakeup.
-            if let Some(ctx) = gui_ctx.lock().unwrap().as_ref() {
+            if let Some(ctx) = gui_ctx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                 ctx.send_viewport_cmd_to(
                     eframe::egui::ViewportId::ROOT,
                     eframe::egui::ViewportCommand::Close,

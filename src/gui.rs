@@ -93,7 +93,7 @@ pub fn run(
             "Ethernet Gateway",
             options,
             Box::new(move |cc| {
-                *gui_ctx.lock().unwrap() = Some(cc.egui_ctx.clone());
+                *gui_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cc.egui_ctx.clone());
                 egui_extras::install_image_loaders(&cc.egui_ctx);
                 Ok(Box::new(App::new(cfg, shutdown, restart)))
             }),
