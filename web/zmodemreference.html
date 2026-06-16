@@ -578,8 +578,9 @@
                     headers, CRC-16 and CRC-32, and batch send and receive. Its
                     <code>ZRINIT</code> advertises <code>CANFDX | CANOVIO | CANFC32</code>
                     (full-duplex, overlapped I/O, CRC-32 capable), but the data path runs
-                    <strong>stop-and-wait</strong> &mdash; every data subpacket is
-                    <code>ZCRCW</code>-terminated and ACK-gated. That is slightly slower than
+                    <strong>stop-and-wait</strong> &mdash; every non-final data
+                    subpacket is <code>ZCRCQ</code>-terminated and ACK-gated (the
+                    final one closes the frame with <code>ZCRCE</code>). That is slightly slower than
                     true streaming in theory, but rock-solid over a telnet or SSH hop where
                     buffering and flow control are unpredictable.
                 </p>
@@ -636,20 +637,24 @@
                     <tr><td><code>ZRPOS</code></td><td>0x09</td><td>Receiver</td><td>&ldquo;Resume at this byte offset&rdquo; &mdash; accept, recover, or resume.</td></tr>
                     <tr><td><code>ZDATA</code></td><td>0x0A</td><td>Sender</td><td>Data frame at a byte offset; subpackets follow.</td></tr>
                     <tr><td><code>ZEOF</code></td><td>0x0B</td><td>Sender</td><td>End of file &mdash; argument is the final length.</td></tr>
+                    <tr><td><code>ZCHALLENGE</code></td><td>0x0E</td><td>Receiver</td><td>Optional liveness check &mdash; the gateway (as sender) echoes the value back in a <code>ZACK</code>.</td></tr>
+                    <tr><td><code>ZFREECNT</code></td><td>0x11</td><td>Sender</td><td>Optional free-space query &mdash; the gateway (as receiver) answers with a <code>ZACK</code>.</td></tr>
+                    <tr><td><code>ZCOMMAND</code></td><td>0x12</td><td>Sender</td><td>&ldquo;Run this command&rdquo; &mdash; the gateway <strong>never executes it</strong> (security); it refuses with a non-zero <code>ZCOMPL</code>. Use SSH for shell access.</td></tr>
                 </table>
 
                 <div class="cat">Subpacket terminators</div>
                 <p class="dim-text">
                     Data rides in subpackets; the byte that ends each one tells the receiver
-                    what to do next. The gateway sends data using <code>ZCRCW</code>
-                    (ACK-gated), which is what gives it its safe stop-and-wait cadence.
+                    what to do next. The gateway sends data using <code>ZCRCQ</code>
+                    (ACK-gated) between subpackets and <code>ZCRCE</code> on the last,
+                    which is what gives it its safe stop-and-wait cadence.
                 </p>
                 <table class="data-table">
                     <tr><th>Terminator</th><th>Byte</th><th>Meaning</th></tr>
-                    <tr><td><code>ZCRCE</code></td><td><code>h</code></td><td>End of frame, no more data this frame, no ACK.</td></tr>
+                    <tr><td><code>ZCRCE</code></td><td><code>h</code></td><td>End of frame, no more data this frame, no ACK. <em>(The gateway's final data subpacket.)</em></td></tr>
                     <tr><td><code>ZCRCG</code></td><td><code>i</code></td><td>More data follows, streaming &mdash; no ACK.</td></tr>
-                    <tr><td><code>ZCRCQ</code></td><td><code>j</code></td><td>More data follows, ACK required (mid-frame flow control).</td></tr>
-                    <tr><td><code>ZCRCW</code></td><td><code>k</code></td><td>End of frame, more data next frame, ACK required. <em>(What the gateway uses.)</em></td></tr>
+                    <tr><td><code>ZCRCQ</code></td><td><code>j</code></td><td>More data follows, ACK required (mid-frame flow control). <em>(Each non-final data subpacket the gateway sends.)</em></td></tr>
+                    <tr><td><code>ZCRCW</code></td><td><code>k</code></td><td>End of frame, more data next frame, ACK required. <em>(The gateway's ZFILE name/size subpacket.)</em></td></tr>
                 </table>
             </div>
 
@@ -678,6 +683,19 @@
                     additionally handles the <code>0xFF</code> IAC transform; ZDLE and IAC
                     escaping are independent layers.)
                 </p>
+                <p class="dim-text">
+                    A receiver can ask the sender to escape <em>more</em> than that default
+                    set by setting <code>ESCCTL</code> (escape every control character) or
+                    <code>ESC8</code> (escape every 8th-bit byte) in its <code>ZRINIT</code>
+                    capability flags &mdash; the gateway honors both when it is the sender.
+                    On decode it also accepts the legacy <code>ZRUB0</code> /
+                    <code>ZRUB1</code> rubout escapes (a sender's alternate encoding of
+                    <code>0x7F</code> / <code>0xFF</code>). And because <code>ZDLE</code> is
+                    the same byte as <code>CAN</code>, a run of them is how a peer signals
+                    <strong>abort</strong>: the gateway treats five or more consecutive
+                    <code>CAN</code>s (or a <code>ZDLE&nbsp;CAN</code> pair) as an immediate
+                    cancel rather than waiting out a timeout.
+                </p>
             </div>
 
             <hr class="divider">
@@ -694,7 +712,7 @@
 <span class="prompt-char">term</span>     &lt;- ZRINIT (CANFDX|CANOVIO|CANFC32)  <span class="output-text">receiver ready + caps</span>
 <span class="prompt-char">gateway</span>  -> ZFILE + subpacket("name\0size\0", ZCRCW)
 <span class="prompt-char">term</span>     &lt;- ZRPOS(0)                     <span class="output-text">accept; start at byte 0</span>
-<span class="prompt-char">gateway</span>  -> ZDATA(0) + 1024-byte subpackets (ZCRCW, ACK-gated) ... until EOF
+<span class="prompt-char">gateway</span>  -> ZDATA(0) + 1024-byte subpackets (ZCRCQ, ACK-gated; final ZCRCE) ... until EOF
 <span class="prompt-char">gateway</span>  -> ZEOF(length)                 <span class="output-text">final file size</span>
 <span class="prompt-char">term</span>     &lt;- ZRINIT                       <span class="output-text">ready for next file</span>
 <span class="prompt-char">gateway</span>  -> ZFIN
@@ -708,7 +726,7 @@
                         <li>The terminal answers <code>ZRINIT</code>, advertising its capabilities; the gateway notes whether CRC-32 is available.</li>
                         <li>The gateway sends a <code>ZFILE</code> header followed by a subpacket carrying the <strong>filename and exact size</strong> (and mtime / mode when known), terminated with <code>ZCRCW</code>.</li>
                         <li>The receiver replies <code>ZRPOS(0)</code> to accept and start at byte 0 &mdash; or <code>ZSKIP</code> to decline this file, or a non-zero <code>ZRPOS</code> to <strong>resume</strong> a partial file.</li>
-                        <li>The gateway sends a <code>ZDATA</code> header at that offset, then streams 1024-byte data subpackets, each <code>ZCRCW</code>-terminated and waiting for the receiver's <code>ZACK</code> before the next &mdash; the stop-and-wait cadence.</li>
+                        <li>The gateway sends a <code>ZDATA</code> header at that offset, then streams 1024-byte data subpackets, each non-final one <code>ZCRCQ</code>-terminated and waiting for the receiver's <code>ZACK</code> before the next (the last closes the frame with <code>ZCRCE</code>) &mdash; the stop-and-wait cadence.</li>
                         <li>If the receiver detects an error it sends <code>ZRPOS(offset)</code>; the gateway seeks back to that byte offset and resumes from there.</li>
                         <li>At end of file the gateway sends <code>ZEOF(length)</code>. The receiver answers <code>ZRINIT</code> (ready for the next file).</li>
                         <li>With no more files the gateway sends <code>ZFIN</code>; the receiver returns <code>ZFIN</code>; the gateway sends the <code>"OO"</code> over-and-out trailer and the session ends.</li>

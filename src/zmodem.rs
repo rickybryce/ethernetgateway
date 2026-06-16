@@ -44,6 +44,13 @@ const ZCRCG: u8 = b'i';         // more data, streaming (no ACK)
 const ZCRCQ: u8 = b'j';         // more data, ACK required
 const ZCRCW: u8 = b'k';         // more data next frame, ACK required
 
+// ZDLE-escaped "rubout" codes (Forsberg §10).  Decode-only: legacy
+// senders may encode 0x7F/0xFF this way instead of as `ZDLE (b ^ 0x40)`.
+// Our own sender never emits them (it escapes the plain way), but the
+// receiver must map them back so such a peer round-trips correctly.
+const ZRUB0: u8 = b'l';         // 0x6C → decodes to 0x7F (DEL)
+const ZRUB1: u8 = b'm';         // 0x6D → decodes to 0xFF
+
 // Frame types
 const ZRQINIT: u8 = 0x00;
 const ZRINIT: u8 = 0x01;
@@ -59,13 +66,25 @@ const ZDATA: u8 = 0x0A;
 const ZEOF: u8 = 0x0B;
 #[allow(dead_code)]
 const ZFERR: u8 = 0x0C;
+const ZCHALLENGE: u8 = 0x0E; // receiver→sender liveness check; sender echoes the value in ZACK
+const ZCOMPL: u8 = 0x0F; // command-completion status; we send it (nonzero) to refuse ZCOMMAND
 #[allow(dead_code)]
 const ZCAN: u8 = 0x10;
+const ZFREECNT: u8 = 0x11; // sender→receiver free-space query; receiver answers with ZACK
+const ZCOMMAND: u8 = 0x12; // sender→receiver "run this command"; we refuse it (security)
 
-// ZRINIT capability flags (ZF0 byte of the ZRINIT header)
+// ZRINIT capability flags (ZF0 byte of the ZRINIT header).  Per Forsberg
+// §11.2 the ZF0 byte is the *last* of the four header data bytes on the
+// wire (ZF0 = data[3]); ZP0 (data[0]) is the position LSB.  See `zf0()`.
 const CANFDX: u8 = 0x01;        // full-duplex link
 const CANOVIO: u8 = 0x02;       // can overlap I/O
 const CANFC32: u8 = 0x20;       // can receive CRC-32 frames
+// A receiver may also set these two bits in its ZRINIT ZF0 to ask the
+// *sender* for extra escaping.  Same bit positions as the ZSINIT
+// TESCCTL/TESC8 flags below (and identical meaning), just advertised in
+// the opposite direction.
+const ESCCTL: u8 = 0x40;        // receiver wants all control characters escaped
+const ESC8: u8 = 0x80;          // receiver wants the 8th-bit chars escaped
 
 // ZSINIT flags (ZF0 byte of the ZSINIT header) — Forsberg §11.3.
 // Sender uses these to tell the receiver about extra escaping the link
@@ -81,6 +100,11 @@ const TESC8: u8 = 0x80;         // sender wants the 8th-bit duals escaped too
 use crate::tnio::MAX_FILE_SIZE;
 const SUBPACKET_DATA_SIZE: usize = 1024;
 const MAX_SUBPACKET_DATA: usize = 8192;
+/// Free-space figure (bytes) reported in answer to a ZFREECNT query.
+/// Uploads are buffered in memory and not quota-checked here, so we
+/// advertise a generous ~2 GiB rather than a real disk-free value; a
+/// small figure would make some senders decline the transfer.
+const ZFREECNT_REPLY: u32 = 0x7FFF_FFFF;
 // Protocol timeouts and retry caps are no longer compile-time constants —
 // they're read from `config::get_config()` so the operator can tune them
 // at runtime through the GUI "More..." popup and the telnet
@@ -94,9 +118,9 @@ pub(crate) fn crc16(data: &[u8]) -> u16 {
     crc16_update(0, data)
 }
 
-/// CRC-16 update from a running state.  Lets `build_subpacket` compute
-/// the CRC over `data || [end_marker]` without allocating a temporary
-/// concatenation — saves ~1 KB per subpacket on large transfers.
+/// CRC-16 update from a running state.  Lets `build_subpacket_mode`
+/// compute the CRC over `data || [end_marker]` without allocating a
+/// temporary concatenation — saves ~1 KB per subpacket on large transfers.
 fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
     for &b in data {
         crc ^= (b as u16) << 8;
@@ -146,9 +170,49 @@ fn needs_zdle_escape(b: u8) -> bool {
     )
 }
 
-/// Append `b` to `out`, ZDLE-escaping it if required.
+/// Append `b` to `out`, ZDLE-escaping it with the standard flow-control
+/// set.  Test-only convenience; production paths thread an `EscapeMode`
+/// through `push_escaped_mode`.
+#[cfg(test)]
 fn push_escaped(out: &mut Vec<u8>, b: u8) {
-    if needs_zdle_escape(b) {
+    push_escaped_mode(out, b, EscapeMode::default());
+}
+
+/// Extra escaping a peer can request via its ZRINIT (or ZSINIT) ZF0 byte.
+/// `escctl` (ESCCTL) escapes every control character — 0x00–0x1F and the
+/// high-bit duals 0x80–0x9F; `esc8` (ESC8) escapes every byte with the
+/// high bit set (0x80–0xFF).  `STANDARD` (the default) escapes only our
+/// fixed flow-control set in `needs_zdle_escape`.
+#[derive(Clone, Copy, Default)]
+struct EscapeMode {
+    escctl: bool,
+    esc8: bool,
+}
+
+impl EscapeMode {
+    /// Derive the escaping a *receiver* requested from its ZRINIT ZF0 byte.
+    fn from_zrinit_zf0(zf0: u8) -> EscapeMode {
+        EscapeMode {
+            escctl: zf0 & ESCCTL != 0,
+            esc8: zf0 & ESC8 != 0,
+        }
+    }
+}
+
+/// `needs_zdle_escape` plus any peer-requested extra escaping.
+fn needs_zdle_escape_mode(b: u8, mode: EscapeMode) -> bool {
+    needs_zdle_escape(b)
+        // ESCCTL: a control char has both bits 5 and 6 clear, i.e.
+        // 0x00–0x1F and the 8-bit duals 0x80–0x9F.
+        || (mode.escctl && b & 0x60 == 0)
+        // ESC8: any byte with the high bit set.
+        || (mode.esc8 && b & 0x80 != 0)
+}
+
+/// Append `b` to `out`, ZDLE-escaping it per `mode` (and the always-on
+/// flow-control set) if required.
+fn push_escaped_mode(out: &mut Vec<u8>, b: u8, mode: EscapeMode) {
+    if needs_zdle_escape_mode(b, mode) {
         out.push(ZDLE);
         out.push(b ^ 0x40);
     } else {
@@ -213,10 +277,19 @@ fn build_hex_header(frame: u8, data: [u8; 4]) -> Vec<u8> {
     buf
 }
 
+/// Standard-escaping binary-16 header.  Test-only; production threads an
+/// `EscapeMode` through `build_bin16_header_mode`.
+#[cfg(test)]
+fn build_bin16_header(frame: u8, data: [u8; 4]) -> Vec<u8> {
+    build_bin16_header_mode(frame, data, EscapeMode::default())
+}
+
 /// Build a binary-16 ZMODEM header (ZDLE 'A').  Used for ZFILE and
 /// ZDATA where a hex header would be clumsy given the data subpacket
-/// that follows on the same stream.
-fn build_bin16_header(frame: u8, data: [u8; 4]) -> Vec<u8> {
+/// that follows on the same stream.  Honors the peer's requested extra
+/// escaping (ESCCTL/ESC8) for the header bytes — e.g. a ZDATA position
+/// of 0 packs four 0x00 control bytes that ESCCTL requires escaped.
+fn build_bin16_header_mode(frame: u8, data: [u8; 4], mode: EscapeMode) -> Vec<u8> {
     let payload = [frame, data[0], data[1], data[2], data[3]];
     let crc = crc16(&payload);
 
@@ -225,21 +298,29 @@ fn build_bin16_header(frame: u8, data: [u8; 4]) -> Vec<u8> {
     buf.push(ZDLE);
     buf.push(ZBIN);
     for &b in &payload {
-        push_escaped(&mut buf, b);
+        push_escaped_mode(&mut buf, b, mode);
     }
-    push_escaped(&mut buf, (crc >> 8) as u8);
-    push_escaped(&mut buf, crc as u8);
+    push_escaped_mode(&mut buf, (crc >> 8) as u8, mode);
+    push_escaped_mode(&mut buf, crc as u8, mode);
     buf
+}
+
+/// Standard-escaping data subpacket.  Test-only; production threads an
+/// `EscapeMode` through `build_subpacket_mode`.
+#[cfg(test)]
+fn build_subpacket(data: &[u8], end_marker: u8) -> Vec<u8> {
+    build_subpacket_mode(data, end_marker, EscapeMode::default())
 }
 
 /// Build a data subpacket body: `data` (ZDLE-escaped) followed by
 /// `ZDLE <end_marker> <CRC>`.  The end marker is included in the CRC;
-/// the ZDLE prefix is not.
+/// the ZDLE prefix is not.  Honors the peer's requested extra escaping
+/// (ESCCTL/ESC8) for the data and CRC bytes.
 ///
 /// Uses CRC-16; the enclosing frame type (binary16 vs binary32)
 /// determines which CRC width the peer expects.  Our sender emits
 /// binary16 frames exclusively, so CRC-16 is always correct here.
-fn build_subpacket(data: &[u8], end_marker: u8) -> Vec<u8> {
+fn build_subpacket_mode(data: &[u8], end_marker: u8, mode: EscapeMode) -> Vec<u8> {
     // CRC is computed over `data || [end_marker]`.  Avoid the
     // temporary concatenation by folding the end marker into the
     // running CRC state after hashing the data slice.
@@ -247,12 +328,12 @@ fn build_subpacket(data: &[u8], end_marker: u8) -> Vec<u8> {
 
     let mut buf = Vec::with_capacity(data.len() + 6);
     for &b in data {
-        push_escaped(&mut buf, b);
+        push_escaped_mode(&mut buf, b, mode);
     }
     buf.push(ZDLE);
     buf.push(end_marker);
-    push_escaped(&mut buf, (crc >> 8) as u8);
-    push_escaped(&mut buf, crc as u8);
+    push_escaped_mode(&mut buf, (crc >> 8) as u8, mode);
+    push_escaped_mode(&mut buf, crc as u8, mode);
     buf
 }
 
@@ -283,6 +364,13 @@ impl ZHeader {
     fn position(&self) -> u32 {
         u32::from_le_bytes(self.data)
     }
+
+    /// The ZF0 flags byte of a flag-type header (ZRINIT/ZSINIT).  Per
+    /// Forsberg §11.2 ZF0 is the *last* of the four data bytes on the
+    /// wire — the opposite end from the ZP0 position LSB at `data[0]`.
+    fn zf0(&self) -> u8 {
+        self.data[3]
+    }
 }
 
 // Raw I/O (telnet IAC + NVT CR-NUL stripping) lives in `crate::tnio`,
@@ -291,6 +379,22 @@ impl ZHeader {
 // =============================================================================
 // Header decoder
 // =============================================================================
+
+/// Error returned by the read primitives when the peer sends an abort —
+/// a run of CAN (0x18) characters, or a `ZDLE CAN` sequence (Forsberg §9
+/// "the receiver detects 5 consecutive CANs as an abort"; CAN == ZDLE).
+/// Recovery loops short-circuit on this via `is_peer_cancel` instead of
+/// burning their retry budget trying to recover from a peer that's gone.
+const PEER_CANCEL_ERR: &str = "ZMODEM: peer cancelled (CAN)";
+
+/// Number of consecutive CAN characters that signal an abort.  Forsberg
+/// suggests 5; some senders emit more (our own `send_cancel` emits 8).
+const CANCEL_CAN_RUN: u32 = 5;
+
+/// True if `err` is the peer-cancel signal raised by the read primitives.
+fn is_peer_cancel(err: &str) -> bool {
+    err == PEER_CANCEL_ERR
+}
 
 /// Read one ZMODEM header from the wire.  Scans for the ZPAD sync,
 /// dispatches on the frame-indicator byte (ZBIN/ZHEX/ZBIN32), validates
@@ -308,6 +412,11 @@ async fn read_header(
     // Loop is bounded by a generous byte budget so a malicious peer
     // can't force unbounded reads.
     let mut junk_budget: u32 = 4096;
+    // Count consecutive CAN (0x18) bytes so a peer's cancel sequence
+    // (8 CAN + 8 BS) is detected promptly rather than scanned as junk
+    // until the budget runs out.  CAN is the same byte as ZDLE, but a
+    // bare ZDLE outside a ZPAD prologue is never valid framing here.
+    let mut can_run: u32 = 0;
     loop {
         if junk_budget == 0 {
             return Err("ZMODEM: header sync lost".into());
@@ -315,6 +424,14 @@ async fn read_header(
         junk_budget -= 1;
 
         let b = nvt_read_byte(reader, is_tcp, state).await?;
+        if b == ZDLE {
+            can_run += 1;
+            if can_run >= CANCEL_CAN_RUN {
+                return Err(PEER_CANCEL_ERR.into());
+            }
+        } else {
+            can_run = 0;
+        }
         if b != ZPAD {
             continue;
         }
@@ -349,10 +466,22 @@ async fn read_escaped_byte(
         return Ok(b);
     }
     let e = nvt_read_byte(reader, is_tcp, state).await?;
+    decode_after_zdle(e)
+}
+
+/// Map the byte following a ZDLE into the value it escapes, or an error.
+/// A legitimately escaped data byte never yields ZDLE/CAN (0x18 would
+/// require escaping 'X', which is never escaped), so `ZDLE CAN` is an
+/// unambiguous abort.  ZRUB0/ZRUB1 are the legacy DEL/0xFF rubout codes.
+fn decode_after_zdle(e: u8) -> Result<u8, String> {
     match e {
+        // CAN after ZDLE — peer abort (GOTCAN).
+        ZDLE => Err(PEER_CANCEL_ERR.into()),
         ZCRCE | ZCRCG | ZCRCQ | ZCRCW => {
             Err(format!("Unexpected subpacket terminator 0x{:02X}", e))
         }
+        ZRUB0 => Ok(0x7F),
+        ZRUB1 => Ok(0xFF),
         _ => Ok(e ^ 0x40),
     }
 }
@@ -636,8 +765,11 @@ async fn read_subpacket(
                 crc_result?;
                 return Ok(Subpacket { data, end_marker: e });
             }
+            // Not a terminator: a ZDLE-escaped data byte, a ZRUB0/ZRUB1
+            // rubout code, or a `ZDLE CAN` peer abort (propagated as a
+            // PEER_CANCEL_ERR from `decode_after_zdle`).
             _ => {
-                data.push(e ^ 0x40);
+                data.push(decode_after_zdle(e)?);
             }
         }
     }
@@ -770,6 +902,12 @@ where
                 h
             }
             Ok(Err(e)) => {
+                if is_peer_cancel(&e) {
+                    if verbose {
+                        glog!("ZMODEM recv: peer cancelled the session");
+                    }
+                    return Err(e);
+                }
                 if verbose {
                     glog!("ZMODEM recv: header read error: {}", e);
                 }
@@ -896,9 +1034,14 @@ where
                 //   3. ZACK with payload `0` (the de-facto convention
                 //      among lrzsz/Qodem/etc. — the spec leaves the
                 //      data field unspecified for ZSINIT.ZACK).
-                let escctl = hdr.data[0] & TESCCTL != 0;
-                let esc8 = hdr.data[0] & TESC8 != 0;
-                let _ = read_subpacket(
+                let escctl = hdr.zf0() & TESCCTL != 0;
+                let esc8 = hdr.zf0() & TESC8 != 0;
+                // Drain the Attn subpacket.  We ignore its contents, but a
+                // peer-cancel arriving here must still short-circuit rather
+                // than be masked by the spurious ZACK below; any other read
+                // error (timeout, bad CRC) is non-fatal since we don't use
+                // the Attn sequence.
+                if let Err(e) = read_subpacket(
                     reader,
                     is_tcp,
                     &mut state,
@@ -906,17 +1049,67 @@ where
                     32, // ZATTNLEN cap per spec
                     cfg.zmodem_frame_timeout,
                 )
-                .await;
+                .await
+                {
+                    if is_peer_cancel(&e) {
+                        if verbose {
+                            glog!("ZMODEM recv: peer cancelled during ZSINIT");
+                        }
+                        return Err(e);
+                    }
+                }
                 send_zack(writer, is_tcp, 0, verbose).await?;
                 if verbose {
                     glog!(
                         "ZMODEM recv: ACKed ZSINIT (ZF0=0x{:02X} escctl={} esc8={})",
-                        hdr.data[0],
+                        hdr.zf0(),
                         escctl,
                         esc8
                     );
                 }
                 continue;
+            }
+            ZFREECNT => {
+                // Sender asks how much free space we have (Forsberg
+                // §8.1); answer with a ZACK carrying the count.  We
+                // buffer uploads in memory and don't enforce a disk
+                // quota here, so advertise a generous figure rather
+                // than a real statvfs — a small/zero value would make
+                // some senders refuse to transfer.
+                send_zack(writer, is_tcp, ZFREECNT_REPLY, verbose).await?;
+                if verbose {
+                    glog!("ZMODEM recv: answered ZFREECNT({})", ZFREECNT_REPLY);
+                }
+                continue;
+            }
+            ZCOMMAND => {
+                // Security: we never execute a remote command, on a LAN or
+                // anywhere (the gateway already offers authenticated SSH for
+                // real shell access; ZCOMMAND would be an unauthenticated
+                // second door).  ZCOMMAND is optional in the spec — declining
+                // it is fully compliant.  Drain the command-line subpacket so
+                // the wire stays in sync, then refuse in-band with a non-zero
+                // ZCOMPL so a command-pushing peer learns the command did not
+                // run and ends cleanly instead of hanging.
+                if let Err(e) = read_subpacket(
+                    reader,
+                    is_tcp,
+                    &mut state,
+                    hdr.crc_kind,
+                    MAX_SUBPACKET_DATA,
+                    cfg.zmodem_frame_timeout,
+                )
+                .await
+                {
+                    if is_peer_cancel(&e) {
+                        return Err(e);
+                    }
+                }
+                send_zcompl(writer, is_tcp, 1, verbose).await?;
+                if verbose {
+                    glog!("ZMODEM recv: refused ZCOMMAND (remote command execution disabled)");
+                }
+                return Err("ZMODEM: refused remote command request (ZCOMMAND)".into());
             }
             other => {
                 if verbose {
@@ -1058,6 +1251,12 @@ where
         {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {
+                if is_peer_cancel(&e) {
+                    if verbose {
+                        glog!("ZMODEM recv: peer cancelled the transfer");
+                    }
+                    return Err(e);
+                }
                 if verbose {
                     glog!("ZMODEM recv: header read error: {}", e);
                 }
@@ -1105,6 +1304,12 @@ where
                     {
                         Ok(s) => s,
                         Err(e) => {
+                            if is_peer_cancel(&e) {
+                                if verbose {
+                                    glog!("ZMODEM recv: peer cancelled the transfer");
+                                }
+                                return Err(e);
+                            }
                             if verbose {
                                 glog!("ZMODEM recv: subpacket error: {}", e);
                             }
@@ -1323,6 +1528,12 @@ pub(crate) async fn zmodem_send(
     let deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_secs(negotiation_timeout);
     let mut attempts: u32 = 0;
+    // Extra escaping the receiver may request via its ZRINIT ZF0
+    // (ESCCTL/ESC8).  Assigned when we lock onto the ZRINIT below (the
+    // only non-error exit from the negotiation loop) and threaded
+    // through every binary header + data subpacket for the rest of the
+    // batch.
+    let esc: EscapeMode;
     send_zrqinit(writer, is_tcp, verbose).await?;
     loop {
         if tokio::time::Instant::now() >= deadline || attempts >= max_retries {
@@ -1335,13 +1546,41 @@ pub(crate) async fn zmodem_send(
         )
         .await
         {
-            Ok(Ok(h)) if h.frame == ZRINIT => break,
+            Ok(Ok(h)) if h.frame == ZRINIT => {
+                // Honor any extra escaping the receiver requests in its
+                // ZRINIT ZF0 (ESCCTL/ESC8) for the rest of the session.
+                esc = EscapeMode::from_zrinit_zf0(h.zf0());
+                if verbose && (esc.escctl || esc.esc8) {
+                    glog!(
+                        "ZMODEM send: receiver requested escaping (escctl={} esc8={})",
+                        esc.escctl,
+                        esc.esc8
+                    );
+                }
+                break;
+            }
             Ok(Ok(h)) if h.frame == ZRQINIT => {
                 // Receiver also sent a ZRQINIT (non-standard, but
                 // some implementations do this on startup).  Don't
                 // count it against retries — we have proof the link
                 // is alive.
                 continue;
+            }
+            Ok(Ok(h)) if h.frame == ZCHALLENGE => {
+                // Receiver wants proof we're a live ZMODEM sender:
+                // echo its 32-bit challenge value back in a ZACK
+                // (Forsberg §8.1).  Proof of life — don't burn a retry.
+                send_zack(writer, is_tcp, h.position(), verbose).await?;
+                if verbose {
+                    glog!("ZMODEM send: answered ZCHALLENGE({})", h.position());
+                }
+                continue;
+            }
+            Ok(Err(ref e)) if is_peer_cancel(e) => {
+                if verbose {
+                    glog!("ZMODEM send: receiver cancelled during negotiation");
+                }
+                return Err(PEER_CANCEL_ERR.into());
             }
             Ok(Ok(h)) => {
                 if verbose {
@@ -1396,8 +1635,8 @@ pub(crate) async fn zmodem_send(
             }
             zfile_attempts += 1;
 
-            let mut frame = build_bin16_header(ZFILE, [0, 0, 0, 0]);
-            frame.extend_from_slice(&build_subpacket(&info, ZCRCW));
+            let mut frame = build_bin16_header_mode(ZFILE, [0, 0, 0, 0], esc);
+            frame.extend_from_slice(&build_subpacket_mode(&info, ZCRCW, esc));
             raw_write_bytes(writer, &frame, is_tcp).await?;
             if verbose {
                 glog!("ZMODEM send: sent ZFILE + subpacket for '{}'", filename);
@@ -1442,6 +1681,12 @@ pub(crate) async fn zmodem_send(
                     Ok(Ok(h)) if h.frame == ZABORT => {
                         return Err("ZMODEM: receiver aborted".into());
                     }
+                    Ok(Err(ref e)) if is_peer_cancel(e) => {
+                        if verbose {
+                            glog!("ZMODEM send: receiver cancelled while awaiting ZRPOS");
+                        }
+                        return Err(PEER_CANCEL_ERR.into());
+                    }
                     Ok(Ok(h)) => {
                         if verbose {
                             glog!(
@@ -1480,7 +1725,7 @@ pub(crate) async fn zmodem_send(
             }
             zdata_attempts += 1;
 
-            let hdr = build_bin16_header(ZDATA, (pos as u32).to_le_bytes());
+            let hdr = build_bin16_header_mode(ZDATA, (pos as u32).to_le_bytes(), esc);
             raw_write_bytes(writer, &hdr, is_tcp).await?;
             if verbose {
                 glog!("ZMODEM send: sent ZDATA at offset {}", pos);
@@ -1496,7 +1741,7 @@ pub(crate) async fn zmodem_send(
                 let chunk = &data[pos..pos + chunk_len];
                 let is_last = pos + chunk_len == data.len();
                 let end_marker = if is_last { ZCRCE } else { ZCRCQ };
-                let sub = build_subpacket(chunk, end_marker);
+                let sub = build_subpacket_mode(chunk, end_marker, esc);
                 raw_write_bytes(writer, &sub, is_tcp).await?;
                 subpackets_sent += 1;
                 if verbose && (subpackets_sent <= 3 || zdata_attempts > 1) {
@@ -1537,6 +1782,12 @@ pub(crate) async fn zmodem_send(
                     }
                     Ok(Ok(h)) if h.frame == ZABORT => {
                         return Err("ZMODEM: receiver aborted".into());
+                    }
+                    Ok(Err(ref e)) if is_peer_cancel(e) => {
+                        if verbose {
+                            glog!("ZMODEM send: receiver cancelled during data transfer");
+                        }
+                        return Err(PEER_CANCEL_ERR.into());
                     }
                     Ok(Ok(h)) if h.frame == ZNAK => {
                         continue 'send_loop;
@@ -1580,14 +1831,14 @@ pub(crate) async fn zmodem_send(
                     // requested position.  Safe because ZMODEM
                     // positions are absolute.
                     let mut pos = (h.position() as usize).min(data.len());
-                    let hdr = build_bin16_header(ZDATA, (pos as u32).to_le_bytes());
+                    let hdr = build_bin16_header_mode(ZDATA, (pos as u32).to_le_bytes(), esc);
                     raw_write_bytes(writer, &hdr, is_tcp).await?;
                     while pos < data.len() {
                         let chunk_len = (data.len() - pos).min(SUBPACKET_DATA_SIZE);
                         let chunk = &data[pos..pos + chunk_len];
                         let is_last = pos + chunk_len == data.len();
                         let marker = if is_last { ZCRCE } else { ZCRCQ };
-                        let sub = build_subpacket(chunk, marker);
+                        let sub = build_subpacket_mode(chunk, marker, esc);
                         raw_write_bytes(writer, &sub, is_tcp).await?;
                         if is_last {
                             break;
@@ -1606,6 +1857,12 @@ pub(crate) async fn zmodem_send(
                         break;
                     }
                     continue;
+                }
+                Ok(Err(ref e)) if is_peer_cancel(e) => {
+                    if verbose {
+                        glog!("ZMODEM send: receiver cancelled after ZEOF");
+                    }
+                    return Err(PEER_CANCEL_ERR.into());
                 }
                 _ => continue,
             }
@@ -1665,9 +1922,12 @@ async fn send_zrinit(
     is_tcp: bool,
     verbose: bool,
 ) -> Result<(), String> {
-    // ZF0 = capability flags (CANFDX | CANOVIO | CANFC32)
-    // ZF1..ZF3 unused.  Receiver sends this to advertise.
-    let frame = build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0]);
+    // ZF0 = capability flags (CANFDX | CANOVIO | CANFC32).  Per Forsberg
+    // §11.2 ZF0 is the *last* of the four header data bytes on the wire
+    // (the position-LSB end, ZP0, is data[0]); a real lrzsz ZRINIT is
+    // `B 01 00 00 00 23`, flags 0x23 at byte 3.  ZP0..ZP1 (buffer size)
+    // and ZF1..ZF3 stay 0.
+    let frame = build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]);
     raw_write_bytes(writer, &frame, is_tcp).await?;
     if verbose {
         glog!("ZMODEM: sent ZRINIT");
@@ -1777,6 +2037,24 @@ async fn send_zskip(
     Ok(())
 }
 
+/// Send a ZCOMPL header carrying a command-completion `status`.  We use
+/// this only to *refuse* a ZCOMMAND: a non-zero status tells the peer the
+/// command did not run, so a command-pushing sender ends cleanly instead
+/// of waiting for output (Forsberg §8.1 — ZP0..ZP3 hold the exit status).
+async fn send_zcompl(
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    status: u32,
+    verbose: bool,
+) -> Result<(), String> {
+    let frame = build_hex_header(ZCOMPL, status.to_le_bytes());
+    raw_write_bytes(writer, &frame, is_tcp).await?;
+    if verbose {
+        glog!("ZMODEM: sent ZCOMPL({})", status);
+    }
+    Ok(())
+}
+
 /// Send a cancel sequence (8 × ZDLE + 8 × BS) that any compliant
 /// ZMODEM peer treats as immediate abort.
 async fn send_cancel(
@@ -1841,6 +2119,93 @@ mod tests {
             push_escaped(&mut v, *b);
             assert_eq!(v, vec![*b]);
         }
+    }
+
+    // ─── Peer-requested escaping (ESCCTL / ESC8) ─────────────
+
+    #[test]
+    fn test_escape_mode_from_zrinit_zf0() {
+        // ESCCTL/ESC8 bits live in the receiver's ZRINIT ZF0; the
+        // capability bits (CANFDX/etc.) must not be mistaken for them.
+        let none = EscapeMode::from_zrinit_zf0(CANFDX | CANOVIO | CANFC32);
+        assert!(!none.escctl && !none.esc8);
+
+        let ctl = EscapeMode::from_zrinit_zf0(CANFDX | ESCCTL);
+        assert!(ctl.escctl && !ctl.esc8);
+
+        let hi = EscapeMode::from_zrinit_zf0(ESC8);
+        assert!(!hi.escctl && hi.esc8);
+
+        let both = EscapeMode::from_zrinit_zf0(ESCCTL | ESC8);
+        assert!(both.escctl && both.esc8);
+    }
+
+    #[test]
+    fn test_needs_zdle_escape_mode_escctl() {
+        let m = EscapeMode { escctl: true, esc8: false };
+        // Control characters (bits 5–6 clear): 0x00–0x1F and 0x80–0x9F.
+        for b in [0x00u8, 0x01, 0x07, 0x1F, 0x80, 0x9F] {
+            assert!(needs_zdle_escape_mode(b, m), "escctl should escape 0x{:02X}", b);
+        }
+        // Printable / high bytes outside that band stay literal under
+        // ESCCTL alone (and aren't in the always-on flow-control set).
+        for b in [0x20u8, 0x41, 0x7E, 0xA0, 0xFE] {
+            assert!(!needs_zdle_escape_mode(b, m), "escctl must not escape 0x{:02X}", b);
+        }
+    }
+
+    #[test]
+    fn test_needs_zdle_escape_mode_esc8() {
+        let m = EscapeMode { escctl: false, esc8: true };
+        for b in [0x80u8, 0xA0, 0xFE, 0xFF] {
+            assert!(needs_zdle_escape_mode(b, m), "esc8 should escape 0x{:02X}", b);
+        }
+        // 7-bit bytes not in the always-on set are untouched by ESC8.
+        for b in [0x00u8, 0x07, 0x41, 0x7F] {
+            assert!(!needs_zdle_escape_mode(b, m), "esc8 must not escape 0x{:02X}", b);
+        }
+    }
+
+    #[test]
+    fn test_build_subpacket_mode_escapes_control_under_escctl() {
+        // Under ESCCTL a 0x01 control byte is rewritten as ZDLE,0x41;
+        // 'A' (0x41) is left literal.  Standard mode leaves both literal.
+        let m = EscapeMode { escctl: true, esc8: false };
+        let wire = build_subpacket_mode(&[0x01, b'A'], ZCRCW, m);
+        assert_eq!(&wire[..3], &[ZDLE, 0x01 ^ 0x40, b'A'], "wire was {:?}", wire);
+
+        let plain = build_subpacket_mode(&[0x01, b'A'], ZCRCW, EscapeMode::default());
+        assert_eq!(&plain[..2], &[0x01, b'A'], "standard mode escapes nothing extra");
+    }
+
+    // ─── ZF0 byte position (Forsberg §11.2) ──────────────────
+
+    #[tokio::test]
+    async fn test_zrinit_flags_live_at_wire_byte_3() {
+        // Our emitted ZRINIT must carry its capability flags in ZF0 =
+        // data[3], matching a real lrzsz `B 01 00 00 00 23`.  Capture
+        // what send_zrinit puts on the wire and decode it.
+        let (mut r, mut w) = tokio::io::duplex(1024);
+        send_zrinit(&mut w, false, false).await.unwrap();
+        drop(w);
+        let mut state = ReadState::default();
+        let h = read_header(&mut r, false, &mut state, false).await.unwrap();
+        assert_eq!(h.frame, ZRINIT);
+        assert_eq!(h.zf0(), CANFDX | CANOVIO | CANFC32);
+        assert_eq!(h.data[3], CANFDX | CANOVIO | CANFC32);
+        assert_eq!(h.data[0], 0, "ZP0 (position LSB) must stay 0, not hold flags");
+    }
+
+    // ─── ZRUB0 / ZRUB1 legacy rubout decode ──────────────────
+
+    #[test]
+    fn test_decode_after_zdle_rubouts_and_cancel() {
+        assert_eq!(decode_after_zdle(ZRUB0).unwrap(), 0x7F);
+        assert_eq!(decode_after_zdle(ZRUB1).unwrap(), 0xFF);
+        // Ordinary escaped byte: 'A' (0x41) ⊕ 0x40 = 0x01.
+        assert_eq!(decode_after_zdle(0x41).unwrap(), 0x01);
+        // ZDLE after ZDLE (== CAN) is a peer cancel, not data.
+        assert!(is_peer_cancel(&decode_after_zdle(ZDLE).unwrap_err()));
     }
 
     // ─── Hex header encode/decode round-trip ─────────────────
@@ -2452,6 +2817,276 @@ mod tests {
             Err(e) => panic!("expected 'aborted' error, got Err({:?})", e),
             Ok(_) => panic!("expected abort error, receiver returned Ok"),
         }
+    }
+
+    // ─── Peer-cancel (CAN run) detection ─────────────────────
+
+    #[tokio::test]
+    async fn test_receiver_detects_can_run_abort() {
+        // A cancelling peer sends a run of CAN (0x18) bytes.  The
+        // receiver must surface that promptly as a peer-cancel rather
+        // than scanning to the junk budget or waiting out a timeout.
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(1024);
+        inbound_writer.write_all(&[ZDLE; 8]).await.unwrap(); // 8 × CAN
+        drop(inbound_writer);
+        let (mut discard_reader, mut outbound_writer) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while discard_reader.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let result = zmodem_receive(
+            &mut inbound_reader,
+            &mut outbound_writer,
+            false,
+            false,
+            |_, _, _| true,
+        )
+        .await;
+        match result {
+            Err(e) => assert!(is_peer_cancel(&e), "expected peer-cancel, got {:?}", e),
+            Ok(_) => panic!("expected cancel error, receiver returned Ok"),
+        }
+    }
+
+    // ─── ZCHALLENGE (sender echoes the value) ────────────────
+
+    #[tokio::test]
+    async fn test_sender_answers_zchallenge() {
+        // A receiver may challenge the sender's liveness before ZRINIT;
+        // the sender must answer with a ZACK echoing the 32-bit value.
+        const CHALLENGE: u32 = 0x1234_5678;
+        let (sender_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (s_read, s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let sender = tokio::spawn(async move {
+            let (mut s_read, mut s_write) = (s_read, s_write);
+            let batch: [(&str, &[u8]); 1] = [("file.bin", b"hello")];
+            zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await
+        });
+
+        let mut st = ReadState::default();
+        // Wait for the sender's ZRQINIT, then challenge it.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRQINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZRQINIT: {}", e),
+            }
+        }
+        m_write
+            .write_all(&build_hex_header(ZCHALLENGE, CHALLENGE.to_le_bytes()))
+            .await
+            .unwrap();
+        // The sender must echo the challenge in a ZACK (the loop breaks
+        // only on a ZACK whose value we assert, or panics otherwise).
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZACK => {
+                    assert_eq!(h.position(), CHALLENGE, "ZACK must echo the challenge");
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for challenge ZACK: {}", e),
+            }
+        }
+        // Let the sender finish: advertise readiness, then ZSKIP the file.
+        m_write
+            .write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]))
+            .await
+            .unwrap();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    let _ = read_subpacket(&mut m_read, false, &mut st, h.crc_kind, MAX_SUBPACKET_DATA, 5).await;
+                    m_write.write_all(&build_hex_header(ZSKIP, [0, 0, 0, 0])).await.unwrap();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        // Mirror the sender's closing ZFIN.
+        while let Ok(h) = read_header(&mut m_read, false, &mut st, false).await {
+            if h.frame == ZFIN {
+                m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+                break;
+            }
+        }
+        sender.await.unwrap().expect("sender failed after ZCHALLENGE");
+    }
+
+    // ─── ZFREECNT (receiver answers with free count) ─────────
+
+    #[tokio::test]
+    async fn test_receiver_answers_zfreecnt() {
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        // Wait for the receiver's opening ZRINIT, then ask for free space.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+        m_write.write_all(&build_hex_header(ZFREECNT, [0, 0, 0, 0])).await.unwrap();
+        // Expect a ZACK carrying our free-count reply (the loop breaks
+        // only on a ZACK whose value we assert, or panics otherwise).
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZACK => {
+                    assert_eq!(h.position(), ZFREECNT_REPLY, "ZFREECNT answer value");
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZFREECNT answer: {}", e),
+            }
+        }
+        // End the session (no files); the receiver returns the
+        // "no files received" error, which is fine — we only assert
+        // that it answered the query.
+        m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+        let _ = recv.await.unwrap();
+    }
+
+    // ─── ZCOMMAND is refused (never executed) ────────────────
+
+    #[tokio::test]
+    async fn test_receiver_refuses_zcommand() {
+        // A command-pushing peer sends ZCOMMAND + a command-line
+        // subpacket.  The gateway must NOT execute it — it drains the
+        // subpacket, replies with a non-zero ZCOMPL (refused), and ends
+        // the session with an error rather than running anything.
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        // Wait for the receiver's opening ZRINIT.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+        // Push a command: ZCOMMAND binary header + command-line subpacket.
+        let mut frame = build_bin16_header(ZCOMMAND, [0, 0, 0, 0]);
+        frame.extend_from_slice(&build_subpacket(b"cat /etc/passwd\0", ZCRCW));
+        m_write.write_all(&frame).await.unwrap();
+
+        // The gateway must refuse with a non-zero ZCOMPL.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZCOMPL => {
+                    assert_ne!(h.position(), 0, "ZCOMPL must carry a non-zero (refused) status");
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZCOMPL refusal: {}", e),
+            }
+        }
+        // …and the receive must end with an error, never an Ok with a file.
+        match recv.await.unwrap() {
+            Err(e) => assert!(
+                e.contains("ZCOMMAND") || e.contains("refused"),
+                "expected a refusal error, got {:?}",
+                e
+            ),
+            Ok(_) => panic!("receiver must not return Ok for a refused command"),
+        }
+    }
+
+    // ─── Sender honors a receiver's ESCCTL request ───────────
+
+    #[tokio::test]
+    async fn test_sender_honors_escctl_request() {
+        // The receiver advertises ESCCTL in its ZRINIT ZF0.  The sender
+        // must then ZDLE-escape control bytes (0x01 here) it would
+        // otherwise pass literally — proving the negotiated EscapeMode
+        // is threaded into the data subpackets it emits.
+        let (sender_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (s_read, s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let payload = vec![0x01u8; 64]; // pure control bytes
+        let sender = tokio::spawn(async move {
+            let (mut s_read, mut s_write) = (s_read, s_write);
+            let batch: [(&str, &[u8]); 1] = [("ctl.bin", &payload)];
+            zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await
+        });
+
+        let mut st = ReadState::default();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRQINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZRQINIT: {}", e),
+            }
+        }
+        // ZRINIT requesting control-char escaping.
+        m_write
+            .write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | ESCCTL]))
+            .await
+            .unwrap();
+        // Read ZFILE + block-0, accept at offset 0.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    let _ = read_subpacket(&mut m_read, false, &mut st, h.crc_kind, MAX_SUBPACKET_DATA, 5).await;
+                    m_write.write_all(&build_hex_header(ZRPOS, [0, 0, 0, 0])).await.unwrap();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZFILE: {}", e),
+            }
+        }
+        // Capture the raw bytes the sender emits for the data phase
+        // (ZDATA header + subpacket + ZEOF) and inspect the escaping.
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 2048];
+        loop {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(400),
+                m_read.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > 200 {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        sender.abort();
+        assert!(
+            !raw.contains(&0x01u8),
+            "ESCCTL: 0x01 payload bytes must be escaped, found a bare one: {:?}",
+            raw
+        );
+        assert!(
+            raw.windows(2).any(|w| w == [ZDLE, 0x01 ^ 0x40]),
+            "ESCCTL: expected ZDLE-escaped 0x01 on the wire: {:?}",
+            raw
+        );
     }
 
     /// Drive the receiver's ZRINIT→ZFILE handshake from a mock sender, then
@@ -3606,21 +4241,28 @@ mod tests {
         //   ZCRCG = 'i' (0x69) — more subpackets, no ACK required
         //   ZCRCQ = 'j' (0x6A) — more subpackets, ACK required
         //   ZCRCW = 'k' (0x6B) — last subpacket of frame, ACK required
+        // §10 ZDLE-escaped rubout codes (decode-only):
+        //   ZRUB0 = 'l' (0x6C) — decodes to 0x7F
+        //   ZRUB1 = 'm' (0x6D) — decodes to 0xFF
         const _: () = assert!(ZCRCE == b'h');
         const _: () = assert!(ZCRCG == b'i');
         const _: () = assert!(ZCRCQ == b'j');
         const _: () = assert!(ZCRCW == b'k');
+        const _: () = assert!(ZRUB0 == b'l');
+        const _: () = assert!(ZRUB1 == b'm');
     }
 
     #[test]
     fn test_forsberg_section11_frame_type_byte_values() {
-        // §11 frame type byte values for the 13 frames we use,
-        // plus our internal ZCAN sentinel (0x10).  Forsberg also
-        // defines ZCRC/ZCHALLENGE/ZCOMPL/ZFREECNT/ZCOMMAND/ZSTDERR
-        // (0x0D..0x13) but we don't issue or recognize them.  Lock
-        // down the exact bytes — a refactor that renumbers any of
-        // these would break wire compatibility with every other
-        // ZMODEM implementation.
+        // §11 frame type byte values for the frames we use, plus our
+        // internal ZCAN sentinel (0x10).  We also answer ZCHALLENGE
+        // (0x0E, echo in ZACK), ZFREECNT (0x11, reply with free count),
+        // and ZCOMMAND (0x12) — which we refuse by sending ZCOMPL (0x0F)
+        // with a non-zero status (we never execute remote commands).
+        // Forsberg's remaining frames — ZCRC (0x0D) and ZSTDERR (0x13) —
+        // we neither issue nor recognize.  Lock down the exact bytes — a
+        // refactor that renumbers any of these would break wire
+        // compatibility with every other ZMODEM implementation.
         const _: () = assert!(ZRQINIT == 0x00);
         const _: () = assert!(ZRINIT == 0x01);
         const _: () = assert!(ZSINIT == 0x02);
@@ -3634,7 +4276,11 @@ mod tests {
         const _: () = assert!(ZDATA == 0x0A);
         const _: () = assert!(ZEOF == 0x0B);
         const _: () = assert!(ZFERR == 0x0C);
+        const _: () = assert!(ZCHALLENGE == 0x0E);
+        const _: () = assert!(ZCOMPL == 0x0F);
         const _: () = assert!(ZCAN == 0x10);
+        const _: () = assert!(ZFREECNT == 0x11);
+        const _: () = assert!(ZCOMMAND == 0x12);
     }
 
     #[test]
@@ -3643,9 +4289,18 @@ mod tests {
         //   CANFDX  = 0x01 — full-duplex link
         //   CANOVIO = 0x02 — sender can overlap I/O with output
         //   CANFC32 = 0x20 — receiver can decode CRC-32 frames
+        //   ESCCTL  = 0x40 — receiver wants all control chars escaped
+        //   ESC8    = 0x80 — receiver wants the 8th-bit chars escaped
+        // ESCCTL/ESC8 share the ZSINIT TESCCTL/TESC8 bit positions by
+        // design (same meaning, advertised in the opposite direction);
+        // lock the aliasing so the two can't silently drift apart.
         const _: () = assert!(CANFDX == 0x01);
         const _: () = assert!(CANOVIO == 0x02);
         const _: () = assert!(CANFC32 == 0x20);
+        const _: () = assert!(ESCCTL == 0x40);
+        const _: () = assert!(ESC8 == 0x80);
+        const _: () = assert!(ESCCTL == TESCCTL);
+        const _: () = assert!(ESC8 == TESC8);
     }
 
     #[test]
@@ -3690,8 +4345,10 @@ mod tests {
         assert!(n > 0);
 
         // Send ZSINIT with TESCCTL set, then a small subpacket
-        // carrying an empty Attn sequence.
-        let zsinit = build_hex_header(ZSINIT, [TESCCTL, 0, 0, 0]);
+        // carrying an empty Attn sequence.  ZF0 is the *last* header
+        // data byte on the wire (Forsberg §11.2), so TESCCTL goes at
+        // index 3, not 0.
+        let zsinit = build_hex_header(ZSINIT, [0, 0, 0, TESCCTL]);
         s_write.write_all(&zsinit).await.unwrap();
         // Empty Attn subpacket: just the close marker + CRC.
         let attn_sub = build_subpacket(&[], ZCRCW);
