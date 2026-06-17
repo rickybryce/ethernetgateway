@@ -712,6 +712,25 @@ ssh_port = 2222
 # config with non-default legacy `ssh_username` / `ssh_password` keys
 # is migrated into the unified pair on first load (only when the
 # unified pair is still at the factory defaults).
+
+# SSH gateway (outbound proxy) authentication method offered when bridging
+# a telnet session out to a remote SSH host (the SSH Gateway menu / ATDT).
+#   password — authenticate to the remote host with a password (default)
+#   key      — authenticate with the gateway's own SSH key
+ssh_gateway_auth = password
+
+# Web configuration server (browser-based config editor).
+# web_enabled: bind an HTTP server for editing the configuration from a
+#              browser.  Off by default.  Shares the unified username /
+#              password and the per-IP lockout with telnet and SSH.
+# web_port:    TCP port for the web configuration server (default 8080).
+web_enabled = false
+web_port = 8080
+
+# Gateway debug trace: extra per-connection diagnostics (AT commands and
+# their effect, gateway negotiation steps).  Noisier than `verbose` and
+# aimed at chasing connection-level issues; off by default.
+gateway_debug = false
 ```
 
 ### Setting Up Authentication
@@ -784,7 +803,7 @@ from menus on the gateway side:
 | **XMODEM** | 128 B (SOH) | CRC-16 or checksum | up/down | Auto-detects CRC vs. checksum on receive; classic single-file. |
 | **XMODEM-1K** | 1024 B (STX) | CRC-16 | up/down | Download option; on upload the XMODEM/YMODEM branch accepts STX blocks transparently. Opportunistically falls back to SOH if the peer NAKs the first STX. |
 | **YMODEM** | 1024 B + block-0 header | CRC-16 | up/down | Block 0 carries filename + size; the receive path auto-detects it. |
-| **ZMODEM** | variable subpackets (1 K default) | CRC-16 out, CRC-16 or CRC-32 in | up/down | Full Forsberg spec: ZRQINIT handshake, ZDLE escaping, ZSKIP, batch sends and receives. On upload the first file is saved under the name you entered; subsequent files in a batch use the sender's filename (validated, collisions skipped via ZSKIP). |
+| **ZMODEM** | variable subpackets (1 K default) | CRC-16 out, CRC-16 or CRC-32 in | up/down | Full Forsberg spec: ZRQINIT handshake, ZDLE escaping, ZSKIP, batch sends and receives. On upload the first file is saved under the name you entered; subsequent files in a batch use the sender's filename (validated, collisions skipped via ZSKIP). The one optional frame deliberately not implemented is `ZCOMMAND` (remote command execution) — it is always refused for security; use SSH for shell access. |
 | **Kermit** | configurable long packets (4096 default) | 6-bit / 12-bit checksum or CRC-16/KERMIT | up/down + server | Columbia spec — sliding windows, attribute packets, RESEND, locking shifts, 8-bit quoting. Both **client** (push/pull from the menu) and **server** (idle in the file-transfer menu's `K` slot, on the standalone TCP listener, or via `ATDT KERMIT`) modes. See the [Kermit Reference](http://ethernetgateway.com/kermit.html) for the full surface. |
 | **Punter** | 255 B blocks, 248 B payload (configurable down to 40) | dual checksum — 16-bit additive + cyclic rotate-left | up/down | C1 "New Punter" — the protocol CCGMS / Novaterm / StrikeTerm speak natively on Commodore BBSes. Two-phase transfer (type block then data blocks) with a 3-byte ASCII handshake. C1 has no in-band abort, so a stalled give-up can optionally drop carrier (`punter_hangup_on_failure`) to free a stranded C64. |
 

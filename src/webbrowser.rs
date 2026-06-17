@@ -159,6 +159,22 @@ fn internal_fetch_allowed() -> bool {
     cfg!(test) || crate::config::get_config().disable_ip_safety
 }
 
+/// Classify a URL host that is an IP literal.  `url::Url::host_str()`
+/// hands IPv6 literals back **bracketed** (e.g. `"[::1]"`), a form
+/// `IpAddr`'s parser rejects — strip the brackets first so a bracketed
+/// IPv6 literal is classified here instead of falling through to the
+/// resolver path (which can't resolve a bracketed string and would let it
+/// through, bypassing the SSRF guard for the entire IPv6 space).
+/// Returns `Some(internal?)` for an IP literal, or `None` when `host` is a
+/// DNS name that still needs resolution.
+fn host_literal_is_internal(host: &str) -> Option<bool> {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    bare.parse::<std::net::IpAddr>().ok().map(is_internal_ip)
+}
+
 /// Reject a URL whose host is — or resolves to — an internal/loopback
 /// address, unless `internal_fetch_allowed()`.  Applied to the initial
 /// request and the post-redirect landing URL so a telnet/SSH user can't
@@ -174,8 +190,8 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
         .host_str()
         .ok_or_else(|| "Blocked: URL has no host".to_string())?;
     // IP literal — check directly, no DNS.
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_internal_ip(ip) {
+    if let Some(internal) = host_literal_is_internal(host) {
+        return if internal {
             Err(format!("Blocked: {} is an internal address", host))
         } else {
             Ok(())
@@ -1272,6 +1288,28 @@ mod tests {
                 s
             );
         }
+    }
+
+    #[test]
+    fn test_host_literal_is_internal_handles_bracketed_ipv6() {
+        // url::Url::host_str() hands IPv6 literals back bracketed; the guard
+        // must classify them, not punt them to the resolver path (which
+        // can't resolve a bracketed string and would let them through).
+        // Regression for the SSRF bypass over the whole IPv6 space.
+        for s in ["[::1]", "[::ffff:127.0.0.1]", "[fe80::1]", "[fc00::1]"] {
+            assert_eq!(host_literal_is_internal(s), Some(true), "{} must block", s);
+        }
+        // Bare (un-bracketed) literals still classify correctly.
+        assert_eq!(host_literal_is_internal("::1"), Some(true));
+        assert_eq!(host_literal_is_internal("127.0.0.1"), Some(true));
+        // Public literals (bracketed or not) are allowed through.
+        assert_eq!(host_literal_is_internal("8.8.8.8"), Some(false));
+        assert_eq!(
+            host_literal_is_internal("[2606:4700:4700::1111]"),
+            Some(false)
+        );
+        // DNS names are not literals — they need resolution.
+        assert_eq!(host_literal_is_internal("example.com"), None);
     }
 
     #[test]

@@ -12338,7 +12338,10 @@ impl TelnetSession {
 
             let page_h = Self::WEB_PAGE_HEIGHT;
             let total = self.web_lines.len();
-            let start = self.web_scroll;
+            // Defensive clamp: never let a scroll position index past the
+            // current page — guarantees the page_lines slice below can't
+            // panic regardless of how web_scroll was set.
+            let start = self.web_scroll.min(total.saturating_sub(1));
             let end = (start + page_h).min(total);
 
             let content_max = if self.terminal_type == TerminalType::Petscii {
@@ -12498,7 +12501,11 @@ impl TelnetSession {
                 "b" => {
                     if let Some((prev_url, prev_scroll)) = self.web_history.last().cloned() {
                         if self.web_fetch_page(&prev_url, false).await? {
-                            self.web_scroll = prev_scroll;
+                            // Clamp: the re-fetched page may be shorter than
+                            // it was when we saved prev_scroll (dynamic pages),
+                            // and an out-of-range scroll panics the render slice.
+                            self.web_scroll =
+                                prev_scroll.min(self.web_lines.len().saturating_sub(1));
                             self.web_history.pop();
                         }
                     } else {

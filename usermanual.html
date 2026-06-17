@@ -610,6 +610,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>punter_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the file-type handshake to complete.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block read timeout once a transfer is live.</td></tr>
         <tr><td><code>punter_max_retries</code></td><td>u32</td><td><code>10</code></td><td>Retry cap per block before the session aborts.</td></tr>
+        <tr><td><code>punter_max_bad_rounds</code></td><td>u32</td><td><code>30</code></td><td>Consecutive corrupt-block resend rounds tolerated before giving up. Kept higher than <code>punter_max_retries</code> &mdash; a real C64 peer never caps its resends, so a low value would make the gateway quit first and strand the peer.</td></tr>
+        <tr><td><code>punter_hangup_on_failure</code></td><td>bool</td><td><code>false</code></td><td>On give-up, drop the connection (carrier) so a C64 &mdash; which C1 cannot be told to abort &mdash; sees loss-of-carrier and exits instead of hanging. Ends the whole session; off by default.</td></tr>
         <tr><td><code>punter_negotiation_retry_interval</code></td><td>u64</td><td><code>5</code></td><td>Seconds between handshake re-sends while waiting for the peer.</td></tr>
     </tbody>
 </table>
@@ -1446,6 +1448,31 @@ clients that don't emit the autostart prefix (some MS-DOS-era
 implementations, scripted <code>sz</code> on Unix).
 </p>
 
+<aside class="note">
+<span class="label">ZCOMMAND is recognized but never executed</span>
+The ZMODEM spec defines one <em>optional</em> frame the gateway deliberately does
+<strong>not</strong> implement: <code>ZCOMMAND</code> (frame <code>0x12</code>). It is
+not part of ZMODEM's required core &mdash; a fully spec-compliant implementation need not
+support it (Forsberg's own reference receiver, <code>rz</code>, refuses it unless started
+with an explicit <code>--allow-commands</code> flag), and most transfers never use it. It
+lets a connected <em>sender</em> push a shell command for the <em>receiver</em> to run,
+returning the
+command's exit status in a <code>ZCOMPL</code> header — on Chuck Forsberg's original
+Unix <code>rzsz</code> reference code the command string is handed straight to
+<code>/bin/sh -c</code> (its classic use was a sender pushing <code>sz somefile</code>
+to auto-start a download). That is, in plain terms, <strong>arbitrary remote code
+execution on the host</strong>, which is an unacceptable default for a long-lived,
+multi-session server: unlike Forsberg's throwaway single-session <code>rz</code>, one
+ZMODEM session here shares the process with every other connected user. Rather than
+ignore the frame, the gateway handles it defensively — it recognizes <code>ZCOMMAND</code>,
+drains the command subpacket (so the wire stays in sync), replies a non-zero
+<code>ZCOMPL</code> (refused), and ends the session. Every ZCOMMAND request is rejected,
+and there is no configuration switch to enable it. If you need a shell on the gateway
+host, use the authenticated <a href="#ch6">SSH interface</a> (Chapter 6) — that is the
+proper, encrypted, login-gated path for command access. Every other Forsberg 1988 frame
+is fully implemented.
+</aside>
+
 <h2>8.6 Telnet NVT Transforms</h2>
 
 <p>
@@ -1560,6 +1587,8 @@ file transfer — no restart required.
         <tr><td><code>punter_negotiation_retry_interval</code></td><td>5 s</td><td>Gap between handshake re-sends while waiting for the peer to respond.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>20 s</td><td>Per-block read timeout once a transfer is live.</td></tr>
         <tr><td><code>punter_max_retries</code></td><td>10</td><td>Retry cap per block (BAD/SYN re-sends) before the session aborts.</td></tr>
+        <tr><td><code>punter_max_bad_rounds</code></td><td>30</td><td>Consecutive corrupt-block resend rounds tolerated before giving up &mdash; kept higher than <code>punter_max_retries</code> because a real C64 peer never caps its resends, so a low value would make the gateway quit first and strand the peer.</td></tr>
+        <tr><td><code>punter_hangup_on_failure</code></td><td>false</td><td>On give-up, drop the connection (carrier) so a C64 &mdash; which C1 cannot be told to abort &mdash; sees loss-of-carrier and exits instead of hanging. Ends the whole session; off by default.</td></tr>
     </tbody>
 </table>
 
@@ -2879,6 +2908,8 @@ numeric values fall back to the default.
         <tr><td><code>punter_block_size</code></td><td>u16</td><td><code>255</code></td><td>8&ndash;255</td><td>Punter C1 total block size in bytes (7-byte header included; 248-byte payload at the default). Lower toward ~40 on a noisy line to shrink the retransmit unit.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>&ge; 1 (seconds)</td><td>Per-block read timeout once a Punter transfer is live.</td></tr>
         <tr><td><code>punter_max_retries</code></td><td>u32</td><td><code>10</code></td><td>&ge; 1</td><td>Retry cap per block (BAD / SYN re-sends) before the session aborts.</td></tr>
+        <tr><td><code>punter_max_bad_rounds</code></td><td>u32</td><td><code>30</code></td><td>&ge; 1</td><td>Consecutive corrupt-block resend rounds tolerated before giving up (kept higher than <code>punter_max_retries</code>; a real C64 peer never caps its resends, so a low value strands it).</td></tr>
+        <tr><td><code>punter_hangup_on_failure</code></td><td>bool</td><td><code>false</code></td><td>true / false</td><td>Drop carrier on give-up so a stranded C64 (C1 has no in-band abort) sees loss-of-carrier instead of hanging. Ends the whole session; off by default.</td></tr>
         <tr><td><code>punter_negotiation_retry_interval</code></td><td>u64</td><td><code>5</code></td><td>&ge; 1 (seconds)</td><td>Gap between handshake-code re-sends during Punter negotiation.</td></tr>
         <tr><td><code>punter_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>&ge; 1 (seconds)</td><td>Seconds to wait for the Punter file-type handshake before giving up.</td></tr>
         <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Require login on telnet and SSH. Also required to accept public-IP telnet.</td></tr>

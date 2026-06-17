@@ -64,8 +64,7 @@ const ZFIN: u8 = 0x08;
 const ZRPOS: u8 = 0x09;
 const ZDATA: u8 = 0x0A;
 const ZEOF: u8 = 0x0B;
-#[allow(dead_code)]
-const ZFERR: u8 = 0x0C;
+const ZFERR: u8 = 0x0C; // sender→receiver "file read/write error"; we abort the receive cleanly
 const ZCRC: u8 = 0x0D; // CRC-32 request/answer for verified resume; we answer a receiver's request (sender side)
 const ZCHALLENGE: u8 = 0x0E; // receiver→sender liveness check; sender echoes the value in ZACK
 const ZCOMPL: u8 = 0x0F; // command-completion status; we send it (nonzero) to refuse ZCOMMAND
@@ -1013,6 +1012,18 @@ where
             }
             ZABORT => {
                 return Err("ZMODEM: sender aborted".into());
+            }
+            ZFERR => {
+                // Forsberg §8: the sender hit a file read/write error and
+                // cannot continue.  Unlike ZSTDERR (informational) this is a
+                // terminal condition — abort the receive cleanly with an
+                // informative error instead of ignoring it and waiting out a
+                // frame timeout.  ZFERR is a header-only control frame; no
+                // data subpacket follows it, so there is nothing to drain.
+                if verbose {
+                    glog!("ZMODEM recv: sender reported a file I/O error (ZFERR)");
+                }
+                return Err("ZMODEM: sender reported a file I/O error (ZFERR)".into());
             }
             ZSINIT => {
                 // Per Forsberg §11.3 the sender uses ZSINIT to declare
@@ -2911,6 +2922,36 @@ mod tests {
             Err(e) if e.contains("aborted") => {}
             Err(e) => panic!("expected 'aborted' error, got Err({:?})", e),
             Ok(_) => panic!("expected abort error, receiver returned Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receiver_handles_zferr_from_sender() {
+        // Sender signals a file read/write error (ZFERR, Forsberg §8); our
+        // receiver must surface it as an error rather than ignoring the frame
+        // (the old behavior) and waiting out a frame timeout.  ZFERR is a
+        // header-only control frame, so no subpacket follows.
+        let zferr = build_hex_header(ZFERR, [0, 0, 0, 0]);
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(1024);
+        inbound_writer.write_all(&zferr).await.unwrap();
+        drop(inbound_writer);
+        let (mut discard_reader, mut outbound_writer) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while discard_reader.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let result = zmodem_receive(
+            &mut inbound_reader,
+            &mut outbound_writer,
+            false,
+            false,
+            |_, _, _| true,
+        )
+        .await;
+        match result {
+            Err(e) if e.contains("ZFERR") => {}
+            Err(e) => panic!("expected ZFERR error, got Err({:?})", e),
+            Ok(_) => panic!("expected ZFERR error, receiver returned Ok"),
         }
     }
 

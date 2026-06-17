@@ -637,12 +637,37 @@
                     <tr><td><code>ZRPOS</code></td><td>0x09</td><td>Receiver</td><td>&ldquo;Resume at this byte offset&rdquo; &mdash; accept, recover, or resume.</td></tr>
                     <tr><td><code>ZDATA</code></td><td>0x0A</td><td>Sender</td><td>Data frame at a byte offset; subpackets follow.</td></tr>
                     <tr><td><code>ZEOF</code></td><td>0x0B</td><td>Sender</td><td>End of file &mdash; argument is the final length.</td></tr>
+                    <tr><td><code>ZFERR</code></td><td>0x0C</td><td>Sender</td><td>Sender hit a file read/write error and can't continue &mdash; the gateway (as receiver) aborts the transfer cleanly rather than waiting out a timeout.</td></tr>
                     <tr><td><code>ZCRC</code></td><td>0x0D</td><td>Either</td><td>Verified-resume CRC. A receiver holding a partial file asks the sender to prove the first N bytes match (N=0 means whole file); the gateway (as sender) answers with the <code>CRC-32</code> of those bytes so the peer can resume safely instead of restarting.</td></tr>
                     <tr><td><code>ZCHALLENGE</code></td><td>0x0E</td><td>Receiver</td><td>Optional liveness check &mdash; the gateway (as sender) echoes the value back in a <code>ZACK</code>.</td></tr>
                     <tr><td><code>ZFREECNT</code></td><td>0x11</td><td>Sender</td><td>Optional free-space query &mdash; the gateway (as receiver) answers with a <code>ZACK</code>.</td></tr>
-                    <tr><td><code>ZCOMMAND</code></td><td>0x12</td><td>Sender</td><td>&ldquo;Run this command&rdquo; &mdash; the gateway <strong>never executes it</strong> (security); it refuses with a non-zero <code>ZCOMPL</code>. Use SSH for shell access.</td></tr>
+                    <tr><td><code>ZCOMMAND</code></td><td>0x12</td><td>Sender</td><td><strong>Optional</strong> spec feature, <strong>not implemented</strong> &mdash; &ldquo;run this command.&rdquo; The gateway <strong>never executes it</strong>; it refuses every request with a non-zero <code>ZCOMPL</code>. Use SSH for shell access. See the note below.</td></tr>
                     <tr><td><code>ZSTDERR</code></td><td>0x13</td><td>Sender</td><td>Informational text for the receiver's stderr (progress notes, &ldquo;skipped because&hellip;&rdquo;). Purely cosmetic &mdash; the gateway (as receiver) drains and logs it without changing the transfer outcome.</td></tr>
                 </table>
+
+                <div class="callout callout-info">
+                    <strong>ZCOMMAND (0x12) is recognized but never executed.</strong>
+                    ZCOMMAND is an <em>optional</em> part of the ZMODEM spec &mdash; it is not
+                    required for a compliant implementation, and most transfers never use it.
+                    It lets a connected <em>sender</em> push a shell command for the
+                    <em>receiver</em> to run, returning the command's exit status in a
+                    <code>ZCOMPL</code> header. On Chuck Forsberg's original Unix
+                    <code>rzsz</code> reference code the command string is handed straight to
+                    <code>/bin/sh -c</code>; its classic use was a sender pushing
+                    <code>sz somefile</code> to auto-start a download.
+                    <br><br>
+                    That is <strong>arbitrary remote code execution on the host</strong>, which
+                    is an unacceptable default for a long-lived, multi-session server: unlike
+                    Forsberg's throwaway single-session <code>rz</code>, one ZMODEM session here
+                    shares the process with every other connected user. The gateway therefore
+                    handles the frame <em>defensively</em> rather than ignoring it &mdash; it
+                    recognizes <code>ZCOMMAND</code>, drains the command subpacket so the wire
+                    stays in sync, replies a non-zero <code>ZCOMPL</code> (refused), and ends the
+                    session. Every request is rejected and there is no configuration switch to
+                    enable it. For command access, use the authenticated, encrypted
+                    <strong>SSH interface</strong> instead. Every other Forsberg 1988 frame is
+                    fully implemented.
+                </div>
 
                 <div class="cat">Subpacket terminators</div>
                 <p class="dim-text">

@@ -5,6 +5,19 @@ All notable changes to **ethernet-gateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Fixed an SSRF-guard bypass for IPv6-literal URLs in the text-mode web browser.** `guard_public_url` classified IP literals with `IpAddr::parse`, but `url::Url::host_str()` returns IPv6 literals *bracketed* (e.g. `[::1]`), which fails that parse and fell through to the resolver path — allowing `http://[::1]/`, `http://[::ffff:127.0.0.1]/`, and the like to reach loopback / link-local / internal IPv6 services (initial request and every redirect hop). The guard now strips the brackets before classifying, blocking the entire internal IPv6 space. Regression test added. IPv4 literals and DNS names were already handled correctly.
+
+### Fixed
+- **ZMODEM: `ZFERR` (0x0C) is now handled instead of ignored.** A sender's file read/write-error frame aborts the receive cleanly with an informative error rather than falling through to the ignore arm and waiting out a frame timeout. Every Forsberg 1988 frame is now handled.
+- **Text-mode web browser: fixed a remote-triggerable panic on Back.** Returning to a previous page whose re-fetched content is shorter than the saved scroll position could index past the page and panic the session task. The scroll position is now clamped on restore and again defensively at render time.
+
+### Documentation
+- **Documented ZMODEM `ZCOMMAND` (frame 0x12) as the one optional spec frame deliberately not implemented** — it is recognized but always refused (non-zero `ZCOMPL`), since arbitrary `/bin/sh -c` execution on a shared, long-lived host is an unacceptable default; use SSH for shell access. Noted in the user manual and the ZMODEM web reference.
+- Documented previously-undocumented config keys: `web_enabled`, `web_port`, `gateway_debug`, and `ssh_gateway_auth` in the README config reference, and `punter_max_bad_rounds` / `punter_hangup_on_failure` in the user manual. Added the now-handled `ZFERR` frame to the ZMODEM web reference and completed the CLAUDE.md architecture table (added `kermit.rs`, `serial.rs`, `tnio.rs`, `webserver.rs`, `webbrowser.rs`, `logger.rs`).
+
 ## [0.6.1] - 2026-06-06
 
 ### Added
