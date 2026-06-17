@@ -66,12 +66,14 @@ const ZDATA: u8 = 0x0A;
 const ZEOF: u8 = 0x0B;
 #[allow(dead_code)]
 const ZFERR: u8 = 0x0C;
+const ZCRC: u8 = 0x0D; // CRC-32 request/answer for verified resume; we answer a receiver's request (sender side)
 const ZCHALLENGE: u8 = 0x0E; // receiver→sender liveness check; sender echoes the value in ZACK
 const ZCOMPL: u8 = 0x0F; // command-completion status; we send it (nonzero) to refuse ZCOMMAND
 #[allow(dead_code)]
 const ZCAN: u8 = 0x10;
 const ZFREECNT: u8 = 0x11; // sender→receiver free-space query; receiver answers with ZACK
 const ZCOMMAND: u8 = 0x12; // sender→receiver "run this command"; we refuse it (security)
+const ZSTDERR: u8 = 0x13; // sender→receiver text for the receiver's stderr; we drain + log it (receive side)
 
 // ZRINIT capability flags (ZF0 byte of the ZRINIT header).  Per Forsberg
 // §11.2 the ZF0 byte is the *last* of the four header data bytes on the
@@ -1111,6 +1113,45 @@ where
                 }
                 return Err("ZMODEM: refused remote command request (ZCOMMAND)".into());
             }
+            ZSTDERR => {
+                // Sender wants to print an informational message on our
+                // stderr (Forsberg §8.1) — progress notes, "file skipped
+                // because…", etc.  Purely cosmetic: it never carries file
+                // data and never changes the outcome.  We don't relay it to
+                // a real stderr (the receiver here is a gateway session, not
+                // a console), but we MUST drain the message subpacket that
+                // follows the header, exactly like the ZSINIT/ZCOMMAND
+                // drains — otherwise its bytes would be left on the wire and
+                // the next read_header would MARK-hunt past them.  A
+                // peer-cancel arriving here still short-circuits; any other
+                // read error is non-fatal since the message is throwaway.
+                match read_subpacket(
+                    reader,
+                    is_tcp,
+                    &mut state,
+                    hdr.crc_kind,
+                    MAX_SUBPACKET_DATA,
+                    cfg.zmodem_frame_timeout,
+                )
+                .await
+                {
+                    Ok(msg) => {
+                        if verbose {
+                            glog!(
+                                "ZMODEM recv: ZSTDERR message ({} bytes): {:?}",
+                                msg.data.len(),
+                                String::from_utf8_lossy(&msg.data)
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if is_peer_cancel(&e) {
+                            return Err(e);
+                        }
+                    }
+                }
+                continue;
+            }
             other => {
                 if verbose {
                     glog!("ZMODEM recv: ignoring header type 0x{:02X}", other);
@@ -1626,6 +1667,13 @@ pub(crate) async fn zmodem_send(
         info.push(0);
 
         let mut zfile_attempts: u32 = 0;
+        // Bounds ZCRC answers for this file.  A legitimate receiver asks at
+        // most once per file (lrzsz `rz`), but answering doesn't burn the
+        // ZFILE-retransmit retry, so without its own cap a peer that floods
+        // ZCRC would spin the inner loop forever recomputing crc32 over the
+        // whole (≤8 MB) buffer.  Reuse the tunable retry budget as the
+        // ceiling — generous for real peers, finite for a hostile one.
+        let mut zcrc_answers: u32 = 0;
         let start_pos: u32;
         let mut skipped = false;
         'zfile: loop {
@@ -1686,6 +1734,31 @@ pub(crate) async fn zmodem_send(
                             glog!("ZMODEM send: receiver cancelled while awaiting ZRPOS");
                         }
                         return Err(PEER_CANCEL_ERR.into());
+                    }
+                    Ok(Ok(h)) if h.frame == ZCRC => {
+                        // Receiver wants verified resume (Forsberg §8.2): it
+                        // holds a partial copy and asks us to prove the first
+                        // N bytes match before it resumes by appending.  The
+                        // request's position field is N; 0 (and any count past
+                        // EOF) means "the whole file" — this matches lrzsz
+                        // `sz`, which CRCs `st_size` bytes when rxpos==0 and
+                        // exactly the first N otherwise.  Answer with the
+                        // CRC-32 of those bytes and keep waiting for ZRPOS —
+                        // proof of life, so don't retransmit ZFILE or burn a
+                        // retry.  ZCRC only ever arrives in this ZFILE→ZRPOS
+                        // window, never mid-data, so the data-phase wait below
+                        // needs no equivalent arm.  Cap the answers per file
+                        // (see `zcrc_answers`) so a peer can't tar-pit us with
+                        // repeated whole-file CRC requests.
+                        zcrc_answers += 1;
+                        if zcrc_answers > max_retries {
+                            send_cancel(writer, is_tcp).await.ok();
+                            return Err("ZMODEM: too many ZCRC requests from receiver".into());
+                        }
+                        let n = h.position() as usize;
+                        let n = if n == 0 || n > data.len() { data.len() } else { n };
+                        send_zcrc(writer, is_tcp, crc32(&data[..n]), verbose).await?;
+                        continue;
                     }
                     Ok(Ok(h)) => {
                         if verbose {
@@ -2033,6 +2106,28 @@ async fn send_zskip(
     raw_write_bytes(writer, &frame, is_tcp).await?;
     if verbose {
         glog!("ZMODEM: sent ZSKIP");
+    }
+    Ok(())
+}
+
+/// Answer a receiver's ZCRC request (Forsberg §8.2, verified resume).
+/// The receiver, holding a partial copy, asks us to prove our copy's
+/// first N bytes match before it resumes by appending; we reply with a
+/// ZCRC header carrying the CRC-32 of those bytes in ZP0..ZP3.  Emitted
+/// as a hex header — `crc` can pack arbitrary control bytes, and a hex
+/// frame keeps the value 7-bit-clean without any ZDLE escaping; real
+/// `rz` parses the reply header by indicator byte, so hex vs binary is
+/// immaterial to it (lrzsz `sz` itself uses a binary header here).
+async fn send_zcrc(
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    crc: u32,
+    verbose: bool,
+) -> Result<(), String> {
+    let frame = build_hex_header(ZCRC, crc.to_le_bytes());
+    raw_write_bytes(writer, &frame, is_tcp).await?;
+    if verbose {
+        glog!("ZMODEM: sent ZCRC(0x{:08X})", crc);
     }
     Ok(())
 }
@@ -2914,6 +3009,296 @@ mod tests {
             }
         }
         sender.await.unwrap().expect("sender failed after ZCHALLENGE");
+    }
+
+    // ─── ZCRC (sender answers a verified-resume request) ─────
+
+    #[tokio::test]
+    async fn test_sender_answers_zcrc() {
+        // A receiver doing verified resume sends a ZCRC request in the
+        // ZFILE→ZRPOS window: the position field is N, the byte count to
+        // checksum (0 = whole file).  The sender must reply with a ZCRC
+        // header carrying the CRC-32 of the first N bytes, matching lrzsz
+        // `sz` (CRC over `st_size` bytes when rxpos==0, else the first N).
+        // We pin the partial (N>0), whole-file (N=0), AND past-EOF (N >
+        // len, which lrzsz `sz` clamps to the whole file via its getc/EOF
+        // loop) cases against our own crc32() — the same routine real
+        // `sz`/`rz` agree with (the #[ignore] live-rz interop test
+        // validates the wire end-to-end).  Answering must not retransmit
+        // ZFILE or burn a retry, so we send the requests back-to-back
+        // before ZSKIP and expect each answered.
+        let payload: Vec<u8> = (0..2500u32).map(|i| (i ^ (i >> 5)) as u8).collect();
+        const N_PARTIAL: u32 = 1000;
+        let expect_partial = crc32(&payload[..N_PARTIAL as usize]);
+        let expect_whole = crc32(&payload);
+        // Distinct CRCs guarantee the test would catch a reply that
+        // ignored N and always CRC'd the whole file (or vice versa).
+        assert_ne!(expect_partial, expect_whole);
+
+        let (sender_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (s_read, s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let send_payload = payload.clone();
+        let sender = tokio::spawn(async move {
+            let (mut s_read, mut s_write) = (s_read, s_write);
+            let batch: [(&str, &[u8]); 1] = [("resume.bin", &send_payload)];
+            zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await
+        });
+
+        let mut st = ReadState::default();
+        // Wait for the sender's ZRQINIT, then advertise readiness.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRQINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZRQINIT: {}", e),
+            }
+        }
+        m_write
+            .write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]))
+            .await
+            .unwrap();
+        // Read the sender's ZFILE and drain its info subpacket.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    let _ = read_subpacket(&mut m_read, false, &mut st, h.crc_kind, MAX_SUBPACKET_DATA, 5).await;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZFILE: {}", e),
+            }
+        }
+        // Partial, then whole-file (N=0), then past-EOF (must clamp to the
+        // whole file); assert each answer.
+        let past_eof = payload.len() as u32 + 500;
+        for (req_n, want) in [
+            (N_PARTIAL, expect_partial),
+            (0u32, expect_whole),
+            (past_eof, expect_whole),
+        ] {
+            m_write
+                .write_all(&build_hex_header(ZCRC, req_n.to_le_bytes()))
+                .await
+                .unwrap();
+            loop {
+                match read_header(&mut m_read, false, &mut st, false).await {
+                    Ok(h) if h.frame == ZCRC => {
+                        // Effective byte count CRC'd: clamp N==0 or N>len to len.
+                        let effective = if req_n == 0 || req_n as usize > payload.len() {
+                            payload.len() as u32
+                        } else {
+                            req_n
+                        };
+                        assert_eq!(
+                            h.position(),
+                            want,
+                            "ZCRC answer for N={} must be crc32 of first {} bytes",
+                            req_n,
+                            effective
+                        );
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) => panic!("waiting for ZCRC answer (N={}): {}", req_n, e),
+                }
+            }
+        }
+        // Decline the file so the sender finishes without a data phase.
+        m_write.write_all(&build_hex_header(ZSKIP, [0, 0, 0, 0])).await.unwrap();
+        while let Ok(h) = read_header(&mut m_read, false, &mut st, false).await {
+            if h.frame == ZFIN {
+                m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+                break;
+            }
+        }
+        sender.await.unwrap().expect("sender failed after ZCRC");
+    }
+
+    #[tokio::test]
+    async fn test_sender_bounds_zcrc_flood() {
+        // Answering ZCRC is proof-of-life and deliberately doesn't burn the
+        // ZFILE-retransmit retry, so it carries its own per-file cap.  A peer
+        // that floods ZCRC (each answer is a whole-file crc32) must be cut
+        // off rather than spinning the inner loop forever.  Drive exactly
+        // `max_retries` requests through (all answered), then one more and
+        // assert the sender cancels with the bound's error.
+        let max_retries = config::get_config().zmodem_max_retries;
+        let payload: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+
+        let (sender_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (s_read, s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let send_payload = payload.clone();
+        let sender = tokio::spawn(async move {
+            let (mut s_read, mut s_write) = (s_read, s_write);
+            let batch: [(&str, &[u8]); 1] = [("flood.bin", &send_payload)];
+            zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await
+        });
+
+        let mut st = ReadState::default();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRQINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZRQINIT: {}", e),
+            }
+        }
+        m_write
+            .write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]))
+            .await
+            .unwrap();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    let _ = read_subpacket(&mut m_read, false, &mut st, h.crc_kind, MAX_SUBPACKET_DATA, 5).await;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZFILE: {}", e),
+            }
+        }
+        // `max_retries` requests are all answered (lockstep so we never
+        // outrun the sender), the next trips the cap.
+        for i in 0..max_retries {
+            m_write.write_all(&build_hex_header(ZCRC, [0, 0, 0, 0])).await.unwrap();
+            loop {
+                match read_header(&mut m_read, false, &mut st, false).await {
+                    Ok(h) if h.frame == ZCRC => break,
+                    Ok(_) => continue,
+                    Err(e) => panic!("expected ZCRC answer #{}: {}", i + 1, e),
+                }
+            }
+        }
+        // One past the cap — the sender cancels and returns the bound error.
+        m_write.write_all(&build_hex_header(ZCRC, [0, 0, 0, 0])).await.unwrap();
+        match sender.await.unwrap() {
+            Err(e) => assert!(
+                e.contains("too many ZCRC"),
+                "expected the ZCRC-flood bound error, got {:?}",
+                e
+            ),
+            Ok(_) => panic!("sender must abort a ZCRC flood, not complete"),
+        }
+    }
+
+    // ─── ZSTDERR (receiver drains the message subpacket) ─────
+
+    #[tokio::test]
+    async fn test_receiver_drains_zstderr() {
+        // A sender may emit a ZSTDERR header + message subpacket to print
+        // an informational note on the receiver's stderr.  We don't relay
+        // it, but we MUST drain the subpacket so the wire stays in sync —
+        // otherwise its bytes would derail the next read_header.  Prove
+        // the receiver consumes ZSTDERR cleanly and goes on to receive the
+        // file that follows.
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        // Wait for the receiver's opening ZRINIT.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+        // Send ZSTDERR + a message subpacket BEFORE the file — if the
+        // subpacket weren't drained, the following ZFILE header would be
+        // mis-read and the transfer would fail.
+        let mut stderr_frame = build_bin16_header(ZSTDERR, [0, 0, 0, 0]);
+        stderr_frame.extend_from_slice(&build_subpacket(b"sender note: heads up\n", ZCRCW));
+        m_write.write_all(&stderr_frame).await.unwrap();
+
+        // Now send a normal one-file transfer.
+        let body = b"file body after a ZSTDERR message";
+        let mut info = Vec::new();
+        info.extend_from_slice(b"after_stderr.txt\0");
+        info.extend_from_slice(format!("{} 0 0 0 0 {}", body.len(), body.len()).as_bytes());
+        info.push(0);
+        let mut zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
+        zfile.extend_from_slice(&build_subpacket(&info, ZCRCW));
+        m_write.write_all(&zfile).await.unwrap();
+        // Wait for ZRPOS, then send ZDATA + final subpacket + ZEOF.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRPOS => break,
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZRPOS: {}", e),
+            }
+        }
+        let mut data_frame = build_bin16_header(ZDATA, 0u32.to_le_bytes());
+        data_frame.extend_from_slice(&build_subpacket(body, ZCRCE));
+        m_write.write_all(&data_frame).await.unwrap();
+        m_write
+            .write_all(&build_hex_header(ZEOF, (body.len() as u32).to_le_bytes()))
+            .await
+            .unwrap();
+        // Receiver answers ZEOF with ZRINIT; close the batch with ZFIN.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => {
+                    m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for post-ZEOF ZRINIT: {}", e),
+            }
+        }
+
+        let files = recv.await.unwrap().expect("receive failed across ZSTDERR");
+        assert_eq!(files.len(), 1, "exactly one file after the ZSTDERR note");
+        assert_eq!(files[0].filename, "after_stderr.txt");
+        assert_eq!(files[0].data, body, "file body intact across ZSTDERR drain");
+    }
+
+    #[tokio::test]
+    async fn test_receiver_zstderr_peer_cancel() {
+        // A peer-cancel arriving while we drain the ZSTDERR message
+        // subpacket must short-circuit the receive (not be masked by the
+        // throwaway-message handling).  Send a ZSTDERR header, then a CAN
+        // run where the subpacket bytes would be — the drain's
+        // `read_subpacket` surfaces a peer-cancel, and the ZSTDERR arm
+        // re-raises it.  Mirrors `test_receiver_detects_can_run_abort`.
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+        // ZSTDERR header, then 8×CAN instead of a valid message subpacket.
+        m_write.write_all(&build_bin16_header(ZSTDERR, [0, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&[ZDLE; 8]).await.unwrap(); // CAN run
+        drop(m_write);
+
+        match recv.await.unwrap() {
+            Err(e) => assert!(
+                is_peer_cancel(&e),
+                "ZSTDERR drain must propagate a peer-cancel, got {:?}",
+                e
+            ),
+            Ok(_) => panic!("receiver must abort on a cancel during ZSTDERR drain"),
+        }
     }
 
     // ─── ZFREECNT (receiver answers with free count) ─────────
@@ -4049,6 +4434,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ─── lrzsz interop: `rz -H` ZCRC verified resume → our sender ─
+    //
+    // `rz --crc-check` (-H) sets ZMODEM management ZF1_ZMCRC: when a file
+    // of the same name already exists, rz computes its CRC-32 and asks the
+    // *sender* for the matching CRC before deciding to transfer.  This is
+    // the one path that drives our send-side ZCRC answer (`send_zcrc`)
+    // against real lrzsz — the unit test `test_sender_answers_zcrc` pins
+    // the exact value; this proves the request/answer handshake survives
+    // the real wire (PTY framing, hex-header parse by `rz`'s zgethdr).
+    //
+    // Setup detail that makes the test meaningful:
+    //   * the local file must be the SAME LENGTH as our payload — for a
+    //     whole-file request (rxpos==0) rz short-circuits to "differs"
+    //     WITHOUT asking us if the lengths already disagree (lrz.c
+    //     do_crc_check), so a different length would never exercise
+    //     `send_zcrc`;
+    //   * its CONTENT differs, so the real CRC compare yields "differs" →
+    //     rz transfers and overwrites with our bytes.
+    // If our ZCRC answer were missing, rz's do_crc_check returns ERROR
+    // after its retries → rz skips the file → the OLD content survives.
+    // So `after == new_content` proves the answer was sent and parsed.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn test_lrzsz_rz_zcrc_verified_resume() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        if Command::new("rz")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            panic!("rz (lrzsz) not found on PATH");
+        }
+
+        let tmp = std::env::temp_dir()
+            .join(format!("zmodem_rz_zcrc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // New payload we send, and a same-length / different-content
+        // local file so the whole-file CRC compare actually runs.
+        let new_content: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(31) ^ 0xA5) as u8).collect();
+        let old_content: Vec<u8> = vec![0u8; new_content.len()];
+        assert_eq!(old_content.len(), new_content.len());
+        assert_ne!(old_content, new_content);
+        std::fs::write(tmp.join("target.dat"), &old_content).unwrap();
+
+        let mut rz = Command::new("rz")
+            .arg("-b") // binary (no CR/LF translation)
+            // --crc-check (ZF1_ZMCRC): verify via ZCRC before transferring.
+            // Use the long form: this lrzsz build accepts it via getopt_long
+            // even though the short `-H` is absent from its optstring.
+            .arg("--crc-check")
+            .arg("-q") // quiet
+            // NOTE: no -y — clobber mode skips the existing-file CRC check.
+            .current_dir(&tmp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn rz --crc-check");
+
+        let mut rz_stdin = rz.stdin.take().unwrap();
+        let mut rz_stdout = rz.stdout.take().unwrap();
+
+        let batch: [(&str, &[u8]); 1] = [("target.dat", &new_content)];
+        let send_result =
+            zmodem_send(&mut rz_stdout, &mut rz_stdin, &batch, false, true).await;
+        let _ = rz.wait().await;
+        send_result.expect("zmodem_send against rz --crc-check failed");
+
+        let after = std::fs::read(tmp.join("target.dat")).unwrap();
+        assert_eq!(
+            after, new_content,
+            "rz --crc-check must transfer (CRC differs) — our ZCRC answer drives the decision"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ─── lrzsz interop: `sz -e` (force-escape) → our receiver ─
     //
     // `sz -e` forces sz to ZDLE-escape control characters that aren't
@@ -4257,12 +4728,13 @@ mod tests {
         // §11 frame type byte values for the frames we use, plus our
         // internal ZCAN sentinel (0x10).  We also answer ZCHALLENGE
         // (0x0E, echo in ZACK), ZFREECNT (0x11, reply with free count),
-        // and ZCOMMAND (0x12) — which we refuse by sending ZCOMPL (0x0F)
+        // ZCRC (0x0D, answer a verified-resume request with the file's
+        // CRC-32), and drain ZSTDERR (0x13, an informational stderr
+        // message).  ZCOMMAND (0x12) we refuse by sending ZCOMPL (0x0F)
         // with a non-zero status (we never execute remote commands).
-        // Forsberg's remaining frames — ZCRC (0x0D) and ZSTDERR (0x13) —
-        // we neither issue nor recognize.  Lock down the exact bytes — a
-        // refactor that renumbers any of these would break wire
-        // compatibility with every other ZMODEM implementation.
+        // Lock down the exact bytes — a refactor that renumbers any of
+        // these would break wire compatibility with every other ZMODEM
+        // implementation.
         const _: () = assert!(ZRQINIT == 0x00);
         const _: () = assert!(ZRINIT == 0x01);
         const _: () = assert!(ZSINIT == 0x02);
@@ -4276,11 +4748,13 @@ mod tests {
         const _: () = assert!(ZDATA == 0x0A);
         const _: () = assert!(ZEOF == 0x0B);
         const _: () = assert!(ZFERR == 0x0C);
+        const _: () = assert!(ZCRC == 0x0D);
         const _: () = assert!(ZCHALLENGE == 0x0E);
         const _: () = assert!(ZCOMPL == 0x0F);
         const _: () = assert!(ZCAN == 0x10);
         const _: () = assert!(ZFREECNT == 0x11);
         const _: () = assert!(ZCOMMAND == 0x12);
+        const _: () = assert!(ZSTDERR == 0x13);
     }
 
     #[test]

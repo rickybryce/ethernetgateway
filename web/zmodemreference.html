@@ -637,9 +637,11 @@
                     <tr><td><code>ZRPOS</code></td><td>0x09</td><td>Receiver</td><td>&ldquo;Resume at this byte offset&rdquo; &mdash; accept, recover, or resume.</td></tr>
                     <tr><td><code>ZDATA</code></td><td>0x0A</td><td>Sender</td><td>Data frame at a byte offset; subpackets follow.</td></tr>
                     <tr><td><code>ZEOF</code></td><td>0x0B</td><td>Sender</td><td>End of file &mdash; argument is the final length.</td></tr>
+                    <tr><td><code>ZCRC</code></td><td>0x0D</td><td>Either</td><td>Verified-resume CRC. A receiver holding a partial file asks the sender to prove the first N bytes match (N=0 means whole file); the gateway (as sender) answers with the <code>CRC-32</code> of those bytes so the peer can resume safely instead of restarting.</td></tr>
                     <tr><td><code>ZCHALLENGE</code></td><td>0x0E</td><td>Receiver</td><td>Optional liveness check &mdash; the gateway (as sender) echoes the value back in a <code>ZACK</code>.</td></tr>
                     <tr><td><code>ZFREECNT</code></td><td>0x11</td><td>Sender</td><td>Optional free-space query &mdash; the gateway (as receiver) answers with a <code>ZACK</code>.</td></tr>
                     <tr><td><code>ZCOMMAND</code></td><td>0x12</td><td>Sender</td><td>&ldquo;Run this command&rdquo; &mdash; the gateway <strong>never executes it</strong> (security); it refuses with a non-zero <code>ZCOMPL</code>. Use SSH for shell access.</td></tr>
+                    <tr><td><code>ZSTDERR</code></td><td>0x13</td><td>Sender</td><td>Informational text for the receiver's stderr (progress notes, &ldquo;skipped because&hellip;&rdquo;). Purely cosmetic &mdash; the gateway (as receiver) drains and logs it without changing the transfer outcome.</td></tr>
                 </table>
 
                 <div class="cat">Subpacket terminators</div>
@@ -822,6 +824,7 @@
                     <tr><td>Any data-phase error (bad subpacket CRC 16/32, a late or garbled header, a position mismatch)</td><td>The receiver re-sends <code>ZRPOS</code> with the last good byte offset and the sender resumes there &mdash; recovery is by <strong>position</strong>, not block number. All of these share one counter that <strong>resets on each good subpacket</strong> and bounds <em>consecutive</em> errors at <code>zmodem_max_retries</code> (default 10) before the receiver cancels.</td></tr>
                     <tr><td>Garbled header</td><td>Answered with <code>ZNAK</code> (or a repeated request); the frame is re-sent.</td></tr>
                     <tr><td>Resume a partial file</td><td>On <code>ZFILE</code> the receiver may answer a <strong>non-zero</strong> <code>ZRPOS</code>; the gateway-as-sender honors it and starts mid-file.</td></tr>
+                    <tr><td>Verified resume (CRC)</td><td>A receiver that wants to <em>prove</em> its partial copy matches before appending sends a <code>ZCRC</code> request (byte count N, or 0 for the whole file); the gateway-as-sender answers with the <code>CRC-32</code> of those bytes. On a match the peer resumes; on a mismatch it restarts from zero &mdash; either way no corruption. (lrzsz <code>rz --crc-check</code>.)</td></tr>
                     <tr><td>Decline one file</td><td><code>ZSKIP</code> &mdash; the gateway sends it to refuse a colliding name on receive, and honors it on send by advancing to the next file.</td></tr>
                     <tr><td>Abort</td><td><code>ZABORT</code>, or the <code>CAN</code> (0x18) run a terminal sends on Ctrl-X; the session tears down cleanly.</td></tr>
                     <tr><td>Stall (no data within <code>zmodem_frame_timeout</code>)</td><td>The receiver re-prompts with <code>ZRPOS</code> rather than abandoning the transfer on the first quiet moment, counting toward the same consecutive-error bound; the sender likewise retransmits stalled frames up to <code>zmodem_max_retries</code>.</td></tr>
