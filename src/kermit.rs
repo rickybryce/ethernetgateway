@@ -3263,6 +3263,16 @@ async fn send_d_and_z_streaming(
                 let mut to_retx: Vec<usize> = Vec::new();
                 for (i, p) in outstanding.iter().enumerate() {
                     if now >= p.sent_at + pkt_timeout {
+                        // Skip seqs that alias another outstanding packet:
+                        // retransmitting an ambiguous seq could land stale
+                        // data at the wrong offset (same hazard as the NAK
+                        // path in handle_streaming_response).  The Z
+                        // retransmit above still drives the stream to
+                        // completion, and a genuinely-missing packet
+                        // provokes a receiver NAK that aborts cleanly.
+                        if outstanding_seq_count(&outstanding, p.seq) > 1 {
+                            continue;
+                        }
                         to_retx.push(i);
                     }
                 }
@@ -3296,6 +3306,20 @@ async fn send_d_and_z_streaming(
             }
         }
     }
+}
+
+/// How many outstanding packets carry a given sequence number.  In
+/// streaming the whole file sits in `outstanding`, so once it spans more
+/// than one 64-value seq cycle (>64 packets) the same seq aliases multiple
+/// packets.  A NAK or timeout that names such a seq can't be resolved to a
+/// single packet — retransmitting the wrong one would land stale data at
+/// the wrong offset (D-packets carry no position field), silently
+/// corrupting the file.  Used to detect that case and fail loudly instead.
+fn outstanding_seq_count(
+    outstanding: &std::collections::VecDeque<OutstandingPacket>,
+    seq: u8,
+) -> usize {
+    outstanding.iter().filter(|p| p.seq == seq).count()
 }
 
 /// Handle a single response packet during streaming send.  Updates
@@ -3334,6 +3358,23 @@ async fn handle_streaming_response(
         return Ok(());
     }
     if resp.kind == TYPE_NAK {
+        // A NAK names only a sequence number.  Once the streamed file spans
+        // more than one 64-value seq cycle, that number aliases multiple
+        // outstanding packets and we CANNOT tell which one the receiver
+        // missed — retransmitting the wrong (stale) one would be appended at
+        // the wrong offset by the receiver, silently corrupting the file.
+        // Streaming is only valid over a reliable transport where NAKs don't
+        // occur (Frank da Cruz §6); if one arrives on an ambiguous seq, the
+        // link dropped a packet mid-stream and streaming can't recover it
+        // safely — abort loudly rather than risk corruption.
+        if outstanding_seq_count(outstanding, resp.seq) > 1 {
+            return Err(format!(
+                "Kermit: streaming NAK on ambiguous seq {} — the link dropped a packet \
+                 mid-stream and streaming cannot recover it without corruption; \
+                 disable kermit_streaming for this peer",
+                resp.seq
+            ));
+        }
         if let Some(idx) = outstanding.iter().position(|p| p.seq == resp.seq) {
             let bytes = {
                 let p = &mut outstanding[idx];
@@ -10900,6 +10941,54 @@ mod tests {
         assert!(!intersect_capabilities(&on, &off).streaming);
         assert!(!intersect_capabilities(&off, &on).streaming);
         assert!(intersect_capabilities(&on, &on).streaming);
+    }
+
+    // ---------- Streaming NAK seq-aliasing safety ----------
+
+    #[tokio::test]
+    async fn test_streaming_nak_on_aliased_seq_aborts() {
+        use std::collections::VecDeque;
+        // Once a streamed file spans more than one 64-value seq cycle, the
+        // same seq aliases multiple outstanding packets.  A NAK for that
+        // seq cannot be resolved to a single packet — retransmitting the
+        // wrong (stale) one would be silently appended at the wrong offset
+        // by the receiver.  The sender must abort loudly instead.
+        let now = tokio::time::Instant::now();
+        let mut outstanding: VecDeque<OutstandingPacket> = VecDeque::new();
+        outstanding.push_back(OutstandingPacket { seq: 5, bytes: vec![b'A'], sent_at: now, retries: 0 });
+        outstanding.push_back(OutstandingPacket { seq: 7, bytes: vec![b'B'], sent_at: now, retries: 0 });
+        outstanding.push_back(OutstandingPacket { seq: 5, bytes: vec![b'C'], sent_at: now, retries: 0 });
+        let nak = Packet { kind: TYPE_NAK, seq: 5, payload: vec![] };
+        let mut sink = tokio::io::sink();
+        let r = handle_streaming_response(nak, &mut outstanding, &mut sink, false, 10, false).await;
+        let err = r.expect_err("aliased-seq NAK must abort, not retransmit a guess");
+        assert!(
+            err.contains("ambiguous seq 5"),
+            "expected ambiguous-seq abort, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_nak_on_unique_seq_retransmits() {
+        use std::collections::VecDeque;
+        use tokio::io::AsyncReadExt;
+        // Control case (small file / no aliasing): a NAK whose seq is unique
+        // in `outstanding` still retransmits that exact packet, so the
+        // recovery path for non-aliased streams is unchanged.
+        let now = tokio::time::Instant::now();
+        let mut outstanding: VecDeque<OutstandingPacket> = VecDeque::new();
+        outstanding.push_back(OutstandingPacket { seq: 5, bytes: b"PKT5".to_vec(), sent_at: now, retries: 0 });
+        outstanding.push_back(OutstandingPacket { seq: 6, bytes: b"PKT6".to_vec(), sent_at: now, retries: 0 });
+        let nak = Packet { kind: TYPE_NAK, seq: 5, payload: vec![] };
+        let (mut wr, mut rd) = tokio::io::duplex(256);
+        let r = handle_streaming_response(nak, &mut outstanding, &mut wr, false, 10, false).await;
+        assert!(r.is_ok(), "unique-seq NAK should retransmit, got {r:?}");
+        // The seq-5 packet bytes must have been re-sent on the wire.
+        drop(wr);
+        let mut got = Vec::new();
+        rd.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"PKT5", "should retransmit the unique seq-5 packet");
+        assert_eq!(outstanding[0].retries, 1, "retry counter should advance");
     }
 
     // ---------- Effective packet timeout (peer TIME) ----------
