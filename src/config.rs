@@ -2646,6 +2646,47 @@ mod tests {
         assert_eq!(cfg.serial_a.mode, "console");
     }
 
+    /// Out-of-range numeric serial values on the apply path are rejected (the
+    /// prior value is kept), mirroring the file reader's clamping. Covers the
+    /// numeric fields the dispatch test above doesn't: baud (<300), x_code
+    /// (>4), dtr_mode (>3), flow_mode (>4), dcd_mode (>1), plus non-numeric.
+    #[test]
+    fn test_apply_serial_numeric_out_of_range_rejected() {
+        let mut cfg = Config::default();
+
+        // baud: below 300, or non-numeric, is rejected.
+        apply_config_key(&mut cfg, "serial_a_baud", "57600");
+        assert_eq!(cfg.serial_a.baud, 57600);
+        apply_config_key(&mut cfg, "serial_a_baud", "100");
+        assert_eq!(cfg.serial_a.baud, 57600, "baud < 300 must be rejected");
+        apply_config_key(&mut cfg, "serial_a_baud", "fast");
+        assert_eq!(cfg.serial_a.baud, 57600, "non-numeric baud must be rejected");
+
+        // x_code: valid 0..=4.
+        apply_config_key(&mut cfg, "serial_a_x_code", "4");
+        assert_eq!(cfg.serial_a.x_code, 4);
+        apply_config_key(&mut cfg, "serial_a_x_code", "5");
+        assert_eq!(cfg.serial_a.x_code, 4, "x_code > 4 must be rejected");
+
+        // dtr_mode: valid 0..=3.
+        apply_config_key(&mut cfg, "serial_a_dtr_mode", "3");
+        assert_eq!(cfg.serial_a.dtr_mode, 3);
+        apply_config_key(&mut cfg, "serial_a_dtr_mode", "4");
+        assert_eq!(cfg.serial_a.dtr_mode, 3, "dtr_mode > 3 must be rejected");
+
+        // flow_mode: valid 0..=4.
+        apply_config_key(&mut cfg, "serial_a_flow_mode", "4");
+        assert_eq!(cfg.serial_a.flow_mode, 4);
+        apply_config_key(&mut cfg, "serial_a_flow_mode", "5");
+        assert_eq!(cfg.serial_a.flow_mode, 4, "flow_mode > 4 must be rejected");
+
+        // dcd_mode: valid 0..=1.
+        apply_config_key(&mut cfg, "serial_a_dcd_mode", "1");
+        assert_eq!(cfg.serial_a.dcd_mode, 1);
+        apply_config_key(&mut cfg, "serial_a_dcd_mode", "2");
+        assert_eq!(cfg.serial_a.dcd_mode, 1, "dcd_mode > 1 must be rejected");
+    }
+
     /// Reading a config file with `serial_a_mode = console` (case-
     /// insensitive, with surrounding whitespace) loads to the
     /// canonical lowercase value.  Reading without the key falls back

@@ -296,4 +296,58 @@ mod tests {
         assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), IAC);
         assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x42);
     }
+
+    #[tokio::test]
+    async fn test_raw_read_byte_skips_option_negotiation() {
+        // IAC WILL <opt> is consumed transparently; the next data byte wins.
+        let data = vec![IAC, WILL, 0x18, 0x42];
+        let mut cur = std::io::Cursor::new(data);
+        assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x42);
+    }
+
+    #[tokio::test]
+    async fn test_raw_read_byte_skips_subnegotiation_block() {
+        // A full IAC SB ... IAC SE block is drained, leaving the data byte.
+        let data = vec![IAC, SB, 0x18, 0x01, 0x02, IAC, SE, 0x42];
+        let mut cur = std::io::Cursor::new(data);
+        assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x42);
+    }
+
+    #[tokio::test]
+    async fn test_raw_read_byte_keeps_iac_as_data_when_not_tcp() {
+        // Off TCP there is no IAC layer, so 0xFF is ordinary data.
+        let data = vec![IAC, 0x42];
+        let mut cur = std::io::Cursor::new(data);
+        assert_eq!(raw_read_byte(&mut cur, false).await.unwrap(), IAC);
+        assert_eq!(raw_read_byte(&mut cur, false).await.unwrap(), 0x42);
+    }
+
+    #[tokio::test]
+    async fn test_consume_telnet_command_will_takes_one_option_byte() {
+        // WILL/WONT/DO/DONT each consume exactly one following option byte.
+        let data = vec![0x18, 0x99];
+        let mut cur = std::io::Cursor::new(data);
+        consume_telnet_command(&mut cur, WILL).await.unwrap();
+        // Only the option byte (0x18) was drained; 0x99 remains readable.
+        assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x99);
+    }
+
+    #[tokio::test]
+    async fn test_consume_telnet_command_sb_drains_to_se() {
+        // SB ... IAC SE is drained in full; the trailing data byte remains.
+        let data = vec![0x01, 0x02, 0x03, IAC, SE, 0x99];
+        let mut cur = std::io::Cursor::new(data);
+        consume_telnet_command(&mut cur, SB).await.unwrap();
+        assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x99);
+    }
+
+    #[tokio::test]
+    async fn test_consume_telnet_command_sb_ignores_doubled_iac() {
+        // An IAC IAC inside the SB body is escaped data, not the SE terminator,
+        // so the block only ends at the real IAC SE.
+        let data = vec![0x01, IAC, IAC, 0x02, IAC, SE, 0x99];
+        let mut cur = std::io::Cursor::new(data);
+        consume_telnet_command(&mut cur, SB).await.unwrap();
+        assert_eq!(raw_read_byte(&mut cur, true).await.unwrap(), 0x99);
+    }
 }

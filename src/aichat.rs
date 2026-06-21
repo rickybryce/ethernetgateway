@@ -197,4 +197,35 @@ mod tests {
             assert!(line.chars().count() <= 38, "line '{}' exceeds 38 chars", line);
         }
     }
+
+    #[test]
+    fn test_wrap_line_long_word_respects_width() {
+        // A single word longer than the width has no space to break on, so it
+        // must be hard-broken into chunks that each still fit the width.
+        let lines = wrap_line("abcdefghij", 4);
+        for l in &lines {
+            assert!(l.chars().count() <= 4, "chunk '{}' exceeds width 4", l);
+        }
+        assert_eq!(lines.concat(), "abcdefghij", "hard break must not drop chars");
+    }
+
+    #[test]
+    fn test_wrap_line_multibyte_hard_break_no_panic() {
+        // Forced break on multibyte chars must land on UTF-8 boundaries (never
+        // panic on a byte slice) and still respect the width. 7 two-byte 'é's,
+        // no spaces to break on.
+        let lines = wrap_line("ééééééé", 3);
+        for l in &lines {
+            assert!(l.chars().count() <= 3, "chunk '{}' exceeds width 3", l);
+        }
+        assert_eq!(lines.concat(), "ééééééé", "hard break must not drop chars");
+    }
+
+    #[test]
+    fn test_sanitize_strips_c1_controls() {
+        // The C1 control range (U+0080–U+009F) — e.g. U+009B (CSI) — is
+        // dropped while surrounding printable text survives.
+        assert_eq!(sanitize_for_terminal("a\u{009b}b"), "ab");
+        assert_eq!(sanitize_for_terminal("x\u{0080}mid\u{009f}y"), "xmidy");
+    }
 }

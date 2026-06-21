@@ -769,4 +769,119 @@ mod tests {
         drop(h1);
         assert_eq!(session_count.load(Ordering::SeqCst), 0);
     }
+
+    /// A locked-out IP is rejected even with correct credentials, and the
+    /// rejection claims no session slot.
+    #[tokio::test]
+    async fn test_auth_password_rejects_locked_out_ip() {
+        use russh::server::{Auth, Handler};
+        let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
+        let lockouts: telnet::LockoutMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        // Drive the IP into lockout (>= AUTH_MAX_ATTEMPTS failures).
+        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+            telnet::record_auth_failure(&lockouts, ip);
+        }
+        assert!(telnet::is_locked_out(&lockouts, ip));
+
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let mut h = SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: session_count.clone(),
+            max_sessions: 2,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some(ip),
+            duplex_writer: None,
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: lockouts.clone(),
+            counted: false,
+        };
+        // Correct credentials, but locked out → reject, no slot claimed.
+        assert!(matches!(
+            h.auth_password("admin", "secret").await.unwrap(),
+            Auth::Reject { .. }
+        ));
+        assert!(!h.counted);
+        assert_eq!(session_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// Repeated wrong passwords lock the IP out and never claim a slot.
+    #[tokio::test]
+    async fn test_auth_password_failures_trigger_lockout() {
+        use russh::server::{Auth, Handler};
+        let ip: std::net::IpAddr = "10.0.0.8".parse().unwrap();
+        let lockouts: telnet::LockoutMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let make = || SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: session_count.clone(),
+            max_sessions: 5,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some(ip),
+            duplex_writer: None,
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: lockouts.clone(),
+            counted: false,
+        };
+        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+            let mut h = make();
+            assert!(matches!(
+                h.auth_password("admin", "wrong").await.unwrap(),
+                Auth::Reject { .. }
+            ));
+        }
+        assert!(
+            telnet::is_locked_out(&lockouts, ip),
+            "IP must be locked out after AUTH_MAX_ATTEMPTS failures"
+        );
+        assert_eq!(
+            session_count.load(Ordering::SeqCst),
+            0,
+            "failed auth must never claim a session slot"
+        );
+    }
+
+    /// A successful login clears a prior (sub-threshold) failure count, so a
+    /// later single failure starts counting from one again.
+    #[tokio::test]
+    async fn test_auth_password_success_clears_failure_counter() {
+        use russh::server::{Auth, Handler};
+        let ip: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        let lockouts: telnet::LockoutMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        // Some failures, but below the lockout threshold.
+        telnet::record_auth_failure(&lockouts, ip);
+        telnet::record_auth_failure(&lockouts, ip);
+        assert!(!telnet::is_locked_out(&lockouts, ip));
+
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let mut h = SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: session_count.clone(),
+            max_sessions: 2,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some(ip),
+            duplex_writer: None,
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: lockouts.clone(),
+            counted: false,
+        };
+        assert!(matches!(
+            h.auth_password("admin", "secret").await.unwrap(),
+            Auth::Accept
+        ));
+        // Success cleared the counter: the next failure is counted as the first.
+        assert_eq!(
+            telnet::record_auth_failure(&lockouts, ip),
+            1,
+            "successful login must reset the failure counter"
+        );
+    }
 }
