@@ -47,6 +47,24 @@ pub fn run(
     restart: Arc<AtomicBool>,
     gui_ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
 ) {
+    // The console window renders into the desktop's X session. Launched as
+    // a boot-time service, the process can start before that session has
+    // finished writing its display auth cookie, so a premature connect
+    // fails ("Invalid MIT-MAGIC-COOKIE-1" / "Failed to open connection to X
+    // server") and the GUI would be lost to headless fallback.
+    //
+    // We can't just retry eframe::run_native: winit sets a process-global
+    // "event loop created" flag on the FIRST build() attempt and never
+    // resets it on Unix (winit event_loop.rs), so any second attempt returns
+    // RecreationAttempt even once X is ready. So instead we wait until the
+    // display is actually reachable *and authenticated* before the single
+    // run_native call below. This is adaptive, not a fixed delay: a manual
+    // launch into a live desktop passes the very first probe and starts with
+    // no wait — only the boot race waits, and only as long as the session
+    // needs. The server already runs on its own thread (spawned in main
+    // before this call), so this never delays telnet/SSH/serial.
+    wait_for_display(&shutdown);
+
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // `mut` is only needed on ARM, where we patch wgpu limits below.
         #[allow(unused_mut)]
@@ -104,6 +122,63 @@ pub fn run(
         Ok(Ok(())) => {}
         Ok(Err(e)) => logger::log(format!("GUI could not start: {}", e)),
         Err(_) => logger::log("GUI crashed during startup (possible graphics driver issue)".into()),
+    }
+}
+
+/// Wait until the X display is reachable and our auth cookie is accepted, so
+/// the one-shot `eframe::run_native` doesn't race a not-yet-ready session at
+/// boot. Bounded and degrades safely:
+///   * no `DISPLAY` (headless, or a pure-Wayland session) -> return at once,
+///     letting run_native use Wayland/headless directly;
+///   * `xset` not installed -> can't probe, return at once (preserves the
+///     original immediate-attempt behavior);
+///   * X reachable -> return as soon as the probe authenticates;
+///   * still not ready after 60s -> give up waiting and let run_native try
+///     anyway (it logs if it can't start).
+fn wait_for_display(shutdown: &Arc<AtomicBool>) {
+    // The probe (xset) is X11-specific, so only gate on an X11 DISPLAY.
+    if std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut announced = false;
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match probe_display() {
+            Some(true) => return, // reachable + authenticated: go
+            None => return,       // can't probe (no xset): attempt directly
+            Some(false) => {
+                if !announced {
+                    logger::log("GUI: waiting for the display session to be ready…".into());
+                    announced = true;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// Probe the X display the same way eframe will: `Some(true)` if an
+/// authenticated query succeeds, `Some(false)` if X is configured but not
+/// answering yet, `None` if we have no way to probe (`xset` not installed).
+/// `xset` inherits DISPLAY/XAUTHORITY from our environment, so it performs
+/// the identical connection + cookie authentication eframe relies on.
+fn probe_display() -> Option<bool> {
+    use std::process::{Command, Stdio};
+    match Command::new("xset")
+        .arg("q")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => Some(status.success()),
+        Err(_) => None,
     }
 }
 
