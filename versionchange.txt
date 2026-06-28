@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 0.6.2
+# Current version: 0.6.3
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -29,6 +29,8 @@ web/ymodemreference.html
 web/zmodemreference.html
 web/atcommandreference.html  # also the ATI / ATI3 example rows
 web/telnetreference.html
+web/punterreference.html     # <title>, .hdr-version, footer
+web/sshreference.html        # <title>, .hdr-version, footer
 #
 # ── On release (separate step) ──────────────────────────────────
 CHANGELOG.md            # Pre-release, the next version's notes accumulate under a

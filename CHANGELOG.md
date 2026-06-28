@@ -5,7 +5,7 @@ All notable changes to **ethernet-gateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.3] - Unreleased
 
 ### Fixed
 - **File transfers over telnet no longer apply NVT CR-NUL stuffing**, which
@@ -26,6 +26,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   editor but missing from its refresh-from-global and dirty-detection paths, so
   a value changed via the web/telnet UI while the GUI was open could be silently
   overwritten by the GUI's stale field on the next Save.
+- **Serial modem mode now auto-reconnects when the device behind the port
+  disappears** (e.g. a `socat`/USB-serial bridge that exits when its attached
+  terminal closes). Command-mode previously hit a hard I/O error and re-looped,
+  spamming the error ~twice/second forever with no recovery; it now logs the
+  outage once, backs off 1 s, and reopens the port automatically when the device
+  returns — matching console mode.
+- **`ATDT` to a hostname now tries every resolved address.** Dialing resolved
+  via `to_socket_addrs()` but only attempted the first address, so a host whose
+  DNS returns an unreachable IPv6 record first could fail with a silent
+  `NO CARRIER` even when a working IPv4 address followed. It now attempts each
+  resolved address until one connects, and logs the failure reason instead of
+  failing silently.
+- **Config save failures are now surfaced.** `write_config_file`/`save_config`
+  return a `Result`; the explicit-save paths (desktop GUI Save buttons, telnet
+  reset-to-defaults) report a failure instead of always logging success.
+- **Hand-edited `serial_*_parity` / `serial_*_flowcontrol` values are honored.**
+  Both are now normalized (trim + lowercase) on read and apply, consistent with
+  `mode`, so e.g. `serial_a_parity = Even` no longer silently reverts.
+- **Config values round-trip without whitespace drift.** `sanitize_value` now
+  trims surrounding whitespace (the reader already trimmed), and the dialup
+  number/host are sanitized on save so an embedded newline can't corrupt
+  `dialup.conf` framing.
+- **GUI waits for the X display before opening the console window**, fixing the
+  headless drop when the gateway is started as a boot-time service before the
+  desktop session's X auth cookie is ready. The wait is adaptive (no delay on a
+  normal manual launch) and degrades safely when there is no display.
+- **Kermit's async server/receive paths no longer stall a runtime worker** —
+  blocking `std::fs` calls moved to `tokio::fs` and the directory listing
+  offloaded via `spawn_blocking`.
 
 ### Security
 - **SSH: warn when a pre-existing host/client private key is group- or
@@ -33,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created by an older build could be more permissive. The gateway now logs a
   `chmod 600` recommendation on load (warn-only — it does not refuse the key,
   matching the trusted-LAN threat model).
+- **ZMODEM: bound consecutive empty data subpackets** (`MAX_EMPTY_SUBPACKETS`)
+  so a peer can't tar-pit the receive loop with CRC-valid zero-progress
+  subpackets.
+- **Telnet: bound in-subnegotiation reads** (`SB_DRAIN_TIMEOUT`) so a peer that
+  opens an `IAC SB` and then stalls can't pin the reader (slowloris); the outer
+  idle wait is unchanged.
 
 ## [0.6.2] - 2026-06-19
 
@@ -1189,7 +1224,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.2...HEAD
+[0.6.3]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.2...HEAD
 [0.6.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.2
 [0.6.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.1
 [0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
