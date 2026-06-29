@@ -548,6 +548,28 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
   (#12) must **label remote ports by slave** (e.g. "Slave 192.168.1.50 Port A") so multiple slaves
   are distinguishable.
 
+### Documentation & help to update (required on ship, follows the project's doc-sweep discipline)
+- **#22 Doc/help surfaces to update when the feature lands** (alongside the implementation, not as an
+  afterthought):
+  - **Telnet in-app help** — add a **Master/Slave help screen**: keep its lines in a
+    `*_help_lines()` fn and add it to the **help-fit aggregate test's groups array** (the established
+    pattern — fit tests iterate the fns, never hand-copied), respecting the **22-row × 40-col PETSCII
+    budget**. Update the Server Config / main CONFIG help text to mention the new `M Master/Slave`
+    nav item + the relocated address block (§4.7), and document the slave-mode warning (#13).
+  - **usermanual.html** — add a **Master/Slave setup** section (role; master host/port/username/
+    password; "accept slaves" toggle; files-land-on-master behavior; slave warning; reconnect/auth
+    notes). Then **regenerate `usermanual.pdf` with WeasyPrint** (per `versionchange.txt` — Producer
+    must stay "WeasyPrint").
+  - **web/index.html** — add a **Master/Slave** section mirroring the new web config card and the
+    usermanual content.
+  - **README.md (only if needed)** — document the new config keys (`gateway_role`,
+    `slave_master_host`/`_port`/`_username`/`_password`, `master_accept_relays`, `relay_transport`),
+    sourcing defaults from the `DEFAULT_*` consts in `config.rs` and cross-checking the web form +
+    conf-writer (the "defaults come from config.rs" rule).
+  - **CHANGELOG.md** — an entry under the shipping version.
+  - **versionchange.txt** — only if a *new* web page is added for the feature (a dedicated reference
+    page), add it to the version-bump checklist; otherwise no change.
+
 ---
 
 ## 10. Validation scenarios (worked examples the design must satisfy)
