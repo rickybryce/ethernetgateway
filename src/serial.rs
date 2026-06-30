@@ -2492,9 +2492,18 @@ fn slave_resolve_relay_target(
 /// Slave-mode bridge: connect to the master over SSH, request the relay
 /// channel for `target`, and pump the local UART's data phase through it
 /// (§4.1).  Connect-per-call — the connection is opened when the device
-/// connects and torn down when the call ends.  `+++`/ATO resume is not
-/// preserved across a relay call in v1 (the device can redial); a clean
-/// hangup or master-side disconnect yields NO CARRIER.
+/// connects and torn down when the call ends.
+///
+/// `+++`/ATO resume **is** preserved across a relay call: on a `+++`
+/// escape the SSH session handle is kept alive in
+/// `ActiveConnection::Relay`, so ATO resumes the same call rather than
+/// redialing.  Caveat for a `RelayTarget::Menu` call: the master's relay
+/// session is parked in a read and is still subject to the master's
+/// `idle_timeout_secs`, so an ATO issued after the master session has
+/// idled out returns NO CARRIER (the device can simply redial).  An
+/// onward `RelayTarget::Dial` has no such timeout (it rides
+/// `copy_bidirectional`).  A clean hangup or master-side disconnect
+/// yields NO CARRIER.
 fn dial_master_relay(
     state: &mut ModemState,
     target: crate::relay::RelayTarget,
@@ -5010,6 +5019,72 @@ mod tests {
     #[test]
     fn test_gateway_phone_number_is_valid() {
         assert!(is_phone_number(GATEWAY_PHONE_NUMBER));
+    }
+
+    // ─── Slave relay-target resolution (Model B) ──────────
+    // These cases avoid the phonebook branch (which reads global config)
+    // by using the gateway keywords and literal host:port targets.
+
+    #[test]
+    fn test_slave_resolve_relay_target_menu_keyword() {
+        use crate::relay::RelayTarget;
+        // The "ethernet-gateway" keyword maps to the master's own menu,
+        // regardless of casing (caller lowercases into `lower`).
+        assert_eq!(
+            slave_resolve_relay_target("ETHERNET-GATEWAY", "ethernet-gateway"),
+            Some(RelayTarget::Menu)
+        );
+        assert_eq!(
+            slave_resolve_relay_target("ethernet gateway", "ethernet gateway"),
+            Some(RelayTarget::Menu)
+        );
+    }
+
+    #[test]
+    fn test_slave_resolve_relay_target_gateway_number() {
+        use crate::relay::RelayTarget;
+        // The built-in gateway phone number resolves to the master's menu.
+        assert_eq!(
+            slave_resolve_relay_target(GATEWAY_PHONE_NUMBER, GATEWAY_PHONE_NUMBER),
+            Some(RelayTarget::Menu)
+        );
+    }
+
+    #[test]
+    fn test_slave_resolve_relay_target_kermit_is_local_only() {
+        // The local Kermit-server shortcut has no relay meaning -> NO CARRIER.
+        assert_eq!(slave_resolve_relay_target("kermit", "kermit"), None);
+        assert_eq!(
+            slave_resolve_relay_target("kermit-server", "kermit-server"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_slave_resolve_relay_target_onward_dial() {
+        use crate::relay::RelayTarget;
+        // A literal host:port becomes an onward dial for the master.
+        assert_eq!(
+            slave_resolve_relay_target("bbs.example.com:6400", "bbs.example.com:6400"),
+            Some(RelayTarget::Dial {
+                host: "bbs.example.com".into(),
+                port: 6400,
+            })
+        );
+        // A bare host defaults to the telnet port (23).
+        assert_eq!(
+            slave_resolve_relay_target("bbs.example.com", "bbs.example.com"),
+            Some(RelayTarget::Dial {
+                host: "bbs.example.com".into(),
+                port: 23,
+            })
+        );
+        // An invalid port -> unresolvable -> NO CARRIER.
+        assert_eq!(slave_resolve_relay_target("host:0", "host:0"), None);
+        assert_eq!(
+            slave_resolve_relay_target("host:notaport", "host:notaport"),
+            None
+        );
     }
 
     #[test]

@@ -223,8 +223,8 @@ async fn test_remote_port_registry() {
     let (master_a, _dev_a) = tokio::io::duplex(64);
     let (master_b, _dev_b) = tokio::io::duplex(64);
 
-    super::register_remote_port(ip, "A".into(), master_a);
-    super::register_remote_port(ip, "B".into(), master_b);
+    let _ = super::register_remote_port(ip, "A".into(), master_a);
+    let _ = super::register_remote_port(ip, "B".into(), master_b);
 
     let listed = super::list_remote_ports();
     assert!(listed.contains(&(ip, "A".to_string())));
@@ -238,6 +238,49 @@ async fn test_remote_port_registry() {
     // Clean up so the global registry doesn't leak into other tests.
     let _ = super::remove_remote_port(ip, "B");
     assert!(!super::list_remote_ports().contains(&(ip, "B".to_string())));
+}
+
+/// Re-registration race guard (§9 #12): if a slave re-registers the SAME
+/// `(IP, label)` on a fresh channel before the master observes the old
+/// channel close, the old channel's generation-stamped teardown must NOT
+/// evict the new, live registration.  Only a matching generation removes;
+/// a picker claim stays generation-agnostic.  TEST-NET-3 IP so it can't
+/// collide with another test's registry keys.
+#[tokio::test]
+async fn test_remote_port_reregister_generation_guard() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+
+    // First registration (old channel) -> gen0.
+    let (master_old, _dev_old) = tokio::io::duplex(64);
+    let gen0 = super::register_remote_port(ip, "A".into(), master_old);
+
+    // Slave re-registers "A" on a new channel before the old one tore
+    // down -> gen1 overwrites the map entry.
+    let (master_new, _dev_new) = tokio::io::duplex(64);
+    let gen1 = super::register_remote_port(ip, "A".into(), master_new);
+    assert_ne!(gen0, gen1, "each registration gets a fresh generation");
+
+    // The OLD channel tears down: removing by its stale generation must be
+    // a no-op (the live entry is gen1), and the live registration survives.
+    assert!(
+        super::remove_remote_port_gen(ip, "A", gen0).is_none(),
+        "stale-generation teardown must not evict the newer registration"
+    );
+    assert!(
+        super::list_remote_ports().contains(&(ip, "A".to_string())),
+        "the live (gen1) registration must survive the old channel teardown"
+    );
+
+    // The new channel's own teardown (matching generation) removes it.
+    assert!(super::remove_remote_port_gen(ip, "A", gen1).is_some());
+    assert!(!super::list_remote_ports().contains(&(ip, "A".to_string())));
+
+    // A picker claim ignores generation — it takes whatever is current.
+    let (master_c, _dev_c) = tokio::io::duplex(64);
+    let _gen2 = super::register_remote_port(ip, "A".into(), master_c);
+    assert!(super::remove_remote_port(ip, "A").is_some());
+    assert!(super::remove_remote_port(ip, "A").is_none());
 }
 
 /// Onward dial (Model B): `run_master_relay_dial` connects to the target

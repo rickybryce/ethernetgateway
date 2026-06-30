@@ -817,7 +817,12 @@ fn collect_form_updates(
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "ssh_gateway_auth",
         "gateway_role", "slave_master_host", "slave_master_port",
-        "slave_master_username", "slave_master_password", "relay_transport",
+        "slave_master_username", "slave_master_password",
+        // `relay_transport` is intentionally NOT here: no UI (telnet, web,
+        // or GUI) exposes it because "raw" is not yet implemented, so the
+        // web form must not accept it either (a crafted POST otherwise
+        // could select the unimplemented transport).  It stays settable
+        // only by hand-editing egateway.conf.
     ];
     for key in plain_keys {
         if let Some(v) = fields.get(*key) {

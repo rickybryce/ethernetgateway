@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::logger::glog;
@@ -395,29 +395,76 @@ async fn connect_master_relay_inner(
 /// in-band escaping of the subsequent raw byte stream is needed.
 pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 
+/// A registered remote console port: the master's end of the idle SSH
+/// registration channel, paired with the generation stamped when it was
+/// registered (see [`REMOTE_PORTS`] for why the generation matters).
+type RegisteredPort = (tokio::io::DuplexStream, u64);
+
 /// Console-mode slave ports currently registered with this master, keyed
-/// by `(slave IP, port label)`.  Each value is the master's end of the
-/// idle SSH registration channel.  The Serial Gateway picker lists the
-/// keys and `claim`s (removes) an entry to bridge a master user to the
-/// slave's console device.  Populated by `ssh.rs` `exec_request`
+/// by `(slave IP, port label)`.  Each value pairs the master's end of the
+/// idle SSH registration channel with a monotonic **generation** stamped
+/// at registration time.  The Serial Gateway picker lists the keys and
+/// `claim`s (removes) an entry to bridge a master user to the slave's
+/// console device.  Populated by `ssh.rs` `exec_request`
 /// (`serial-register`), drained by the picker or by channel teardown.
-static REMOTE_PORTS: StdMutex<Option<HashMap<(IpAddr, String), tokio::io::DuplexStream>>> =
+///
+/// The generation disambiguates a re-registration race: if a slave whose
+/// link briefly dropped re-registers the same `(IP, label)` on a fresh
+/// channel *before* the master observes the old channel close, the new
+/// stream overwrites the old in the map.  Without the generation, the old
+/// channel's teardown — which removes by `(IP, label)` — would evict the
+/// new, live registration.  Teardown therefore removes only when the
+/// stored generation matches the one it registered (`remove_remote_port_gen`),
+/// while a picker claim (`remove_remote_port`) always takes whatever is
+/// current.
+static REMOTE_PORTS: StdMutex<Option<HashMap<(IpAddr, String), RegisteredPort>>> =
     StdMutex::new(None);
 
-/// Register (or replace) a console-mode remote port as available.
-pub fn register_remote_port(slave_ip: IpAddr, label: String, stream: tokio::io::DuplexStream) {
+/// Monotonic source for the per-registration generation stamp.
+static REMOTE_PORT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Register (or replace) a console-mode remote port as available.  Returns
+/// the generation stamp the caller must keep so its later teardown can
+/// remove the entry *only if it is still the same registration* (see
+/// [`remove_remote_port_gen`]).  Marked `#[must_use]`: dropping the
+/// generation silently reintroduces the re-register eviction race.
+#[must_use]
+pub fn register_remote_port(slave_ip: IpAddr, label: String, stream: tokio::io::DuplexStream) -> u64 {
+    let generation = REMOTE_PORT_GEN.fetch_add(1, Ordering::Relaxed);
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new)
-        .insert((slave_ip, label), stream);
+        .insert((slave_ip, label), (stream, generation));
+    generation
 }
 
-/// Remove a registered remote port, returning the master's channel end if
-/// present.  Used both to **claim** a port for bridging (the caller then
-/// owns the stream) and to drop a stale registration on channel teardown.
+/// **Claim** a registered remote port for bridging, returning the master's
+/// channel end if present (the caller then owns the stream).  Takes
+/// whatever is currently registered regardless of generation — the picker
+/// always wants the live entry.
 pub fn remove_remote_port(slave_ip: IpAddr, label: &str) -> Option<tokio::io::DuplexStream> {
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     g.as_mut()
         .and_then(|m| m.remove(&(slave_ip, label.to_string())))
+        .map(|(stream, _gen)| stream)
+}
+
+/// Drop a *specific* registration on channel teardown: removes the entry
+/// only when its stored generation matches `gen`, so an old channel's
+/// teardown can't evict a newer re-registration of the same `(IP, label)`.
+/// Returns the stream if it was the matching registration (so the caller
+/// can drop it deterministically), else `None`.
+pub fn remove_remote_port_gen(
+    slave_ip: IpAddr,
+    label: &str,
+    generation: u64,
+) -> Option<tokio::io::DuplexStream> {
+    let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.as_mut()?;
+    let key = (slave_ip, label.to_string());
+    match map.get(&key) {
+        Some((_, stored)) if *stored == generation => map.remove(&key).map(|(stream, _)| stream),
+        _ => None,
+    }
 }
 
 /// List the currently-registered remote console ports, sorted stably so

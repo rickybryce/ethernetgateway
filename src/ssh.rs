@@ -345,10 +345,13 @@ struct SshHandler {
         Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     >,
     /// Console-mode **registration** channels (`exec "serial-register
-    /// <port>"`): channel -> the port label it registered.  Lets
+    /// <port>"`): channel -> `(port label, registration generation)`.  Lets
     /// channel teardown remove the matching entry from the global
-    /// remote-port registry and release its session-cap slot (§9 #12).
-    registered_ports: std::collections::HashMap<russh::ChannelId, String>,
+    /// remote-port registry — but only if it is still *this* registration
+    /// (the generation guards a re-register race; see
+    /// `relay::remove_remote_port_gen`) — and release its session-cap slot
+    /// (§9 #12).
+    registered_ports: std::collections::HashMap<russh::ChannelId, (String, u64)>,
     session_writers: telnet::SessionWriters,
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
@@ -417,7 +420,13 @@ impl SshHandler {
             return Ok(());
         }
 
-        session.channel_success(channel)?;
+        // Acknowledge the channel.  If that errors (transport already
+        // dying), release the slot we just claimed before propagating —
+        // teardown_channel never runs for a channel we failed to record.
+        if let Err(e) = session.channel_success(channel) {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
         glog!(
             "SSH: registered remote console port {} from {}",
             label,
@@ -436,8 +445,9 @@ impl SshHandler {
         spawn_channel_reader(session.handle(), channel, handler_read);
 
         let label = label.to_string();
-        crate::relay::register_remote_port(slave_ip, label.clone(), gateway_stream);
-        self.registered_ports.insert(channel, label);
+        let generation =
+            crate::relay::register_remote_port(slave_ip, label.clone(), gateway_stream);
+        self.registered_ports.insert(channel, (label, generation));
         Ok(())
     }
 
@@ -446,11 +456,13 @@ impl SshHandler {
     /// single interactive shell bridge.  Shared by channel_eof and
     /// channel_close (a peer may send either, or both — idempotent).
     async fn teardown_channel(&mut self, channel: russh::ChannelId) {
-        // A registration channel: drop its registry entry (if still
-        // unclaimed) and release its session-cap slot.
-        if let Some(label) = self.registered_ports.remove(&channel) {
+        // A registration channel: drop its registry entry (only if it is
+        // still *this* registration — a slave that re-registered the same
+        // port on a newer channel must not be evicted by this old channel's
+        // teardown) and release its session-cap slot.
+        if let Some((label, generation)) = self.registered_ports.remove(&channel) {
             if let Some(addr) = self.peer_addr {
-                let _ = crate::relay::remove_remote_port(addr, &label);
+                let _ = crate::relay::remove_remote_port_gen(addr, &label, generation);
             }
             self.session_count.fetch_sub(1, Ordering::SeqCst);
         }
@@ -536,6 +548,13 @@ impl russh::server::Handler for SshHandler {
             // Valid credentials reset any failure lockout for this IP.
             if let Some(ip) = self.peer_addr {
                 telnet::clear_lockout(&self.lockouts, ip);
+            }
+            // If this connection already claimed a slot on a prior
+            // successful auth, accept again without re-counting — otherwise
+            // a second auth_password call would fetch_add a slot that Drop
+            // (which subtracts once) could never release.
+            if self.counted {
+                return Ok(russh::server::Auth::Accept);
             }
             // Now claim a session slot.  Atomic fetch_add + rollback (the
             // same pattern as the telnet accept loop) enforces the cap
@@ -732,7 +751,13 @@ impl russh::server::Handler for SshHandler {
             return Ok(());
         }
 
-        session.channel_success(channel)?;
+        // Acknowledge the channel.  If that errors before we spawn the
+        // relay task (the sole owner of the matching fetch_sub), release
+        // the slot here so a transport error can't leak it.
+        if let Err(e) = session.channel_success(channel) {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
         match &dial_target {
             None => glog!(
                 "SSH: accepted serial relay (port {}, menu) from {:?}",
