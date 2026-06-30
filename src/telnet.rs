@@ -9702,13 +9702,17 @@ impl TelnetSession {
         }
     }
 
+    /// Prompt for a free-form (or secret) config string and persist it.
+    /// Returns `true` if the value was changed/saved, `false` if the user
+    /// cancelled with empty input — so a caller whose setting needs a
+    /// server restart can show the restart notice only on an actual change.
     async fn other_set_field(
         &mut self,
         label: &str,
         key: &str,
         current_display: &str,
         is_secret: bool,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<bool, std::io::Error> {
         self.send_line("").await?;
         self.send_line(&format!(
             "  Current {}: {}",
@@ -9731,7 +9735,7 @@ impl TelnetSession {
 
         let input = match input {
             Some(s) if !s.is_empty() => s,
-            _ => return Ok(()),
+            _ => return Ok(false),
         };
 
         let k = key.to_string();
@@ -9752,7 +9756,7 @@ impl TelnetSession {
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
         self.wait_for_key().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn other_show_help(&mut self) -> Result<(), std::io::Error> {
@@ -10374,47 +10378,61 @@ impl TelnetSession {
                     self.config_restart_notice().await?;
                 }
                 "m" => {
-                    self.other_set_field(
-                        "Master host",
-                        "slave_master_host",
-                        &cfg.slave_master_host,
-                        false,
-                    )
-                    .await?;
-                    self.config_restart_notice().await?;
+                    // `config_set_port` / `other_set_field` only persist on a
+                    // non-empty entry; show the restart notice only when the
+                    // value actually changed (config_set_port emits its own).
+                    if self
+                        .other_set_field(
+                            "Master host",
+                            "slave_master_host",
+                            &cfg.slave_master_host,
+                            false,
+                        )
+                        .await?
+                    {
+                        self.config_restart_notice().await?;
+                    }
                 }
                 "p" => {
+                    // config_set_port shows the restart notice itself on a
+                    // successful change (and an error otherwise), so this
+                    // branch must NOT add a second one.
                     self.config_set_port(
                         "Master",
                         "slave_master_port",
                         cfg.slave_master_port,
                     )
                     .await?;
-                    self.config_restart_notice().await?;
                 }
                 "u" => {
-                    self.other_set_field(
-                        "Master user",
-                        "slave_master_username",
-                        &cfg.slave_master_username,
-                        false,
-                    )
-                    .await?;
-                    self.config_restart_notice().await?;
+                    if self
+                        .other_set_field(
+                            "Master user",
+                            "slave_master_username",
+                            &cfg.slave_master_username,
+                            false,
+                        )
+                        .await?
+                    {
+                        self.config_restart_notice().await?;
+                    }
                 }
                 "w" => {
-                    self.other_set_field(
-                        "Master pass",
-                        "slave_master_password",
-                        if cfg.slave_master_password.is_empty() {
-                            "(not set)"
-                        } else {
-                            "(set)"
-                        },
-                        true,
-                    )
-                    .await?;
-                    self.config_restart_notice().await?;
+                    if self
+                        .other_set_field(
+                            "Master pass",
+                            "slave_master_password",
+                            if cfg.slave_master_password.is_empty() {
+                                "(not set)"
+                            } else {
+                                "(set)"
+                            },
+                            true,
+                        )
+                        .await?
+                    {
+                        self.config_restart_notice().await?;
+                    }
                 }
                 "h" => {
                     self.show_help_page(

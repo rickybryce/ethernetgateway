@@ -368,6 +368,20 @@ impl Drop for SshHandler {
         if self.counted {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
         }
+        // Backstop for an abrupt connection drop (e.g. TCP RST) that never
+        // delivered channel_eof/channel_close: release any console
+        // registration channels still held — each consumes a per-channel
+        // session slot and a global remote-port registry entry that
+        // teardown_channel would otherwise have drained on a graceful
+        // close.  Generation-matched removal can't evict a newer
+        // re-registration from another connection.  (register_console_port
+        // requires a peer addr, so any entry here has one.)
+        for (_channel, (label, generation)) in self.registered_ports.drain() {
+            if let Some(addr) = self.peer_addr {
+                let _ = crate::relay::remove_remote_port_gen(addr, &label, generation);
+            }
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+        }
         if let Some(addr) = self.peer_addr {
             glog!("SSH: {} disconnected", addr);
         }

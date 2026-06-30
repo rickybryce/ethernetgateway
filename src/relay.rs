@@ -40,8 +40,18 @@ use crate::telnet::{LockoutMap, SessionWriters, SharedWriter, TelnetSession};
 /// `session_writers` is the shared shutdown-broadcast list: the relay's
 /// write half is registered for the lifetime of the session (and removed
 /// on exit) exactly as `ssh.rs` `shell_request` does for an interactive
-/// session, so the server-shutdown broadcast can write the goodbye and
-/// force EOF on a relay session parked in a read.
+/// session, so the server-shutdown broadcast writes the "Goodbye" toward
+/// the slave/device on this write half.
+///
+/// Note on teardown: unlike a *telnet* TCP session (where the broadcast's
+/// `shutdown()` on the registered TCP write half makes the peer's read
+/// EOF), the relay's registered half is the gateway side of a split
+/// in-process duplex — shutting it does NOT directly unstick a relay
+/// session parked reading the *other* half.  What actually tears a parked
+/// relay session down promptly is the SSH server shutdown dropping the
+/// connection handler: that drops the handler-side writer, which EOFs our
+/// reader and ends the session.  Registration here is therefore for the
+/// goodbye-toward-the-device, not a read-EOF guarantee.
 ///
 /// Returns when the session ends (device disconnect, menu exit, relay
 /// EOF, or shutdown).  The write half is flushed and shut down on the way
@@ -60,8 +70,10 @@ pub async fn run_master_relay_session(
     let writer: SharedWriter =
         Arc::new(tokio::sync::Mutex::new(write_half));
 
-    // Register with the shutdown-broadcast list so a parked relay session
-    // receives the server-shutdown goodbye/EOF (review finding 1).
+    // Register with the shutdown-broadcast list so the server-shutdown
+    // goodbye is written toward the slave/device on this write half (the
+    // prompt teardown of a parked read comes from the SSH handler dropping
+    // on shutdown — see the fn doc).
     session_writers.lock().await.push(writer.clone());
 
     let mut session = TelnetSession::new_relay(
