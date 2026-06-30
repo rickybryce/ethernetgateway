@@ -242,6 +242,24 @@ const DEFAULT_SSH_PORT: u16 = 2222;
 /// public key on the remote's `~/.ssh/authorized_keys`.
 const DEFAULT_SSH_GATEWAY_AUTH: &str = "password";
 
+// ── Master/Slave serial-extender (relay) defaults ──────────
+/// Gateway role.  `standalone` (default) is today's behavior — the
+/// relay feature is entirely inert.  `master` accepts relay connections
+/// from slaves (gated by `master_accept_relays`); `slave` extends its
+/// serial ports to a master.  Roles are mutually exclusive (§9 #18).
+const DEFAULT_GATEWAY_ROLE: &str = "standalone";
+/// Master gate: even with the SSH server up for normal logins, a master
+/// only accepts relay channels when this is on.  Off by default so
+/// accepting relays is never *implied* by enabling SSH (§4.7).
+const DEFAULT_MASTER_ACCEPT_RELAYS: bool = false;
+/// Slave → the master's relay port.  Defaults to the SSH port, since the
+/// recommended transport rides the master's existing SSH server.
+const DEFAULT_SLAVE_MASTER_PORT: u16 = 2222;
+/// Relay transport: `ssh` (recommended — reuses the master's SSH server,
+/// auth + encryption for free) or `raw` (a dedicated plaintext port, the
+/// §4.3 alternative).
+const DEFAULT_RELAY_TRANSPORT: &str = "ssh";
+
 /// Identifier for one of the two configurable serial ports.
 ///
 /// Two physically independent ports — Port A (the legacy single port) and
@@ -526,6 +544,28 @@ pub struct Config {
     /// "key" (uses the gateway's auto-generated Ed25519 client key) or
     /// "password" (prompts for the remote password each time).
     pub ssh_gateway_auth: String,
+
+    // ── Master/Slave serial-extender (relay) ───────────────
+    /// Gateway role: "standalone" (default), "master", or "slave".
+    /// Mutually exclusive (§9 #18).  Validated on read/apply.
+    pub gateway_role: String,
+    /// Master gate — accept inbound relay channels from slaves.  Has no
+    /// effect unless `gateway_role == "master"`.
+    pub master_accept_relays: bool,
+    /// Slave → the master's hostname/IP to connect to.  Empty until the
+    /// operator configures slave mode.
+    pub slave_master_host: String,
+    /// Slave → the master's relay port (defaults to the SSH port).
+    pub slave_master_port: u16,
+    /// Slave → username it authenticates to the master with.  Must match
+    /// the master's unified `username` (§9 #6).
+    pub slave_master_username: String,
+    /// Slave → password it authenticates to the master with.  Must match
+    /// the master's unified `password`.  Persisted plaintext like the
+    /// other credentials (file written 0600).
+    pub slave_master_password: String,
+    /// Relay transport: "ssh" (default) or "raw".
+    pub relay_transport: String,
 }
 
 impl Default for Config {
@@ -589,6 +629,13 @@ impl Default for Config {
             ssh_enabled: DEFAULT_SSH_ENABLED,
             ssh_port: DEFAULT_SSH_PORT,
             ssh_gateway_auth: DEFAULT_SSH_GATEWAY_AUTH.into(),
+            gateway_role: DEFAULT_GATEWAY_ROLE.into(),
+            master_accept_relays: DEFAULT_MASTER_ACCEPT_RELAYS,
+            slave_master_host: String::new(),
+            slave_master_port: DEFAULT_SLAVE_MASTER_PORT,
+            slave_master_username: String::new(),
+            slave_master_password: String::new(),
+            relay_transport: DEFAULT_RELAY_TRANSPORT.into(),
         }
     }
 }
@@ -955,6 +1002,37 @@ fn read_config_file(path: &str) -> Config {
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "key" | "password"))
             .unwrap_or_else(|| DEFAULT_SSH_GATEWAY_AUTH.into()),
+        gateway_role: map
+            .get("gateway_role")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "standalone" | "master" | "slave"))
+            .unwrap_or_else(|| DEFAULT_GATEWAY_ROLE.into()),
+        master_accept_relays: map
+            .get("master_accept_relays")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_MASTER_ACCEPT_RELAYS),
+        slave_master_host: map
+            .get("slave_master_host")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default(),
+        slave_master_port: map
+            .get("slave_master_port")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
+            .unwrap_or(DEFAULT_SLAVE_MASTER_PORT),
+        slave_master_username: map
+            .get("slave_master_username")
+            .cloned()
+            .unwrap_or_default(),
+        slave_master_password: map
+            .get("slave_master_password")
+            .cloned()
+            .unwrap_or_default(),
+        relay_transport: map
+            .get("relay_transport")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "ssh" | "raw"))
+            .unwrap_or_else(|| DEFAULT_RELAY_TRANSPORT.into()),
     };
 
     // ── Legacy ssh_username / ssh_password migration ───────────
@@ -1496,6 +1574,38 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #              each connect.  No key is offered.
 ");
     write_kv_str(&mut content, "ssh_gateway_auth", &cfg.ssh_gateway_auth);
+    content.push('\n');
+
+    content.push_str("\
+# ── Master/Slave serial extender (relay) ───────────────────────
+# gateway_role: standalone (default) | master | slave.  Standalone is
+# today's behavior — the relay feature is entirely inert.  Roles are
+# mutually exclusive.
+");
+    write_kv_str(&mut content, "gateway_role", &cfg.gateway_role);
+    content.push('\n');
+
+    content.push_str("\
+# master_accept_relays: a MASTER only accepts relay channels from slaves
+# when this is on.  Off by default so accepting relays is never implied
+# by enabling SSH for normal logins.
+");
+    write_kv(&mut content, "master_accept_relays", cfg.master_accept_relays);
+    content.push('\n');
+
+    content.push_str("\
+# SLAVE settings — where to reach the master and the credentials to log
+# in with (must match the master's unified username/password).  Ignored
+# unless gateway_role = slave.
+");
+    write_kv_str(&mut content, "slave_master_host", &cfg.slave_master_host);
+    write_kv(&mut content, "slave_master_port", cfg.slave_master_port);
+    write_kv_str(&mut content, "slave_master_username", &cfg.slave_master_username);
+    write_kv_str(&mut content, "slave_master_password", &cfg.slave_master_password);
+    content.push('\n');
+
+    content.push_str("# relay_transport: ssh (default, recommended) | raw\n");
+    write_kv_str(&mut content, "relay_transport", &cfg.relay_transport);
 
     // Write to a per-PID + per-thread tmp file with owner-only mode
     // from the moment of creation, then rename into place.  On Unix
@@ -1877,6 +1987,29 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.ssh_gateway_auth = lower;
             }
         }
+        "gateway_role" => {
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "standalone" | "master" | "slave") {
+                cfg.gateway_role = lower;
+            }
+        }
+        "master_accept_relays" => {
+            cfg.master_accept_relays = value.eq_ignore_ascii_case("true")
+        }
+        "slave_master_host" => cfg.slave_master_host = value.trim().to_string(),
+        "slave_master_port" => {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
+                cfg.slave_master_port = v;
+            }
+        }
+        "slave_master_username" => cfg.slave_master_username = value.to_string(),
+        "slave_master_password" => cfg.slave_master_password = value.to_string(),
+        "relay_transport" => {
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "ssh" | "raw") {
+                cfg.relay_transport = lower;
+            }
+        }
         _ => {}
     }
 }
@@ -2110,6 +2243,45 @@ mod tests {
         // root` and unlikely to collide with system services).
         assert!(!cfg.web_enabled);
         assert_eq!(cfg.web_port, 8080);
+        // Master/Slave relay: inert by default (standalone, no relays).
+        assert_eq!(cfg.gateway_role, "standalone");
+        assert!(!cfg.master_accept_relays);
+        assert_eq!(cfg.slave_master_host, "");
+        assert_eq!(cfg.slave_master_port, 2222);
+        assert_eq!(cfg.slave_master_username, "");
+        assert_eq!(cfg.slave_master_password, "");
+        assert_eq!(cfg.relay_transport, "ssh");
+    }
+
+    /// Invalid enum-valued relay keys fall back to their defaults rather
+    /// than storing garbage (mirrors the ssh_gateway_auth / parity guards).
+    #[test]
+    fn test_relay_keys_validate_and_fall_back() {
+        let mut cfg = Config::default();
+
+        // Valid values are accepted (lower-cased / trimmed).
+        apply_config_key(&mut cfg, "gateway_role", "  Master ");
+        assert_eq!(cfg.gateway_role, "master");
+        apply_config_key(&mut cfg, "relay_transport", "RAW");
+        assert_eq!(cfg.relay_transport, "raw");
+
+        // Invalid values leave the prior value untouched.
+        apply_config_key(&mut cfg, "gateway_role", "bogus");
+        assert_eq!(cfg.gateway_role, "master");
+        apply_config_key(&mut cfg, "relay_transport", "carrier-pigeon");
+        assert_eq!(cfg.relay_transport, "raw");
+
+        // Port rejects 0 / non-numeric, keeps default.
+        apply_config_key(&mut cfg, "slave_master_port", "0");
+        assert_eq!(cfg.slave_master_port, 2222);
+        apply_config_key(&mut cfg, "slave_master_port", "2200");
+        assert_eq!(cfg.slave_master_port, 2200);
+
+        // Free-text fields pass through.
+        apply_config_key(&mut cfg, "slave_master_host", " 10.0.0.5 ");
+        assert_eq!(cfg.slave_master_host, "10.0.0.5");
+        apply_config_key(&mut cfg, "master_accept_relays", "true");
+        assert!(cfg.master_accept_relays);
     }
 
     #[test]
@@ -2344,6 +2516,13 @@ mod tests {
             ssh_enabled: true,
             ssh_port: 2222,
             ssh_gateway_auth: "password".into(),
+            gateway_role: "slave".into(),
+            master_accept_relays: true,
+            slave_master_host: "192.168.1.10".into(),
+            slave_master_port: 2200,
+            slave_master_username: "relay-user".into(),
+            slave_master_password: "relay-pass".into(),
+            relay_transport: "ssh".into(),
         };
         write_config_file(path.to_str().unwrap(), &original).unwrap();
         let loaded = read_config_file(path.to_str().unwrap());
@@ -2441,6 +2620,13 @@ mod tests {
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);
         assert_eq!(loaded.ssh_port, original.ssh_port);
         assert_eq!(loaded.ssh_gateway_auth, original.ssh_gateway_auth);
+        assert_eq!(loaded.gateway_role, original.gateway_role);
+        assert_eq!(loaded.master_accept_relays, original.master_accept_relays);
+        assert_eq!(loaded.slave_master_host, original.slave_master_host);
+        assert_eq!(loaded.slave_master_port, original.slave_master_port);
+        assert_eq!(loaded.slave_master_username, original.slave_master_username);
+        assert_eq!(loaded.slave_master_password, original.slave_master_password);
+        assert_eq!(loaded.relay_transport, original.relay_transport);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2589,6 +2775,13 @@ mod tests {
             "ssh_enabled",
             "ssh_port",
             "ssh_gateway_auth",
+            "gateway_role",
+            "master_accept_relays",
+            "slave_master_host",
+            "slave_master_port",
+            "slave_master_username",
+            "slave_master_password",
+            "relay_transport",
         ];
 
         for key in expected_keys {

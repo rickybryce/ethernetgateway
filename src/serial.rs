@@ -2159,6 +2159,25 @@ fn handle_dial_with_modifiers(state: &mut ModemState, parsed: &ParsedDial) {
 fn handle_dial(state: &mut ModemState, target: &str) {
     let lower = target.to_ascii_lowercase();
 
+    // Slave mode (§3 Model B): every connected call bridges to the
+    // master.  The slave's modem ran the whole command dialog locally;
+    // here, at connect, it resolves the number against its *local*
+    // phonebook and hands the master either "your menu" or a resolved
+    // host:port to dial onward.  Standalone/master fall through to the
+    // local dial paths below.
+    {
+        let cfg = config::get_config();
+        if cfg.gateway_role == "slave" {
+            match slave_resolve_relay_target(target, &lower) {
+                Some(rt) => dial_master_relay(state, rt, &cfg),
+                None => {
+                    send_result(state, "NO CARRIER");
+                }
+            }
+            return;
+        }
+    }
+
     // Check for the built-in gateway number (digits only, ignoring formatting).
     if is_phone_number(target)
         && config::normalize_phone_number(target) == GATEWAY_PHONE_NUMBER
@@ -2212,6 +2231,121 @@ fn handle_dial(state: &mut ModemState, target: &str) {
         };
         dial_tcp(state, &host, port);
     }
+}
+
+/// Slave-mode (§3 Model B) resolution of a dial string into a relay
+/// target.  Mirrors the standalone `handle_dial` resolution but produces
+/// a [`crate::relay::RelayTarget`] for the master instead of dialing
+/// locally: the gateway keywords/number map to the master's menu; a
+/// phone number is looked up in the *local* phonebook; a host[:port]
+/// becomes an onward dial.  Returns `None` (→ NO CARRIER) for an
+/// unresolvable number or an unsupported keyword (e.g. the local-only
+/// Kermit-server entry, which has no relay meaning).
+fn slave_resolve_relay_target(
+    target: &str,
+    lower: &str,
+) -> Option<crate::relay::RelayTarget> {
+    use crate::relay::RelayTarget;
+
+    if (is_phone_number(target)
+        && config::normalize_phone_number(target) == GATEWAY_PHONE_NUMBER)
+        || lower == "ethernet-gateway"
+        || lower == "ethernet gateway"
+    {
+        return Some(RelayTarget::Menu);
+    }
+    // The local Kermit-server shortcut isn't a relay destination.
+    if matches!(lower, "kermit" | "kermit-server" | "kermit server") {
+        return None;
+    }
+
+    let resolved = if is_phone_number(target) {
+        config::lookup_dialup_number(target)?
+    } else {
+        target.to_string()
+    };
+    let (host, port) = if let Some((h, p)) = resolved.rsplit_once(':') {
+        match p.parse::<u16>() {
+            Ok(port) if port > 0 => (h.to_string(), port),
+            _ => return None,
+        }
+    } else {
+        (resolved, 23u16)
+    };
+    Some(RelayTarget::Dial { host, port })
+}
+
+/// Slave-mode bridge: connect to the master over SSH, request the relay
+/// channel for `target`, and pump the local UART's data phase through it
+/// (§4.1).  Connect-per-call — the connection is opened when the device
+/// connects and torn down when the call ends.  `+++`/ATO resume is not
+/// preserved across a relay call in v1 (the device can redial); a clean
+/// hangup or master-side disconnect yields NO CARRIER.
+fn dial_master_relay(
+    state: &mut ModemState,
+    target: crate::relay::RelayTarget,
+    cfg: &config::Config,
+) {
+    if cfg.slave_master_host.is_empty() {
+        glog!("Relay (slave): no master host configured; refusing dial");
+        send_result(state, "NO CARRIER");
+        return;
+    }
+
+    let host = cfg.slave_master_host.clone();
+    let port = cfg.slave_master_port;
+    let user = cfg.slave_master_username.clone();
+    let pass = cfg.slave_master_password.clone();
+    let port_label = state.port_id.label();
+
+    let connected = state.handle.block_on(async {
+        crate::relay::connect_master_relay(&host, port, &user, &pass, &target, port_label)
+            .await
+    });
+    let relay = match connected {
+        Ok(r) => r,
+        Err(e) => {
+            glog!("Relay (slave) Port {}: {}", port_label, e);
+            send_result(state, "NO CARRIER");
+            return;
+        }
+    };
+
+    send_result(state, "CONNECT");
+    state.mode = ModemMode::Online;
+
+    // Keep the SSH session handle alive for the duration of the call;
+    // dropping it closes the connection.
+    let crate::relay::MasterRelay { _session, stream } = relay;
+    let (mut relay_read, mut relay_write) = tokio::io::split(stream);
+    let exit = online_mode_duplex(state, &mut relay_read, &mut relay_write);
+
+    state.mode = ModemMode::Command;
+
+    // Cleanly close the relay write half so the master sees EOF (and can
+    // flush any in-flight output / finish a transfer) rather than a hard
+    // connection reset when `_session` drops.  Bounded so a stuck peer
+    // can't wedge the serial thread.
+    let _ = state.handle.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::io::AsyncWriteExt::shutdown(&mut relay_write),
+        )
+        .await
+    });
+
+    match exit {
+        OnlineExit::Escaped => {
+            // v1: relay calls are not preserved across +++ (no ATO
+            // resume); fall back to command mode and let the connection
+            // close when `_session` drops below.
+            send_result(state, "OK");
+        }
+        OnlineExit::Disconnected => {
+            send_result(state, "NO CARRIER");
+        }
+    }
+    // `_session` drops here, tearing down the SSH relay connection.
 }
 
 /// Returns true if the dial string looks like a phone number rather than a
@@ -2501,11 +2635,29 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
 /// Uses `Handle::block_on` to perform async reads/writes on the duplex stream.
 /// This is safe because the serial thread is a `std::thread`, not a tokio task.
 /// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
-fn online_mode_duplex(
+/// Bridge the blocking UART's data phase to an async byte stream until
+/// the call ends (`+++` escape, carrier loss, or shutdown).
+///
+/// Generic over the async halves so it serves **two** callers with one
+/// implementation:
+/// - the in-process dial bridges (`dial_ethernet_gateway`,
+///   `dial_kermit_server`) that pair the UART with a local
+///   [`tokio::io::DuplexStream`]; and
+/// - the master/slave **outward relay** (Phase 2): the same data phase
+///   bridged to a relay channel pointed at the master, instead of a local
+///   session — see `crate::relay`.
+///
+/// Only `AsyncRead`/`AsyncWrite` are required, so a `DuplexStream` half, a
+/// TCP socket half, or an SSH channel half all satisfy the bounds.
+fn online_mode_duplex<R, W>(
     state: &mut ModemState,
-    duplex_read: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
-    duplex_write: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
-) -> OnlineExit {
+    duplex_read: &mut R,
+    duplex_write: &mut W,
+) -> OnlineExit
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut serial_buf = [0u8; 256];

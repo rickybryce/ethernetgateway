@@ -296,16 +296,83 @@ master` (policy choice at implementation time — see §4.6).
 
 ## 6. Suggested phased plan
 
-- **P1 — Relay plumbing (§4.1):** slave side — on CONNECT, bridge the modem emulator's data phase
-  outward (≈ the existing console-bridge, pointed at the master); master side — accept a relay
-  stream and hand it to the existing session machinery (menu / dial-out / file-transfer protocols).
-  The modem emulator stays on the slave's UART (no async rewrite). Unit-test over a loopback socket.
-- **P2 — SSH transport (recommended):** add the `exec`/`subsystem` routing to the russh **server**
-  (`ssh.rs`) so a relay channel is handed to the intake while `shell`/`pty` stays the menu path;
-  add the **slave** SSH-client relay (reusing the `GatewayHandler` client pattern,
-  `telnet.rs:1301`) with auto-reconnect; carry both ports as two SSH channels; wire **Model-B
-  dialing** (slave resolves → master dials). Config/UI keys (§4.5). End-to-end loopback test
-  (slave ↔ master over SSH, push a transfer through, dial a fake BBS via the master).
+- **P1 — Relay plumbing (§4.1): DONE 2026-06-30 (uncommitted on `dev`).** Transport-agnostic
+  master-intake + slave-bridge primitive, loopback-tested. Shipped pieces:
+  - **Master intake — `src/relay.rs` `run_master_relay_session(reader, write_half, peer_addr,
+    shutdown, restart, lockouts)`:** wraps an accepted relay stream in a relay `TelnetSession` and
+    runs the full session machinery (menu / transfer / dial-out). Transport-agnostic
+    (`AsyncRead`/`AsyncWrite` only) — the P2 SSH `exec`/`subsystem` handler and the loopback test
+    share this one path. `#[allow(dead_code)]` until P2 wires the production (SSH) caller.
+  - **`TelnetSession::new_relay(...)` (telnet.rs):** master-side session for a relayed device.
+    `is_serial = true` (terminal detection runs, raw 8-bit, **no telnet IAC / no CR-NUL** — §9 #2
+    raw serial semantics), `serial_port_id = None` (owns no local port → every "own-port" check is
+    correctly false; a relayed device may bridge to a local port), `peer_addr = slave IP`. Skips
+    auth like a serial caller (the transport authenticates in P2).
+  - **Slave-side bridge primitive:** `serial::online_mode_duplex` generalized from concrete
+    `DuplexStream` halves to generic `R: AsyncRead + Unpin` / `W: AsyncWrite + Unpin`, so the same
+    UART⇄async pump serves both the in-process dial bridges and the P2 outward relay. No standalone
+    `bridge_uart_to_relay` wrapper yet — its caller (Model-B dial / SSH client) arrives in P2;
+    adding an uncalled `pub fn` now would be dead code (clippy).
+  - **Loopback test** (`src/relay/tests.rs`): a `tokio::io::duplex` pair drives a complete session
+    over the relay (detect → main menu → quit/farewell → clean EOF), plus a raw-transparency probe
+    (a 0xFF/IAC byte at the color prompt is passed through, not consumed as a telnet command).
+  - Suite **1243 lib + 1 e2e green, clippy `--all-targets` clean.** Standalone behavior unchanged
+    (relay code is additive; no production caller until P2).
+- **P2 — SSH transport + config/UI + Model-B dialing: DONE 2026-06-30 (uncommitted on `dev`).**
+  Shipped:
+  - **P2a — Config + roles (config.rs):** `gateway_role` (standalone|master|slave, default
+    standalone), `master_accept_relays` (default OFF — explicit opt-in), `slave_master_host/port/
+    username/password`, `relay_transport` (ssh|raw, default ssh). Full lifecycle (const/struct/
+    default/parse-validate/write/`apply_config_key`) + round-trip/defaults/validation tests.
+  - **P2b — 3-UI wiring:** telnet `M Master/Slave` sub-screen (`master_slave_config`) with the
+    §4.7 address-block relocation to the CONFIGURATION menu (`render_server_address_block`); row
+    tests updated + `master_slave_help_lines` registered in `all_help_line_groups`. Web
+    `frame_master_slave` card. GUI `draw_server_relay` in the Server "More…" popup
+    (`slave_master_port_buf` wired through all 5 buffer sites). Per-port identity is *derived*
+    from the port letter (not a config key).
+  - **P2c — Master SSH relay intake (ssh.rs):** `exec_request` parses `serial-relay <port>
+    menu|dial <host:port>` (shared `relay::parse_relay_command`), gates on `gateway_role==master
+    && master_accept_relays`, and routes the channel → `run_master_relay_session` (menu) or
+    `run_master_relay_dial` (onward dial). Per-channel `relay_writers` map so one slave connection
+    carries Ports A+B as separate channels; `data()`/`channel_eof()` route by channel. `shell`/
+    `pty` stay the interactive path. **Review findings 1 & 2 resolved:** auth is enforced by the
+    existing `auth_password` before any channel request, and `run_master_relay_session` now
+    registers/deregisters its writer in `session_writers`.
+  - **P2d — Slave SSH-client relay + Model-B dialing (relay.rs + serial.rs):** `SlaveRelayHandler`
+    + `connect_master_relay` (russh client, password auth, host key accept-on-first-use per the
+    trusted-LAN threat model). `handle_dial` intercepts slave mode → `slave_resolve_relay_target`
+    (local phonebook resolution → Menu or Dial) → `dial_master_relay` bridges the UART to the
+    relay via the generalized `online_mode_duplex`. **Connect-per-call** for modem mode (no
+    persistent connection needed there).
+  - **P2e — tests:** command-contract round-trip (`RelayTarget::exec_command` ↔
+    `parse_relay_command`), onward-dial transparent piping (`run_master_relay_dial` ↔ a fake TCP
+    echo), plus P1's full-session loopback (the exact thing the SSH channel carries). All CI-able.
+  - Suite green (1273 lib + 1 e2e at last full run), clippy `--all-targets` clean.
+  - **Deferred (not blockers; tracked for a later pass):**
+    - **Real two-instance SSH smoke test** is the manual ground truth (a CI test would race the
+      process-global config singleton and write a host key into CWD — same reason CCGMS/VICE
+      interop is manual). Components are covered above.
+    - **Console-mode remote ports** (§9 #12): persistent slave→master registration channel +
+      remote-port registry in the master's Serial Gateway picker + paging/cap. Modem-mode
+      (slave-initiated on connect) is done; console-mode (master-initiated on pick) is not.
+    - **Review finding 3 (relay identity):** `client_type_label()` still shows "Serial modem" for
+      a relay; first-class `is_relay`/remote-key identity rides with the picker registry work.
+    - **`+++`/ATO resume across a relay call** (modem mode): not preserved in v1 — a relay call
+      ends on `+++` (the device can redial). `ActiveConnection` has no relay variant yet. (The
+      relay write half is now flushed+EOF'd cleanly on `+++` so the master isn't reset mid-flush.)
+    - **#13 slave-mode warning** on the telnet main menu ("this gateway is in SLAVE mode — connect
+      to the master at <ip>"): not yet added.
+    - **`relay_transport = raw`** (P3): only `ssh` is implemented. The `raw` option is now hidden
+      from all 3 UIs and a startup warning fires if it's hand-set (was a silent "set raw, get ssh"
+      trap); the config key is retained for when P3 adds the raw transport.
+    - **Head-of-line blocking** across concurrent relay channels on one SSH connection: documented
+      in `ssh.rs` `data()`; the correct fix (per-channel mpsc pump with SSH-window backpressure)
+      belongs with the concurrent multi-channel work (#12), not a naive try_send/unbounded buffer.
+  - **Two adversarial review passes (2026-06-30): all findings fixed** except the deferrals above.
+    P2-review fixes shipped: relay connect timeout (15s), `channel_close` cleanup (no writer leak),
+    onward-dial `copy_bidirectional` (no truncation), slave host-key TOFU pin via `gateway_hosts`,
+    relay channels counted against `max_sessions`, shared `spawn_channel_reader`, clean `+++` EOF,
+    and the master-ssh-disabled / raw-transport startup warnings. 1248 lib + 1 e2e green.
 - **P3 — (alternative) raw-port transport:** only if a non-SSH path is wanted — dedicated raw
   relay port + its own auth/lockout. Skippable if SSH transport is adopted.
 - **P4 — (optional, likely unneeded) Full line control:** an RFC-2217-style control sub-channel —

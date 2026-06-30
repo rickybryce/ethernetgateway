@@ -309,6 +309,7 @@ impl russh::server::Server for SshServer {
             password: cfg.password.clone(),
             peer_addr: peer_addr.map(|a| a.ip()),
             duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
             session_writers: self.session_writers.clone(),
             lockouts: self.lockouts.clone(),
             counted: false,
@@ -333,6 +334,15 @@ struct SshHandler {
     /// Set once a shell is opened; prevents duplicate shell requests.
     duplex_writer:
         Option<Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>>,
+    /// Per-channel write halves for master/slave **relay** channels
+    /// (`exec "serial-relay <port>"`).  Keyed by channel so one SSH
+    /// connection from a slave can carry several relay channels (Ports A
+    /// and B) concurrently — `data()`/`channel_eof()` route by channel.
+    /// Separate from `duplex_writer` (the single interactive shell).
+    relay_writers: std::collections::HashMap<
+        russh::ChannelId,
+        Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    >,
     session_writers: telnet::SessionWriters,
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
@@ -353,6 +363,52 @@ impl Drop for SshHandler {
             glog!("SSH: {} disconnected", addr);
         }
     }
+}
+
+impl SshHandler {
+    /// Shut down the bridge for a closed channel.  A relay channel closes
+    /// only that channel's session; any non-relay channel falls back to the
+    /// single interactive shell bridge.  Shared by channel_eof and
+    /// channel_close (a peer may send either, or both — idempotent).
+    async fn teardown_channel(&mut self, channel: russh::ChannelId) {
+        if let Some(writer) = self.relay_writers.remove(&channel) {
+            let mut w = writer.lock().await;
+            let _ = w.shutdown().await;
+        } else if let Some(writer) = self.duplex_writer.take() {
+            let mut w = writer.lock().await;
+            let _ = w.shutdown().await;
+        }
+    }
+}
+
+/// Pump a duplex bridge's gateway-output half back to the SSH client
+/// channel, closing the channel when the session ends.  Shared by
+/// `shell_request` (interactive) and `exec_request` (relay) so the two
+/// can't drift (review finding: this loop was duplicated).
+fn spawn_channel_reader(
+    handle: russh::server::Handle,
+    channel: russh::ChannelId,
+    mut reader: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+) {
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if handle
+                        .data(channel, bytes::Bytes::copy_from_slice(&buf[..n]))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = handle.close(channel).await;
+    });
 }
 
 impl russh::server::Handler for SshHandler {
@@ -514,40 +570,165 @@ impl russh::server::Handler for SshHandler {
             session_writers.lock().await.retain(|w| !Arc::ptr_eq(w, &writer_for_task));
         });
 
-        // Spawn a reader task: reads TelnetSession output from the duplex
-        // and sends it back to the SSH client.
-        let handle = session.handle();
+        // Reader task: forward TelnetSession output back to the SSH client
+        // (shared with exec_request's relay path).
+        spawn_channel_reader(session.handle(), channel, handler_read);
+
+        Ok(())
+    }
+
+    /// Master/slave relay intake.  A slave opens a channel and runs
+    /// `exec "serial-relay <port>"` instead of a shell; we route that
+    /// channel into a master-side relay session (the full menu / transfer
+    /// / dial-out machinery) rather than an interactive shell.
+    ///
+    /// Auth already happened in `auth_password` (the slave logs in with
+    /// the master's unified credentials — review finding 2), so the only
+    /// extra gates here are: the command must be `serial-relay`, this
+    /// gateway must be a `master`, and `master_accept_relays` must be on.
+    /// Any other `exec` is refused — this is not a general command shell.
+    async fn exec_request(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data);
+        let command = command.trim();
+
+        // Grammar (§3 Model B): `serial-relay <port> menu`
+        //                    or `serial-relay <port> dial <host>:<port>`.
+        let Some(parsed) = crate::relay::parse_relay_command(command) else {
+            glog!(
+                "SSH: refused exec {:?} from {:?} (only serial-relay is allowed)",
+                command,
+                self.peer_addr
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        let port_label = parsed.port_label;
+        let dial_target = parsed.dial;
+
+        let cfg = config::get_config();
+        if cfg.gateway_role != "master" || !cfg.master_accept_relays {
+            glog!(
+                "SSH: refused serial-relay from {:?} (role={}, accept_relays={})",
+                self.peer_addr,
+                cfg.gateway_role,
+                cfg.master_accept_relays
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        // Count this relay channel against the session cap.  Each relay
+        // channel spawns a full master session, so (like the interactive
+        // shell) it must occupy a slot — previously relay sessions bypassed
+        // max_sessions, letting one authenticated slave spawn unbounded
+        // master sessions (review finding).
+        let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
+        if prev >= self.max_sessions {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            glog!(
+                "SSH: relay from {:?} rejected (server at capacity {})",
+                self.peer_addr,
+                self.max_sessions
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        session.channel_success(channel)?;
+        match &dial_target {
+            None => glog!(
+                "SSH: accepted serial relay (port {}, menu) from {:?}",
+                port_label,
+                self.peer_addr
+            ),
+            Some((h, p)) => glog!(
+                "SSH: accepted serial relay (port {}, dial {}:{}) from {:?}",
+                port_label,
+                h,
+                p,
+                self.peer_addr
+            ),
+        }
+
+        // Bridge the SSH channel to the gateway side via a duplex (same
+        // pattern as shell_request).  The gateway-side consumer depends on
+        // the target: the master's menu session, or a transparent onward
+        // dial to an external host (Model B).
+        let (gateway_stream, handler_stream) = tokio::io::duplex(65536);
+        let (handler_read, handler_write) = tokio::io::split(handler_stream);
+
+        // Route this channel's inbound data to the relay bridge.
+        self.relay_writers.insert(
+            channel,
+            Arc::new(tokio::sync::Mutex::new(handler_write)),
+        );
+
+        let shutdown = self.shutdown.clone();
+        let restart = self.restart.clone();
+        let peer_addr = self.peer_addr;
+        let session_writers = self.session_writers.clone();
+        let lockouts = self.lockouts.clone();
+        let session_count = self.session_count.clone();
         tokio::spawn(async move {
-            let mut reader = handler_read;
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if handle
-                            .data(channel, bytes::Bytes::copy_from_slice(&buf[..n]))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            match dial_target {
+                None => {
+                    let (gateway_read, gateway_write) = tokio::io::split(gateway_stream);
+                    crate::relay::run_master_relay_session(
+                        Box::new(gateway_read),
+                        Box::new(gateway_write),
+                        peer_addr,
+                        shutdown,
+                        restart,
+                        session_writers,
+                        lockouts,
+                    )
+                    .await;
+                }
+                Some((host, port)) => {
+                    // Pass the WHOLE (unsplit) duplex so copy_bidirectional
+                    // can half-close each direction without dropping the
+                    // peer's final bytes.
+                    crate::relay::run_master_relay_dial(gateway_stream, host, port).await;
                 }
             }
-            let _ = handle.close(channel).await;
+            // Release the slot when the relay session ends.
+            session_count.fetch_sub(1, Ordering::SeqCst);
         });
+
+        // Forward relay-session output back to the SSH channel (shared
+        // with shell_request).
+        spawn_channel_reader(session.handle(), channel, handler_read);
 
         Ok(())
     }
 
     async fn data(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         data: &[u8],
         _session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
-        if let Some(writer) = &self.duplex_writer {
+        // Route by channel: a relay channel's bytes go to its relay
+        // session; otherwise to the single interactive shell bridge.
+        //
+        // NOTE (head-of-line blocking): `write_all().await` here holds the
+        // per-connection handler callback while the duplex drains.  Today
+        // a slave opens one channel per connection (connect-per-call), so
+        // there is no contention.  If the deferred concurrent multi-channel
+        // design lands (Ports A+B on one connection), a stalled channel
+        // would block the others — the correct fix then is a per-channel
+        // mpsc pump with the SSH window providing backpressure, NOT a
+        // try_send (drops data) or unbounded buffer (grows without bound).
+        // Left as-is deliberately rather than half-fixed.
+        if let Some(writer) = self.relay_writers.get(&channel) {
+            let mut w = writer.lock().await;
+            let _ = w.write_all(data).await;
+        } else if let Some(writer) = &self.duplex_writer {
             let mut w = writer.lock().await;
             let _ = w.write_all(data).await;
         }
@@ -556,14 +737,25 @@ impl russh::server::Handler for SshHandler {
 
     async fn channel_eof(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         _session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
-        // Client closed their end — shut down the bridge.
-        if let Some(writer) = self.duplex_writer.take() {
-            let mut w = writer.lock().await;
-            let _ = w.shutdown().await;
-        }
+        self.teardown_channel(channel).await;
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: russh::ChannelId,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        // A peer may send CHANNEL_CLOSE without a preceding CHANNEL_EOF
+        // (EOF is optional in the SSH protocol), which russh routes here,
+        // not to channel_eof.  Without this handler a relay channel's
+        // entry (and its held duplex write-half) would leak for the whole
+        // connection lifetime on a long-lived slave that opens many
+        // channels (review finding).  Idempotent with channel_eof.
+        self.teardown_channel(channel).await;
         Ok(())
     }
 }
@@ -762,6 +954,7 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some("10.0.0.1".parse().unwrap()),
             duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             counted: false,
@@ -846,6 +1039,7 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,
@@ -876,6 +1070,7 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,
@@ -921,6 +1116,7 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,

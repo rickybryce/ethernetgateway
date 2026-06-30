@@ -1317,7 +1317,7 @@ impl russh::client::Handler for GatewayHandler {
 const GATEWAY_HOSTS_FILE: &str = "gateway_hosts";
 
 /// Result of checking a host key against the known-hosts file.
-enum HostKeyStatus {
+pub(crate) enum HostKeyStatus {
     /// Key matches a stored entry.
     Known,
     /// No entry for this host:port.
@@ -1340,7 +1340,7 @@ fn format_host_key(key: &russh::keys::PublicKey) -> String {
 }
 
 /// Look up a host:port in the known-hosts file and compare the key.
-fn check_known_host(
+pub(crate) fn check_known_host(
     host: &str,
     port: u16,
     key: &russh::keys::PublicKey,
@@ -1374,7 +1374,7 @@ fn check_known_host(
 ///
 /// Uses a static mutex to serialise read-modify-write across concurrent
 /// sessions, and write-to-temp-then-rename for crash safety.
-fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKey) {
+pub(crate) fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKey) {
     static HOSTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = HOSTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -1632,6 +1632,77 @@ impl TelnetSession {
             is_serial: false,
             serial_port_id: None,
             is_ssh: true,
+            idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
+            pushback: None,
+            neg_sent_will: Box::new([false; 256]),
+            neg_sent_do: Box::new([false; 256]),
+            neg_sent_wont: Box::new([false; 256]),
+            neg_sent_dont: Box::new([false; 256]),
+            ttype_matched: false,
+            ttype_raw: None,
+            telnet_negotiated: false,
+            window_width: None,
+            window_height: None,
+        }
+    }
+
+    /// Create a session for an inbound **master/slave relay** connection.
+    ///
+    /// On the master, a slave bridges a remote serial device's data phase
+    /// to us over a relay channel (an SSH channel in P2, an in-process
+    /// socket in the loopback test).  The bytes carry **raw serial
+    /// semantics** end to end — no telnet IAC, no CR-NUL stuffing — so the
+    /// session behaves like a directly-attached serial caller: terminal
+    /// detection runs, output is raw 8-bit.  We therefore set
+    /// `is_serial = true` to inherit that I/O behavior.
+    ///
+    /// Unlike `new_serial`, the master owns **no local serial port** for a
+    /// relay caller, so `serial_port_id` is `None`.  Every "own-port" check
+    /// (`self.is_serial && self.serial_port_id == Some(id)`) consequently
+    /// evaluates false, which is correct: a relayed device is not attached
+    /// to any of *this* gateway's ports and may freely bridge to a local
+    /// port via the Serial Gateway menu.
+    ///
+    /// `peer_addr` is the slave's IP (the relay endpoint), so per-IP
+    /// lockout accounting and logging attribute to the right host.
+    /// `lockouts` is the shared map (as with `new_ssh`) so any future
+    /// `authenticate()` on the relay path inherits cross-IP counting;
+    /// today the relay is gated by the transport (SSH auth in P2), so a
+    /// relay session — like a serial session — does not itself auth.
+    ///
+    /// Called by `crate::relay::run_master_relay_session`, which the
+    /// master SSH relay-channel handler (`ssh.rs` `exec_request`) drives.
+    pub(crate) fn new_relay(
+        reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        writer: SharedWriter,
+        shutdown: Arc<AtomicBool>,
+        restart: Arc<AtomicBool>,
+        peer_addr: Option<IpAddr>,
+        lockouts: LockoutMap,
+    ) -> Self {
+        Self {
+            reader,
+            writer,
+            shutdown,
+            restart,
+            current_menu: Menu::Main,
+            terminal_type: TerminalType::Ascii,
+            erase_char: 0x7F,
+            lockouts,
+            peer_addr,
+            transfer_subdir: String::new(),
+            xmodem_iac: false,
+            web_lines: Vec::new(),
+            web_scroll: 0,
+            web_links: Vec::new(),
+            web_history: Vec::new(),
+            web_url: None,
+            web_title: None,
+            web_forms: Vec::new(),
+            weather_zip: config::get_config().weather_zip,
+            is_serial: true,
+            serial_port_id: None,
+            is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             neg_sent_will: Box::new([false; 256]),
@@ -9105,6 +9176,43 @@ impl TelnetSession {
 
     // ─── CONFIGURATION ──────────────────────────────────────
 
+    /// Render the "Server addresses:" banner — the gateway's reachable
+    /// IPs (capped at `SERVER_ADDR_DISPLAY_CAP`) plus a sample
+    /// `ATD <ip>:<port>` dial string.  Shown at the top of the
+    /// CONFIGURATION menu as a "how to reach this gateway" banner.
+    /// (Relocated here off the Server Configuration screen in the
+    /// master/slave work to free a row for the `M Master/Slave` entry —
+    /// §4.7 of the design note.)  No-op when no addresses are detected.
+    async fn render_server_address_block(&mut self) -> Result<(), std::io::Error> {
+        let cfg = config::get_config();
+        let addrs = get_server_addresses();
+        if addrs.is_empty() {
+            return Ok(());
+        }
+        self.send_line(&format!("  {}", self.dim("Server addresses:")))
+            .await?;
+        let max_w = if self.terminal_type == TerminalType::Petscii {
+            36 // 40 - 4 chars indent
+        } else {
+            52 // 56 - 4 chars indent
+        };
+        for addr in addrs.iter().take(SERVER_ADDR_DISPLAY_CAP) {
+            let display = truncate_to_width(addr, max_w);
+            self.send_line(&format!("    {}", display)).await?;
+        }
+        if cfg.telnet_enabled {
+            let example = format!("ATD {}:{}", addrs[0], cfg.telnet_port);
+            let max_example = if self.terminal_type == TerminalType::Petscii {
+                38 // 40 - 2 chars indent
+            } else {
+                54 // 56 - 2 chars indent
+            };
+            let example = truncate_to_width(&example, max_example);
+            self.send_line(&format!("  {}", self.amber(&example))).await?;
+        }
+        Ok(())
+    }
+
     async fn configuration(&mut self) -> Result<(), std::io::Error> {
         loop {
             self.clear_screen().await?;
@@ -9113,6 +9221,11 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.yellow("CONFIGURATION")))
                 .await?;
             self.send_line(&sep).await?;
+
+            // "How to reach this gateway" banner — relocated here from the
+            // Server Configuration screen (§4.7) so that screen has room
+            // for the M Master/Slave entry.
+            self.render_server_address_block().await?;
             self.send_line("").await?;
 
             // Per-port mode/status is shown under Serial Configuration (M),
@@ -9785,35 +9898,8 @@ impl TelnetSession {
             .await?;
             self.send_line("").await?;
 
-            // Show server IP addresses and ATD example
-            let addrs = get_server_addresses();
-            if !addrs.is_empty() {
-                self.send_line(&format!(
-                    "  {}",
-                    self.dim("Server addresses:")
-                ))
-                .await?;
-                let max_w = if self.terminal_type == TerminalType::Petscii {
-                    36 // 40 - 4 chars indent
-                } else {
-                    52 // 56 - 4 chars indent
-                };
-                for addr in addrs.iter().take(SERVER_ADDR_DISPLAY_CAP) {
-                    let display = truncate_to_width(addr, max_w);
-                    self.send_line(&format!("    {}", display)).await?;
-                }
-                if cfg.telnet_enabled {
-                    let example = format!("ATD {}:{}", addrs[0], cfg.telnet_port);
-                    let max_example = if self.terminal_type == TerminalType::Petscii {
-                        38 // 40 - 2 chars indent
-                    } else {
-                        54 // 56 - 2 chars indent
-                    };
-                    let example = truncate_to_width(&example, max_example);
-                    self.send_line(&format!("  {}", self.amber(&example)))
-                        .await?;
-                }
-            }
+            // (The "Server addresses:" banner now lives at the top of the
+            // CONFIGURATION menu — see render_server_address_block / §4.7.)
 
             self.send_line(&format!(
                 "  {}  Toggle telnet    {}  Set telnet port",
@@ -9849,6 +9935,11 @@ impl TelnetSession {
                 "  {}  Session cap      {}  Idle timeout",
                 self.cyan("C"),
                 self.cyan("D")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Master/Slave",
+                self.cyan("M")
             ))
             .await?;
             self.send_line(&format!(
@@ -9941,6 +10032,9 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "m" => {
+                    self.master_slave_config().await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -9957,6 +10051,206 @@ impl TelnetSession {
                 }
             }
         }
+    }
+
+    // ─── MASTER / SLAVE (relay) sub-screen ───────────────────
+
+    /// Master/Slave serial-extender settings (§4.7).  Its own fresh
+    /// 22-row budget.  Shows the role and the relevant master/slave
+    /// fields, and lets the operator change them.  Role / relay changes
+    /// take effect on the next server restart (the relay listener and the
+    /// slave client are started at boot from `gateway_role`), so changes
+    /// here surface a restart notice.
+    async fn master_slave_config(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("MASTER / SLAVE")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let role_disp = match cfg.gateway_role.as_str() {
+                "master" => self.green("MASTER"),
+                "slave" => self.cyan("SLAVE"),
+                _ => self.dim("STANDALONE"),
+            };
+            self.send_line(&format!("  Role: {}", role_disp)).await?;
+
+            let accept_disp = if cfg.master_accept_relays {
+                self.green("ENABLED")
+            } else {
+                self.red("Disabled")
+            };
+            self.send_line(&format!("  Accept relays: {}", accept_disp))
+                .await?;
+
+            let host_disp = if cfg.slave_master_host.is_empty() {
+                self.dim("(not set)")
+            } else {
+                self.amber(&format!(
+                    "{}:{}",
+                    cfg.slave_master_host, cfg.slave_master_port
+                ))
+            };
+            self.send_line(&format!("  Master: {}", host_disp)).await?;
+            let user_disp = if cfg.slave_master_username.is_empty() {
+                self.dim("(not set)")
+            } else {
+                self.amber(&cfg.slave_master_username)
+            };
+            self.send_line(&format!("  User:   {}", user_disp)).await?;
+            let pass_disp = if cfg.slave_master_password.is_empty() {
+                self.dim("(not set)")
+            } else {
+                self.green("(set)")
+            };
+            self.send_line(&format!("  Pass:   {}", pass_disp)).await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}  Cycle role       {}  Accept relays",
+                self.cyan("R"),
+                self.cyan("A")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Master host      {}  Master port",
+                self.cyan("M"),
+                self.cyan("P")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Master user      {}  Master pass",
+                self.cyan("U"),
+                self.cyan("W")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  {}",
+                self.action_prompt("Q", "Back"),
+                self.action_prompt("H", "Help")
+            ))
+            .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/relay"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            match input.as_str() {
+                "r" => {
+                    let next = match cfg.gateway_role.as_str() {
+                        "standalone" => "master",
+                        "master" => "slave",
+                        _ => "standalone",
+                    };
+                    let v = next.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("gateway_role", &v);
+                    })
+                    .await
+                    .ok();
+                    self.config_restart_notice().await?;
+                }
+                "a" => {
+                    let v = (!cfg.master_accept_relays).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("master_accept_relays", &v);
+                    })
+                    .await
+                    .ok();
+                    self.config_restart_notice().await?;
+                }
+                "m" => {
+                    self.other_set_field(
+                        "Master host",
+                        "slave_master_host",
+                        &cfg.slave_master_host,
+                        false,
+                    )
+                    .await?;
+                    self.config_restart_notice().await?;
+                }
+                "p" => {
+                    self.config_set_port(
+                        "Master",
+                        "slave_master_port",
+                        cfg.slave_master_port,
+                    )
+                    .await?;
+                    self.config_restart_notice().await?;
+                }
+                "u" => {
+                    self.other_set_field(
+                        "Master user",
+                        "slave_master_username",
+                        &cfg.slave_master_username,
+                        false,
+                    )
+                    .await?;
+                    self.config_restart_notice().await?;
+                }
+                "w" => {
+                    self.other_set_field(
+                        "Master pass",
+                        "slave_master_password",
+                        if cfg.slave_master_password.is_empty() {
+                            "(not set)"
+                        } else {
+                            "(set)"
+                        },
+                        true,
+                    )
+                    .await?;
+                    self.config_restart_notice().await?;
+                }
+                "h" => {
+                    self.show_help_page(
+                        "MASTER / SLAVE HELP",
+                        Self::master_slave_help_lines(
+                            self.terminal_type == TerminalType::Petscii,
+                        ),
+                    )
+                    .await?;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press a letter from the menu.").await?;
+                }
+            }
+        }
+    }
+
+    /// Help lines for the Master/Slave sub-screen.  Kept in a function so
+    /// the help-fit tests can iterate them (see CLAUDE.md testing notes).
+    /// One table that fits the 40-col PETSCII budget (so it also fits the
+    /// 80-col ANSI budget); `petscii` is accepted for signature parity
+    /// with the other `*_help_lines` and the `all_help_line_groups` table.
+    fn master_slave_help_lines(_petscii: bool) -> &'static [&'static str] {
+        &[
+            "  Role / relay settings.",
+            "",
+            "  Standalone: normal gateway.",
+            "  Master: accepts slave relays",
+            "    (also enable Accept relays).",
+            "  Slave: bridges its serial ports",
+            "    to the master over SSH.",
+            "",
+            "  R Cycle role   A Accept relays",
+            "  M Host  P Port  U User  W Pass",
+            "",
+            "  Slave logs in with the master's",
+            "  username/password.  Restart to",
+            "  apply.",
+        ]
     }
 
     /// Toggle `disable_ip_safety`.  Off→on shows a full-screen security
@@ -15096,6 +15390,11 @@ mod tests {
             "  W  Toggle Web       B  Set Web port",
             "  I  IP safety        R  Restart server",
             "  C  Session cap      D  Idle timeout",
+            "  M  Master/Slave",
+            // Master/Slave sub-screen (two-key rows; tightest ~38 chars)
+            "  R  Cycle role       A  Accept relays",
+            "  M  Master host      P  Master port",
+            "  U  Master user      W  Master pass",
             // Dialup mapping menu
             "  A  Add mapping",
             "  D  Delete mapping",
@@ -15354,26 +15653,30 @@ mod tests {
     /// Typical machines have 1-3 addresses, fitting well within 22.
     #[test]
     fn test_config_menu_row_count() {
-        // Configuration submenu (post dual-port refactor):
-        // header(3) + blank + 7 items (E, G, M, S, F, O, R; T moved to
-        // per-port menu) + blank + Q/H + prompt = 14.  The per-port status
-        // block was removed — it's shown under Serial Configuration (M).
-        let submenu_rows = 3 + 1 + 7 + 1 + 1 + 1; // 14
+        // CONFIGURATION submenu now carries the "Server addresses:" banner
+        // at the top (relocated here from Server Config, §4.7):
+        // header(3) + address block [label(1) + N addrs + ATD example(1)]
+        // + blank + 7 items (E, G, M, S, F, O, R) + blank + Q/H + prompt.
+        // Worst case is N = SERVER_ADDR_DISPLAY_CAP.
+        let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 7 + 1 + 1 + 1; // 19
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
         // Server configuration: header(3) + 5 status (telnet, ssh,
-        // kermit, web, ip-safety) + blank + 6 items (T/P, S/O, K/J,
-        // W/B, I/R, C/D) + Q/H + prompt = 17.  The leading blank after
-        // the header was dropped to make room for the new C/D
-        // (session-cap / idle-timeout) row without growing the screen.
-        let static_rows = 3 + 5 + 1 + 6 + 1 + 1; // 17
-        assert!(static_rows <= 22, "server config menu static is {} rows, exceeds 22", static_rows);
-        // Address block (telnet on): label(1) + N addrs + ATD example(1),
-        // with N capped at SERVER_ADDR_DISPLAY_CAP and the old trailing
-        // blank removed.  Worst case (N = cap) is exactly 22, so the menu
-        // now fits PETSCII's 22-row budget even on a multi-homed host —
-        // it previously hit 23 (and scrolled) at 3+ private IPs.
-        let with_addrs = static_rows + 1 + SERVER_ADDR_DISPLAY_CAP + 1; // 22
-        assert!(with_addrs <= 22, "server config menu with capped addrs is {} rows, exceeds 22", with_addrs);
+        // kermit, web, ip-safety) + blank + 7 item rows (T/P, S/O, K/J,
+        // W/B, I/R, C/D, and the new single M Master/Slave row) + Q/H +
+        // prompt = 18.  The address block moved to the CONFIGURATION menu,
+        // so this screen no longer grows with the detected-IP list.
+        let static_rows = 3 + 5 + 1 + 7 + 1 + 1; // 18
+        assert!(static_rows <= 22, "server config menu is {} rows, exceeds 22", static_rows);
+    }
+
+    /// Master/Slave sub-screen: header(3) + blank + 5 status (role,
+    /// accept-relays, master host:port, user, pass) + blank + 3 item rows
+    /// (R/A, M/P, U/W) + Q/H + prompt = 15.  (Transport is not exposed
+    /// until the raw transport is implemented; SSH is the only mode.)
+    #[test]
+    fn test_master_slave_menu_row_count() {
+        let rows = 3 + 1 + 5 + 1 + 3 + 1 + 1; // 15
+        assert!(rows <= 22, "master/slave menu is {} rows, exceeds 22", rows);
     }
 
     /// Configuration help screen (ANSI): header(3) + blank + 15 content lines +
@@ -16153,7 +16456,7 @@ mod tests {
     /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
     /// new help screen is only width-checked once added below (bump the array
     /// length to match).  Single-width tables ignore `petscii` (they fit 40).
-    fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 23] {
+    fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 24] {
         [
             TelnetSession::main_help_lines(),
             TelnetSession::config_submenu_help_lines(petscii),
@@ -16178,6 +16481,7 @@ mod tests {
             TelnetSession::form_help_lines(),
             TelnetSession::gateway_config_help_lines(petscii),
             TelnetSession::serial_config_help_lines(),
+            TelnetSession::master_slave_help_lines(petscii),
         ]
     }
 

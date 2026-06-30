@@ -332,6 +332,7 @@ struct App {
     ssh_port_buf: String,
     kermit_server_port_buf: String,
     web_port_buf: String,
+    slave_master_port_buf: String,
     max_sessions_buf: String,
     idle_timeout_buf: String,
     negotiation_timeout_buf: String,
@@ -404,6 +405,7 @@ impl App {
         let ssh_port_buf = cfg.ssh_port.to_string();
         let kermit_server_port_buf = cfg.kermit_server_port.to_string();
         let web_port_buf = cfg.web_port.to_string();
+        let slave_master_port_buf = cfg.slave_master_port.to_string();
         let max_sessions_buf = cfg.max_sessions.to_string();
         let idle_timeout_buf = cfg.idle_timeout_secs.to_string();
         let negotiation_timeout_buf = cfg.xmodem_negotiation_timeout.to_string();
@@ -449,6 +451,7 @@ impl App {
             ssh_port_buf,
             kermit_server_port_buf,
             web_port_buf,
+            slave_master_port_buf,
             max_sessions_buf,
             idle_timeout_buf,
             negotiation_timeout_buf,
@@ -491,6 +494,7 @@ impl App {
         if let Ok(v) = self.ssh_port_buf.parse::<u16>() && v >= 1 { self.cfg.ssh_port = v; }
         if let Ok(v) = self.kermit_server_port_buf.parse::<u16>() && v >= 1 { self.cfg.kermit_server_port = v; }
         if let Ok(v) = self.web_port_buf.parse::<u16>() && v >= 1 { self.cfg.web_port = v; }
+        if let Ok(v) = self.slave_master_port_buf.parse::<u16>() && v >= 1 { self.cfg.slave_master_port = v; }
         if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
         if let Ok(v) = self.idle_timeout_buf.parse() { self.cfg.idle_timeout_secs = v; }
         if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
@@ -719,6 +723,59 @@ impl App {
             let mut key_display = pubkey;
             multiline_with_menu(ui, &mut key_display, 2);
         }
+    }
+
+    /// Render the Master/Slave serial-extender (relay) options.  Role is a
+    /// dropdown; the master gate is a checkbox; the slave's master host /
+    /// port / credentials are text fields (password masked).  Changing
+    /// these takes effect on the next server restart (the relay listener /
+    /// slave client start at boot from `gateway_role`).  Shown only in the
+    /// Server "More…" popup.  (No transport control — SSH is the only
+    /// implemented relay transport.)
+    fn draw_server_relay(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Master / Slave").strong().color(AMBER));
+        ui.horizontal(|ui| {
+            ui.label("Role:");
+            let display = match self.cfg.gateway_role.as_str() {
+                "master" => "Master",
+                "slave" => "Slave",
+                _ => "Standalone",
+            };
+            egui::ComboBox::from_id_salt("gateway_role")
+                .width(120.0)
+                .selected_text(display)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.cfg.gateway_role,
+                        "standalone".to_string(),
+                        "Standalone",
+                    );
+                    ui.selectable_value(
+                        &mut self.cfg.gateway_role,
+                        "master".to_string(),
+                        "Master",
+                    );
+                    ui.selectable_value(
+                        &mut self.cfg.gateway_role,
+                        "slave".to_string(),
+                        "Slave",
+                    );
+                });
+        });
+        ui.checkbox(
+            &mut self.cfg.master_accept_relays,
+            "Master: accept relay connections from slaves",
+        );
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Master host:", &mut self.cfg.slave_master_host, 150.0);
+            labeled_field(ui, "Port:", &mut self.slave_master_port_buf, 50.0);
+        });
+        ui.horizontal(|ui| {
+            labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
+            labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password);
+        });
+        // No transport control: SSH is the only implemented relay
+        // transport; the raw alternative will add one when it lands.
     }
 
     /// Render the primary row for one port on the main Serial Port
@@ -1426,6 +1483,7 @@ impl App {
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
         self.kermit_server_port_buf = self.cfg.kermit_server_port.to_string();
         self.web_port_buf = self.cfg.web_port.to_string();
+        self.slave_master_port_buf = self.cfg.slave_master_port.to_string();
         self.max_sessions_buf = self.cfg.max_sessions.to_string();
         self.idle_timeout_buf = self.cfg.idle_timeout_secs.to_string();
         self.negotiation_timeout_buf = self.cfg.xmodem_negotiation_timeout.to_string();
@@ -2056,6 +2114,10 @@ impl eframe::App for App {
                 ui.separator();
                 ui.add_space(4.0);
                 self.draw_server_advanced(ui);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.draw_server_relay(ui);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -2415,6 +2477,7 @@ impl eframe::App for App {
                 || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
                 || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
                 || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
+                || self.slave_master_port_buf != self.last_synced_cfg.slave_master_port.to_string()
                 || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
                 || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
                 || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
@@ -2472,6 +2535,10 @@ mod tests {
             app.cfg.kermit_server_port.to_string()
         );
         assert_eq!(app.web_port_buf, app.cfg.web_port.to_string());
+        assert_eq!(
+            app.slave_master_port_buf,
+            app.cfg.slave_master_port.to_string()
+        );
         assert_eq!(app.max_sessions_buf, app.cfg.max_sessions.to_string());
         assert_eq!(app.idle_timeout_buf, app.cfg.idle_timeout_secs.to_string());
         assert_eq!(app.negotiation_timeout_buf, app.cfg.xmodem_negotiation_timeout.to_string());

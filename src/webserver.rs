@@ -816,6 +816,8 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "ssh_gateway_auth",
+        "gateway_role", "slave_master_host", "slave_master_port",
+        "slave_master_username", "slave_master_password", "relay_transport",
     ];
     for key in plain_keys {
         if let Some(v) = fields.get(*key) {
@@ -836,6 +838,7 @@ fn collect_form_updates(
         "kermit_resume_partial", "kermit_locking_shifts",
         "allow_atdt_kermit",
         "punter_hangup_on_failure",
+        "master_accept_relays",
         "serial_a_enabled", "serial_b_enabled",
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
@@ -1018,6 +1021,7 @@ fn render_grid(cfg: &Config) -> String {
     out.push_str("<div class=\"grid\">");
     out.push_str(&frame_server(cfg));
     out.push_str(&frame_security(cfg));
+    out.push_str(&frame_master_slave(cfg));
     out.push_str(&frame_file_transfer(cfg));
     out.push_str(&frame_ai_browser(cfg));
     out.push_str(&frame_serial(cfg));
@@ -1118,6 +1122,44 @@ fn frame_security(cfg: &Config) -> String {
         ipsafe_chk = checkbox("disable_ip_safety", "Disable IP Safety", cfg.disable_ip_safety),
         user = textfield("username", "User", &cfg.username, false, 12),
         pass = textfield("password", "Pass", &cfg.password, true, 12),
+    )
+}
+
+/// Master/Slave serial-extender card.  `gateway_role` is an enum select;
+/// the master gate is a checkbox; the slave's master host/port/credentials
+/// are text fields (password masked).  Changing role/relays needs a server
+/// restart, so the card's save button restarts.  (`relay_transport` has no
+/// control here — SSH is the only implemented transport; the raw
+/// alternative will add one when it lands.)  See the Master/Slave design
+/// note.
+fn frame_master_slave(cfg: &Config) -> String {
+    let role_sel = |v: &str| if cfg.gateway_role == v { "selected" } else { "" };
+    format!(
+        "<section class=\"frame\"><div class=\"frame-head\">\
+         <span class=\"title\">Master/Slave</span>\
+         <span class=\"head-right\">{save}</span></div>\
+         <div class=\"row\"><span class=\"label\">Role:</span>\
+         <select name=\"gateway_role\">\
+         <option value=\"standalone\" {st_sel}>Standalone</option>\
+         <option value=\"master\" {ma_sel}>Master</option>\
+         <option value=\"slave\" {sl_sel}>Slave</option>\
+         </select> {accept_chk}</div>\
+         <div class=\"row\">{host} {port}</div>\
+         <div class=\"row\">{user} {pass}</div>\
+         </section>",
+        save = save_button("save_and_restart", "Save and Restart", "secondary"),
+        st_sel = role_sel("standalone"),
+        ma_sel = role_sel("master"),
+        sl_sel = role_sel("slave"),
+        accept_chk = checkbox(
+            "master_accept_relays",
+            "Master: accept relays",
+            cfg.master_accept_relays
+        ),
+        host = textfield("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16),
+        port = numfield("slave_master_port", "Port", cfg.slave_master_port),
+        user = textfield("slave_master_username", "User", &cfg.slave_master_username, false, 12),
+        pass = textfield("slave_master_password", "Pass", &cfg.slave_master_password, true, 12),
     )
 }
 
@@ -1880,6 +1922,10 @@ mod tests {
         assert!(html.contains("security_enabled"));
         assert!(html.contains("serial_a_enabled"));
         assert!(html.contains("serial_b_enabled"));
+        // Master/Slave card.
+        assert!(html.contains("gateway_role"));
+        assert!(html.contains("master_accept_relays"));
+        assert!(html.contains("slave_master_host"));
         // Scripture verse is part of the page.
         assert!(html.contains("John 3:16"));
     }
@@ -2196,7 +2242,7 @@ mod tests {
         let (updates, _) = collect_form_updates(&empty_form(), &old);
         for key in [
             "telnet_enabled", "ssh_enabled", "web_enabled",
-            "security_enabled", "verbose",
+            "security_enabled", "verbose", "master_accept_relays",
         ] {
             let pair = updates.iter().find(|(k, _)| k == key);
             assert!(pair.is_some(), "missing key {}", key);

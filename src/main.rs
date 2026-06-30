@@ -15,6 +15,7 @@ mod gui;
 mod kermit;
 mod logger;
 mod punter;
+mod relay;
 mod serial;
 mod ssh;
 mod telnet;
@@ -69,6 +70,20 @@ fn main() {
         }
         if cfg.security_enabled && cfg.password == "changeme" {
             glog!("WARNING: Security is enabled with the default password. Change it in {}.", config::CONFIG_FILE);
+        }
+
+        // Master/Slave relay sanity checks — surface "silently armed but
+        // inert" misconfigurations instead of failing quietly.
+        if cfg.gateway_role == "master"
+            && cfg.master_accept_relays
+            && cfg.relay_transport == "ssh"
+            && !cfg.ssh_enabled
+        {
+            glog!("WARNING: gateway_role=master and master_accept_relays=true, but ssh_enabled=false.");
+            glog!("         Relays ride the SSH server, so NO slave can connect until SSH is enabled.");
+        }
+        if cfg.relay_transport == "raw" && cfg.gateway_role != "standalone" {
+            glog!("WARNING: relay_transport=raw is not yet implemented; the relay still uses SSH.");
         }
 
         // Create transfer directory if it doesn't exist
