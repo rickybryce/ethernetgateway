@@ -1060,6 +1060,67 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
             <hr class="divider">
 
             <!-- ══════════════════════════════════════════════ -->
+            <!-- MASTER / SLAVE                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="master-slave">
+                <div class="section-title">Master/Slave Serial Extender</div>
+                <p>
+                    An optional mode lets a <strong>slave</strong> gateway extend
+                    its serial ports to a <strong>master</strong> gateway over the
+                    master's SSH port. A serial-attached device then reaches the
+                    master's menu, file transfer, and dial-out as if it were
+                    attached to the master &mdash; and <strong>files always land on
+                    the master</strong>. It is entirely inert by default
+                    (<code>gateway_role = standalone</code>); a standalone gateway
+                    behaves exactly as before.
+                </p>
+                <div class="cat">Master</div>
+                <p>
+                    Enable the SSH server, set <code>gateway_role = master</code>,
+                    and turn on <code>master_accept_relays</code>. Relay
+                    connections share the existing SSH port (2222) alongside normal
+                    SSH logins &mdash; no per-slave configuration. (Accepting
+                    relays is never implied by enabling SSH; if you arm
+                    master + accept-relays but leave SSH off, startup warns.)
+                </p>
+                <div class="cat">Slave</div>
+                <p>
+                    Set <code>gateway_role = slave</code>, point
+                    <code>slave_master_host</code> / <code>slave_master_port</code>
+                    at the master, and enter
+                    <code>slave_master_username</code> /
+                    <code>slave_master_password</code> &mdash; which must match the
+                    master's unified username/password. The slave pins the master's
+                    SSH host key on first contact (TOFU, in <code>gateway_hosts</code>)
+                    and refuses a changed key. All of this is editable from
+                    <strong>Configuration &rarr; S Server &rarr; M Master/Slave</strong>,
+                    the web config <em>Master/Slave</em> card, and the GUI Server
+                    &ldquo;More&hellip;&rdquo; popup.
+                </p>
+                <ul>
+                    <li><strong>Modem-mode port</strong> &mdash; the slave runs the
+                        Hayes emulator locally; on connect it bridges the call to
+                        the master, which serves its menu or dials a resolved
+                        <code>host:port</code> onward (the slave's <em>local</em>
+                        phonebook resolves; the master dials). <code>+++</code>/<code>ATO</code>
+                        work normally.</li>
+                    <li><strong>Console-mode port</strong> &mdash; the slave
+                        registers the port with the master; a master user reaches it
+                        from the master's <strong>Serial Gateway</strong> menu, which
+                        lists local ports plus registered remote ports.</li>
+                </ul>
+                <p>
+                    In slave mode the gateway still serves its own telnet/SSH, shows
+                    a &ldquo;SLAVE mode&rdquo; notice with the master's address on
+                    its main menu, and reconnects automatically if the link drops.
+                    Only the SSH transport is implemented
+                    (<code>relay_transport = ssh</code>).
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
             <!-- AI CHAT                                       -->
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="ai-chat">
@@ -1232,6 +1293,24 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>SSH port</td><td>2222</td><td>TCP port for SSH connections</td></tr>
                     <tr><td>Max sessions</td><td>50</td><td>Maximum concurrent connections</td></tr>
                     <tr><td>Idle timeout</td><td>900s (15 min)</td><td>Disconnect after inactivity (0 = disabled)</td></tr>
+                </table>
+
+                <div class="cat">Master/Slave Settings</div>
+                <p class="dim-text">
+                    Reached from <strong>Configuration &rsaquo; S Server &rsaquo;
+                    M Master/Slave</strong> (telnet), the web <em>Master/Slave</em>
+                    card, or the GUI Server &ldquo;More&hellip;&rdquo; popup. See
+                    <a href="#master-slave">Master/Slave Serial Extender</a> above.
+                </p>
+                <table class="data-table">
+                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+                    <tr><td>Role (<code>gateway_role</code>)</td><td>standalone</td><td><code>standalone</code> | <code>master</code> | <code>slave</code></td></tr>
+                    <tr><td>Accept relays (<code>master_accept_relays</code>)</td><td>false</td><td>Master only: accept relay connections from slaves</td></tr>
+                    <tr><td>Master host (<code>slave_master_host</code>)</td><td><em>(none)</em></td><td>Slave only: the master's hostname/IP</td></tr>
+                    <tr><td>Master port (<code>slave_master_port</code>)</td><td>2222</td><td>Slave only: the master's SSH port</td></tr>
+                    <tr><td>Master user (<code>slave_master_username</code>)</td><td><em>(none)</em></td><td>Slave only: must match the master's username</td></tr>
+                    <tr><td>Master pass (<code>slave_master_password</code>)</td><td><em>(none)</em></td><td>Slave only: must match the master's password</td></tr>
+                    <tr><td>Transport (<code>relay_transport</code>)</td><td>ssh</td><td>Only <code>ssh</code> is implemented</td></tr>
                 </table>
 
                 <div class="cat">File Transfer Settings</div>
@@ -1436,7 +1515,14 @@ punter_max_bad_rounds = 30
 punter_negotiation_retry_interval = 5
 punter_hangup_on_failure = false
 disable_ip_safety = false
-ssh_gateway_auth = password</span></code></pre>
+ssh_gateway_auth = password
+gateway_role = standalone
+master_accept_relays = false
+slave_master_host =
+slave_master_port = 2222
+slave_master_username =
+slave_master_password =
+relay_transport = ssh</span></code></pre>
                 <p class="dim-text" style="margin-top:8px;">
                     The <code>egateway.conf</code> auto-creation also writes the full
                     <code>kermit_*</code> family (long packets, sliding windows, streaming,

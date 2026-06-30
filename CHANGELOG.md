@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.3] - Unreleased
 
+### Added
+- **Master/Slave serial extender (optional).** A gateway set to
+  `gateway_role = slave` extends its serial ports to a `master` gateway over
+  the master's existing SSH port; the serial device reaches the master's menu,
+  file transfer, and dial-out as if attached to the master, and **files always
+  land on the master**. Default `gateway_role = standalone` leaves the feature
+  entirely inert. Modem-mode ports relay on connect (the slave resolves its
+  *local* dial map; the master dials onward — "resolve local, dial central");
+  console-mode ports register with the master and appear in the master's Serial
+  Gateway picker (local ports + registered remote ports). New config keys
+  (telnet/web/GUI): `gateway_role`, `master_accept_relays`, `slave_master_host`,
+  `slave_master_port`, `slave_master_username`, `slave_master_password`,
+  `relay_transport` (only `ssh` implemented). The slave authenticates with the
+  master's unified username/password and pins the master's SSH host key (TOFU,
+  in `gateway_hosts`); relay connections are gated by `master_accept_relays` and
+  count against the session cap. The slave's main menu shows a SLAVE-mode notice
+  with the master address, and reconnects automatically if the link drops.
+
 ### Fixed
 - **File transfers over telnet no longer apply NVT CR-NUL stuffing**, which
   corrupted binary transfers through telnet↔serial bridges (e.g. tcpser) and

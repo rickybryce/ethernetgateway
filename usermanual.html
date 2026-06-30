@@ -282,6 +282,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
             <li><a href="#ch9-aslash">A/ Repeat-Last-Command</a></li>
             <li><a href="#ch9-chain">Chained Command Lines</a></li>
             <li><a href="#ch9-console">Console Mode (Telnet-Serial Bridge)</a></li>
+            <li><a href="#ch9-relay">Master/Slave Serial Extender</a></li>
         </ol>
     </li>
     <li><span class="num">10.</span> <a href="#ch10">SSH Gateway (Outbound)</a></li>
@@ -571,6 +572,13 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>web_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the configuration web server on <code>web_port</code>.  Off by default; mirrors the GUI settings page in a browser.  See §5.6.</td></tr>
         <tr><td><code>web_port</code></td><td>u16</td><td><code>8080</code></td><td>Web-server listen port.</td></tr>
         <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td>Outbound SSH-gateway auth mode: <code>password</code> prompts for the remote password each connect; <code>key</code> uses the gateway's auto-generated Ed25519 client key (which must be installed in the remote's <code>authorized_keys</code> first).</td></tr>
+        <tr><td><code>gateway_role</code></td><td>string</td><td><code>standalone</code></td><td>Master/Slave role: <code>standalone</code> | <code>master</code> | <code>slave</code>. See §9.14.</td></tr>
+        <tr><td><code>master_accept_relays</code></td><td>bool</td><td><code>false</code></td><td>Master only: accept relay connections from slaves (never implied by enabling SSH).</td></tr>
+        <tr><td><code>slave_master_host</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: the master's hostname/IP.</td></tr>
+        <tr><td><code>slave_master_port</code></td><td>u16</td><td><code>2222</code></td><td>Slave only: the master's SSH port.</td></tr>
+        <tr><td><code>slave_master_username</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified username.</td></tr>
+        <tr><td><code>slave_master_password</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified password.</td></tr>
+        <tr><td><code>relay_transport</code></td><td>string</td><td><code>ssh</code></td><td>Relay transport; only <code>ssh</code> is implemented.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>Session idle timeout. 0 disables.</td></tr>
@@ -2325,12 +2333,75 @@ not interfere with each other.
 
 <aside class="warn">
 <span class="label">Self-bridging is blocked</span>
-A session that arrived over a serial port itself does <em>not</em>
-see the Serial Gateway item — bridging that port back into its own
-bridge would loop your terminal to itself.  The item is also hidden
-when neither port is in console mode, so the menu doesn't dead-end at
-an empty picker.
+The Serial Gateway item is always shown; the picker is the single
+authority on what's eligible.  A session that arrived over a serial
+port may bridge to a <em>different</em> port but not back to its own
+arrival port (that would loop your terminal to itself), so the picker
+marks only that one port ineligible.  When nothing is available the
+picker says so rather than the menu dead-ending.
 </aside>
+
+<h2 id="ch9-relay">9.14 Master/Slave Serial Extender</h2>
+
+<p>
+A <strong>slave</strong> gateway can extend its serial ports to a
+<strong>master</strong> gateway over the master's SSH port, so a
+serial-attached device reaches the master's menu, file transfer, and
+dial-out as if it were attached to the master directly.
+<strong>Files always land on the master.</strong>  The feature is
+entirely inert by default (<code>gateway_role = standalone</code>); a
+standalone gateway behaves exactly as it always has.
+</p>
+
+<h3>9.14.1 Configuring the Master</h3>
+<p>
+Enable the SSH server (<code>ssh_enabled = true</code>), set
+<code>gateway_role = master</code>, and turn on
+<code>master_accept_relays</code>.  Relay connections share the existing
+SSH port (2222) alongside normal SSH logins — there is no per-slave
+configuration.  Accepting relays is never implied by enabling SSH; if you
+set master + accept-relays but leave SSH disabled, the server logs a
+startup warning because relays ride the SSH server.
+</p>
+
+<h3>9.14.2 Configuring the Slave</h3>
+<p>
+Set <code>gateway_role = slave</code>, point
+<code>slave_master_host</code> / <code>slave_master_port</code> at the
+master (the port defaults to the SSH port, 2222), and enter
+<code>slave_master_username</code> / <code>slave_master_password</code> —
+which <strong>must match the master's unified username/password</strong>.
+The slave pins the master's SSH host key on first contact (trust-on-first-use,
+stored in <code>gateway_hosts</code>) and refuses a changed key.  All of
+these settings are editable from the telnet
+<strong>Configuration &rsaquo; S Server &rsaquo; M Master/Slave</strong>
+sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
+<em>More&#8230;</em> popup.
+</p>
+
+<h3>9.14.3 How Ports Relay</h3>
+<ul>
+    <li><strong>Modem-mode port</strong> — the slave runs the Hayes
+        emulator locally; when the device dials, the slave bridges the call
+        to the master, which serves its menu or dials a resolved
+        <code>host:port</code> onward.  The slave's <em>local</em> dial map
+        resolves the number and the master performs the dial
+        ("resolve local, dial central").  <code>+++</code> / <code>ATO</code>
+        work normally.</li>
+    <li><strong>Console-mode port</strong> — the slave registers the port
+        with the master; a master user reaches it from the master's
+        <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu, which lists local
+        ports plus registered remote (slave) ports.  A slave's own Serial
+        Gateway menu shows its relayed console port as
+        "&rarr; master" (not selectable locally).</li>
+</ul>
+
+<p>
+In slave mode the gateway still serves its own telnet/SSH and shows a
+"SLAVE mode: ports relay to master" notice with the master's address on
+its main menu.  The slave reconnects automatically if the link drops.
+Only the SSH transport is implemented (<code>relay_transport = ssh</code>).
+</p>
 
 <!-- ═══════════════════ 10. SSH Gateway ═══════════════════ -->
 <h1 id="ch10">10. SSH Gateway (Outbound)</h1>

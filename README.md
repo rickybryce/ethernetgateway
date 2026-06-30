@@ -6,7 +6,8 @@ independent serial ports** (each with optional telnet-serial console
 bridge) for serial-attached retro hardware, text-mode web browser, and
 AI chat client written in Rust. Supports PETSCII (Commodore 64), ANSI,
 and ASCII terminals. Designed for local network use with retro and
-modern terminal clients.
+modern terminal clients. An optional **master/slave** mode extends a
+gateway's serial ports to another gateway over SSH.
 
 **[User Manual](http://ethernetgateway.com/index.html)**
 &nbsp;&middot;&nbsp;
@@ -436,7 +437,9 @@ Most settings can be changed from within a telnet or SSH session using the
 - **S** Server Configuration -- enable/disable the telnet, SSH, Kermit, and
   web listeners and set each one's port, set the session cap (**C**) and idle
   timeout (**D**, `0` disables it), toggle the network-safety opt-out
-  (`disable_ip_safety`), and restart the server.
+  (`disable_ip_safety`), restart the server, and open the **M Master/Slave**
+  sub-screen (role, master host/port/credentials, "accept relays" toggle).
+  See **Master/Slave Serial Extender** below.
 - **F** File Transfer -- submenu with shared transfer directory and
   per-protocol settings pages:
   - **X** XMODEM settings -- negotiation timeout, retry interval
@@ -743,6 +746,27 @@ web_port = 8080
 # their effect, gateway negotiation steps).  Noisier than `verbose` and
 # aimed at chasing connection-level issues; off by default.
 gateway_debug = false
+
+# Master/Slave serial extender (relay).  Lets a "slave" gateway extend its
+# serial ports to a "master" gateway over the master's SSH port, so the
+# device reaches the master's menu / file transfer / dial-out (files always
+# land on the master).  Entirely inert by default (standalone).
+# gateway_role:           standalone (default) | master | slave.
+# master_accept_relays:   a MASTER only accepts relay connections when on
+#                         (off by default — never implied by enabling SSH).
+# slave_master_host/port: a SLAVE -> the master to reach (port defaults to
+#                         the SSH port).
+# slave_master_username/  a SLAVE -> credentials it logs into the master's
+#   slave_master_password: SSH server with (must match the master's unified
+#                         username / password).
+# relay_transport:        ssh (default; only implemented transport).
+gateway_role = standalone
+master_accept_relays = false
+slave_master_host =
+slave_master_port = 2222
+slave_master_username =
+slave_master_password =
+relay_transport = ssh
 ```
 
 ### Setting Up Authentication
@@ -1002,6 +1026,45 @@ client's `~/.ssh/known_hosts`). `ethernet_ssh_host_key` is the Ethernet Gateway'
 *own* SSH server host key. `ethernet_gateway_ssh_key` is the gateway's outgoing-
 client keypair used for public-key authentication to remote servers. All three
 are independent.
+
+## Master/Slave Serial Extender
+
+A **slave** gateway can extend its serial ports to a **master** gateway over the
+master's SSH port, so a serial-attached device reaches the master's menu, file
+transfer, and dial-out as if it were attached to the master directly. **Files
+always land on the master.** The feature is entirely inert by default
+(`gateway_role = standalone`); a standalone gateway is unchanged.
+
+**Set up the master:** enable the SSH server (`ssh_enabled = true`), set
+`gateway_role = master`, and turn on `master_accept_relays`. No per-slave
+configuration — the master accepts relay connections on its existing SSH port
+alongside normal SSH logins. (If you set master + accept-relays but leave SSH
+disabled, startup warns, because relays ride the SSH server.)
+
+**Set up the slave:** set `gateway_role = slave`, point `slave_master_host` /
+`slave_master_port` at the master (port defaults to the SSH port, 2222), and
+enter `slave_master_username` / `slave_master_password` — which **must match the
+master's unified username/password**. The slave pins the master's SSH host key
+on first contact (TOFU, in `gateway_hosts`) and refuses a changed key. All of
+this is editable from the **Configuration > S Server > M Master/Slave**
+sub-screen (telnet/SSH), the web config card, and the GUI Server "More…" popup.
+
+Each serial port relays according to its own mode:
+
+- **Modem-mode port** — the slave runs the Hayes emulator locally; when the
+  device dials (e.g. `ATDT ethernet-gateway`, or a number in the slave's *local*
+  dial map), the slave bridges the call to the master, which serves its menu or
+  dials the resolved `host:port` onward (the slave's local phonebook resolves;
+  the master dials). `+++`/`ATO` work normally.
+- **Console-mode port** — the slave registers the port with the master and a
+  master user reaches it from the master's **Serial Gateway** menu, which lists
+  local ports plus registered remote ports. (A slave's *own* Serial Gateway menu
+  shows its relayed console port as "→ master".)
+
+In slave mode the gateway still serves its own telnet/SSH, and the main menu
+shows a "SLAVE mode: ports relay to master" notice with the master's address.
+The slave reconnects automatically if the link drops. Only the SSH transport is
+implemented (`relay_transport = ssh`).
 
 ## Telnet Gateway
 
