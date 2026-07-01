@@ -2077,7 +2077,7 @@ baud rates report code 1.
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
         <tr><td><code>AT+PETSCII=0</code> (<em>gateway default</em>)</td><td>PETSCII translation off — direct-TCP dials (<code>ATDT&nbsp;host:port</code>) are raw ASCII passthrough.</td></tr>
-        <tr><td><code>AT+PETSCII=1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Inbound punctuation that renders wrong on a C64 in lower/upper mode is normalized to plain ASCII: back-tick (the old &ldquo;left single quote&rdquo;, which shows as a thick underscore) and UTF-8 &ldquo;smart&rdquo; single quotes&nbsp;&rarr; <code>'</code>; smart double quotes&nbsp;&rarr; <code>"</code>; tilde and en/em dashes&nbsp;&rarr; <code>-</code>; the ellipsis&nbsp;&rarr; <code>...</code>; other high bytes the C64 can't display are dropped or shown as <code>?</code>. While editing the AT command line under <code>+PETSCII=1</code>, the C64 <span class="kbd">INST/DEL</span> key (PETSCII DEL, 0x14) works as backspace and echoes correctly. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. Persists immediately (and is re-saved by <code>AT&amp;W</code>); also editable from the telnet, web, and GUI config surfaces.</td></tr>
+        <tr><td><code>AT+PETSCII=1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Inbound punctuation that renders wrong on a C64 in lower/upper mode is normalized to plain ASCII: back-tick (the old &ldquo;left single quote&rdquo;, which shows as a thick underscore) and UTF-8 &ldquo;smart&rdquo; single quotes&nbsp;&rarr; <code>'</code>; smart double quotes&nbsp;&rarr; <code>"</code>; tilde and en/em dashes&nbsp;&rarr; <code>-</code>; the ellipsis&nbsp;&rarr; <code>...</code>; other high bytes the C64 can't display are dropped or shown as <code>?</code>. While editing the AT command line under <code>+PETSCII=1</code>, the C64 <span class="kbd">INST/DEL</span> key (PETSCII DEL, 0x14) works as backspace and echoes correctly. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. <strong>Text only — turn it off (<code>AT+PETSCII=0</code>) before running a file transfer over a direct-TCP dial: it rewrites bytes in both directions and will corrupt XMODEM/YMODEM/ZMODEM/Kermit/Punter binary data.</strong> Persists immediately (and is re-saved by <code>AT&amp;W</code>); also editable from the telnet, web, and GUI config surfaces.</td></tr>
     </tbody>
 </table>
 
@@ -2109,6 +2109,14 @@ the emulator drives <strong>DTR</strong> as a carrier proxy following
 detect. Most retro terminal software works fine without these signals; if your
 program requires DCD before communicating, enable that opt-in or look for a
 "force DTR" / "ignore carrier" option.
+<br><br>
+Note that <code>serial_<em>x</em>_drive_carrier</code> is a config-file setting,
+not modem state: because it reflects physical cabling it is <strong>not</strong>
+reset by <code>ATZ</code>/<code>AT&amp;F</code>, <strong>not</strong> saved by
+<code>AT&amp;W</code>, and <strong>not</strong> shown in <code>AT&amp;V</code>
+(unlike <code>AT&amp;C</code>). Change it in the GUI/web config or the telnet
+per-port modem menu (<span class="kbd">C</span>) — the <code>AT&amp;C</code>
+mode it follows is the normal, ATZ-resettable modem setting.
 </aside>
 
 <aside class="note">
@@ -2418,6 +2426,46 @@ In slave mode the gateway still serves its own telnet/SSH and shows a
 its main menu.  The slave reconnects automatically if the link drops.
 Only the SSH transport is implemented (<code>relay_transport = ssh</code>).
 </p>
+
+<h3>9.14.4 Relay Limitations and Operational Notes</h3>
+<ul>
+    <li><strong>A modem-mode relay reports only <code>NO&nbsp;CARRIER</code> on
+        any failure.</strong>  Master unreachable, wrong credentials, a
+        protocol-version skew, or a number not in the <em>slave's</em> dial map
+        all look identical at the device — the specific cause is in the
+        <strong>slave's</strong> server log, so check there when a relay dial
+        won't connect.</li>
+    <li><strong>Relay and console-registration channels count against the
+        master's <code>max_sessions</code>.</strong>  Each active relay call
+        <em>and each idle console-port registration</em> uses one master
+        session slot, so size <code>max_sessions</code> to cover your slaves'
+        registered ports plus interactive telnet/SSH/web users; a master at
+        capacity refuses further relays.</li>
+    <li><strong>Master and slave must run a compatible relay protocol
+        version.</strong>  A skewed pair refuses to relay (the log says
+        "upgrade the older gateway"); keep both gateways on the same release.</li>
+    <li><strong>A changed master SSH host key strands a slave until you clear
+        it.</strong>  The slave pins the master's key on first contact; if it
+        later <em>changes</em> (e.g. the master was reinstalled) the slave
+        refuses to reconnect as a possible MITM and cannot prompt (it is
+        headless).  Delete the master's entry from the slave's
+        <code>gateway_hosts</code> file to let it re-pin.</li>
+    <li><strong>Role and relay settings apply at server startup.</strong>
+        Changing <code>gateway_role</code> or <code>master_accept_relays</code>
+        (or the slave's master address) takes effect on the next server
+        restart, not live — the telnet Master/Slave screen shows a restart
+        reminder; web/GUI users must restart the server themselves.  An
+        unrecognized <code>gateway_role</code> or <code>relay_transport</code>
+        value (or <code>slave_master_port&nbsp;=&nbsp;0</code>) is silently
+        reset to its default.</li>
+    <li><strong>A slave retries with a failure-aware backoff and won't lock out
+        its own IP.</strong>  Network errors retry briskly (1&rarr;30&nbsp;s), a
+        wrong-credential rejection backs off ~6&nbsp;min (longer than the
+        master's 5-minute per-IP lockout window, so a misconfigured slave never
+        trips the ban against its own host), and a relays-declined master is
+        re-checked every ~60&nbsp;s.  A silently-dead link is detected within
+        ~2&nbsp;minutes via SSH keepalive.</li>
+</ul>
 
 <!-- ═══════════════════ 10. SSH Gateway ═══════════════════ -->
 <h1 id="ch10">10. SSH Gateway (Outbound)</h1>

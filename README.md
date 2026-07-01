@@ -711,7 +711,9 @@ serial_a_stored_0 =
 serial_a_stored_1 =
 serial_a_stored_2 =
 serial_a_stored_3 =
-# PETSCII<->ASCII translation on direct-TCP dials (AT+PETSCII); per port
+# PETSCII<->ASCII translation on direct-TCP dials (AT+PETSCII); per port.
+# TEXT ONLY: turn it OFF (AT+PETSCII=0) before a file transfer over a
+# direct-TCP dial -- it rewrites bytes both ways and corrupts binary data.
 serial_a_petscii_translate = false
 # Drive DTR as a DCD carrier proxy per AT&C (wire DTR->DCD). Default off =
 # gateway never touches the modem-control lines. Modem mode only.
@@ -1118,6 +1120,38 @@ A few relay behaviors are worth knowing:
 - **Onward-dial targets must be a hostname or IPv4 address.** A bracketed IPv6
   literal (e.g. `[2001:db8::1]:23`) is not supported as a relay onward-dial
   destination.
+- **A modem-mode relay reports only `NO CARRIER` on any failure.** Master
+  unreachable, wrong credentials, protocol-version skew, or a number that
+  isn't in the *slave's* dial map all surface identically as `NO CARRIER` at
+  the device — the specific cause is in the **slave's** server log, so check
+  there when a relay dial won't connect.
+- **Relay and console-registration channels count against the master's
+  `max_sessions`.** Each active relay call *and each idle console-port
+  registration* consumes one master session slot, so size `max_sessions` to
+  cover your slaves' registered ports plus interactive telnet/SSH/web users; a
+  master at capacity refuses further relays (the slave sees a refusal and backs
+  off).
+- **Master and slave must run a compatible relay protocol version.** A skewed
+  pair refuses to relay (the log says "upgrade the older gateway"); keep both
+  gateways on the same release.
+- **A changed master SSH host key strands a slave until you clear it.** The
+  slave pins the master's key on first contact and, if it later *changes* (e.g.
+  the master was reinstalled), refuses to reconnect as a possible MITM and
+  backs off — it is headless, so it cannot prompt like the interactive SSH
+  Gateway does. Delete the master's entry from the slave's `gateway_hosts` file
+  to let it re-pin.
+- **Role and relay settings apply at server startup.** Changing `gateway_role`
+  or `master_accept_relays` (or the slave's master address) takes effect on the
+  next server restart, not live — the telnet Master/Slave screen shows a restart
+  reminder; web/GUI users must restart the server themselves. An unrecognized
+  `gateway_role` or `relay_transport` value (or `slave_master_port = 0`) is
+  silently reset to its default with no error.
+- **A slave retries with a failure-aware backoff and won't lock out its own
+  IP.** Transient network errors retry briskly (1→30 s), a wrong-credential
+  rejection backs off ~6 min (deliberately longer than the master's 5-minute
+  per-IP lockout window, so a misconfigured slave never trips the ban against
+  its own host), and a relays-declined master is re-checked every ~60 s. A dead
+  link (silent freeze) is detected within ~2 minutes via SSH keepalive.
 
 ## Telnet Gateway
 
@@ -1301,9 +1335,10 @@ AT&W, AT&V, ATE, ATV, ATQ, ATI (I0–I7), ATH, ATA, ATO, ATX, AT&C, AT&D,
 AT&K, AT&Z (stored numbers), ATD (with T/P/L/S variants), ATSn, S-registers
 S0–S26, the `A/` repeat-last-command shortcut, and the `+++` escape with
 S2/S12 guard-time semantics. `AT&W` persists every Hayes setting — echo,
-verbose, quiet, X, &C, &D, &K, all 27 S-registers, and four stored-number
-slots — to `egateway.conf`; `ATZ` restores them. Numeric and verbose result
-codes honor the ATX level.
+verbose, quiet, X, &C, &D, &K, the `+PETSCII` toggle, all 27 S-registers, and
+four stored-number slots — to `egateway.conf`; `ATZ` restores them. Numeric and
+verbose result codes honor the ATX level. (The `serial_X_drive_carrier` opt-in
+is *not* part of this modem state — see the DCD note below.)
 
 Commands the emulator can't meaningfully implement over TCP (`ATB`, `ATC`,
 `ATL`, `ATM`, `AT&B`, `AT&G`, `AT&J`, `AT&S`, `AT&T`, `AT&Y`) are accepted
@@ -1328,6 +1363,11 @@ All three deviations can be overridden interactively (e.g. `AT&D2`,
   DCD line, which *is* driven (as a DTR→DCD proxy) when the per-port
   `serial_X_drive_carrier` opt-in is enabled. See the **Limitations** section
   below for the wiring and the rationale.
+- **`serial_X_drive_carrier` is a config-file setting, not modem state.**
+  Because it reflects physical cabling, it is *not* reset by `ATZ`/`AT&F`, *not*
+  saved by `AT&W`, and *not* shown in `AT&V` (unlike `AT&C`/`AT&D`/`AT&K`).
+  Change it in the GUI/web config or the telnet per-port modem menu (**C** key);
+  the `AT&C` mode it follows is the normal, ATZ-resettable modem setting.
 - `ATX1`–`ATX4` all affect result codes and `CONNECT` formatting.
 - `ATS6` (wait-for-dial-tone) and `ATS8` (comma pause) sleep for the
   configured number of seconds before the TCP connect, summed per modifier

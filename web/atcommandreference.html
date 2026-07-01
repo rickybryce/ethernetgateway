@@ -706,6 +706,21 @@
                     (<code>AT&amp;D2</code>, <code>AT&amp;K3</code>, <code>ATS7=50</code>) and
                     persist with <code>AT&amp;W</code>.
                 </div>
+
+                <div class="callout">
+                    <strong>Driving DCD in hardware.</strong> By default no RS-232 pins are
+                    driven. Enable the per-port <code>serial_x_drive_carrier</code> opt-in
+                    (default off) and the emulator drives <strong>DTR</strong> as a carrier
+                    proxy following <code>AT&amp;C</code> &mdash; asserted on <code>CONNECT</code>
+                    and dropped on <code>NO CARRIER</code> under <code>&amp;C1</code>, or forced
+                    on under <code>&amp;C0</code> &mdash; which a terminal wired
+                    DTR&rarr;DCD reads as carrier detect. Because it reflects physical cabling,
+                    <code>serial_x_drive_carrier</code> is <strong>not</strong> reset by
+                    <code>ATZ</code>/<code>AT&amp;F</code>, <strong>not</strong> saved by
+                    <code>AT&amp;W</code>, and <strong>not</strong> shown in <code>AT&amp;V</code>;
+                    set it in the GUI/web config or the telnet per-port modem menu
+                    (<span class="kbd">C</span>).
+                </div>
                 <div class="callout callout-warn">
                     <strong>Signal pins are not physically driven.</strong> <code>&amp;C</code>,
                     <code>&amp;D</code>, and <code>&amp;K</code> are parsed, stored, persisted,
@@ -740,6 +755,14 @@
                     <li><strong>Strips inbound ANSI escape sequences</strong> (<code>ESC&nbsp;[ &hellip;</code> cursor / colour codes) so they don't spray as garbage on a screen that can't render them.</li>
                     <li><strong>Normalizes punctuation</strong> the C64 can't show: the back-tick and UTF-8 &ldquo;smart&rdquo; single quotes fold to <code>'</code>, smart double quotes to <code>"</code>, tilde / en- / em-dashes to <code>-</code>, the ellipsis to <code>...</code>; other undisplayable high bytes are dropped or shown as <code>?</code>.</li>
                 </ul>
+
+                <div class="callout callout-warn">
+                    <strong>Text only &mdash; turn it off before a file transfer.</strong>
+                    <code>AT+PETSCII=1</code> rewrites bytes in <em>both</em> directions, so it
+                    will corrupt an XMODEM / YMODEM / ZMODEM / Kermit / Punter transfer run over
+                    a direct-TCP dial. Send <code>AT+PETSCII=0</code> before starting a transfer
+                    (and re-enable it afterward for chatting with a text BBS).
+                </div>
 
                 <div class="callout callout-info">
                     <strong>Notes.</strong> It applies <em>only</em> to direct-TCP dials &mdash;

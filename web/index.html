@@ -1127,6 +1127,30 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     Only the SSH transport is implemented
                     (<code>relay_transport = ssh</code>).
                 </p>
+                <p><strong>Relay limitations worth knowing:</strong></p>
+                <ul>
+                    <li>A modem-mode relay reports only <code>NO CARRIER</code> on
+                        any failure (master down, bad credentials, version skew, or
+                        an unmapped number) &mdash; the specific cause is in the
+                        <em>slave's</em> server log.</li>
+                    <li>Each active relay call and each idle console-port
+                        registration counts against the master's
+                        <code>max_sessions</code>; a master at capacity refuses
+                        further relays.</li>
+                    <li>Master and slave must run a compatible relay protocol
+                        version &mdash; keep both gateways on the same release.</li>
+                    <li>If the master's SSH host key legitimately changes (e.g. a
+                        reinstall), the slave refuses to reconnect until you delete
+                        the master's entry from the slave's <code>gateway_hosts</code>
+                        file.</li>
+                    <li>Changing <code>gateway_role</code> /
+                        <code>master_accept_relays</code> takes effect on the next
+                        server restart, not live.</li>
+                    <li><code>+++</code>/<code>ATO</code> on a relayed <em>menu</em>
+                        call is bounded by the master's idle timeout; onward-dial
+                        (<code>host:port</code>) targets must be a hostname or IPv4
+                        address (no bracketed IPv6).</li>
+                </ul>
             </div>
 
             <hr class="divider">
