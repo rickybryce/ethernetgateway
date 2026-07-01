@@ -49,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `gateway_hosts`); relay connections are gated by `master_accept_relays` and
   count against the session cap. The slave's main menu shows a SLAVE-mode notice
   with the master address, and reconnects automatically if the link drops.
+- **Serial sessions can now receive administrative broadcasts.** A process-global
+  broadcast channel (`serial::broadcast_to_serial`) fans a message out to every
+  open serial port, delivered at the **command prompt only** — an in-call
+  (online) serial session, which may be carrying a binary file transfer, drains
+  its queued messages when it next returns to command mode (`+++`, hangup, or
+  call end) so a notice can never corrupt a transfer. This is the serial-side
+  counterpart to the telnet/SSH/relay `broadcast_to_sessions` list, completing
+  broadcast coverage across all connection types. The shutdown "Goodbye" keeps
+  its own reliable shutdown-flag write (which fires even mid-online) and is not
+  routed through this channel. Modem mode only. (Extension point: no production
+  broadcast is routed to it yet — the first admin-notice feature plugs in here.)
 
 ### Fixed
 - **Shutdown "Goodbye" now reaches every session, not just when telnet is

@@ -21,10 +21,11 @@
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
 
 use crate::config;
 use crate::config::{SerialPortConfig, SerialPortId, SERIAL_PORT_IDS};
@@ -149,6 +150,71 @@ const CONSOLE_DUPLEX_BUFSIZE: usize = 16 * 1024;
 /// their own concurrent bridge.
 static BRIDGE_ACTIVE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+// ─── Serial broadcast channel ──────────────────────────────
+
+/// Capacity of the serial broadcast ring.  Each subscriber (one per open
+/// serial port) keeps its own cursor into this buffer; a port that falls
+/// behind by more than this many messages `Lagged`s and skips the ones it
+/// missed.  16 is ample for the low-rate admin-notice traffic this carries.
+const SERIAL_BROADCAST_CAP: usize = 16;
+
+/// Process-global fan-out channel for administrative broadcasts to serial
+/// sessions.  See [`broadcast_to_serial`].
+static SERIAL_BROADCAST: OnceLock<broadcast::Sender<Arc<[u8]>>> = OnceLock::new();
+
+fn serial_broadcast() -> &'static broadcast::Sender<Arc<[u8]>> {
+    SERIAL_BROADCAST.get_or_init(|| broadcast::channel(SERIAL_BROADCAST_CAP).0)
+}
+
+/// Queue a message for delivery to every serial session.
+///
+/// This is the serial-side counterpart to `telnet::broadcast_to_sessions`:
+/// telnet/SSH/relay sessions live in the async `session_writers` list, but
+/// serial ports run on blocking `std::thread`s with synchronous ports, so
+/// they subscribe to this channel instead.  A single admin broadcast fans
+/// out to both by calling `broadcast_to_sessions` (async) and this (serial).
+///
+/// **Delivery is command-mode only.**  A serial port that is currently
+/// *online* (a live `ATDT` call, possibly carrying a binary file transfer)
+/// does not drain the channel — injecting bytes mid-transfer would corrupt
+/// it.  Queued messages stay in the subscriber's ring and are written when
+/// the session next returns to the command prompt (`+++`, hangup, or call
+/// end).  A busy port that misses more than `SERIAL_BROADCAST_CAP` messages
+/// while online simply skips the intermediate ones (`Lagged`).
+///
+/// The message bytes are sent verbatim, so the caller must include any
+/// framing (leading/trailing CRLF).  No-op if no ports are subscribed.
+/// **Not** the shutdown-goodbye path — that has its own shutdown-flag write
+/// in `serial_thread` that fires even mid-online.
+///
+/// This is a wired extension point: the channel, subscription, and drain are
+/// live, but no production broadcast is routed to it yet (the only broadcast
+/// today is shutdown, which deliberately keeps its own path).  The first
+/// admin-notice caller drops in here.  `#[allow(dead_code)]` until then.
+#[allow(dead_code)]
+pub fn broadcast_to_serial(msg: Arc<[u8]>) {
+    let _ = serial_broadcast().send(msg); // Err == no subscribers; fine.
+}
+
+/// Drain all currently-pending broadcast messages from `rx` without
+/// blocking, in arrival order.  `Lagged` cursors are skipped (a port that
+/// fell behind on a burst just misses the intermediate notices); `Empty`
+/// and `Closed` stop the drain.  Split from the port write in
+/// [`drain_serial_broadcasts`] so the channel logic is unit-testable
+/// without a live serial port.
+fn collect_pending_broadcasts(rx: &mut broadcast::Receiver<Arc<[u8]>>) -> Vec<Arc<[u8]>> {
+    let mut out = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => out.push(msg),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+    out
+}
+
 // ─── Modem state ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,6 +325,10 @@ struct ModemState {
     /// carrier detect.  Reflects physical cabling, so it is NOT reset by
     /// ATZ/AT&F (unlike the modem-profile fields).
     drive_carrier: bool,
+    /// Subscription to the process-global serial broadcast channel.  Drained
+    /// in `command_mode_tick` (command mode only — never mid-online, which
+    /// would corrupt a transfer).  See [`broadcast_to_serial`].
+    bc_rx: broadcast::Receiver<Arc<[u8]>>,
 }
 
 // ─── Public API ────────────────────────────────────────────
@@ -1293,6 +1363,11 @@ fn serial_thread(
         stored_numbers: port_cfg.stored_numbers.clone(),
         petscii_translate: port_cfg.petscii_translate,
         drive_carrier: port_cfg.drive_carrier,
+        // Subscribe before the command loop so no broadcast issued once this
+        // port is up is missed.  A fresh subscription per port-open means
+        // notices queued while the port was closed/reopening are skipped —
+        // acceptable for transient admin messages.
+        bc_rx: serial_broadcast().subscribe(),
     };
 
     // Establish the initial carrier line state: no call is in progress at
@@ -1385,10 +1460,27 @@ fn is_paired_eol(byte: u8, prev: u8, cr: u8, lf: u8) -> bool {
     (byte_is_lf && prev_is_cr) || (byte_is_cr && prev_is_lf)
 }
 
+/// Write every pending broadcast message to the port.  Called only from
+/// command mode (see the note in `command_mode_tick`).  A write error is
+/// ignored here — the next `state.port.read` in the tick surfaces a dead
+/// port and returns `false` so the manager reopens it.
+fn drain_serial_broadcasts(state: &mut ModemState) {
+    for msg in collect_pending_broadcasts(&mut state.bc_rx) {
+        let _ = state.port.write_all(&msg);
+        let _ = state.port.flush();
+    }
+}
+
 /// Run one command-mode read.  Returns `false` if the port hit a fatal
 /// I/O error (e.g. the underlying device/bridge disappeared) so the
 /// caller can drop the session and reopen; `true` to keep polling.
 fn command_mode_tick(state: &mut ModemState) -> bool {
+    // Deliver any pending administrative broadcasts before servicing input.
+    // This is the only place broadcasts reach a serial session — never in
+    // online mode, where injected bytes would corrupt a live file transfer.
+    // Runs at least every `SERIAL_READ_TIMEOUT` while idle at the prompt.
+    drain_serial_broadcasts(state);
+
     let mut buf = [0u8; 1];
     match state.port.read(&mut buf) {
         Ok(1) => {
@@ -6168,4 +6260,79 @@ mod tests {
         assert!(!quiet, "&F must restore quiet");
     }
 
+    // ─── Serial broadcast channel ──────────────────────────
+
+    #[test]
+    fn test_serial_broadcast_delivers_to_subscriber() {
+        // A message sent after a subscriber exists is drained in order.
+        let tx = broadcast::channel::<Arc<[u8]>>(SERIAL_BROADCAST_CAP).0;
+        let mut rx = tx.subscribe();
+        tx.send(Arc::from(&b"hello"[..])).unwrap();
+        tx.send(Arc::from(&b"world"[..])).unwrap();
+        let drained = collect_pending_broadcasts(&mut rx);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(&*drained[0], b"hello");
+        assert_eq!(&*drained[1], b"world");
+    }
+
+    #[test]
+    fn test_serial_broadcast_empty_when_idle() {
+        // No pending messages → empty drain, and it does not block.
+        let tx = broadcast::channel::<Arc<[u8]>>(SERIAL_BROADCAST_CAP).0;
+        let mut rx = tx.subscribe();
+        assert!(collect_pending_broadcasts(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn test_serial_broadcast_skips_lagged() {
+        // A subscriber that fell behind by more than the ring capacity
+        // `Lagged`s; the drain skips the dropped messages and returns only
+        // those still in the ring, rather than erroring or looping forever.
+        let tx = broadcast::channel::<Arc<[u8]>>(4).0;
+        let mut rx = tx.subscribe();
+        for i in 0..10u8 {
+            tx.send(Arc::from(&[i][..])).unwrap();
+        }
+        // Overflowed the ring of 4; drain recovers the surviving tail.
+        let drained = collect_pending_broadcasts(&mut rx);
+        assert_eq!(drained.len(), 4, "only the last {} messages survive", 4);
+        assert_eq!(&*drained[0], &[6]); // messages 6,7,8,9 remain
+        assert_eq!(&*drained[3], &[9]);
+        // Idle again afterwards.
+        assert!(collect_pending_broadcasts(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn test_serial_broadcast_closed_sender_stops_drain() {
+        // Once the sender is dropped, a drained-empty receiver reports
+        // Closed → the drain returns cleanly (no infinite loop).
+        let tx = broadcast::channel::<Arc<[u8]>>(SERIAL_BROADCAST_CAP).0;
+        let mut rx = tx.subscribe();
+        tx.send(Arc::from(&b"last"[..])).unwrap();
+        drop(tx);
+        let drained = collect_pending_broadcasts(&mut rx);
+        assert_eq!(drained.len(), 1, "buffered message still delivered");
+        assert_eq!(&*drained[0], b"last");
+        // Sender gone and ring empty: drain terminates on Closed.
+        assert!(collect_pending_broadcasts(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn test_broadcast_to_serial_no_subscribers_is_noop() {
+        // Sending with no live ports must not panic (Err is swallowed).
+        broadcast_to_serial(Arc::from(&b"nobody home"[..]));
+    }
+
+    #[test]
+    fn test_serial_broadcast_global_reaches_live_subscriber() {
+        // The process-global channel: a subscriber taken before a
+        // `broadcast_to_serial` call receives that message.
+        let mut rx = serial_broadcast().subscribe();
+        broadcast_to_serial(Arc::from(&b"admin notice"[..]));
+        let drained = collect_pending_broadcasts(&mut rx);
+        assert!(
+            drained.iter().any(|m| &**m == b"admin notice"),
+            "subscriber should see the globally-broadcast message"
+        );
+    }
 }
