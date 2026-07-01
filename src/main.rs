@@ -123,7 +123,7 @@ fn main() {
                     shutdown_rt.clone(),
                     restart_rt.clone(),
                     notify_rt.clone(),
-                    session_writers,
+                    session_writers.clone(),
                     lockouts.clone(),
                 );
                 serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
@@ -146,6 +146,15 @@ fn main() {
                     }
                     notify_rt.notified().await;
                 }
+
+                // Broadcast the goodbye to every live async session (telnet,
+                // SSH, and master/slave relay all register their writer),
+                // centrally so it fires for any combination of enabled
+                // servers — including SSH-only, where the old telnet-accept-
+                // loop broadcast never ran.  Serial sessions emit their own
+                // notice from the serial thread on the shutdown flag.
+                let goodbye = format!("\r\n\r\n{}\r\n", telnet::SHUTDOWN_GOODBYE);
+                telnet::broadcast_to_sessions(&session_writers, goodbye.as_bytes(), true).await;
 
                 // Give sessions a moment to receive the shutdown message
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;

@@ -1465,6 +1465,45 @@ struct WeatherData {
 pub(crate) type SharedWriter = Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>;
 pub(crate) type SessionWriters = Arc<tokio::sync::Mutex<Vec<SharedWriter>>>;
 
+/// The notice sent to every live session when the server shuts down.  Kept
+/// as one constant so the central async broadcast (telnet/SSH/relay) and
+/// the serial thread's own notice stay in sync (and the test pins it).
+pub(crate) const SHUTDOWN_GOODBYE: &str = "Server shutting down. Goodbye.";
+
+/// Broadcast `msg` to every registered async session writer, then optionally
+/// close each writer.
+///
+/// Telnet, SSH interactive shells, and master/slave relay sessions all
+/// register their `SharedWriter` into the shared [`SessionWriters`] list, so
+/// this reaches every async connection **regardless of which servers are
+/// enabled**.  It is the single transport-agnostic broadcast primitive:
+/// invoked from the central shutdown path in `main.rs` (previously the
+/// shutdown notice lived in the telnet accept loop and was skipped entirely
+/// on an SSH-only deployment), and the hook for any future all-session
+/// broadcast message.
+///
+/// `close = true` flushes and shuts each writer down after the write (the
+/// shutdown-goodbye path); pass `false` for an in-band message that leaves
+/// the session running.  A per-writer `try_lock` skips a session that is
+/// mid-write (holding its own writer lock) rather than blocking the whole
+/// broadcast on it — at shutdown such a session is being torn down anyway.
+///
+/// Serial sessions are **not** in this list — they run on blocking threads
+/// with a synchronous port and emit their own notice from
+/// `serial::serial_thread` on the shutdown flag.
+pub async fn broadcast_to_sessions(writers: &SessionWriters, msg: &[u8], close: bool) {
+    let writers = writers.lock().await;
+    for w in writers.iter() {
+        if let Ok(mut writer) = w.try_lock() {
+            let _ = writer.write_all(msg).await;
+            let _ = writer.flush().await;
+            if close {
+                let _ = writer.shutdown().await;
+            }
+        }
+    }
+}
+
 /// A Serial Gateway pick: either a local port (A/B) or a registered
 /// remote console port on a slave (§9 #12), keyed by the slave's IP and
 /// port label.
@@ -14234,15 +14273,9 @@ pub fn start_server(
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
-                let writers = session_writers.lock().await;
-                let msg = b"\r\n\r\nServer shutting down. Goodbye.\r\n";
-                for w in writers.iter() {
-                    if let Ok(mut writer) = w.try_lock() {
-                        let _ = writer.write_all(msg).await;
-                        let _ = writer.flush().await;
-                        let _ = writer.shutdown().await;
-                    }
-                }
+                // The shutdown goodbye is broadcast centrally from main.rs
+                // (see `broadcast_to_sessions`) so it reaches SSH/relay
+                // sessions too, not just when the telnet server is enabled.
                 break;
             }
             tokio::select! {
@@ -15809,11 +15842,41 @@ mod tests {
     /// Shutdown broadcast message must be valid and end with CRLF.
     #[test]
     fn test_shutdown_message_format() {
-        let msg = b"\r\n\r\nServer shutting down. Goodbye.\r\n";
-        assert!(msg.ends_with(b"\r\n"), "shutdown message must end with CRLF");
-        // Message must be short enough that it fits any terminal
-        let text = "Server shutting down. Goodbye.";
-        assert!(text.len() <= PETSCII_WIDTH, "shutdown message exceeds PETSCII width");
+        let msg = format!("\r\n\r\n{}\r\n", SHUTDOWN_GOODBYE);
+        assert!(msg.ends_with("\r\n"), "shutdown message must end with CRLF");
+        // Message must be short enough that it fits any terminal.
+        assert!(
+            SHUTDOWN_GOODBYE.len() <= PETSCII_WIDTH,
+            "shutdown message exceeds PETSCII width"
+        );
+    }
+
+    /// `broadcast_to_sessions` writes to every registered writer and (with
+    /// `close`) shuts each down — the central shutdown-goodbye primitive
+    /// that now runs from main.rs for any enabled-server combination.
+    #[tokio::test]
+    async fn test_broadcast_to_sessions_reaches_all_and_closes() {
+        // Two registered "sessions", each a duplex whose far end we read.
+        // A `DuplexStream` is itself an `AsyncWrite`; writing the near end
+        // is readable at the far end, and shutting it EOFs the far end.
+        let (a_near, mut a_far) = tokio::io::duplex(256);
+        let (b_near, mut b_far) = tokio::io::duplex(256);
+        let mk = |s: tokio::io::DuplexStream| -> SharedWriter {
+            Arc::new(tokio::sync::Mutex::new(
+                Box::new(s) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+            ))
+        };
+        let writers: SessionWriters =
+            Arc::new(tokio::sync::Mutex::new(vec![mk(a_near), mk(b_near)]));
+
+        broadcast_to_sessions(&writers, b"BYE", true).await;
+
+        // Each far end sees "BYE" then EOF (writer was shut down).
+        for far in [&mut a_far, &mut b_far] {
+            let mut buf = Vec::new();
+            far.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, b"BYE", "session did not receive the broadcast");
+        }
     }
 
     /// Dialup mapping menu (with entries): header(3) + blank + 10 entries + blank

@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the master address, and reconnects automatically if the link drops.
 
 ### Fixed
+- **Shutdown "Goodbye" now reaches every session, not just when telnet is
+  enabled.** The shutdown broadcast used to live inside the telnet accept loop,
+  so an SSH-only deployment (`telnet_enabled = false`) tore SSH and relay
+  sessions down with no notice. It is now a transport-neutral broadcast invoked
+  centrally at shutdown, so telnet, SSH, and master/slave relay sessions all
+  receive it for any combination of enabled servers (serial ports already emit
+  their own notice). The mechanism is reusable for future all-session messages.
 - **File transfers over telnet no longer apply NVT CR-NUL stuffing**, which
   corrupted binary transfers through telnet↔serial bridges (e.g. tcpser) and
   telnet-aware WiFi modems that don't symmetrically un-stuff. The shared

@@ -1339,7 +1339,11 @@ fn serial_thread(
     if restart_flag.load(Ordering::SeqCst) {
         glog!("Serial modem (Port {}): restarting with new config", id.label());
     } else {
-        let _ = state.port.write_all(b"\r\nServer shutting down. Goodbye.\r\n");
+        // Serial runs on a blocking thread with a synchronous port, so it
+        // can't be in the async `session_writers` broadcast list — it emits
+        // the same shutdown notice itself here, from the shutdown flag.
+        let notice = format!("\r\n{}\r\n", crate::telnet::SHUTDOWN_GOODBYE);
+        let _ = state.port.write_all(notice.as_bytes());
         let _ = state.port.flush();
         glog!("Serial modem (Port {}): shutting down", id.label());
     }

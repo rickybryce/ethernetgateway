@@ -737,15 +737,21 @@ These two were **intentionally deferred** — neither is a hang or data loss, bo
 are pre-existing architecture or cosmetic, and a fix costs more than it's worth
 under the trusted-LAN threat model. Revisit only if the cost/benefit changes.
 
-- **(P2) Shutdown "Goodbye" broadcast is telnet-coupled.** The `session_writers`
-  shutdown broadcast loop lives inside the *telnet* accept task, so on an
-  SSH-only deployment (`telnet_enabled = false`) it never runs — no goodbye for
-  SSH shells *or* relay sessions. Not a hang: sessions still tear down via
-  russh's disconnect cascade when the server future drops. A proper fix means
-  hoisting the broadcast out of the telnet accept task into a transport-neutral
-  shutdown step. (Related: the broadcast's `shutdown()` on a relay's gateway-side
-  write half doesn't directly EOF the parked read either — see the corrected doc
-  comment in `relay.rs::run_master_relay_session`.)
+- **(P2) Shutdown "Goodbye" broadcast is telnet-coupled. RESOLVED 2026-07-01.**
+  The `session_writers` shutdown broadcast loop lived inside the *telnet* accept
+  task, so on an SSH-only deployment (`telnet_enabled = false`) it never ran — no
+  goodbye for SSH shells *or* relay sessions. Fixed by hoisting it into a
+  transport-neutral primitive, `telnet::broadcast_to_sessions(writers, msg, close)`,
+  invoked from the central shutdown step in `main.rs` so it runs for **any**
+  combination of enabled servers. The telnet accept loop now just breaks on
+  shutdown. Serial sessions (blocking threads, no async writer in the list) emit
+  the same notice from `serial::serial_thread` on the shutdown flag; the message
+  is unified in one constant (`telnet::SHUTDOWN_GOODBYE`). The helper is also the
+  hook for future all-session broadcast messages. Verified live: a paramiko SSH
+  client on a `telnet_enabled=false` gateway received the goodbye + EOF on SIGTERM.
+  (Related: the broadcast's `shutdown()` on a relay's gateway-side write half
+  doesn't directly EOF the parked read either — see the doc comment in
+  `relay.rs::run_master_relay_session`.)
 - **(P3, cosmetic) Slave connect `block_on` can race runtime drop on shutdown.**
   The slave serial thread is a detached `std::thread`; its master-connect
   `block_on` is bounded by `RELAY_CONNECT_TIMEOUT` (15 s) but doesn't re-check
