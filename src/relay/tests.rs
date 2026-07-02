@@ -20,8 +20,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
-    parse_relay_command, run_master_relay_dial, run_master_relay_session, ParsedRelay,
-    RelayConnectError, RelayTarget,
+    claim_remote_peer, parse_relay_command, parse_remote_peer_addr, register_remote_port,
+    run_master_relay_dial, run_master_relay_session, ParsedRelay, RelayConnectError, RelayTarget,
+    RELAY_ACTIVATE_BYTE,
 };
 
 /// The connect-error classes carry their detail through `Display`/`message`
@@ -305,6 +306,50 @@ fn test_parse_relay_command_rejects_garbage() {
             peer: None,
         })
     );
+}
+
+/// Phase 2b: parse a peer-dial address into a remote-registry key.
+#[test]
+fn test_parse_remote_peer_addr() {
+    use std::net::IpAddr;
+    assert_eq!(
+        parse_remote_peer_addr("B@192.168.1.50"),
+        Some(("192.168.1.50".parse::<IpAddr>().unwrap(), "B".to_string()))
+    );
+    // Label case-folds to upper (registry keys are uppercase).
+    assert_eq!(
+        parse_remote_peer_addr("a@10.0.0.9"),
+        Some(("10.0.0.9".parse::<IpAddr>().unwrap(), "A".to_string()))
+    );
+    // Bracketed IPv6 literal.
+    assert_eq!(
+        parse_remote_peer_addr("B@[::1]"),
+        Some(("::1".parse::<IpAddr>().unwrap(), "B".to_string()))
+    );
+    // A hostname (not an IP) can't be a registry key; a bad/absent label.
+    assert_eq!(parse_remote_peer_addr("B@example.com"), None);
+    assert_eq!(parse_remote_peer_addr("C@10.0.0.1"), None);
+    assert_eq!(parse_remote_peer_addr("192.168.1.1"), None);
+}
+
+/// Phase 2b: claiming a registered remote port removes it, writes the
+/// activate byte the slave waits for, and hands back the master's stream.
+#[tokio::test]
+async fn test_claim_remote_peer_activates() {
+    use std::net::IpAddr;
+    // TEST-NET-2, distinct from other tests, so the global registry key
+    // can't collide under parallel execution.
+    let ip: IpAddr = "198.51.100.7".parse().unwrap();
+    let (mut device_end, master_end) = tokio::io::duplex(64);
+    let _gen = register_remote_port(ip, "A".to_string(), master_end);
+
+    let claimed = claim_remote_peer(ip, "A").await;
+    assert!(claimed.is_some(), "a registered port is claimable");
+    let mut buf = [0u8; 1];
+    device_end.read_exact(&mut buf).await.unwrap();
+    assert_eq!(buf[0], RELAY_ACTIVATE_BYTE, "slave receives the activate byte");
+    // The claim removed it — a second claim finds nothing.
+    assert!(claim_remote_peer(ip, "A").await.is_none());
 }
 
 /// Slave link-state (§9 #10) round-trips through the per-port atomic and

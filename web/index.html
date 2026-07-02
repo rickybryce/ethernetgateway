@@ -1742,9 +1742,11 @@ relay_transport = ssh</span></code></pre>
                     Off by default. Cross-gateway: a device on a <strong>slave</strong>
                     can dial a port on its <strong>master</strong>
                     (<code>ATD &lt;Port&gt;@&lt;master-ip&gt;</code>) — the slave relays
-                    and the master rings/connects its port. Slave&harr;slave and
-                    dialing a slave's modem port are still planned. See the user
-                    manual &sect;9.2.3.
+                    and the master rings/connects its port. The master also routes
+                    to a slave's <strong>registered</strong> (console) ports, so
+                    those are dialable from the master or, via the crossbar, from
+                    another slave. Dialing a slave's <strong>modem</strong> port is
+                    still planned. See the user manual &sect;9.2.3.
                 </p>
 
                 <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>

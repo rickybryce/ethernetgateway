@@ -1460,9 +1460,11 @@ own ports and rings/connects it, bridging `device ↔ slave ↔ master ↔ port`
 This needs the slave's `allow_peer_dial` on (to relay) and the master's
 `master_accept_relays` + `allow_peer_dial` on (to accept and bridge). Addressing
 is by IP, so master and slave must have distinct addresses (normal for separate
-machines). Still planned: slave↔slave (via the master as a crossbar) and dialing
-a *slave's* modem port, which require slaves to announce their modem ports —
-those addresses return `NO CARRIER` today.
+machines). The master also routes a peer address to a port a slave has
+**registered** with it, so a slave's **console** port is dialable
+(`<Port>@<slave-ip>`) from the master — or, with the master acting as a
+crossbar, from another slave. Still planned: dialing a slave's **modem** port
+(needs the slave to announce its modem ports); that returns `NO CARRIER` today.
 
 ### Serial Safety
 

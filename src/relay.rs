@@ -158,36 +158,46 @@ where
         let _ = relay.shutdown().await;
         return;
     }
-    let Some(target) = crate::serial::resolve_local_peer_target(&addr) else {
-        glog!("Relay: peer-dial target {} is not a local port; refusing", addr);
+
+    // A LOCAL target — a port on this master (2a): ring (modem) or connect
+    // (console) it and bridge.
+    if let Some(target) = crate::serial::resolve_local_peer_target(&addr) {
+        let cfg = crate::config::get_config();
+        let tp = cfg.port(target);
+        let bridge = if tp.mode == "console" {
+            crate::serial::request_console_bridge(target).await.map_err(|e| e.to_string())
+        } else {
+            crate::serial::request_peer_call(target, RELAY_PEER_ANSWER_WAIT)
+                .await
+                .map_err(|o| format!("{:?}", o))
+        };
+        match bridge {
+            Ok(mut b) => {
+                glog!("Relay: peer-dial bridged to local Port {}", target.label());
+                let _ = tokio::io::copy_bidirectional(&mut relay, &mut b).await;
+            }
+            Err(why) => glog!("Relay: peer-dial to Port {} failed: {}", target.label(), why),
+        }
         let _ = relay.shutdown().await;
         return;
-    };
+    }
 
-    let cfg = crate::config::get_config();
-    let tp = cfg.port(target);
-    let mut bridge = if tp.mode == "console" {
-        match crate::serial::request_console_bridge(target).await {
-            Ok(b) => b,
-            Err(e) => {
-                glog!("Relay: peer-dial to Port {} refused: {}", target.label(), e);
-                let _ = relay.shutdown().await;
-                return;
+    // A REMOTE target (2b crossbar): a port a slave registered with us —
+    // claim its registration channel, activate it, and bridge the two
+    // relay legs (device ↔ slave ↔ master ↔ other-slave port).
+    if let Some((ip, label)) = parse_remote_peer_addr(&addr) {
+        match claim_remote_peer(ip, &label).await {
+            Some(mut remote) => {
+                glog!("Relay: peer-dial crossbar to {} @ {}", label, ip);
+                let _ = tokio::io::copy_bidirectional(&mut relay, &mut remote).await;
             }
+            None => glog!("Relay: peer-dial target {} @ {} not registered", label, ip),
         }
-    } else {
-        match crate::serial::request_peer_call(target, RELAY_PEER_ANSWER_WAIT).await {
-            Ok(b) => b,
-            Err(outcome) => {
-                glog!("Relay: peer-dial to Port {} failed: {:?}", target.label(), outcome);
-                let _ = relay.shutdown().await;
-                return;
-            }
-        }
-    };
-    glog!("Relay: peer-dial bridged to Port {}", target.label());
+        let _ = relay.shutdown().await;
+        return;
+    }
 
-    let _ = tokio::io::copy_bidirectional(&mut relay, &mut bridge).await;
+    glog!("Relay: peer-dial address {} not resolvable; refusing", addr);
     let _ = relay.shutdown().await;
 }
 
@@ -698,6 +708,34 @@ pub fn remove_remote_port_gen(
         Some((_, stored)) if *stored == generation => map.remove(&key).map(|(stream, _)| stream),
         _ => None,
     }
+}
+
+/// Parse a peer-dial address `<Port>@<host>` into `(ip, LABEL)` when the
+/// host is an IP literal, for looking a *remote* registered port up in
+/// [`REMOTE_PORTS`] (keyed by the slave's peer IP + uppercase label).
+/// `None` if the label isn't `A`/`B` or the host isn't an IP.
+pub fn parse_remote_peer_addr(addr: &str) -> Option<(IpAddr, String)> {
+    let (label, host) = addr.split_once('@')?;
+    let label = label.trim().to_ascii_uppercase();
+    if label != "A" && label != "B" {
+        return None;
+    }
+    let ip: IpAddr = host.trim().trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+    Some((ip, label))
+}
+
+/// Claim a registered remote port for a peer-dial and signal the slave to
+/// start bridging (`RELAY_ACTIVATE_BYTE`), returning the master's channel
+/// stream to pump.  `None` if no such port is registered or it went away
+/// before the activate byte landed.  Shared by the peer-dial crossbar and
+/// mirrors the Serial Gateway picker's claim+activate.
+pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> Option<tokio::io::DuplexStream> {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = remove_remote_port(ip, label)?;
+    if stream.write_all(&[RELAY_ACTIVATE_BYTE]).await.is_err() || stream.flush().await.is_err() {
+        return None;
+    }
+    Some(stream)
 }
 
 /// List the currently-registered remote console ports, sorted stably so

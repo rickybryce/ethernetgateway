@@ -3108,17 +3108,26 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
             return;
         }
         connect_local_peer(state, addr.port);
+    } else if let Ok(ip) = addr.host.parse::<std::net::IpAddr>() {
+        // Remote target.  On a MASTER this may be a port a slave registered
+        // with us — claim + activate its channel and bridge (the crossbar: a
+        // master-local device dialing a slave's port).  On a standalone
+        // gateway nothing is registered, so this is NO CARRIER.
+        let label = addr.port.label().to_string();
+        match state.handle.block_on(crate::relay::claim_remote_peer(ip, &label)) {
+            Some(stream) => bridge_duplex_online(state, stream),
+            None => {
+                glog!(
+                    "Serial modem (Port {}): remote peer {}@{} not registered here",
+                    state.port_id.label(),
+                    label,
+                    addr.host
+                );
+                send_result(state, "NO CARRIER");
+            }
+        }
     } else {
-        // Cross-gateway peer-dial from a *slave* is handled in `handle_dial`
-        // (relayed to the master).  This path runs only on a standalone or
-        // master gateway, which has no master to relay through — so a remote
-        // peer address is NO CARRIER here.
-        glog!(
-            "Serial modem (Port {}): remote peer-dial {}@{} not routable (no master to relay through)",
-            state.port_id.label(),
-            addr.port.label(),
-            addr.host
-        );
+        // Host isn't an IP literal (and isn't local) — nothing to route to.
         send_result(state, "NO CARRIER");
     }
 }
@@ -3152,25 +3161,7 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
     // Wait bounded by the caller's S7 (wait-for-answer); S7=0 → 1 s.
     let answer_wait = Duration::from_secs((state.s_regs[7].max(1)) as u64);
     match state.handle.block_on(request_peer_call(target, answer_wait)) {
-        Ok(caller_end) => {
-            send_result(state, "CONNECT");
-            state.mode = ModemMode::Online;
-            apply_carrier(state, true);
-            let (mut read, mut write) = tokio::io::split(caller_end);
-            let exit = online_mode_duplex(state, &mut read, &mut write);
-            state.mode = ModemMode::Command;
-            match exit {
-                OnlineExit::Escaped => {
-                    state.active_connection =
-                        Some(ActiveConnection::Duplex { read, write });
-                    send_result(state, "OK");
-                }
-                OnlineExit::Disconnected => {
-                    apply_carrier(state, false);
-                    send_result(state, "NO CARRIER");
-                }
-            }
-        }
+        Ok(caller_end) => bridge_duplex_online(state, caller_end),
         Err(PeerCallOutcome::Busy) => {
             send_result(state, "BUSY");
         }
@@ -3180,6 +3171,31 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
             send_result(state, "NO ANSWER");
         }
         Err(_) => {
+            send_result(state, "NO CARRIER");
+        }
+    }
+}
+
+/// Take this modem session online, bridged to `bridge` — a duplex whose far
+/// end is pumped by the answering local port, a local console manager, or a
+/// remote (relayed) port.  Emits `CONNECT`, asserts carrier, pumps the UART,
+/// and on a `+++` escape preserves the duplex in `active_connection` so `ATO`
+/// resumes (matching `dial_ethernet_gateway`); a disconnect drops carrier and
+/// emits `NO CARRIER`.  Shared by every local/remote peer bridge.
+fn bridge_duplex_online(state: &mut ModemState, bridge: tokio::io::DuplexStream) {
+    send_result(state, "CONNECT");
+    state.mode = ModemMode::Online;
+    apply_carrier(state, true);
+    let (mut read, mut write) = tokio::io::split(bridge);
+    let exit = online_mode_duplex(state, &mut read, &mut write);
+    state.mode = ModemMode::Command;
+    match exit {
+        OnlineExit::Escaped => {
+            state.active_connection = Some(ActiveConnection::Duplex { read, write });
+            send_result(state, "OK");
+        }
+        OnlineExit::Disconnected => {
+            apply_carrier(state, false);
             send_result(state, "NO CARRIER");
         }
     }
@@ -3205,27 +3221,7 @@ fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
             return;
         }
     };
-
-    send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
-    apply_carrier(state, true);
-
-    let (mut read, mut write) = tokio::io::split(bridge);
-    let exit = online_mode_duplex(state, &mut read, &mut write);
-
-    state.mode = ModemMode::Command;
-    match exit {
-        OnlineExit::Escaped => {
-            // +++ escape — preserve the bridge so ATO resumes, matching
-            // dial_ethernet_gateway.
-            state.active_connection = Some(ActiveConnection::Duplex { read, write });
-            send_result(state, "OK");
-        }
-        OnlineExit::Disconnected => {
-            apply_carrier(state, false);
-            send_result(state, "NO CARRIER");
-        }
-    }
+    bridge_duplex_online(state, bridge);
 }
 
 /// Slave-mode bridge: connect to the master over SSH, request the relay
