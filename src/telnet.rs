@@ -6832,6 +6832,20 @@ impl TelnetSession {
             self.send_line("").await?;
 
             let cfg = config::get_config();
+            // When peer-dial is on, show this gateway's address so a caller
+            // knows the phone-book form to dial from a modem port:
+            // `ATD <Port>@<ip>`.  One line, and only when the feature is on,
+            // so the default layout is unchanged.
+            if cfg.allow_peer_dial {
+                let ip = crate::serial::primary_local_ip();
+                // Keep <=40 cols: "Dial: <Port>@" (13) + IPv4 (<=15) = 28.
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim(&format!("Dial: <Port>@{}", ip))
+                ))
+                .await?;
+                self.send_line("").await?;
+            }
             let mut any_eligible = false;
             for id in SERIAL_PORT_IDS {
                 let port = cfg.port(id);
@@ -6847,9 +6861,19 @@ impl TelnetSession {
                     && port.enabled
                     && port.mode == "console"
                     && !port.port.is_empty();
-                let ok = !own_port
+                let console_ok = !own_port
                     && !relayed_to_master
                     && crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
+                // A modem-mode port is selectable when peer-dial is enabled:
+                // picking it rings the port (the device answers per its own
+                // AT rules), just like `ATD <Port>@<IP>`.
+                let peer_ok = cfg.allow_peer_dial
+                    && !own_port
+                    && !relayed_to_master
+                    && port.enabled
+                    && port.mode != "console"
+                    && !port.port.is_empty();
+                let ok = console_ok || peer_ok;
                 any_eligible |= ok;
                 // Two-line per-port entry so the device path + baud
                 // never overflow the 40-col PETSCII budget.  Line 1 is
@@ -6865,7 +6889,8 @@ impl TelnetSession {
                 } else if !port.enabled {
                     "Disabled"
                 } else if port.mode != "console" {
-                    "Modem mode"
+                    // Modem port: selectable (rings) only when peer-dial is on.
+                    if peer_ok { "Modem (rings)" } else { "Modem mode" }
                 } else if port.port.is_empty() {
                     "No device"
                 } else {
@@ -6878,7 +6903,7 @@ impl TelnetSession {
                 } else if !port.enabled {
                     self.red(role)
                 } else if port.mode != "console" {
-                    self.amber(role)
+                    if peer_ok { self.green(role) } else { self.amber(role) }
                 } else if port.port.is_empty() {
                     self.red(role)
                 } else {
@@ -7021,19 +7046,29 @@ impl TelnetSession {
         }
 
         let cfg = config::get_config();
-        // Re-validate under the picked id.  Eligibility might have
-        // changed since the picker rendered (operator could have
-        // toggled mode in another session).
-        if let Err(e) = crate::serial::check_console_bridge_eligible(&cfg, id) {
+        let port_cfg = cfg.port(id).clone();
+        // A console-mode target connects directly; a modem-mode target is
+        // rung (peer-dial) and answers per its own AT rules.  Re-validate
+        // under the picked id — mode/eligibility might have changed since
+        // the picker rendered (operator could have toggled it elsewhere).
+        let is_console = port_cfg.mode == "console";
+        if is_console {
+            if let Err(e) = crate::serial::check_console_bridge_eligible(&cfg, id) {
+                self.show_error_lines(&["Could not acquire serial port:", "", e.as_str()])
+                    .await?;
+                return Ok(());
+            }
+        } else if !cfg.allow_peer_dial || !port_cfg.enabled || port_cfg.port.is_empty() {
+            // Modem-mode target requires the peer-dial opt-in and a live port.
             self.show_error_lines(&[
-                "Could not acquire serial port:",
+                "That port can't be dialed.",
                 "",
-                e.as_str(),
+                "Enable peer-dial (Serial Config > P)",
+                "and give the modem port a device.",
             ])
             .await?;
             return Ok(());
         }
-        let port_cfg = cfg.port(id).clone();
 
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
@@ -7108,20 +7143,35 @@ impl TelnetSession {
         // the slot every 150 ms).
         self.send_line(&format!(
             "  {}",
-            self.dim("Acquiring serial port...")
+            self.dim(if is_console { "Acquiring serial port..." } else { "Ringing port..." })
         ))
         .await?;
         self.flush().await?;
-        let bridge = match crate::serial::request_console_bridge(id).await {
-            Ok(b) => b,
-            Err(e) => {
-                self.show_error_lines(&[
-                    "Could not acquire serial port:",
-                    "",
-                    e.as_str(),
-                ])
-                .await?;
-                return Ok(());
+        let bridge = if is_console {
+            match crate::serial::request_console_bridge(id).await {
+                Ok(b) => b,
+                Err(e) => {
+                    self.show_error_lines(&["Could not acquire serial port:", "", e.as_str()])
+                        .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            // Ring the modem-mode target; it answers per its own AT rules
+            // (S0 auto-answer / manual ATA).  ~30 s covers the default
+            // S0=5 at the 6 s ring cadence, plus a manual answer.
+            use crate::serial::PeerCallOutcome;
+            match crate::serial::request_peer_call(id, std::time::Duration::from_secs(30)).await {
+                Ok(b) => b,
+                Err(outcome) => {
+                    let why = match outcome {
+                        PeerCallOutcome::Busy => "That port is busy (in a call).",
+                        PeerCallOutcome::NoAnswer => "No answer.",
+                        _ => "The call could not be completed.",
+                    };
+                    self.show_error_lines(&["Could not connect:", "", why]).await?;
+                    return Ok(());
+                }
             }
         };
 
@@ -8125,10 +8175,22 @@ impl TelnetSession {
                 dbg_state
             ))
             .await?;
+            let peer_state = if cfg.allow_peer_dial {
+                self.green("ON")
+            } else {
+                self.red("OFF")
+            };
+            self.send_line(&format!(
+                "  {} - Peer-dial (Port@IP): {}",
+                self.cyan("[P]"),
+                peer_state
+            ))
+            .await?;
             self.send_line("").await?;
             self.send_line(&format!(
-                "  {}  {}  {}",
-                self.action_prompt("D", "Toggle debug"),
+                "  {}  {}  {}  {}",
+                self.action_prompt("D", "Debug"),
+                self.action_prompt("P", "Peer-dial"),
                 self.action_prompt("Q", "Back"),
                 self.action_prompt("H", "Help")
             ))
@@ -8152,10 +8214,18 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "p" => {
+                    let v = (!cfg.allow_peer_dial).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("allow_peer_dial", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "h" => self.serial_configuration_help().await?,
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press A, B, D, H, or Q.").await?;
+                    self.show_error("Press A, B, D, P, H, or Q.").await?;
                 }
             }
         }
@@ -8184,6 +8254,12 @@ impl TelnetSession {
             "  trace (byte-level logging of SSH/",
             "  Telnet gateway sessions). Takes effect",
             "  on the next gateway session.",
+            "",
+            "  Press P to toggle peer-dial: a modem",
+            "  port may dial another port directly",
+            "  (ATD Port@IP) or ring a modem port",
+            "  picked from the Serial Gateway menu,",
+            "  instead of the gateway menu.",
         ]
     }
 
@@ -16791,6 +16867,9 @@ mod tests {
     #[test]
     fn test_serial_gateway_picker_row_count() {
         let chrome = 3 + 1; // sep+title+sep, blank
+        // Peer-dial header ("Dial from a modem port: ...") + blank, shown
+        // only when allow_peer_dial is on.
+        let peer_header = 1 + 1;
         // Worst case: both ports configured, so each takes 2 lines.
         let port_rows = 2 * 2;
         let blank_after = 1;
@@ -16803,7 +16882,7 @@ mod tests {
         let fallback = 1 + 1 + 1;
         let remote_block = 1 + REMOTE_PORT_DISPLAY_CAP + 1 + 1;
         let bigger = if remote_block > fallback { remote_block } else { fallback };
-        let worst_case = chrome + port_rows + blank_after + bigger + footer;
+        let worst_case = chrome + peer_header + port_rows + blank_after + bigger + footer;
         assert!(
             worst_case <= 22,
             "Serial Gateway picker is {} rows, exceeds 22",
@@ -16820,9 +16899,12 @@ mod tests {
         let chrome = 3 + 1; // sep+title+sep, blank
         let port_rows = 2 * 2; // 2 lines per port at worst case
         let blank_after = 1;
-        let debug_row = 1 + 1; // gateway-debug status line + blank
+        let debug_row = 1; // gateway-debug status line
+        let peer_dial_row = 1; // peer-dial status line
+        let blank_before_footer = 1;
         let footer = 1 + 1; // footer line + prompt
-        let total = chrome + port_rows + blank_after + debug_row + footer;
+        let total =
+            chrome + port_rows + blank_after + debug_row + peer_dial_row + blank_before_footer + footer;
         assert!(
             total <= 22,
             "Serial Configuration picker is {} rows",

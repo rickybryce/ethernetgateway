@@ -1230,6 +1230,18 @@ in `egateway.conf`.
 Or edit `egateway.conf` directly under the `serial_a_*` / `serial_b_*`
 keys and restart the server.
 
+> **Device names can move — port settings don't.** A port's *settings* (mode,
+> baud, framing, AT/S-register state) are keyed to Port A / Port B and persist
+> across restarts. The *device path* (`serial_a_port` / `serial_b_port`, e.g.
+> `/dev/ttyUSB0`) is just a saved string, and Linux assigns `ttyUSBn` in the
+> order adapters enumerate — so a **reboot, or replugging the adapters in a
+> different order, can swap** which physical device Port A and Port B point at
+> (applying Port A's baud/mode to the wrong device). To pin a device regardless
+> of order, set the port to a stable by-id path, e.g.
+> `serial_a_port = /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A1234-if00-port0`
+> (`ls -l /dev/serial/by-id/`), and re-check each port's device after any
+> re-cabling.
+
 ### Supported AT Commands
 
 | Command | Action |
@@ -1395,6 +1407,48 @@ receives the Ethernet Gateway main menu, just as if it had dialed in
 with `ATDT ethernet-gateway`.  The serial device can also answer
 manually with `ATA` during ringing.  The two ports' ring slots are
 independent — Port A and Port B can be ringing simultaneously.
+
+### Peer-Dial (Calling Another Port)
+
+Peer-dial lets a modem port **call another serial port directly** and talk to
+the device on it — the gateway equivalent of dialing a friend's modem to swap
+files. Where `ATDT ethernet-gateway` reaches the *menu*, peer-dial connects
+straight through to a specific port. It is **off by default**; enable
+`allow_peer_dial` from **Configuration > M > P**, the web *Serial* config, or
+the GUI.
+
+Dial a port by its address, `<Port>@<IP>` — exactly what the **Serial Gateway**
+menu shows (`Dial: <Port>@<ip>`), so you dial what you see:
+
+```
+ATD B@192.168.1.50      # call Port B on the gateway at 192.168.1.50
+```
+
+Picking a port in the Serial Gateway menu has the same effect as dialing its
+address. What happens depends on the **target port's mode**:
+
+- **Modem-mode target — it rings.** The device answers per its *own* AT rules:
+  automatically after `S0` rings (`S0 = 0` disables auto-answer), or when its
+  operator types `ATA`. A true dial-up call.
+- **Console-mode (telnet-serial) target — it connects directly** (no modem to
+  answer; leased-line style).
+
+Once connected it is a **transparent byte pipe** between the two devices — run
+XMODEM/YMODEM/ZMODEM/Kermit/Punter end to end between them, exactly as over a
+real modem-to-modem call. Each port keeps its own baud rate (they need not
+match); turn PETSCII translation off (`AT+PETSCII=0`) before a binary transfer.
+The caller sees `CONNECT` on answer, `BUSY` if the target is already in a call,
+`NO ANSWER` if it rings unanswered within the caller's `S7` (needs `ATX3`+), or
+`NO CARRIER` otherwise.
+
+> **Ring count vs. answer timeout:** auto-answer waits `S0` rings at ~6 s each,
+> so the default `S0 = 5` (~30 s) is longer than the caller's default `S7 = 15`
+> wait — which would give `NO ANSWER` first (authentic modem behavior). On a
+> port meant to be dialed, set a low `S0` (e.g. `ATS0=1`) or answer with `ATA`.
+
+Peer-dial currently bridges ports on the **same** gateway; dialing a port on a
+*different* gateway (`<Port>@<other-ip>`, over the master/slave relay) is
+planned and today returns `NO CARRIER`.
 
 ### Serial Safety
 

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.3] - Unreleased
 
 ### Added
+- **Peer-dial: call another serial port directly.** With the new
+  `allow_peer_dial` opt-in (default off; wired into telnet **Configuration > M >
+  P**, web, and GUI), a modem-mode port can dial another port by address —
+  `ATD <Port>@<IP>` (e.g. `ATD B@192.168.1.50`) — or select that port in the
+  Serial Gateway menu, and bridge straight through to the device on it (the
+  gateway equivalent of calling a friend's modem). A **modem-mode** target
+  *rings* and answers per its own AT rules (`S0` auto-answer / manual `ATA`); a
+  **console-mode** target connects directly. The connection is a transparent
+  byte pipe, so a file-transfer protocol runs end to end between the two
+  devices. Result codes follow ATX (`CONNECT`/`BUSY`/`NO ANSWER`/`NO CARRIER`).
+  Phase 1 bridges ports on the same gateway; cross-gateway peer-dial over the
+  relay is planned. See README "Peer-Dial" and user manual §9.2.3.
 - **Live relay status in the telnet Master/Slave screen.** A master now lists
   the remote console ports slaves have registered (so you can see connected
   slaves at a glance); a slave shows each console port's link state to its

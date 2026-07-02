@@ -1913,6 +1913,25 @@ interface (SwiftLink / Turbo232) or a WiFi modem with its own UART is not
 affected and can run faster. See &sect;16.9.
 </aside>
 
+<aside class="warn">
+<span class="label">Device names can move &mdash; port settings don't</span>
+A port's <em>settings</em> (mode, baud, framing, AT/S-register state) are keyed
+to <strong>Port&nbsp;A</strong> / <strong>Port&nbsp;B</strong> and persist across
+restarts.  The <em>device path</em> (<code>serial_a_port</code> /
+<code>serial_b_port</code>, e.g. <code>/dev/ttyUSB0</code>) is just a saved
+string &mdash; and on Linux the kernel hands out <code>ttyUSB0</code>,
+<code>ttyUSB1</code>, &hellip; in the order adapters enumerate.  After a reboot,
+or if you unplug the adapters and plug them back in a different order, those
+names can <strong>swap</strong>, so Port&nbsp;A may suddenly point at the adapter
+you meant for Port&nbsp;B (with Port&nbsp;A's baud/mode applied to the wrong
+device).  To pin a device regardless of enumeration order, set the port to a
+stable by-id path instead of <code>ttyUSBn</code> &mdash; e.g.
+<code>serial_a_port = /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A1234-if00-port0</code>
+(list them with <code>ls -l /dev/serial/by-id/</code>).  After any re-cabling,
+confirm each port's device in the GUI dropdown or the telnet
+<em>Configuration &rarr; M</em> screen.
+</aside>
+
 <h2 id="ch9-dial">9.2 Dialing</h2>
 
 <p>
@@ -1994,6 +2013,76 @@ the local gateway menu (equivalent to <code>ATDT ethernet-gateway</code>) and
 cannot be deleted.  Numbers are matched by digits only — dashes, spaces,
 and parentheses are ignored — so <code>555-1234</code> and <code>5551234</code>
 hit the same entry.
+</p>
+
+<h3 id="ch9-peerdial">9.2.3 Calling Another Port (Peer-Dial)</h3>
+
+<p>
+Peer-dial lets a modem port <strong>call another serial port directly</strong>
+and talk to the device attached to it &mdash; the gateway equivalent of dialing
+a friend's modem to swap files.  Where <code>ATDT ethernet-gateway</code> lands
+on the gateway <em>menu</em>, peer-dial connects straight through to a specific
+port.  It is <strong>off by default</strong>; enable <code>allow_peer_dial</code>
+from <em>Configuration &rarr; M&nbsp;Serial&nbsp;Configuration &rarr;
+<span class="kbd">P</span></em>, the web <em>Serial</em> config, or the GUI.
+</p>
+
+<p>
+Dial another port by its <strong>address</strong>, <code>&lt;Port&gt;@&lt;IP&gt;</code>:
+</p>
+
+<pre><code>ATD B@192.168.1.50        <span class="output-text">(call Port B on the gateway at 192.168.1.50)</span></code></pre>
+
+<p>
+The address is exactly what the <strong>Serial Gateway</strong> menu shows
+(<em>Dial: &lt;Port&gt;@&lt;ip&gt;</em>), so you dial what you see.  You can also
+just pick the target port in that menu &mdash; it has the same effect as dialing
+its address.  What happens next depends on the <strong>target port's mode</strong>:
+</p>
+
+<ul>
+    <li><strong>Modem-mode target &mdash; it rings.</strong>  The device on that
+        port answers per its <em>own</em> AT rules: automatically after
+        <code>S0</code> rings (S0&nbsp;=&nbsp;0 disables auto-answer), or when its
+        operator types <code>ATA</code>.  This is a true dial-up call.</li>
+    <li><strong>Console-mode (telnet-serial) target &mdash; it connects
+        directly.</strong>  A console port has no modem to answer, so the bridge
+        opens immediately (leased-line style).</li>
+</ul>
+
+<p>
+Once connected it is a <strong>transparent byte pipe</strong> between the two
+devices &mdash; run a file-transfer protocol (XMODEM / YMODEM / ZMODEM / Kermit /
+Punter) end to end between them, exactly as you would over a real modem-to-modem
+call.  Each port keeps its own baud rate; they need not match.  (Turn PETSCII
+translation off &mdash; <code>AT+PETSCII=0</code> &mdash; before a binary transfer.)
+</p>
+
+<table>
+    <thead><tr><th>Caller sees</th><th>When</th></tr></thead>
+    <tbody>
+        <tr><td><code>CONNECT</code></td><td>Target answered (modem) or connected (console).</td></tr>
+        <tr><td><code>BUSY</code></td><td>Target modem port is already in a call.</td></tr>
+        <tr><td><code>NO ANSWER</code></td><td>Target rang but nobody answered within the caller's <code>S7</code> (needs <code>ATX3</code>+; else <code>NO CARRIER</code>).</td></tr>
+        <tr><td><code>NO CARRIER</code></td><td>Unknown/disabled port, peer-dial off, dialing your own port, or the call failed.</td></tr>
+    </tbody>
+</table>
+
+<aside class="note">
+<span class="label">Ring count vs. answer timeout</span>
+Auto-answer waits <code>S0</code> rings at the ~6&nbsp;s ring cadence, so the
+gateway default <code>S0&nbsp;=&nbsp;5</code> takes ~30&nbsp;s &mdash; longer than
+the caller's default <code>S7&nbsp;=&nbsp;15</code> wait, which would give
+<code>NO&nbsp;ANSWER</code> first (authentic real-modem behaviour).  On a port
+you intend to be dialed, set a low <code>S0</code> (e.g. <code>ATS0=1</code>) or
+have the operator answer with <code>ATA</code>.
+</aside>
+
+<p>
+<strong>Scope:</strong> peer-dial currently bridges ports on the
+<em>same</em> gateway.  Dialing a port on a <em>different</em> gateway
+(<code>&lt;Port&gt;@&lt;other-ip&gt;</code>, over the master/slave relay) is
+planned; today it returns <code>NO&nbsp;CARRIER</code>.
 </p>
 
 <h2 id="ch9-info">9.3 Identification (ATI)</h2>

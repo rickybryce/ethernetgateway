@@ -1686,6 +1686,20 @@ relay_transport = ssh</span></code></pre>
                     that port to console mode would tear down the caller's own
                     connection before they could acknowledge.
                 </p>
+                <div class="callout callout-warn">
+                    <strong>Device names can move &mdash; port settings don't.</strong>
+                    A port's settings (mode, baud, framing, AT state) are keyed to
+                    Port&nbsp;A / Port&nbsp;B and persist. The device path
+                    (<code>serial_a_port</code>, e.g. <code>/dev/ttyUSB0</code>) is
+                    just a saved string, and Linux assigns <code>ttyUSBn</code> in
+                    enumeration order &mdash; so a reboot or replugging adapters in a
+                    different order can swap which physical device Port&nbsp;A and
+                    Port&nbsp;B point at. To pin a device, use a stable
+                    <code>/dev/serial/by-id/&hellip;</code> path (list them with
+                    <code>ls -l /dev/serial/by-id/</code>) instead of
+                    <code>ttyUSBn</code>, and re-check the device after any
+                    re-cabling.
+                </div>
 
                 <div class="cat" id="at-commands">AT Command Reference</div>
                 <p class="dim-text">
@@ -1700,6 +1714,35 @@ relay_transport = ssh</span></code></pre>
                     &mdash; the complete command-by-command reference for the serial modem
                     emulator, with usage examples and the <code>+++</code> escape sequence.
                 </div>
+
+                <div class="cat" id="peer-dial">Peer-Dial (Calling Another Port)</div>
+                <p class="dim-text">
+                    With <code>allow_peer_dial</code> enabled (Serial config
+                    &rarr; <strong>P</strong>, or web/GUI), a modem port can
+                    <strong>call another port directly</strong> and talk to the
+                    device on it &mdash; the gateway equivalent of dialing a
+                    friend's modem. Dial the address the Serial Gateway menu
+                    shows, <code>ATD &lt;Port&gt;@&lt;IP&gt;</code> (e.g.
+                    <code>ATD B@192.168.1.50</code>), or just pick the port in
+                    that menu &mdash; same effect.
+                </p>
+                <ul>
+                    <li>A <strong>modem-mode</strong> target <strong>rings</strong>;
+                        its device answers per its own AT rules (auto-answer after
+                        <code>S0</code> rings, or a manual <code>ATA</code>).</li>
+                    <li>A <strong>console-mode</strong> target <strong>connects
+                        directly</strong> (no modem to answer).</li>
+                    <li>Once connected it is a transparent byte pipe &mdash; run
+                        XMODEM/ZMODEM/etc. end to end between the two devices
+                        (turn <code>AT+PETSCII</code> off for binary). Result
+                        codes: <code>CONNECT</code> / <code>BUSY</code> /
+                        <code>NO ANSWER</code> / <code>NO CARRIER</code>.</li>
+                </ul>
+                <p class="dim-text">
+                    Off by default. Currently bridges ports on the same gateway;
+                    cross-gateway peer-dial over the relay is planned. See the
+                    user manual &sect;9.2.3 for details.
+                </p>
 
                 <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>
                 <p class="dim-text">

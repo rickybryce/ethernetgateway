@@ -842,6 +842,7 @@ fn collect_form_updates(
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
         "allow_atdt_kermit",
+        "allow_peer_dial",
         "punter_hangup_on_failure",
         "master_accept_relays",
         "serial_a_enabled", "serial_b_enabled",
@@ -1385,6 +1386,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{krc} {krp}</div>\
          <div class=\"row\">{kma} {kls}</div>\
          <div class=\"row\">{atd}</div>\
+         <div class=\"row\">{apd}</div>\
          <h3>Punter (C1)</h3>\
          <div class=\"row\">{pbs} {pneg}</div>\
          <div class=\"row\">{pblk} {pret} {pbad} {pint}</div>\
@@ -1416,6 +1418,7 @@ fn render_more_popups(cfg: &Config) -> String {
         kma = numfield("kermit_resume_max_age_hours", "Resume max age (h)", cfg.kermit_resume_max_age_hours),
         kls = checkbox("kermit_locking_shifts", "Locking shifts", cfg.kermit_locking_shifts),
         atd = checkbox("allow_atdt_kermit", "Allow ATDT KERMIT (modem emulator)", cfg.allow_atdt_kermit),
+        apd = checkbox("allow_peer_dial", "Allow peer-dial (ATD Port@IP / ring modem ports)", cfg.allow_peer_dial),
         pbs = numfield("punter_block_size", "Block size (8-255)", cfg.punter_block_size),
         pneg = numfield("punter_negotiation_timeout", "Neg (s)", cfg.punter_negotiation_timeout),
         pblk = numfield("punter_block_timeout", "Block (s)", cfg.punter_block_timeout),

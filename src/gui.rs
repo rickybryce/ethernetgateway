@@ -1101,6 +1101,27 @@ impl App {
                 }
             }
         });
+        // Peer-dial toggle — a plain checkbox (no popup): it lets a modem
+        // port dial another port directly (ATD Port@IP) or ring a modem
+        // port picked from the Serial Gateway menu, instead of always
+        // landing on the gateway menu.  Persisted immediately either way.
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut self.cfg.allow_peer_dial, "Allow peer-dial")
+                .changed()
+            {
+                self.last_synced_cfg.allow_peer_dial = self.cfg.allow_peer_dial;
+                config::update_config_value(
+                    "allow_peer_dial",
+                    if self.cfg.allow_peer_dial { "true" } else { "false" },
+                );
+            }
+            ui.label(
+                egui::RichText::new("(ATD Port@IP / ring modem ports)")
+                    .small()
+                    .color(AMBER),
+            );
+        });
     }
 
     /// Render the File Transfer frame's primary rows.  The main layout

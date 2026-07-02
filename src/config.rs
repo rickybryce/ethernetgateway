@@ -154,6 +154,15 @@ const DEFAULT_KERMIT_LOCKING_SHIFTS: bool = false;
 /// keep this off and have callers go through the regular telnet
 /// menu (F → K) instead.
 const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
+/// Peer-dial: let a modem-mode serial port dial another port directly
+/// (`ATD <Port>@<IP>`, or select a modem port in the Serial Gateway
+/// menu) and bridge to the device on it, instead of always landing on
+/// the gateway menu.  A dialed modem port rings and answers per its own
+/// AT rules (S0 auto-answer / manual `ATA`); a console port connects
+/// directly.  Off by default: it lets any modem caller ring/connect to
+/// any addressable port, so it is opt-in even under the trusted-LAN
+/// threat model.  See `GatewayPeerDialPlan.md`.
+const DEFAULT_ALLOW_PEER_DIAL: bool = false;
 /// Standalone Kermit-server TCP listener.  When `true`, the gateway
 /// binds `kermit_server_port` and drops every connection straight into
 /// Kermit server mode — no telnet menu, no auth gate, no private-IP
@@ -505,6 +514,10 @@ pub struct Config {
     /// mode from the serial modem emulator, bypassing any telnet-menu
     /// auth gate.  Off by default.
     pub allow_atdt_kermit: bool,
+    /// Allow peer-dial: a modem-mode serial port may dial another port
+    /// directly (`ATD <Port>@<IP>`) or select a modem port in the Serial
+    /// Gateway menu, bridging to the device on it.  Off by default.
+    pub allow_peer_dial: bool,
     /// Run a standalone Kermit-server TCP listener on
     /// `kermit_server_port`.  Bypasses authentication AND the
     /// private-IP allowlist — every accepted connection drops straight
@@ -630,6 +643,7 @@ impl Default for Config {
             kermit_resume_max_age_hours: DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS,
             kermit_locking_shifts: DEFAULT_KERMIT_LOCKING_SHIFTS,
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
+            allow_peer_dial: DEFAULT_ALLOW_PEER_DIAL,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
             punter_block_size: DEFAULT_PUNTER_BLOCK_SIZE,
@@ -951,6 +965,10 @@ fn read_config_file(path: &str) -> Config {
             .get("allow_atdt_kermit")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_ALLOW_ATDT_KERMIT),
+        allow_peer_dial: map
+            .get("allow_peer_dial")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_ALLOW_PEER_DIAL),
         kermit_server_enabled: map
             .get("kermit_server_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1472,6 +1490,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #                              Enable only on trusted serial lines; for any
 #                              auth-required deployment leave this off and
 #                              have callers go via the telnet F/K path.
+# allow_peer_dial:             let a modem-mode serial port dial another port
+#                              directly (ATD <Port>@<IP>, or pick a modem port
+#                              in the Serial Gateway menu) and bridge to the
+#                              device on it, instead of always landing on the
+#                              gateway menu.  A dialed modem port rings and
+#                              answers per its own AT rules (S0 auto-answer /
+#                              manual ATA); a console port connects directly.
+#                              Off by default (opt-in even on a trusted LAN).
 ");
     write_kv(&mut content, "kermit_negotiation_timeout", cfg.kermit_negotiation_timeout);
     write_kv(&mut content, "kermit_packet_timeout", cfg.kermit_packet_timeout);
@@ -1490,6 +1516,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "kermit_resume_max_age_hours", cfg.kermit_resume_max_age_hours);
     write_kv(&mut content, "kermit_locking_shifts", cfg.kermit_locking_shifts);
     write_kv(&mut content, "allow_atdt_kermit", cfg.allow_atdt_kermit);
+    write_kv(&mut content, "allow_peer_dial", cfg.allow_peer_dial);
     content.push('\n');
 
     content.push_str("\
@@ -1936,6 +1963,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_locking_shifts" => {
             cfg.kermit_locking_shifts = value.eq_ignore_ascii_case("true");
         }
+        "allow_peer_dial" => {
+            cfg.allow_peer_dial = value.eq_ignore_ascii_case("true");
+        }
         "allow_atdt_kermit" => {
             cfg.allow_atdt_kermit = value.eq_ignore_ascii_case("true");
         }
@@ -2223,6 +2253,7 @@ mod tests {
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
         assert!(!cfg.allow_atdt_kermit);
+        assert!(!cfg.allow_peer_dial);
         assert!(!cfg.punter_hangup_on_failure);
         for port in [&cfg.serial_a, &cfg.serial_b] {
             assert!(!port.enabled);
@@ -2304,6 +2335,11 @@ mod tests {
         assert_eq!(cfg.slave_master_host, "10.0.0.5");
         apply_config_key(&mut cfg, "master_accept_relays", "true");
         assert!(cfg.master_accept_relays);
+        assert!(!cfg.allow_peer_dial);
+        apply_config_key(&mut cfg, "allow_peer_dial", "true");
+        assert!(cfg.allow_peer_dial);
+        apply_config_key(&mut cfg, "allow_peer_dial", "false");
+        assert!(!cfg.allow_peer_dial);
     }
 
     #[test]
@@ -2474,6 +2510,7 @@ mod tests {
             kermit_resume_max_age_hours: 72,
             kermit_locking_shifts: true,
             allow_atdt_kermit: true,
+            allow_peer_dial: true,
             kermit_server_enabled: true,
             kermit_server_port: 2525,
             punter_block_size: 200,
@@ -2627,6 +2664,7 @@ mod tests {
             original.kermit_locking_shifts
         );
         assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
+        assert_eq!(loaded.allow_peer_dial, original.allow_peer_dial);
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
         assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
         assert_eq!(loaded.punter_block_size, original.punter_block_size);

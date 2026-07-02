@@ -120,6 +120,113 @@ static RING_REQUEST: [std::sync::Mutex<Option<tokio::sync::mpsc::Sender<u8>>>; 2
 /// Ring interval: 2 seconds on, 4 seconds off = 6 seconds per cycle (US standard).
 const RING_INTERVAL: Duration = Duration::from_secs(6);
 
+/// An incoming peer-dial call for a modem-mode port (`ATD <Port>@<IP>` from
+/// another port).  The target's thread picks this up in its command loop,
+/// rings per its own AT rules, and on answer pumps its UART through
+/// `bridge`.  `progress` reports back to the caller: `0` per RING, `1` on
+/// answer, `2` on a port error.  See `GatewayPeerDialPlan.md`.
+struct PeerCall {
+    bridge: tokio::io::DuplexStream,
+    progress: tokio::sync::mpsc::Sender<u8>,
+}
+
+/// Per-port incoming peer-call slots.  A caller places one here; the
+/// target modem thread claims it in its command loop.  Independent per
+/// port, like `RING_REQUEST`.
+static PEER_CALL_REQUEST: [std::sync::Mutex<Option<PeerCall>>; 2] = [
+    std::sync::Mutex::new(None),
+    std::sync::Mutex::new(None),
+];
+
+/// How long the caller waits for the target to START ringing before
+/// treating it as busy (occupied by another call, or not idle at the
+/// prompt).  Once ringing begins, the caller waits out its own `S7`
+/// (wait-for-answer) instead.
+const PEER_PICKUP_SECS: u64 = 3;
+
+fn take_peer_call_request(id: SerialPortId) -> Option<PeerCall> {
+    PEER_CALL_REQUEST[id.index()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+/// Place an incoming peer call for `id`.  Returns the call back as `Err`
+/// if one is already pending (target busy), so the caller can report BUSY
+/// without losing the duplex/channel.
+fn try_place_peer_call(id: SerialPortId, call: PeerCall) -> Result<(), PeerCall> {
+    let mut slot = PEER_CALL_REQUEST[id.index()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return Err(call);
+    }
+    *slot = Some(call);
+    Ok(())
+}
+
+/// Outcome of placing a peer-dial call to a modem-mode target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PeerCallOutcome {
+    /// Answered — the returned duplex is the far end to pump against.
+    Answered,
+    /// Target never started ringing within the pickup window — occupied by
+    /// another call, or not idle at its prompt.
+    Busy,
+    /// Rang but nobody answered within the wait timeout.
+    NoAnswer,
+    /// Target port error or its thread went away.
+    Error,
+}
+
+/// Place a peer-dial call to a local **modem-mode** target and wait for it
+/// to ring and answer per its own AT rules.  On success returns the caller
+/// end of a duplex whose far end the target is pumping its UART against;
+/// otherwise returns why (BUSY / NO ANSWER / error).  Shared by the
+/// serial-thread caller (`ATD <Port>@<IP>`) and the telnet Serial Gateway
+/// picker, so both entry points ring identically.  `answer_wait` bounds how
+/// long to wait for an answer (the caller's `S7` for a modem dialer).
+pub async fn request_peer_call(
+    target: SerialPortId,
+    answer_wait: Duration,
+) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
+    let (caller_end, target_end) = tokio::io::duplex(65536);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+    if try_place_peer_call(target, PeerCall { bridge: target_end, progress: tx }).is_err() {
+        return Err(PeerCallOutcome::Busy);
+    }
+
+    let start = tokio::time::Instant::now();
+    let answer_deadline = start + answer_wait;
+    let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
+    let mut saw_ring = false;
+    let outcome = loop {
+        let now = tokio::time::Instant::now();
+        if now >= answer_deadline {
+            break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy };
+        }
+        match tokio::time::timeout(answer_deadline - now, rx.recv()).await {
+            Ok(Some(0)) => saw_ring = true,          // RING
+            Ok(Some(1)) => break PeerCallOutcome::Answered,
+            Ok(Some(_)) => break PeerCallOutcome::Error, // 2 = port error
+            Ok(None) => break PeerCallOutcome::Error,    // target dropped it
+            Err(_) => break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy },
+        }
+        if !saw_ring && tokio::time::Instant::now() >= pickup_deadline {
+            break PeerCallOutcome::Busy;
+        }
+    };
+
+    if outcome == PeerCallOutcome::Answered {
+        Ok(caller_end)
+    } else {
+        // Reclaim the request if the target never took it; if it already
+        // did, dropping `rx`/`caller_end` here signals its ring to abort.
+        take_peer_call_request(target);
+        Err(outcome)
+    }
+}
+
 /// A queued console-bridge request from the telnet menu.  `reply` is a
 /// oneshot the serial thread uses to hand back its half of a tokio
 /// duplex pair once the port is open; `Err(_)` if the port couldn't be
@@ -1387,6 +1494,13 @@ fn serial_thread(
             && let Some(sender) = take_ring_request(id)
         {
             process_ring(&mut state, sender);
+            continue;
+        }
+        // Check for a pending peer-dial call (another port dialed us).
+        if state.mode == ModemMode::Command
+            && let Some(call) = take_peer_call_request(id)
+        {
+            process_peer_ring(&mut state, call);
             continue;
         }
         match state.mode {
@@ -2736,6 +2850,15 @@ fn handle_dial(state: &mut ModemState, target: &str) {
         }
     }
 
+    // Peer-dial: `ATD <Port>@<host>` connects to another port directly
+    // (Phase 1: a local port on this gateway) instead of the gateway menu.
+    // Checked before the phone-number / hostname paths because the `@`
+    // form is unambiguous and must not be treated as an onward-dial host.
+    if let Some(addr) = parse_peer_address(target) {
+        handle_peer_dial(state, addr);
+        return;
+    }
+
     // Check for the built-in gateway number (digits only, ignoring formatting).
     if is_phone_number(target)
         && config::normalize_phone_number(target) == GATEWAY_PHONE_NUMBER
@@ -2831,6 +2954,218 @@ fn slave_resolve_relay_target(
         (resolved, 23u16)
     };
     Some(RelayTarget::Dial { host, port })
+}
+
+// ─── Peer-dial (call another port directly) ───────────────
+
+/// A parsed peer-dial address of the form `<Port>@<host>` — e.g.
+/// `B@192.168.1.50`.  See `GatewayPeerDialPlan.md`.
+#[derive(Debug, PartialEq)]
+struct PeerAddress {
+    port: SerialPortId,
+    host: String,
+}
+
+/// Parse an `ATD` target as a peer-dial address `<Port>@<host>`.
+///
+/// The label before the single `@` must be exactly `A` or `B`
+/// (case-insensitive); the host is whatever follows.  Returns `None` for
+/// anything else, so an ordinary hostname (which never has a bare `A`/`B`
+/// before an `@`) or a `user@host` form is left to the normal dial paths.
+fn parse_peer_address(target: &str) -> Option<PeerAddress> {
+    let (label, host) = target.split_once('@')?;
+    let host = host.trim();
+    if host.is_empty() || host.contains('@') {
+        return None;
+    }
+    let port = match label.trim().to_ascii_uppercase().as_str() {
+        "A" => SerialPortId::A,
+        "B" => SerialPortId::B,
+        _ => return None,
+    };
+    Some(PeerAddress {
+        port,
+        host: host.to_string(),
+    })
+}
+
+/// Whether `host` names *this* gateway (loopback, `localhost`, or one of
+/// our own interface addresses in `local_ips`).  Pure so it can be tested
+/// without touching the network; `local_host_ips()` supplies the live set.
+fn host_is_local(host: &str, local_ips: &[String]) -> bool {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if h.eq_ignore_ascii_case("localhost")
+        || h == "127.0.0.1"
+        || h == "::1"
+        || h == "0.0.0.0"
+    {
+        return true;
+    }
+    local_ips.iter().any(|ip| ip.eq_ignore_ascii_case(h))
+}
+
+/// This gateway's primary IPv4 address (for showing the peer-dial phone-book
+/// address `<Port>@<ip>`); falls back to loopback if none is detected.
+pub fn primary_local_ip() -> String {
+    local_host_ips()
+        .into_iter()
+        .find(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+        .unwrap_or_else(|| "127.0.0.1".into())
+}
+
+/// This gateway's own non-loopback interface addresses (IPv4 + IPv6), used
+/// to recognize a peer-dial address that points back at us as a *local*
+/// port.  Mirrors the detection in `webserver`/`gui` `local_ip()`.
+fn local_host_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in &ifaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            ips.push(iface.ip().to_string());
+        }
+    }
+    ips
+}
+
+/// Handle a peer-dial (`ATD <Port>@<host>`).  Phase 1: only *local* targets
+/// (a port on this same gateway) are bridged; a remote host is deferred to
+/// the cross-gateway relay path (Phase 2) and reported as `NO CARRIER` for
+/// now.  Gated by `allow_peer_dial`; a disabled feature or an unresolvable
+/// target looks like any other failed dial (no hint), matching the
+/// `allow_atdt_kermit` posture.
+fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
+    if !config::get_config().allow_peer_dial {
+        send_result(state, "NO CARRIER");
+        return;
+    }
+    if host_is_local(&addr.host, &local_host_ips()) {
+        // Self-dial guard: a port can't call itself.
+        if addr.port == state.port_id {
+            glog!(
+                "Serial modem (Port {}): peer-dial to self refused",
+                state.port_id.label()
+            );
+            send_result(state, "NO CARRIER");
+            return;
+        }
+        connect_local_peer(state, addr.port);
+    } else {
+        // Phase 2 (cross-gateway relay) — not yet wired.
+        glog!(
+            "Serial modem (Port {}): peer-dial to remote {}@{} not yet supported",
+            state.port_id.label(),
+            addr.port.label(),
+            addr.host
+        );
+        send_result(state, "NO CARRIER");
+    }
+}
+
+/// Bridge the calling port to another *local* port on this gateway.
+///
+/// A **console-mode** target connects directly (leased-line): we request a
+/// bridge duplex from the target's console manager and pump the caller's
+/// UART through it, so the two attached devices talk transparently.  A
+/// **modem-mode** target rings and answers per its own AT rules — that path
+/// (a `process_ring` bridge variant) is the next step and currently reports
+/// `NO CARRIER`.
+fn connect_local_peer(state: &mut ModemState, target: SerialPortId) {
+    let cfg = config::get_config();
+    let tp = cfg.port(target);
+    if !tp.enabled || tp.port.is_empty() {
+        send_result(state, "NO CARRIER");
+        return;
+    }
+    if tp.mode == "console" {
+        bridge_local_console_peer(state, target);
+    } else {
+        bridge_local_modem_peer(state, target);
+    }
+}
+
+/// Place a peer-dial call to a local **modem-mode** target and, on answer,
+/// bridge this UART to the target's through the duplex.  `BUSY` / `NO
+/// ANSWER` / `NO CARRIER` follow the caller's ATX result-code level.
+fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
+    // Wait bounded by the caller's S7 (wait-for-answer); S7=0 → 1 s.
+    let answer_wait = Duration::from_secs((state.s_regs[7].max(1)) as u64);
+    match state.handle.block_on(request_peer_call(target, answer_wait)) {
+        Ok(caller_end) => {
+            send_result(state, "CONNECT");
+            state.mode = ModemMode::Online;
+            apply_carrier(state, true);
+            let (mut read, mut write) = tokio::io::split(caller_end);
+            let exit = online_mode_duplex(state, &mut read, &mut write);
+            state.mode = ModemMode::Command;
+            match exit {
+                OnlineExit::Escaped => {
+                    state.active_connection =
+                        Some(ActiveConnection::Duplex { read, write });
+                    send_result(state, "OK");
+                }
+                OnlineExit::Disconnected => {
+                    apply_carrier(state, false);
+                    send_result(state, "NO CARRIER");
+                }
+            }
+        }
+        Err(PeerCallOutcome::Busy) => {
+            send_result(state, "BUSY");
+        }
+        // NO ANSWER is an X3+ extended code; send_result maps it to the
+        // right numeric/verbose form and it degrades to NO CARRIER at low X.
+        Err(PeerCallOutcome::NoAnswer) => {
+            send_result(state, "NO ANSWER");
+        }
+        Err(_) => {
+            send_result(state, "NO CARRIER");
+        }
+    }
+}
+
+/// Bridge the caller to a local **console-mode** port by borrowing the same
+/// duplex the Serial Gateway menu uses (`request_console_bridge`).  The
+/// target's console manager pumps its UART against the far end; we pump the
+/// caller's UART against this end, so the devices are transparently joined.
+fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
+    let bridge = match state.handle.block_on(request_console_bridge(target)) {
+        Ok(d) => d,
+        Err(e) => {
+            // Target busy, wrong mode, or no device — looks like a failed
+            // call to the caller; detail is in the log.
+            glog!(
+                "Serial modem (Port {}): peer-dial to Port {} refused: {}",
+                state.port_id.label(),
+                target.label(),
+                e
+            );
+            send_result(state, "NO CARRIER");
+            return;
+        }
+    };
+
+    send_result(state, "CONNECT");
+    state.mode = ModemMode::Online;
+    apply_carrier(state, true);
+
+    let (mut read, mut write) = tokio::io::split(bridge);
+    let exit = online_mode_duplex(state, &mut read, &mut write);
+
+    state.mode = ModemMode::Command;
+    match exit {
+        OnlineExit::Escaped => {
+            // +++ escape — preserve the bridge so ATO resumes, matching
+            // dial_ethernet_gateway.
+            state.active_connection = Some(ActiveConnection::Duplex { read, write });
+            send_result(state, "OK");
+        }
+        OnlineExit::Disconnected => {
+            apply_carrier(state, false);
+            send_result(state, "NO CARRIER");
+        }
+    }
 }
 
 /// Slave-mode bridge: connect to the master over SSH, request the relay
@@ -3675,37 +4010,49 @@ fn take_ring_request(id: SerialPortId) -> Option<tokio::sync::mpsc::Sender<u8>> 
         .take()
 }
 
-/// Simulate an incoming call.  Sends RING to the serial port at standard
-/// phone cadence, checks for ATA (manual answer), and auto-answers after
-/// S0 rings.  Reports progress via the sender (0 = ring, 1 = answered,
-/// 2 = serial port error).
-fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
-    state.s_regs[1] = 0; // reset ring counter
+/// Why the ring loop stopped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RingOutcome {
+    /// The device answered — auto-answer after S0 rings, or a manual `ATA`.
+    Answered,
+    /// Shutdown, a per-port restart, a port write error, or the caller
+    /// hung up (its progress channel closed) — do not answer.
+    Aborted,
+}
 
+/// Ring the serial device at standard phone cadence, honoring the port's
+/// own AT answer rules: reset S1, emit `RING` (respecting `ATQ`/`ATV` via
+/// `send_result`), count rings in S1, auto-answer after `S0` rings (S0=0 ⇒
+/// never), and answer immediately on a manual `ATA`.  Reports progress
+/// through `progress`: `0` per RING, `2` on a port write error.  Returns
+/// [`RingOutcome`]; the *caller* decides what "answered" bridges to (the
+/// gateway menu for the Ring Emulator, or a peer duplex for peer-dial),
+/// and is responsible for sending the `1` (answered) progress.
+fn ring_loop(state: &mut ModemState, progress: &tokio::sync::mpsc::Sender<u8>) -> RingOutcome {
+    state.s_regs[1] = 0; // reset ring counter
     let auto_answer = state.s_regs[0];
-    let mut manual_answer = false;
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
 
     loop {
         if state.shutdown.load(Ordering::SeqCst) || restart_flag.load(Ordering::SeqCst) {
-            return;
+            return RingOutcome::Aborted;
         }
 
-        // Send RING to serial device
+        // Send RING to serial device.
         state.s_regs[1] = state.s_regs[1].saturating_add(1);
         if !send_result(state, "RING") {
-            let _ = sender.try_send(2); // serial port write failed
-            return;
+            let _ = progress.try_send(2); // serial port write failed
+            return RingOutcome::Aborted;
         }
 
-        // Notify the telnet/SSH user; if they disconnected, abort.
-        if sender.try_send(0).is_err() {
-            return;
+        // Notify the caller of a ring; if it hung up (channel closed), abort.
+        if progress.try_send(0).is_err() {
+            return RingOutcome::Aborted;
         }
 
-        // Auto-answer?
+        // Auto-answer after S0 rings (S0 = 0 disables auto-answer).
         if auto_answer > 0 && state.s_regs[1] >= auto_answer {
-            break; // answer the call
+            return RingOutcome::Answered;
         }
 
         // Wait one ring interval, checking for ATA, shutdown, or a per-port
@@ -3715,7 +4062,7 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
         let deadline = Instant::now() + RING_INTERVAL;
         while Instant::now() < deadline {
             if state.shutdown.load(Ordering::SeqCst) || restart_flag.load(Ordering::SeqCst) {
-                return;
+                return RingOutcome::Aborted;
             }
             // Check serial port for ATA (manual answer)
             let mut buf = [0u8; 1];
@@ -3725,8 +4072,7 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
                     let cmd = std::mem::take(&mut state.cmd_buffer);
                     let cmd = cmd.trim().to_ascii_uppercase();
                     if cmd == "ATA" {
-                        manual_answer = true;
-                        break;
+                        return RingOutcome::Answered;
                     }
                 } else if byte.is_ascii() && byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
                     // ASCII printable only — see command_mode_tick: a high
@@ -3736,15 +4082,49 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
                 }
             }
         }
+    }
+}
 
-        if manual_answer {
-            break;
+/// Simulate an incoming call from the telnet "Ring Emulator": ring per the
+/// port's AT rules and, on answer, drop the device into the gateway menu.
+fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
+    if ring_loop(state, &sender) == RingOutcome::Answered {
+        let _ = sender.try_send(1); // notify telnet/SSH: answered
+        dial_ethernet_gateway(state);
+    }
+}
+
+/// Handle an incoming peer-dial call on a modem-mode port: ring per this
+/// port's AT rules and, on answer, bridge this port's UART to the caller
+/// through the supplied duplex (transparent — the two devices talk
+/// directly, just like calling a modem in the old days).
+fn process_peer_ring(state: &mut ModemState, call: PeerCall) {
+    let PeerCall { bridge, progress } = call;
+    if ring_loop(state, &progress) != RingOutcome::Answered {
+        // Aborted (shutdown/restart/port error/caller hung up); dropping
+        // `bridge` here EOFs the caller's end so it stops waiting.
+        return;
+    }
+    let _ = progress.try_send(1); // tell the caller: answered
+
+    send_result(state, "CONNECT");
+    state.mode = ModemMode::Online;
+    apply_carrier(state, true);
+
+    let (mut read, mut write) = tokio::io::split(bridge);
+    let exit = online_mode_duplex(state, &mut read, &mut write);
+
+    state.mode = ModemMode::Command;
+    match exit {
+        OnlineExit::Escaped => {
+            state.active_connection = Some(ActiveConnection::Duplex { read, write });
+            send_result(state, "OK");
+        }
+        OnlineExit::Disconnected => {
+            apply_carrier(state, false);
+            send_result(state, "NO CARRIER");
         }
     }
-
-    // Answer: connect to ethernet-gateway
-    let _ = sender.try_send(1); // notify telnet/SSH: answered
-    dial_ethernet_gateway(state);
 }
 
 // ─── Config persistence helpers ────────────────────────────
@@ -5003,6 +5383,35 @@ mod tests {
         );
     }
 
+    /// Peer-call slot: first place succeeds, a second while pending is
+    /// refused (BUSY path), and `take` drains it so a later place succeeds.
+    #[test]
+    fn test_peer_call_slot_place_take_busy() {
+        let _g = lock_global_state();
+        let id = SerialPortId::A;
+        // Clear any residue from another test.
+        let _ = take_peer_call_request(id);
+
+        let mk = || {
+            let (bridge, _far) = tokio::io::duplex(64);
+            let (progress, _rx) = tokio::sync::mpsc::channel::<u8>(4);
+            PeerCall { bridge, progress }
+        };
+
+        assert!(try_place_peer_call(id, mk()).is_ok(), "first place succeeds");
+        assert!(
+            try_place_peer_call(id, mk()).is_err(),
+            "second place while pending is refused (target busy)"
+        );
+        assert!(take_peer_call_request(id).is_some(), "take drains the slot");
+        assert!(take_peer_call_request(id).is_none(), "slot empty after take");
+        assert!(
+            try_place_peer_call(id, mk()).is_ok(),
+            "place succeeds again once drained"
+        );
+        let _ = take_peer_call_request(id); // cleanup
+    }
+
     #[test]
     fn test_serial_read_timeout_constant() {
         assert_eq!(SERIAL_READ_TIMEOUT, Duration::from_millis(100));
@@ -5457,6 +5866,51 @@ mod tests {
             slave_resolve_relay_target("ethernet gateway", "ethernet gateway"),
             Some(RelayTarget::Menu)
         );
+    }
+
+    // ─── Peer-dial address parsing / resolution ───────────
+
+    #[test]
+    fn test_parse_peer_address_valid() {
+        assert_eq!(
+            parse_peer_address("B@192.168.1.50"),
+            Some(PeerAddress { port: SerialPortId::B, host: "192.168.1.50".into() })
+        );
+        // Case-insensitive label; whitespace tolerated around each half.
+        assert_eq!(
+            parse_peer_address("a @ localhost"),
+            Some(PeerAddress { port: SerialPortId::A, host: "localhost".into() })
+        );
+    }
+
+    #[test]
+    fn test_parse_peer_address_rejects_non_peer_forms() {
+        // Ordinary hostname / user@host: label isn't a bare A/B.
+        assert_eq!(parse_peer_address("bbs@example.com"), None);
+        assert_eq!(parse_peer_address("user@host"), None);
+        // No '@' at all.
+        assert_eq!(parse_peer_address("192.168.1.50"), None);
+        assert_eq!(parse_peer_address("ethernet-gateway"), None);
+        // Empty host, bad label, or a second '@'.
+        assert_eq!(parse_peer_address("B@"), None);
+        assert_eq!(parse_peer_address("C@1.2.3.4"), None);
+        assert_eq!(parse_peer_address("B@a@b"), None);
+    }
+
+    #[test]
+    fn test_host_is_local() {
+        let ips = vec!["192.168.1.50".to_string(), "fe80::1".to_string()];
+        // Loopback / localhost forms are always local.
+        assert!(host_is_local("localhost", &ips));
+        assert!(host_is_local("LocalHost", &ips));
+        assert!(host_is_local("127.0.0.1", &ips));
+        assert!(host_is_local("::1", &ips));
+        // Our own interface addresses are local; a bracketed IPv6 is unwrapped.
+        assert!(host_is_local("192.168.1.50", &ips));
+        assert!(host_is_local("[fe80::1]", &ips));
+        // An address that isn't ours is remote (Phase 2).
+        assert!(!host_is_local("10.0.0.9", &ips));
+        assert!(!host_is_local("192.168.1.51", &ips));
     }
 
     #[test]
