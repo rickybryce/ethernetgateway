@@ -135,6 +135,62 @@ where
     let _ = relay.shutdown().await;
 }
 
+/// How long the master waits for its own modem-mode target to answer a
+/// relayed peer call (the relayed device has no local `S7` to bound it).
+/// Matches the telnet Serial Gateway picker's peer-call wait.
+const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Master-side **peer-dial** (Phase 2): a slave relayed a device that dialed
+/// `<Port>@<host>`.  The master resolves the address against its *own* ports
+/// (Phase 2a — a remote/slave target is deferred) and bridges the relay
+/// channel to that port: a modem port **rings** and answers per its AT rules,
+/// a console port connects directly — reusing the same machinery as a local
+/// peer-dial (`device ↔ slave ↔ master ↔ master's port`).  Refuses unless
+/// `allow_peer_dial` is on.
+pub async fn run_master_relay_peer<S>(mut relay: S, addr: String)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    if !crate::config::get_config().allow_peer_dial {
+        glog!("Relay: peer-dial refused (allow_peer_dial=false)");
+        let _ = relay.shutdown().await;
+        return;
+    }
+    let Some(target) = crate::serial::resolve_local_peer_target(&addr) else {
+        glog!("Relay: peer-dial target {} is not a local port; refusing", addr);
+        let _ = relay.shutdown().await;
+        return;
+    };
+
+    let cfg = crate::config::get_config();
+    let tp = cfg.port(target);
+    let mut bridge = if tp.mode == "console" {
+        match crate::serial::request_console_bridge(target).await {
+            Ok(b) => b,
+            Err(e) => {
+                glog!("Relay: peer-dial to Port {} refused: {}", target.label(), e);
+                let _ = relay.shutdown().await;
+                return;
+            }
+        }
+    } else {
+        match crate::serial::request_peer_call(target, RELAY_PEER_ANSWER_WAIT).await {
+            Ok(b) => b,
+            Err(outcome) => {
+                glog!("Relay: peer-dial to Port {} failed: {:?}", target.label(), outcome);
+                let _ = relay.shutdown().await;
+                return;
+            }
+        }
+    };
+    glog!("Relay: peer-dial bridged to Port {}", target.label());
+
+    let _ = tokio::io::copy_bidirectional(&mut relay, &mut bridge).await;
+    let _ = relay.shutdown().await;
+}
+
 // ─── Slave side — outbound SSH relay client ────────────────
 
 /// What a relayed call connects to on the master (Model B, §3): either
@@ -146,6 +202,11 @@ pub enum RelayTarget {
     Menu,
     /// Ask the master to dial this external address and bridge through.
     Dial { host: String, port: u16 },
+    /// Peer-dial (§ Phase 2): connect to a specific port addressed as
+    /// `<Port>@<host>` — the master resolves the address against its own
+    /// ports and bridges (ringing a modem port, or connecting a console
+    /// port).  `addr` is the raw address the device dialed.
+    Peer { addr: String },
 }
 
 impl RelayTarget {
@@ -154,11 +215,15 @@ impl RelayTarget {
     /// knows which device this is.  Grammar:
     ///   `serial-relay <port> menu`
     ///   `serial-relay <port> dial <host>:<port>`
+    ///   `serial-relay <port> peer <Port>@<host>`
     pub fn exec_command(&self, port_label: &str) -> String {
         match self {
             RelayTarget::Menu => format!("serial-relay {} menu", port_label),
             RelayTarget::Dial { host, port } => {
                 format!("serial-relay {} dial {}:{}", port_label, host, port)
+            }
+            RelayTarget::Peer { addr } => {
+                format!("serial-relay {} peer {}", port_label, addr)
             }
         }
     }
@@ -174,6 +239,9 @@ pub struct ParsedRelay {
     /// `None` ⇒ bridge to the master's menu; `Some((host, port))` ⇒
     /// onward-dial that external address (Model B).
     pub dial: Option<(String, u16)>,
+    /// `Some(addr)` ⇒ peer-dial the master's port addressed as
+    /// `<Port>@<host>` (Phase 2).  Mutually exclusive with `dial`.
+    pub peer: Option<String>,
 }
 
 /// Parse a `serial-relay …` exec command.  Returns `None` for anything
@@ -181,25 +249,35 @@ pub struct ParsedRelay {
 /// is not a general command-exec shell).  Grammar:
 ///   `serial-relay <port> menu`
 ///   `serial-relay <port> dial <host>:<port>`
+///   `serial-relay <port> peer <Port>@<host>`
 pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
     let mut toks = command.split_whitespace();
     if toks.next()? != "serial-relay" {
         return None;
     }
     let port_label = toks.next().unwrap_or("?").to_string();
-    let dial = match toks.next().unwrap_or("menu") {
-        "menu" => None,
+    let mut dial = None;
+    let mut peer = None;
+    match toks.next().unwrap_or("menu") {
+        "menu" => {}
         "dial" => {
             let (h, p) = toks.next()?.rsplit_once(':')?;
             let port: u16 = p.parse().ok()?;
             if port == 0 {
                 return None;
             }
-            Some((h.to_string(), port))
+            dial = Some((h.to_string(), port));
+        }
+        "peer" => {
+            let addr = toks.next()?;
+            if addr.is_empty() {
+                return None;
+            }
+            peer = Some(addr.to_string());
         }
         _ => return None,
-    };
-    Some(ParsedRelay { port_label, dial })
+    }
+    Some(ParsedRelay { port_label, dial, peer })
 }
 
 /// SSH client handler for the slave→master relay connection.  The

@@ -2840,6 +2840,24 @@ fn handle_dial(state: &mut ModemState, target: &str) {
     {
         let cfg = config::get_config();
         if cfg.gateway_role == "slave" {
+            // Peer-dial on a slave: a LOCAL address (`<Port>@<this-slave-ip>`)
+            // is handled locally like any standalone gateway; a REMOTE address
+            // is relayed to the master, which resolves it (Phase 2 — the
+            // master's own port today; the crossbar to another slave later).
+            if let Some(addr) = parse_peer_address(target) {
+                if host_is_local(&addr.host, &local_host_ips()) {
+                    handle_peer_dial(state, addr);
+                } else if cfg.allow_peer_dial {
+                    dial_master_relay(
+                        state,
+                        crate::relay::RelayTarget::Peer { addr: target.to_string() },
+                        &cfg,
+                    );
+                } else {
+                    send_result(state, "NO CARRIER");
+                }
+                return;
+            }
             match slave_resolve_relay_target(target, &lower) {
                 Some(rt) => dial_master_relay(state, rt, &cfg),
                 None => {
@@ -3002,6 +3020,20 @@ fn host_is_local(host: &str, local_ips: &[String]) -> bool {
         return true;
     }
     local_ips.iter().any(|ip| ip.eq_ignore_ascii_case(h))
+}
+
+/// Resolve a peer-dial address `<Port>@<host>` to a **local** port on this
+/// gateway, or `None` if it doesn't parse or the host isn't us.  Used by the
+/// master's relay peer-dial handler to map a relayed address to one of its
+/// own ports (Phase 2a); a non-local host returns `None` (deferred to the
+/// cross-gateway crossbar, Phase 2b).
+pub fn resolve_local_peer_target(addr: &str) -> Option<SerialPortId> {
+    let parsed = parse_peer_address(addr)?;
+    if host_is_local(&parsed.host, &local_host_ips()) {
+        Some(parsed.port)
+    } else {
+        None
+    }
 }
 
 /// This gateway's primary IPv4 address (for showing the peer-dial phone-book
@@ -5911,6 +5943,19 @@ mod tests {
         // An address that isn't ours is remote (Phase 2).
         assert!(!host_is_local("10.0.0.9", &ips));
         assert!(!host_is_local("192.168.1.51", &ips));
+    }
+
+    #[test]
+    fn test_resolve_local_peer_target() {
+        // Loopback / localhost always resolve to the named local port.
+        assert_eq!(resolve_local_peer_target("B@127.0.0.1"), Some(SerialPortId::B));
+        assert_eq!(resolve_local_peer_target("a@localhost"), Some(SerialPortId::A));
+        // A clearly non-local address (TEST-NET-3) is not us -> None, so the
+        // master defers it (Phase 2b crossbar) rather than bridging locally.
+        assert_eq!(resolve_local_peer_target("B@203.0.113.7"), None);
+        // Malformed peer addresses -> None.
+        assert_eq!(resolve_local_peer_target("bbs@example.com"), None);
+        assert_eq!(resolve_local_peer_target("no-at-sign"), None);
     }
 
     #[test]

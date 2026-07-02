@@ -18,8 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **console-mode** target connects directly. The connection is a transparent
   byte pipe, so a file-transfer protocol runs end to end between the two
   devices. Result codes follow ATX (`CONNECT`/`BUSY`/`NO ANSWER`/`NO CARRIER`).
-  Phase 1 bridges ports on the same gateway; cross-gateway peer-dial over the
-  relay is planned. See README "Peer-Dial" and user manual §9.2.3.
+  Works on the same gateway and, **over the master/slave relay, from a slave
+  device to a port on its master** (`ATD <Port>@<master-ip>`): the slave relays
+  the call and the master resolves the address to one of its own ports and
+  rings/connects it (gated by the master's `master_accept_relays` +
+  `allow_peer_dial`). Still planned: slave↔slave and dialing a *slave's* modem
+  port (need slaves to announce modem ports). See README "Peer-Dial" and user
+  manual §9.2.3.
 - **Live relay status in the telnet Master/Slave screen.** A master now lists
   the remote console ports slaves have registered (so you can see connected
   slaves at a glance); a slave shows each console port's link state to its

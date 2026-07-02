@@ -1446,9 +1446,16 @@ The caller sees `CONNECT` on answer, `BUSY` if the target is already in a call,
 > wait — which would give `NO ANSWER` first (authentic modem behavior). On a
 > port meant to be dialed, set a low `S0` (e.g. `ATS0=1`) or answer with `ATA`.
 
-Peer-dial currently bridges ports on the **same** gateway; dialing a port on a
-*different* gateway (`<Port>@<other-ip>`, over the master/slave relay) is
-planned and today returns `NO CARRIER`.
+**Cross-gateway peer-dial (over the master/slave relay):** a device on a
+**slave** can dial a port on its **master** — `ATD <Port>@<master-ip>`. The
+slave relays the call to the master, which resolves the address to one of its
+own ports and rings/connects it, bridging `device ↔ slave ↔ master ↔ port`.
+This needs the slave's `allow_peer_dial` on (to relay) and the master's
+`master_accept_relays` + `allow_peer_dial` on (to accept and bridge). Addressing
+is by IP, so master and slave must have distinct addresses (normal for separate
+machines). Still planned: slave↔slave (via the master as a crossbar) and dialing
+a *slave's* modem port, which require slaves to announce their modem ports —
+those addresses return `NO CARRIER` today.
 
 ### Serial Safety
 

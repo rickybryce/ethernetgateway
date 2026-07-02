@@ -754,6 +754,7 @@ impl russh::server::Handler for SshHandler {
         };
         let port_label = parsed.port_label;
         let dial_target = parsed.dial;
+        let peer_target = parsed.peer;
 
         let cfg = config::get_config();
         if cfg.gateway_role != "master" || !cfg.master_accept_relays {
@@ -802,17 +803,23 @@ impl russh::server::Handler for SshHandler {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
             return Err(e);
         }
-        match &dial_target {
-            None => glog!(
+        match (&dial_target, &peer_target) {
+            (None, None) => glog!(
                 "SSH: accepted serial relay (port {}, menu) from {:?}",
                 port_label,
                 self.peer_addr
             ),
-            Some((h, p)) => glog!(
+            (Some((h, p)), _) => glog!(
                 "SSH: accepted serial relay (port {}, dial {}:{}) from {:?}",
                 port_label,
                 h,
                 p,
+                self.peer_addr
+            ),
+            (None, Some(addr)) => glog!(
+                "SSH: accepted serial relay (port {}, peer {}) from {:?}",
+                port_label,
+                addr,
                 self.peer_addr
             ),
         }
@@ -837,8 +844,19 @@ impl russh::server::Handler for SshHandler {
         let lockouts = self.lockouts.clone();
         let session_count = self.session_count.clone();
         tokio::spawn(async move {
-            match dial_target {
-                None => {
+            match (dial_target, peer_target) {
+                (Some((host, port)), _) => {
+                    // Pass the WHOLE (unsplit) duplex so copy_bidirectional
+                    // can half-close each direction without dropping the
+                    // peer's final bytes.
+                    crate::relay::run_master_relay_dial(gateway_stream, host, port).await;
+                }
+                (None, Some(addr)) => {
+                    // Phase 2 peer-dial: bridge the channel to the master's
+                    // own addressed port (ring modem / connect console).
+                    crate::relay::run_master_relay_peer(gateway_stream, addr).await;
+                }
+                (None, None) => {
                     let (gateway_read, gateway_write) = tokio::io::split(gateway_stream);
                     crate::relay::run_master_relay_session(
                         Box::new(gateway_read),
@@ -850,12 +868,6 @@ impl russh::server::Handler for SshHandler {
                         lockouts,
                     )
                     .await;
-                }
-                Some((host, port)) => {
-                    // Pass the WHOLE (unsplit) duplex so copy_bidirectional
-                    // can half-close each direction without dropping the
-                    // peer's final bytes.
-                    crate::relay::run_master_relay_dial(gateway_stream, host, port).await;
                 }
             }
             // Release the slot when the relay session ends.

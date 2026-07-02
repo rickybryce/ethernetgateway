@@ -238,7 +238,8 @@ fn test_relay_command_round_trip() {
         parse_relay_command(&cmd),
         Some(ParsedRelay {
             port_label: "A".into(),
-            dial: None
+            dial: None,
+            peer: None,
         })
     );
 
@@ -254,6 +255,20 @@ fn test_relay_command_round_trip() {
         Some(ParsedRelay {
             port_label: "B".into(),
             dial: Some(("bbs.example.com".into(), 6400)),
+            peer: None,
+        })
+    );
+
+    // Peer-dial target (Phase 2): `<Port>@<host>` round-trips verbatim.
+    let target = RelayTarget::Peer { addr: "B@192.168.1.50".into() };
+    let cmd = target.exec_command("A");
+    assert_eq!(cmd, "serial-relay A peer B@192.168.1.50");
+    assert_eq!(
+        parse_relay_command(&cmd),
+        Some(ParsedRelay {
+            port_label: "A".into(),
+            dial: None,
+            peer: Some("B@192.168.1.50".into()),
         })
     );
 
@@ -279,12 +294,15 @@ fn test_parse_relay_command_rejects_garbage() {
     assert_eq!(parse_relay_command("serial-relay A dial nohostport"), None);
     assert_eq!(parse_relay_command("serial-relay A dial host:0"), None);
     assert_eq!(parse_relay_command("serial-relay A dial host:notaport"), None);
+    // `peer` with no address is malformed.
+    assert_eq!(parse_relay_command("serial-relay A peer"), None);
     // Missing port label defaults to "?" but is still a valid menu relay.
     assert_eq!(
         parse_relay_command("serial-relay"),
         Some(ParsedRelay {
             port_label: "?".into(),
-            dial: None
+            dial: None,
+            peer: None,
         })
     );
 }

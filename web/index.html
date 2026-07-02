@@ -1739,9 +1739,12 @@ relay_transport = ssh</span></code></pre>
                         <code>NO ANSWER</code> / <code>NO CARRIER</code>.</li>
                 </ul>
                 <p class="dim-text">
-                    Off by default. Currently bridges ports on the same gateway;
-                    cross-gateway peer-dial over the relay is planned. See the
-                    user manual &sect;9.2.3 for details.
+                    Off by default. Cross-gateway: a device on a <strong>slave</strong>
+                    can dial a port on its <strong>master</strong>
+                    (<code>ATD &lt;Port&gt;@&lt;master-ip&gt;</code>) — the slave relays
+                    and the master rings/connects its port. Slave&harr;slave and
+                    dialing a slave's modem port are still planned. See the user
+                    manual &sect;9.2.3.
                 </p>
 
                 <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>

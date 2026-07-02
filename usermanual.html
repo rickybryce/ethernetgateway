@@ -2079,10 +2079,17 @@ have the operator answer with <code>ATA</code>.
 </aside>
 
 <p>
-<strong>Scope:</strong> peer-dial currently bridges ports on the
-<em>same</em> gateway.  Dialing a port on a <em>different</em> gateway
-(<code>&lt;Port&gt;@&lt;other-ip&gt;</code>, over the master/slave relay) is
-planned; today it returns <code>NO&nbsp;CARRIER</code>.
+<strong>Cross-gateway (over the master/slave relay):</strong> a device on a
+<em>slave</em> can dial a port on its <em>master</em> &mdash;
+<code>ATD&nbsp;&lt;Port&gt;@&lt;master-ip&gt;</code>. The slave relays the call;
+the master resolves the address to one of its own ports and rings/connects it,
+bridging <code>device&nbsp;&harr;&nbsp;slave&nbsp;&harr;&nbsp;master&nbsp;&harr;&nbsp;port</code>.
+Requires the slave's <code>allow_peer_dial</code> on (to relay) and the master's
+<code>master_accept_relays</code> + <code>allow_peer_dial</code> on (to accept).
+Addressing is by IP, so master and slave need distinct addresses (normal for
+separate machines). Still planned: slave&harr;slave (master as crossbar) and
+dialing a <em>slave's</em> modem port &mdash; those return
+<code>NO&nbsp;CARRIER</code> today.
 </p>
 
 <h2 id="ch9-info">9.3 Identification (ATI)</h2>
