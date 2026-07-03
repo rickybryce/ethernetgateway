@@ -442,6 +442,24 @@
             margin-bottom: 0;
         }
 
+        .compat-card ul { list-style: none; margin: 0; padding: 0; }
+        .compat-card li {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            padding-left: 16px;
+            position: relative;
+            margin-bottom: 6px;
+        }
+        .compat-card li:last-child { margin-bottom: 0; }
+        .compat-card li::before {
+            content: "\25B8";
+            position: absolute;
+            left: 0;
+            color: var(--amber);
+        }
+        .compat-card li strong { color: var(--cyan); }
+
         /* ---- Author ---- */
         .author-block {
             display: flex;
@@ -577,6 +595,38 @@
                     Ethernet Gateway adapts its display automatically to the capabilities
                     of each connected client.
                 </p>
+
+                <div class="cat">Highlights</div>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3>Connect &amp; Bridge</h3>
+                        <ul>
+                            <li>Telnet and encrypted <strong>SSH</strong> access, plus SSH/telnet proxying to remote servers</li>
+                            <li>Two independent serial ports &mdash; each a Hayes AT modem <em>or</em> a telnet-serial console bridge</li>
+                            <li>Auto-adapts to <strong>PETSCII</strong> (Commodore 64), ANSI, and ASCII terminals</li>
+                            <li>Built-in text-mode web browser, AI chat, and weather</li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>Transfer Files</h3>
+                        <ul>
+                            <li>XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter C1</li>
+                            <li><strong>Peer-to-peer file transfers</strong> &mdash; dial another serial port directly and pipe two devices end to end, like calling a friend's modem</li>
+                            <li>Hayes-compatible modem emulator with ATDT TCP dial-out and a phone book</li>
+                            <li>Binary-transparent bridging for clean, reliable transfers</li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>Scale &amp; Manage</h3>
+                        <ul>
+                            <li><strong>Master/Slave mode</strong> &mdash; cascade gateway servers: a slave extends its serial ports to a master over SSH, so files land centrally</li>
+                            <li>Configure from the terminal, the web UI, or a desktop GUI console with live logs</li>
+                            <li>Optional authentication with per-IP lockout; Ed25519 SSH host key</li>
+                            <li>Runs on hardware from the Commodore 64 and CP/M to modern Linux, macOS, and Windows</li>
+                        </ul>
+                    </div>
+                </div>
+
                 <p>
                     <strong style="color: var(--amber);">Download:</strong>
                     Pre-built binaries are available on the
