@@ -6973,6 +6973,16 @@ impl TelnetSession {
                 .await?;
                 self.send_line("").await?;
             }
+            if any_eligible {
+                // A picked port is a transparent, direct link (no host echoing
+                // keystrokes back), so the caller needs their terminal's local
+                // echo to see what they type. 38 cols — fits the PETSCII width.
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Tip: enable local echo to see typing")
+                ))
+                .await?;
+            }
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
                 .await?;
             let prompt = format!("{}> ", self.cyan("ethernet/gateway"));
@@ -10442,35 +10452,58 @@ impl TelnetSession {
             };
             self.send_line(&format!("  Role: {}", role_disp)).await?;
 
-            let accept_disp = if cfg.master_accept_relays {
-                self.green("ENABLED")
-            } else {
-                self.red("Disabled")
-            };
-            self.send_line(&format!("  Accept relays: {}", accept_disp))
-                .await?;
+            let is_master = cfg.gateway_role == "master";
+            let is_slave = cfg.gateway_role == "slave";
 
-            let host_disp = if cfg.slave_master_host.is_empty() {
-                self.dim("(not set)")
+            // Accept-relays applies to a MASTER only; grey it out in the other
+            // roles so the operator isn't led to toggle a field that is inert.
+            if is_master {
+                let accept_disp = if cfg.master_accept_relays {
+                    self.green("ENABLED")
+                } else {
+                    self.red("Disabled")
+                };
+                self.send_line(&format!("  Accept relays: {}", accept_disp))
+                    .await?;
             } else {
-                self.amber(&format!(
-                    "{}:{}",
-                    cfg.slave_master_host, cfg.slave_master_port
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Accept relays: (master only)")
                 ))
-            };
-            self.send_line(&format!("  Master: {}", host_disp)).await?;
-            let user_disp = if cfg.slave_master_username.is_empty() {
-                self.dim("(not set)")
+                .await?;
+            }
+
+            // Master host/user/pass point this gateway at its master, so they
+            // apply to a SLAVE only; grey them out in the other roles.
+            if is_slave {
+                let host_disp = if cfg.slave_master_host.is_empty() {
+                    self.dim("(not set)")
+                } else {
+                    self.amber(&format!(
+                        "{}:{}",
+                        cfg.slave_master_host, cfg.slave_master_port
+                    ))
+                };
+                self.send_line(&format!("  Master: {}", host_disp)).await?;
+                let user_disp = if cfg.slave_master_username.is_empty() {
+                    self.dim("(not set)")
+                } else {
+                    self.amber(&cfg.slave_master_username)
+                };
+                self.send_line(&format!("  User:   {}", user_disp)).await?;
+                let pass_disp = if cfg.slave_master_password.is_empty() {
+                    self.dim("(not set)")
+                } else {
+                    self.green("(set)")
+                };
+                self.send_line(&format!("  Pass:   {}", pass_disp)).await?;
             } else {
-                self.amber(&cfg.slave_master_username)
-            };
-            self.send_line(&format!("  User:   {}", user_disp)).await?;
-            let pass_disp = if cfg.slave_master_password.is_empty() {
-                self.dim("(not set)")
-            } else {
-                self.green("(set)")
-            };
-            self.send_line(&format!("  Pass:   {}", pass_disp)).await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Master/User/Pass: (slave only)")
+                ))
+                .await?;
+            }
             self.send_line("").await?;
 
             // Live relay status (§9 #10), read-only.  A master lists the
@@ -10565,28 +10598,51 @@ impl TelnetSession {
                         "master" => "slave",
                         _ => "standalone",
                     };
+                    let became_master = next == "master";
                     let v = next.to_string();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("gateway_role", &v);
+                        // A master with relays off can't accept slaves, so
+                        // default the accept-relays gate ON when entering
+                        // master (the operator can still turn it off with A).
+                        if became_master {
+                            config::update_config_value("master_accept_relays", "true");
+                        }
                     })
                     .await
                     .ok();
+                    // The relay listens on the SSH port, so a master needs the
+                    // SSH server enabled. Warn if it's off — never toggle it.
+                    if became_master && !config::get_config().ssh_enabled {
+                        self.relay_ssh_needed_notice().await?;
+                    }
                     self.config_restart_notice().await?;
                 }
                 "a" => {
-                    let v = (!cfg.master_accept_relays).to_string();
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("master_accept_relays", &v);
-                    })
-                    .await
-                    .ok();
-                    self.config_restart_notice().await?;
+                    if cfg.gateway_role != "master" {
+                        self.relay_field_not_applicable(
+                            "Accept relays: Master role only.",
+                        )
+                        .await?;
+                    } else {
+                        let v = (!cfg.master_accept_relays).to_string();
+                        tokio::task::spawn_blocking(move || {
+                            config::update_config_value("master_accept_relays", &v);
+                        })
+                        .await
+                        .ok();
+                        self.config_restart_notice().await?;
+                    }
                 }
                 "m" => {
-                    // `config_set_port` / `other_set_field` only persist on a
-                    // non-empty entry; show the restart notice only when the
-                    // value actually changed (config_set_port emits its own).
-                    if self
+                    if cfg.gateway_role != "slave" {
+                        self.relay_field_not_applicable(
+                            "Master settings: Slave role only.",
+                        )
+                        .await?;
+                    } else if self
+                        // `other_set_field` only persists on a non-empty entry;
+                        // show the restart notice only when it actually changed.
                         .other_set_field(
                             "Master host",
                             "slave_master_host",
@@ -10599,18 +10655,29 @@ impl TelnetSession {
                     }
                 }
                 "p" => {
-                    // config_set_port shows the restart notice itself on a
-                    // successful change (and an error otherwise), so this
-                    // branch must NOT add a second one.
-                    self.config_set_port(
-                        "Master",
-                        "slave_master_port",
-                        cfg.slave_master_port,
-                    )
-                    .await?;
+                    if cfg.gateway_role != "slave" {
+                        self.relay_field_not_applicable(
+                            "Master settings: Slave role only.",
+                        )
+                        .await?;
+                    } else {
+                        // config_set_port shows its own restart notice on a
+                        // successful change, so this branch must not add one.
+                        self.config_set_port(
+                            "Master",
+                            "slave_master_port",
+                            cfg.slave_master_port,
+                        )
+                        .await?;
+                    }
                 }
                 "u" => {
-                    if self
+                    if cfg.gateway_role != "slave" {
+                        self.relay_field_not_applicable(
+                            "Master settings: Slave role only.",
+                        )
+                        .await?;
+                    } else if self
                         .other_set_field(
                             "Master user",
                             "slave_master_username",
@@ -10623,7 +10690,12 @@ impl TelnetSession {
                     }
                 }
                 "w" => {
-                    if self
+                    if cfg.gateway_role != "slave" {
+                        self.relay_field_not_applicable(
+                            "Master settings: Slave role only.",
+                        )
+                        .await?;
+                    } else if self
                         .other_set_field(
                             "Master pass",
                             "slave_master_password",
@@ -11257,6 +11329,55 @@ impl TelnetSession {
         self.send_line(&format!(
             "  {}",
             self.yellow("to take effect.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
+    }
+
+    /// Brief "this field doesn't apply in the current role" notice for the
+    /// Master/Slave menu, so a greyed option explains itself instead of
+    /// silently doing nothing when its key is pressed.
+    async fn relay_field_not_applicable(
+        &mut self,
+        msg: &str,
+    ) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.yellow(msg))).await?;
+        self.send_line(&format!("  {}", self.dim("Change Role (R) first.")))
+            .await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
+    }
+
+    /// Warn (only) that switching to Master needs the SSH server, which is
+    /// currently off — the relay listens on the SSH port.  Per the operator's
+    /// choice this never toggles SSH; it just points the way.
+    async fn relay_ssh_needed_notice(&mut self) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("MASTER NEEDS SSH")))
+            .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line("  Slaves connect to a master over").await?;
+        self.send_line("  the SSH server, which is now OFF.").await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.dim("Enable SSH in Server settings and")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}",
+            self.dim("restart, or slaves can't connect.")
         ))
         .await?;
         self.send_line("").await?;

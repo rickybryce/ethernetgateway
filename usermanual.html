@@ -2069,6 +2069,16 @@ translation off &mdash; <code>AT+PETSCII=0</code> &mdash; before a binary transf
 </table>
 
 <aside class="note">
+<span class="label">Local echo</span>
+The connection is a transparent link &mdash; neither gateway echoes the data,
+and (unlike dialing a host or BBS) there is no remote host echoing your
+keystrokes back.  <strong>Turn on local echo (half-duplex) on each terminal</strong>
+to see what you type, exactly as with two terminals wired back to back.
+<code>ATE</code> does <em>not</em> help here: it only echoes <code>AT</code>
+commands in command mode, not the online data stream.
+</aside>
+
+<aside class="note">
 <span class="label">Ring count vs. answer timeout</span>
 Auto-answer waits <code>S0</code> rings at the ~6&nbsp;s ring cadence, so the
 gateway default <code>S0&nbsp;=&nbsp;5</code> takes ~30&nbsp;s &mdash; longer than

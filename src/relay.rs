@@ -189,10 +189,10 @@ where
     if let Some((ip, label)) = parse_remote_peer_addr(&addr) {
         match claim_remote_peer(ip, &label).await {
             Some(mut remote) => {
-                glog!("Relay: peer-dial crossbar to {} @ {}", label, ip);
+                glog!("Relay: peer-dial crossbar to {}@{}", label, ip);
                 let _ = tokio::io::copy_bidirectional(&mut relay, &mut remote).await;
             }
-            None => glog!("Relay: peer-dial target {} @ {} not registered", label, ip),
+            None => glog!("Relay: peer-dial target {}@{} not registered", label, ip),
         }
         let _ = relay.shutdown().await;
         return;

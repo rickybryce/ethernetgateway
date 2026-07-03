@@ -852,6 +852,16 @@ fn collect_form_updates(
         "serial_a_drive_carrier", "serial_b_drive_carrier",
     ];
     for key in bool_keys {
+        // `master_accept_relays` applies only to a master.  In the other roles
+        // the web renders its checkbox disabled, so it isn't submitted — skip
+        // it there instead of clobbering the stored value to false.  This
+        // matches the GUI/telnet, which preserve it (it is inert outside master
+        // anyway, and is re-defaulted on when the role is switched to master).
+        if *key == "master_accept_relays"
+            && fields.get("gateway_role").map(String::as_str) != Some("master")
+        {
+            continue;
+        }
         let truthy = fields.get(*key).map(|s| is_truthy(s)).unwrap_or(false);
         updates.push(((*key).to_string(), if truthy { "true" } else { "false" }.to_string()));
     }
@@ -1141,12 +1151,25 @@ fn frame_security(cfg: &Config) -> String {
 /// note.
 fn frame_master_slave(cfg: &Config) -> String {
     let role_sel = |v: &str| if cfg.gateway_role == v { "selected" } else { "" };
+    let is_master = cfg.gateway_role == "master";
+    let is_slave = cfg.gateway_role == "slave";
+    // Grey out the fields that don't apply to the current role: `accept relays`
+    // is Master-only, the master host/port/user/pass are Slave-only.  The
+    // server renders the initial disabled state (correct even without JS), and
+    // `updateRelayFields()`/`onRoleChange()` keep it in sync as the role
+    // changes.  Disabled inputs aren't submitted, and the save preserves a
+    // greyed field's stored value: the slave_* text fields because plain keys
+    // are only written when present, and `master_accept_relays` because the
+    // save skips it unless the submitted role is master (see
+    // collect_form_updates).
+    let dis_accept = if is_master { "" } else { "disabled" };
+    let dis_slave = if is_slave { "" } else { "disabled" };
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">Master/Slave</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\"><span class=\"label\">Role:</span>\
-         <select name=\"gateway_role\">\
+         <select name=\"gateway_role\" onchange=\"onRoleChange(this)\">\
          <option value=\"standalone\" {st_sel}>Standalone</option>\
          <option value=\"master\" {ma_sel}>Master</option>\
          <option value=\"slave\" {sl_sel}>Slave</option>\
@@ -1158,15 +1181,16 @@ fn frame_master_slave(cfg: &Config) -> String {
         st_sel = role_sel("standalone"),
         ma_sel = role_sel("master"),
         sl_sel = role_sel("slave"),
-        accept_chk = checkbox(
+        accept_chk = checkbox_with_attr(
             "master_accept_relays",
             "Master: accept relays",
-            cfg.master_accept_relays
+            cfg.master_accept_relays,
+            dis_accept,
         ),
-        host = textfield("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16),
-        port = numfield("slave_master_port", "Port", cfg.slave_master_port),
-        user = textfield("slave_master_username", "User", &cfg.slave_master_username, false, 12),
-        pass = textfield("slave_master_password", "Pass", &cfg.slave_master_password, true, 12),
+        host = textfield_attr("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16, dis_slave),
+        port = numfield_attr("slave_master_port", "Port", cfg.slave_master_port, dis_slave),
+        user = textfield_attr("slave_master_username", "User", &cfg.slave_master_username, false, 12, dis_slave),
+        pass = textfield_attr("slave_master_password", "Pass", &cfg.slave_master_password, true, 12, dis_slave),
     )
 }
 
@@ -1537,12 +1561,9 @@ fn html_escape(s: &str) -> String {
 }
 
 fn checkbox(name: &str, label: &str, checked: bool) -> String {
-    // Hidden sentinel ensures absence-is-false works robustly even when
-    // the browser collapses a checkbox name; an unchecked checkbox does
-    // not submit, so absence from the form is the "false" signal we rely
-    // on server-side.  The hidden field is harmless because the visible
-    // checkbox's submitted "true" value wins (last-write semantics in
-    // parse_form).
+    // An unchecked checkbox is not submitted, so absence from the form data
+    // is the "false" signal collect_form_updates relies on server-side; a
+    // checked box submits value="true".
     format!(
         "<label class=\"chk\"><input type=\"checkbox\" name=\"{name}\" value=\"true\" {chk}> {label}</label>",
         name = name,
@@ -1576,14 +1597,39 @@ fn numfield<T: std::fmt::Display>(name: &str, label: &str, value: T) -> String {
 }
 
 fn textfield(name: &str, label: &str, value: &str, password: bool, size: usize) -> String {
+    textfield_attr(name, label, value, password, size, "")
+}
+
+/// Like [`textfield`] but with an extra attribute string (e.g. `"disabled"`),
+/// used to grey out fields that don't apply to the current gateway role.
+fn textfield_attr(
+    name: &str,
+    label: &str,
+    value: &str,
+    password: bool,
+    size: usize,
+    attr: &str,
+) -> String {
     let kind = if password { "password" } else { "text" };
     format!(
-        "<span class=\"label\">{label}:</span><input type=\"{kind}\" name=\"{name}\" value=\"{value}\" size=\"{size}\">",
+        "<span class=\"label\">{label}:</span><input type=\"{kind}\" name=\"{name}\" value=\"{value}\" size=\"{size}\" {attr}>",
         kind = kind,
         name = name,
         label = html_escape(label),
         value = html_escape(value),
         size = size,
+        attr = attr,
+    )
+}
+
+/// Like [`numfield`] but with an extra attribute string (e.g. `"disabled"`).
+fn numfield_attr<T: std::fmt::Display>(name: &str, label: &str, value: T, attr: &str) -> String {
+    format!(
+        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"5\" class=\"num-tight\" {attr}>",
+        name = name,
+        label = html_escape(label),
+        value = value,
+        attr = attr,
     )
 }
 
@@ -1657,6 +1703,8 @@ h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; 
 .label { color: var(--text); }
 .label-dim { color: var(--amber-dim); min-width: 56px; }
 .chk { display: inline-flex; align-items: center; gap: 6px; }
+input:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }
+label.chk:has(input:disabled) { opacity: 0.45; }
 .hspace { display: inline-block; width: 18px; }
 input[type=text], input[type=password], select {
   background: var(--bg-mid);
@@ -1826,6 +1874,36 @@ function warnIfChangingWebPort(input) {
     }
   }
 }
+// Grey out the Master/Slave fields that don't apply to the selected role:
+// 'accept relays' is Master-only; the master host/port/user/pass are
+// Slave-only.  Runs on load and on every role change.
+function updateRelayFields() {
+  var roleEl = document.querySelector('[name=gateway_role]');
+  if (!roleEl) return;
+  var role = roleEl.value;
+  var isMaster = role === 'master', isSlave = role === 'slave';
+  var accept = document.querySelector('[name=master_accept_relays]');
+  if (accept) accept.disabled = !isMaster;
+  ['slave_master_host', 'slave_master_port', 'slave_master_username', 'slave_master_password'].forEach(function(n) {
+    var el = document.querySelector('[name=' + n + ']');
+    if (el) el.disabled = !isSlave;
+  });
+}
+function onRoleChange(sel) {
+  if (sel.value === 'master') {
+    // A master with relays off can't accept slaves: default the box on.
+    var accept = document.querySelector('[name=master_accept_relays]');
+    if (accept) accept.checked = true;
+    // The relay listens on the SSH port. Warn (only) if SSH is off — never
+    // toggle it automatically.
+    var ssh = document.querySelector('[name=ssh_enabled]');
+    if (ssh && !ssh.checked) {
+      alert('Master mode uses the SSH server for slave connections, but SSH is currently disabled. Enable SSH in Server settings and Save & Restart, otherwise slaves cannot connect. (SSH is not changed automatically.)');
+    }
+  }
+  updateRelayFields();
+}
+updateRelayFields();
 function refreshLogs() {
   fetch('/logs').then(function(r) { return r.text(); }).then(function(t) {
     var el = document.getElementById('console');
@@ -2255,14 +2333,60 @@ mod tests {
         // require for unchecked checkboxes (they don't submit).
         let old = Config::default();
         let (updates, _) = collect_form_updates(&empty_form(), &old);
+        // NB: `master_accept_relays` is intentionally NOT in this list — it is
+        // role-gated (written only when the submitted gateway_role is
+        // "master"); see test_collect_form_updates_master_accept_relays_role_gated.
         for key in [
             "telnet_enabled", "ssh_enabled", "web_enabled",
-            "security_enabled", "verbose", "master_accept_relays",
+            "security_enabled", "verbose",
         ] {
             let pair = updates.iter().find(|(k, _)| k == key);
             assert!(pair.is_some(), "missing key {}", key);
             assert_eq!(pair.unwrap().1, "false", "key {} should be false", key);
         }
+    }
+
+    #[test]
+    fn test_collect_form_updates_master_accept_relays_role_gated() {
+        // `master_accept_relays` applies only to a master.  With role=master an
+        // absent checkbox means unchecked -> "false", present -> "true".  With
+        // any other role the checkbox is rendered disabled (not submitted) and
+        // must be left untouched (preserved), not clobbered to false.
+        let old = Config::default();
+
+        let mut f = empty_form();
+        f.insert("gateway_role".into(), "master".into());
+        let (updates, _) = collect_form_updates(&f, &old);
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "master_accept_relays").map(|(_, v)| v.as_str()),
+            Some("false"),
+            "role=master + absent checkbox should write false"
+        );
+
+        let mut f = empty_form();
+        f.insert("gateway_role".into(), "master".into());
+        f.insert("master_accept_relays".into(), "true".into());
+        let (updates, _) = collect_form_updates(&f, &old);
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "master_accept_relays").map(|(_, v)| v.as_str()),
+            Some("true"),
+            "role=master + present checkbox should write true"
+        );
+
+        let mut f = empty_form();
+        f.insert("gateway_role".into(), "slave".into());
+        let (updates, _) = collect_form_updates(&f, &old);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "master_accept_relays"),
+            "role=slave must leave master_accept_relays untouched (preserved)"
+        );
+
+        // Absent gateway_role (non-master) is likewise preserved.
+        let (updates, _) = collect_form_updates(&empty_form(), &old);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "master_accept_relays"),
+            "non-master role must leave master_accept_relays untouched"
+        );
     }
 
     #[test]

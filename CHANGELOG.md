@@ -108,6 +108,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`<Port> @ <ip>`) invited mistyped dial strings with embedded spaces. The
   remote-bridge screen title and the master's registered-ports status list were
   unspaced to match.
+- **Master/Slave configuration now guides the operator by role.** Across the
+  telnet menu, web, and desktop GUI, fields that don't apply to the selected
+  role are greyed out / disabled: *accept relays* is editable only for a
+  **Master** (and now defaults **on** when you switch to Master, since a master
+  with it off can't accept slaves), while the master host / port / user / pass
+  are editable only for a **Slave**. Switching to Master while the SSH server is
+  off now surfaces a warning (a popup in web/GUI, a dedicated screen in telnet)
+  explaining that slaves connect over SSH — it points you at the setting but
+  never toggles SSH for you.
+- **Peer-dial now reminds you about local echo.** A peer-dial connection is a
+  transparent link with no host echoing keystrokes back, so the Serial Gateway
+  picker shows a "enable local echo to see typing" tip, and the README /
+  user-manual peer-dial sections explain that each terminal needs local echo
+  (half-duplex) — and that `ATE` does not affect the online data path.
 - **Shutdown "Goodbye" now reaches every session, not just when telnet is
   enabled.** The shutdown broadcast used to live inside the telnet accept loop,
   so an SSH-only deployment (`telnet_enabled = false`) tore SSH and relay

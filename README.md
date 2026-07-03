@@ -1448,6 +1448,13 @@ The caller sees `CONNECT` on answer, `BUSY` if the target is already in a call,
 `NO ANSWER` if it rings unanswered within the caller's `S7` (needs `ATX3`+), or
 `NO CARRIER` otherwise.
 
+> **Local echo:** the connection is a transparent link — neither gateway echoes
+> the data, and (unlike dialing a host or BBS) there is no remote host echoing
+> your keystrokes back. **Turn on local echo (half-duplex) on each terminal** to
+> see what you type, exactly as with two terminals wired back-to-back. `ATE`
+> does *not* help here — it only echoes `AT` commands in command mode, not the
+> online data stream.
+
 > **Ring count vs. answer timeout:** auto-answer waits `S0` rings at ~6 s each,
 > so the default `S0 = 5` (~30 s) is longer than the caller's default `S7 = 15`
 > wait — which would give `NO ANSWER` first (authentic modem behavior). On a

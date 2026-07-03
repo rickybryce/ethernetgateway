@@ -447,6 +447,9 @@ struct App {
     /// behind explicit confirmation because enabling the feature
     /// bypasses the telnet menu's auth gate.
     atdt_kermit_warn_open: bool,
+    /// Warn-only popup shown when the role is switched to Master while the SSH
+    /// server is off (the relay listens on the SSH port).  Never toggles SSH.
+    relay_ssh_warn_open: bool,
     /// Whether the security-warning popup for the standalone Kermit
     /// server listener is open.  Shown when the operator first ticks
     /// the "Kermit Server" checkbox in the Server frame or its More
@@ -551,6 +554,7 @@ impl App {
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             atdt_kermit_warn_open: false,
+            relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
             disable_ip_safety_warn_open: false,
             pending_dir_pick: None,
@@ -802,6 +806,7 @@ impl App {
     /// implemented relay transport.)
     fn draw_server_relay(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Master / Slave").strong().color(AMBER));
+        let prev_role = self.cfg.gateway_role.clone();
         ui.horizontal(|ui| {
             ui.label("Role:");
             let display = match self.cfg.gateway_role.as_str() {
@@ -830,17 +835,35 @@ impl App {
                     );
                 });
         });
-        ui.checkbox(
-            &mut self.cfg.master_accept_relays,
-            "Master: accept relay connections from slaves",
-        );
-        ui.horizontal(|ui| {
-            labeled_field(ui, "Master host:", &mut self.cfg.slave_master_host, 150.0);
-            labeled_field(ui, "Port:", &mut self.slave_master_port_buf, 50.0);
+        let is_master = self.cfg.gateway_role == "master";
+        let is_slave = self.cfg.gateway_role == "slave";
+        // On the transition into Master: default the accept-relays gate ON (a
+        // master with it off can't accept slaves), and arm a warn-only popup if
+        // the SSH server — which the relay listens on — is off.  Never toggles
+        // SSH (operator's choice); fires once because prev_role gates it.
+        if is_master && prev_role != "master" {
+            self.cfg.master_accept_relays = true;
+            if !self.cfg.ssh_enabled {
+                self.relay_ssh_warn_open = true;
+            }
+        }
+        // "Accept relays" applies to Master only; the master host/port/user/
+        // pass apply to Slave only.  Grey out the fields that don't apply.
+        ui.add_enabled_ui(is_master, |ui| {
+            ui.checkbox(
+                &mut self.cfg.master_accept_relays,
+                "Master: accept relay connections from slaves",
+            );
         });
-        ui.horizontal(|ui| {
-            labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
-            labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password);
+        ui.add_enabled_ui(is_slave, |ui| {
+            ui.horizontal(|ui| {
+                labeled_field(ui, "Master host:", &mut self.cfg.slave_master_host, 150.0);
+                labeled_field(ui, "Port:", &mut self.slave_master_port_buf, 50.0);
+            });
+            ui.horizontal(|ui| {
+                labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
+                labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password);
+            });
         });
         // No transport control: SSH is the only implemented relay
         // transport; the raw alternative will add one when it lands.
@@ -2403,6 +2426,48 @@ impl eframe::App for App {
             warn_open = false;
         }
         self.atdt_kermit_warn_open = warn_open;
+
+        // Master-needs-SSH popup (warn-only — never toggles SSH, per the
+        // operator's choice).  Armed in draw_server_relay when the role is
+        // switched to Master while the SSH server is off.  Just an OK to
+        // dismiss; the message points the operator at the SSH setting.
+        let mut ssh_warn_open = self.relay_ssh_warn_open;
+        let mut ssh_warn_close = false;
+        egui::Window::new(
+            egui::RichText::new("Master needs SSH")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut ssh_warn_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(440.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                "Slaves connect to a master over the SSH server, which is \
+                 currently disabled. Enable SSH (Server settings) and Save & \
+                 Restart, otherwise slaves cannot connect.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("SSH is not changed automatically.").color(AMBER),
+            );
+            ui.add_space(10.0);
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("OK").strong().color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                ssh_warn_close = true;
+            }
+        });
+        if ssh_warn_close {
+            ssh_warn_open = false;
+        }
+        self.relay_ssh_warn_open = ssh_warn_open;
 
         // Kermit server enable-confirmation popup.  Same posture as
         // the ATDT KERMIT popup: the off→on transition arms the popup;
