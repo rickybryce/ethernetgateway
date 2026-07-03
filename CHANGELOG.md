@@ -5,7 +5,7 @@ All notable changes to **ethernet-gateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.4] - Unreleased
 
 ### Added
 - **Make directories from the telnet file-transfer menu.** A new **M** option
@@ -1370,7 +1370,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.3...HEAD
+[0.6.4]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.3...HEAD
 [0.6.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.3
 [0.6.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.2
 [0.6.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.1

@@ -274,7 +274,7 @@ ships with:
 ### Verifying the checksum
 
 ```sh
-sha256sum -c ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -282,8 +282,8 @@ sha256sum -c ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.asc \
-    ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.asc \
+    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -293,11 +293,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sig \
     --certificate-identity-regexp "https://github.com/rickybryce/ethernet-gateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    ethernet-gateway-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
