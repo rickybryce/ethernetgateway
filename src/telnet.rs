@@ -4902,9 +4902,13 @@ impl TelnetSession {
     }
 
     /// Prompt the user for which XMODEM-family protocol to use for this
-    /// download.  Returns `None` if the user presses ESC to cancel.
+    /// download.  Shows the file being downloaded (name + size) so the user
+    /// can confirm they picked the right one before starting.  Returns `None`
+    /// if the user presses ESC to cancel.
     async fn prompt_download_protocol(
         &mut self,
+        filename: &str,
+        file_size: u64,
     ) -> Result<Option<DownloadProtocol>, std::io::Error> {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let esc_label = if is_petscii { "<-" } else { "ESC" };
@@ -4915,6 +4919,17 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.yellow("SELECT PROTOCOL")))
             .await?;
         self.send_line(&sep).await?;
+        self.send_line("").await?;
+        // Show what's being downloaded so the user can verify they picked the
+        // right file before choosing a protocol.
+        let max_name = if is_petscii { 31 } else { 60 };
+        self.send_line(&format!(
+            "  File: {}",
+            self.amber(&truncate_to_width(filename, max_name))
+        ))
+        .await?;
+        self.send_line(&format!("  Size: {} bytes", file_size))
+            .await?;
         self.send_line("").await?;
         // Keep each line <= 39 columns so it doesn't wrap on a 40-column
         // PETSCII (C64) screen.
@@ -5047,7 +5062,7 @@ impl TelnetSession {
 
         // Prompt the user to pick the transfer protocol for this download.
         // ESC at the prompt cancels the transfer.
-        let protocol = match self.prompt_download_protocol().await? {
+        let protocol = match self.prompt_download_protocol(filename, file_size).await? {
             Some(p) => p,
             None => return Ok(()),
         };
