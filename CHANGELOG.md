@@ -84,6 +84,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   broadcast is routed to it yet — the first admin-notice feature plugs in here.)
 
 ### Fixed
+- **Serial `AT&C` now updates the hardware carrier (DCD/DTR) line immediately.**
+  With `serial_X_drive_carrier` enabled, changing `AT&C` at the command prompt
+  used to take effect only at the next connect/hangup; it now re-applies the
+  DCD line right away — `&C0` asserts DTR (carrier forced on regardless of call
+  state) and `&C1` restores follow-the-carrier — matching the documented
+  contract and the existing `ATZ`/`AT&F` behavior. Found during on-hardware DCD
+  validation (DTR→DCD crossover).
 - **Shutdown "Goodbye" now reaches every session, not just when telnet is
   enabled.** The shutdown broadcast used to live inside the telnet accept loop,
   so an SSH-only deployment (`telnet_enabled = false`) tore SSH and relay

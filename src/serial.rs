@@ -2634,6 +2634,13 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::DcdSet(n) => {
                 state.dcd_mode = n;
+                // Reflect the &C change on the DCD line immediately, not just at
+                // the next connect/hangup: &C0 forces DTR asserted while the port
+                // is open (regardless of call state), and &C1 restores follow-the-
+                // carrier.  Mirrors ATZ/AT&F, which already re-apply after resetting
+                // dcd_mode.  carrier_up follows any still-active (e.g. +++-escaped)
+                // connection.
+                apply_carrier(state, state.active_connection.is_some());
                 pending_ok = true;
             }
             AtResult::DtrSet(n) => {
