@@ -91,6 +91,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state) and `&C1` restores follow-the-carrier — matching the documented
   contract and the existing `ATZ`/`AT&F` behavior. Found during on-hardware DCD
   validation (DTR→DCD crossover).
+- **GUI console started as a boot service now waits for the window manager.**
+  When launched as a boot-time systemd service, the console window could come
+  up undecorated (no title bar / minimize / close) or with its title bar tucked
+  under the desktop panel, because it opened as soon as the X server accepted a
+  connection — before the window manager had taken over decoration and
+  placement. The display-wait now also waits (bounded, X11-only) for an EWMH
+  window manager (`_NET_SUPPORTING_WM_CHECK` on the root window) before opening
+  the window. Degrades safely: no `xprop`, a bare X server, or a non-EWMH WM
+  falls through after a short cap and opens anyway, and the server is never
+  delayed (only the window waits). Non-X11 targets (Windows, macOS, headless,
+  pure-Wayland) are unaffected — the wait returns immediately without `DISPLAY`.
 - **Shutdown "Goodbye" now reaches every session, not just when telnet is
   enabled.** The shutdown broadcast used to live inside the telnet accept loop,
   so an SSH-only deployment (`telnet_enabled = false`) tore SSH and relay

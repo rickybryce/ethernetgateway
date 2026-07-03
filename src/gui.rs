@@ -148,8 +148,18 @@ fn wait_for_display(shutdown: &Arc<AtomicBool>) {
             return;
         }
         match probe_display() {
-            Some(true) => return, // reachable + authenticated: go
-            None => return,       // can't probe (no xset): attempt directly
+            Some(true) => {
+                // X is up + authenticated. Now also wait (bounded) for a
+                // window manager to be managing the display before we open the
+                // decorated console window: at boot the X server can accept us
+                // before the WM/panel takes over, and a window mapped in that
+                // gap comes up undecorated (no title bar/min/close) or placed
+                // with its title bar under the panel. Only the window waits —
+                // the server is already running.
+                wait_for_wm(shutdown);
+                return;
+            }
+            None => return, // can't probe (no xset): attempt directly
             Some(false) => {
                 if !announced {
                     logger::log("GUI: waiting for the display session to be ready…".into());
@@ -179,6 +189,64 @@ fn probe_display() -> Option<bool> {
     {
         Ok(status) => Some(status.success()),
         Err(_) => None,
+    }
+}
+
+/// After the X server is reachable, wait (bounded) for an EWMH window manager
+/// to be managing the display. This closes the boot gap where X accepts us but
+/// the WM/panel hasn't taken over yet, which left the console window
+/// undecorated or with its title bar tucked under the desktop panel. Degrades
+/// safely, mirroring `wait_for_display`:
+///   * `xprop` not installed -> can't probe, return at once;
+///   * WM present -> return as soon as it is detected;
+///   * no WM after 15s -> give up waiting and open anyway (a bare X server or a
+///     non-EWMH WM is never worse off than the previous open-immediately path).
+///
+/// Only the GUI window waits here; the server started earlier and is unaffected.
+fn wait_for_wm(shutdown: &Arc<AtomicBool>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut announced = false;
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match probe_wm() {
+            Some(true) => return, // a WM is managing the display: safe to open
+            None => return,       // can't probe (no xprop): open directly
+            Some(false) => {
+                if !announced {
+                    logger::log("GUI: waiting for the window manager to be ready…".into());
+                    announced = true;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// Probe for an EWMH-compliant window manager on the current X display:
+/// `Some(true)` if `_NET_SUPPORTING_WM_CHECK` is set on the root window (a WM
+/// is managing), `Some(false)` if it is not yet, `None` if we cannot probe
+/// (`xprop` not installed). `xprop` inherits DISPLAY/XAUTHORITY from our
+/// environment, so it authenticates the same way eframe will. Note `xprop`
+/// exits 0 whether or not the property exists (printing "not found." when it
+/// does not), so we key on the printed value, not the exit status.
+fn probe_wm() -> Option<bool> {
+    use std::process::{Command, Stdio};
+    match Command::new("xprop")
+        .args(["-root", "_NET_SUPPORTING_WM_CHECK"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            Some(String::from_utf8_lossy(&out.stdout).contains("window id #"))
+        }
+        Ok(_) => Some(false), // xprop ran but couldn't query: treat as not-ready
+        Err(_) => None,       // xprop not installed: can't probe
     }
 }
 
