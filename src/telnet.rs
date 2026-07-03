@@ -3776,6 +3776,11 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
+            "  {}  Make directory",
+            self.cyan("M")
+        ))
+        .await?;
+        self.send_line(&format!(
             "  {}  Kermit server mode",
             self.cyan("K")
         ))
@@ -3834,6 +3839,9 @@ impl TelnetSession {
             "c" => {
                 self.file_transfer_chdir().await?;
             }
+            "m" => {
+                self.file_transfer_mkdir().await?;
+            }
             "k" => {
                 match self.file_transfer_kermit_server().await {
                     Ok(()) => {}
@@ -3863,7 +3871,7 @@ impl TelnetSession {
             }
             "r" => {} // Refresh — just re-render
             _ => {
-                self.show_error("Press U, D, X, C, K, I, R, Q, or H.")
+                self.show_error("Press U, D, X, C, M, K, I, R, Q, or H.")
                     .await?;
             }
         }
@@ -5790,6 +5798,109 @@ impl TelnetSession {
         } else {
             self.show_error("Enter a number or Q.").await?;
         }
+        Ok(())
+    }
+
+    /// Create a new subdirectory inside the current transfer working directory,
+    /// then offer to make it the working directory.  The name goes through
+    /// `validate_filename` (a single component — no `..`, `/`, or leading dot),
+    /// so the new path can't escape the transfer base; the optional switch is
+    /// still re-checked with `verify_transfer_path` for defense in depth.
+    async fn file_transfer_mkdir(&mut self) -> Result<(), std::io::Error> {
+        self.ensure_transfer_dir().await?;
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("MAKE DIRECTORY")))
+            .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+
+        let max_dir = if self.terminal_type == TerminalType::Petscii {
+            26
+        } else {
+            56
+        };
+        let dir_str = truncate_to_width(&self.transfer_dir_display(), max_dir);
+        self.send_line(&format!("  In: {}", self.amber(&dir_str)))
+            .await?;
+        self.send_line("").await?;
+        self.send(&format!("  {} ", self.cyan("New directory name:")))
+            .await?;
+        self.flush().await?;
+
+        let name = match self.get_line_input().await? {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return Ok(()), // empty / cancel
+        };
+
+        if let Err(msg) = Self::validate_filename(&name) {
+            self.show_error(msg).await?;
+            return Ok(());
+        }
+
+        let target = self.transfer_path().join(&name);
+        match tokio::fs::create_dir(&target).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.show_error("That name already exists.").await?;
+                return Ok(());
+            }
+            Err(e) => {
+                self.show_error(&format!("Could not create: {}", e)).await?;
+                return Ok(());
+            }
+        }
+
+        let created = truncate_to_width(&format!("Created {}/", name), max_dir);
+        self.send_line(&format!("  {}", self.green(&created))).await?;
+        self.send_line("").await?;
+
+        // Offer to switch into the new directory.
+        self.send(&format!(
+            "  {} ",
+            self.cyan("Make this the working dir? (Y/N):")
+        ))
+        .await?;
+        self.flush().await?;
+        self.drain_input().await;
+        let answer = match self.read_byte_filtered().await? {
+            Some(b) => {
+                if self.terminal_type == TerminalType::Petscii {
+                    petscii_to_ascii_byte(b)
+                } else {
+                    b
+                }
+            }
+            None => return Ok(()),
+        };
+        self.send_line("").await?;
+
+        if answer == b'y' || answer == b'Y' {
+            let prev = self.transfer_subdir.clone();
+            if self.transfer_subdir.is_empty() {
+                self.transfer_subdir = name.clone();
+            } else {
+                self.transfer_subdir = format!("{}/{}", self.transfer_subdir, name);
+            }
+            if self.verify_transfer_path() {
+                let disp = truncate_to_width(&self.transfer_dir_display(), max_dir);
+                self.send_line(&format!("  {} {}", self.dim("Now in:"), self.amber(&disp)))
+                    .await?;
+            } else {
+                // Should not happen (validate_filename bars escape), but revert
+                // and report rather than leave a bad subdir set.
+                self.transfer_subdir = prev;
+                self.show_error("Access denied.").await?;
+                return Ok(());
+            }
+        }
+
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
         Ok(())
     }
 
@@ -13826,6 +13937,7 @@ impl TelnetSession {
             "  D  Download a file from server",
             "  X  Delete a file on the server",
             "  C  Change to a subdirectory",
+            "  M  Make a new subdirectory",
             "  K  Kermit server mode (idle for",
             "     remote get/send/dir/finish)",
             "  I  Toggle IAC escaping on/off",

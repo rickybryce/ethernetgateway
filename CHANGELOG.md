@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Make directories from the telnet file-transfer menu.** A new **M** option
+  creates a subdirectory inside the current transfer working directory (the
+  name is validated like a filename — a single component, no `..` or `/`), then
+  asks whether to make it the working directory.
+
 ### Security
 - **Refreshed dependencies to clear RustSec advisories.** `cargo update`
   moved `aes` (yanked) → 0.9.1, `memmap2` (RUSTSEC-2026-0186 unsound) → 0.9.11,
