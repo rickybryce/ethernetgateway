@@ -7815,10 +7815,35 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// GET a URL and read the size-capped body, retrying once on a transient
+    /// transport failure (connect drop, reset).  Returns the body bytes or a
+    /// short error string.
+    fn weather_http_get(agent: &ureq::Agent, url: &str, cap: u64) -> Result<Vec<u8>, String> {
+        let mut last = String::new();
+        for _ in 0..2 {
+            match agent.get(url).call() {
+                Ok(resp) => {
+                    let mut bytes = Vec::new();
+                    resp.into_body()
+                        .as_reader()
+                        .take(cap)
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| e.to_string())?;
+                    return Ok(bytes);
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    }
+
     fn fetch_weather(zip: &str) -> Result<WeatherData, String> {
+        // Short connect timeout so an unreachable/blocked host fails fast (don't
+        // leave the menu hanging on a dead endpoint), with a modest overall cap.
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .timeout_connect(Some(std::time::Duration::from_secs(5)))
+                .timeout_global(Some(std::time::Duration::from_secs(12)))
                 .build(),
         );
 
@@ -7827,19 +7852,10 @@ impl TelnetSession {
             "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
             zip
         );
-        let geo_resp = agent
-            .get(&geo_url)
-            .call()
-            .map_err(|e| format!("Geocoding failed: {}", e))?;
-        let mut geo_bytes = Vec::new();
-        geo_resp
-            .into_body()
-            .as_reader()
-            .take(64 * 1024)
-            .read_to_end(&mut geo_bytes)
-            .map_err(|e| format!("Read error: {}", e))?;
-        let geo: serde_json::Value =
-            serde_json::from_slice(&geo_bytes).map_err(|e| format!("Parse error: {}", e))?;
+        let geo_bytes = Self::weather_http_get(&agent, &geo_url, 64 * 1024)
+            .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
+        let geo: serde_json::Value = serde_json::from_slice(&geo_bytes)
+            .map_err(|_| "Weather service returned bad data.".to_string())?;
 
         let result = geo
             .get("results")
@@ -7861,19 +7877,10 @@ impl TelnetSession {
              &timezone={}&forecast_days=3",
             lat, lon, timezone
         );
-        let wx_resp = agent
-            .get(&wx_url)
-            .call()
-            .map_err(|e| format!("Weather fetch failed: {}", e))?;
-        let mut wx_bytes = Vec::new();
-        wx_resp
-            .into_body()
-            .as_reader()
-            .take(128 * 1024)
-            .read_to_end(&mut wx_bytes)
-            .map_err(|e| format!("Read error: {}", e))?;
-        let wx: serde_json::Value =
-            serde_json::from_slice(&wx_bytes).map_err(|e| format!("Parse error: {}", e))?;
+        let wx_bytes = Self::weather_http_get(&agent, &wx_url, 128 * 1024)
+            .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
+        let wx: serde_json::Value = serde_json::from_slice(&wx_bytes)
+            .map_err(|_| "Weather service returned bad data.".to_string())?;
 
         let current = wx.get("current").ok_or("No current weather")?;
         let temp_f = current.get("temperature_2m").and_then(|v| v.as_f64()).unwrap_or(0.0);

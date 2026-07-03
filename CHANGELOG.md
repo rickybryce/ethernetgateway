@@ -8,10 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - Unreleased
 
 ### Added
+- **Show the file being downloaded on the SELECT PROTOCOL screen.** The
+  download protocol picker now displays the file name (truncated to the
+  terminal width) and byte size above the protocol list, so the user can
+  confirm the right file before choosing a protocol.
 - **Make directories from the telnet file-transfer menu.** A new **M** option
   creates a subdirectory inside the current transfer working directory (the
   name is validated like a filename — a single component, no `..` or `/`), then
   asks whether to make it the working directory.
+
+### Changed
+- **Weather fetch fails fast with a clearer message.** The Open-Meteo request
+  now uses a 5 s connect timeout (was a single 15 s global) and retries once on
+  a transient transport failure, so an unreachable/blocked forecast host no
+  longer hangs the Weather menu for 15 s. Errors are distinguished:
+  "Zip code not found." (bad zip) vs "Weather service unreachable. Try again
+  later." (network/host down) vs "Weather service returned bad data." (parse).
 
 ### Security
 - **Refreshed dependencies to clear RustSec advisories.** `cargo update`
