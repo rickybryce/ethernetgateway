@@ -832,7 +832,8 @@ fn collect_form_updates(
 
     // Checkbox-style booleans: an unchecked checkbox does not appear in
     // the form data, so absence is the canonical "false" signal.  Every
-    // boolean key the page renders is set unconditionally — partial
+    // boolean key the page renders is set unconditionally (except
+    // master_accept_relays, which is role-gated — see below) — partial
     // saves are not supported (the full form is always submitted).
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
