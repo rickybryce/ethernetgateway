@@ -102,6 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   falls through after a short cap and opens anyway, and the server is never
   delayed (only the window waits). Non-X11 targets (Windows, macOS, headless,
   pure-Wayland) are unaffected — the wait returns immediately without `DISPLAY`.
+- **Serial Gateway menu shows peer-dial addresses without spaces around `@`.**
+  Remote (slave) port entries are now displayed as `<Port>@<ip>` — exactly the
+  string you type to dial them (`ATDT <Port>@<ip>`). The previous spaced form
+  (`<Port> @ <ip>`) invited mistyped dial strings with embedded spaces. The
+  remote-bridge screen title and the master's registered-ports status list were
+  unspaced to match.
 - **Shutdown "Goodbye" now reaches every session, not just when telnet is
   enabled.** The shutdown broadcast used to live inside the telnet accept loop,
   so an SSH-only deployment (`telnet_enabled = false`) tore SSH and relay

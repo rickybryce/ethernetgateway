@@ -6940,7 +6940,9 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.dim("Remote (slave) ports:")))
                     .await?;
                 for (i, (ip, label)) in shown.iter().enumerate() {
-                    let entry = truncate_to_width(&format!("{} @ {}", label, ip), 30);
+                    // No spaces around '@' — the entry is exactly the string the
+                    // user types to dial it (`ATDT <Port>@<ip>`).
+                    let entry = truncate_to_width(&format!("{}@{}", label, ip), 30);
                     self.send_line(&format!(
                         "  {} {}",
                         self.cyan(&format!("[{}]", i + 1)),
@@ -7225,7 +7227,7 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        let title = truncate_to_width(&format!("REMOTE: {} @ {}", label, ip), 36);
+        let title = truncate_to_width(&format!("REMOTE: {}@{}", label, ip), 36);
         self.send_line(&format!("  {}", self.yellow(&title))).await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
@@ -10489,7 +10491,7 @@ impl TelnetSession {
                     .await?;
                     const RELAY_STATUS_CAP: usize = 3;
                     for (ip, label) in ports.iter().take(RELAY_STATUS_CAP) {
-                        self.send_line(&format!("    {} @ {}", self.amber(label), ip))
+                        self.send_line(&format!("    {}@{}", self.amber(label), ip))
                             .await?;
                     }
                     if ports.len() > RELAY_STATUS_CAP {
