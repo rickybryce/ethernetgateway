@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.3] - Unreleased
 
 ### Added
+- **The desktop GUI remembers its window position and size.** The
+  configuration window now reopens where you last left it — its outer position
+  and inner size are saved (debounced) to `gui_window_geometry` in
+  `egateway.conf` and restored on the next launch. It is auto-managed: there is
+  no config-UI field for it, and an empty value means "use the default size and
+  let the window manager place it." Works on X11/Windows/macOS; Wayland
+  compositors don't expose a window's position, so it isn't remembered there.
 - **Peer-dial: call another serial port directly.** With the new
   `allow_peer_dial` opt-in (default off; wired into telnet **Configuration > M >
   P**, web, and GUI), a modem-mode port can dial another port by address —

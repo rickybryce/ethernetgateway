@@ -67,12 +67,22 @@ pub fn run(
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // `mut` is only needed on ARM, where we patch wgpu limits below.
+        // Restore the saved window geometry (position + inner size) so the GUI
+        // reopens where the operator last left it; otherwise fall back to the
+        // default size + window-manager placement.  On Wayland with_position is
+        // ignored by the compositor (harmless — geometry just isn't restored).
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_title(format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION")))
+            .with_min_inner_size([640.0, 480.0]);
+        viewport = match parse_window_geometry(&cfg.gui_window_geometry) {
+            Some((x, y, w, h)) => viewport
+                .with_position([x as f32, y as f32])
+                .with_inner_size([w as f32, h as f32]),
+            None => viewport.with_inner_size([1120.0, 810.0]),
+        };
         #[allow(unused_mut)]
         let mut options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_title(format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION")))
-                .with_inner_size([1120.0, 810.0])
-                .with_min_inner_size([640.0, 480.0]),
+            viewport,
             ..Default::default()
         };
 
@@ -250,6 +260,24 @@ fn probe_wm() -> Option<bool> {
     }
 }
 
+/// Parse a saved `x,y,width,height` window geometry string (as written to
+/// `gui_window_geometry`).  Returns `None` for empty/malformed input or an
+/// implausible size, so a bad value harmlessly falls back to the defaults.
+fn parse_window_geometry(s: &str) -> Option<(i32, i32, i32, i32)> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let x = parts[0].trim().parse::<i32>().ok()?;
+    let y = parts[1].trim().parse::<i32>().ok()?;
+    let w = parts[2].trim().parse::<i32>().ok()?;
+    let h = parts[3].trim().parse::<i32>().ok()?;
+    if !(320..=16384).contains(&w) || !(240..=16384).contains(&h) {
+        return None;
+    }
+    Some((x, y, w, h))
+}
+
 fn apply_theme(ctx: &egui::Context) {
     // Set absolute font sizes (avoids compounding if theme is re-applied)
     let mut style = (*ctx.global_style()).clone();
@@ -395,6 +423,12 @@ struct App {
     local_ip: String,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
+    // Window-geometry persistence (auto-managed → gui_window_geometry in the
+    // config; no UI surface).  last_seen tracks the live rect, geom_changed_at
+    // debounces writes, saved holds what's on disk to avoid redundant writes.
+    last_seen_geom: Option<(i32, i32, i32, i32)>,
+    geom_changed_at: f64,
+    saved_geom: Option<(i32, i32, i32, i32)>,
     // String buffers for numeric fields so the user can type freely
     telnet_port_buf: String,
     ssh_port_buf: String,
@@ -472,6 +506,9 @@ struct App {
 
 impl App {
     fn new(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
+        // Seed saved_geom from the config so we don't rewrite the identical
+        // geometry we just restored on first launch.
+        let saved_geom = parse_window_geometry(&cfg.gui_window_geometry);
         let telnet_port_buf = cfg.telnet_port.to_string();
         let ssh_port_buf = cfg.ssh_port.to_string();
         let kermit_server_port_buf = cfg.kermit_server_port.to_string();
@@ -518,6 +555,9 @@ impl App {
             local_ip: local_ip(),
             shutdown,
             restart,
+            last_seen_geom: None,
+            geom_changed_at: 0.0,
+            saved_geom,
             telnet_port_buf,
             ssh_port_buf,
             kermit_server_port_buf,
@@ -1598,6 +1638,51 @@ impl App {
     /// Pull the global config singleton and, if it changed since our last
     /// sync (i.e. a telnet/SSH session persisted a setting), refresh every
     /// GUI field to match.
+    /// Remember the window's position + inner size so the next launch reopens
+    /// it where the operator left it.  Auto-managed: writes straight to
+    /// `gui_window_geometry` in the config, with no UI surface.  Debounced so a
+    /// drag doesn't rewrite the file on every frame.  On Wayland the compositor
+    /// doesn't report an outer position (`outer_rect` is None) — we skip, so
+    /// geometry simply isn't remembered there.
+    fn track_window_geometry(&mut self, ctx: &egui::Context) {
+        let (pos, size, now) = ctx.input(|i| {
+            let vp = i.viewport();
+            (
+                vp.outer_rect.map(|r| r.min),
+                vp.inner_rect.map(|r| r.size()),
+                i.time,
+            )
+        });
+        let (Some(pos), Some(size)) = (pos, size) else {
+            return;
+        };
+        let geom = (
+            pos.x.round() as i32,
+            pos.y.round() as i32,
+            size.x.round() as i32,
+            size.y.round() as i32,
+        );
+        // Ignore bogus / minimized rects.
+        if geom.2 < 320 || geom.3 < 240 {
+            return;
+        }
+        if Some(geom) != self.last_seen_geom {
+            self.last_seen_geom = Some(geom);
+            self.geom_changed_at = now;
+        }
+        // Persist once the geometry has settled (~1.5 s after the last move or
+        // resize) so dragging the window doesn't rewrite the config each frame.
+        if now - self.geom_changed_at > 1.5 && Some(geom) != self.saved_geom {
+            self.saved_geom = Some(geom);
+            let val = format!("{},{},{},{}", geom.0, geom.1, geom.2, geom.3);
+            // Keep cfg + last_synced in sync so refresh_from_global doesn't see
+            // this self-write as an external change.
+            self.cfg.gui_window_geometry = val.clone();
+            self.last_synced_cfg.gui_window_geometry = val.clone();
+            config::update_config_value("gui_window_geometry", &val);
+        }
+    }
+
     fn refresh_from_global(&mut self) {
         if self.dirty {
             return; // Don't overwrite fields the user is actively editing.
@@ -1880,6 +1965,7 @@ impl eframe::App for App {
         self.poll_logs();
         self.poll_dir_pick();
         self.refresh_from_global();
+        self.track_window_geometry(ui.ctx());
 
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
 
@@ -2696,6 +2782,18 @@ mod tests {
     }
 
     // ── App::new initialization ──────────────────────────────
+
+    #[test]
+    fn test_parse_window_geometry() {
+        assert_eq!(parse_window_geometry("100,120,1280,900"), Some((100, 120, 1280, 900)));
+        assert_eq!(parse_window_geometry(" -50 , 0 , 800 , 600 "), Some((-50, 0, 800, 600)));
+        assert_eq!(parse_window_geometry(""), None); // unset
+        assert_eq!(parse_window_geometry("1,2,3"), None); // too few
+        assert_eq!(parse_window_geometry("1,2,3,4,5"), None); // too many
+        assert_eq!(parse_window_geometry("a,b,c,d"), None); // non-numeric
+        assert_eq!(parse_window_geometry("0,0,100,100"), None); // below min size
+        assert_eq!(parse_window_geometry("0,0,99999,99999"), None); // above max
+    }
 
     #[test]
     fn test_app_new_buffers_match_config() {

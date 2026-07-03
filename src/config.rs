@@ -436,6 +436,12 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub transfer_dir: String,
+    /// Last GUI window geometry as `x,y,width,height` (outer position + inner
+    /// size, in logical points).  Auto-managed by the desktop GUI to reopen the
+    /// window where the operator left it; empty = unset (default size + window-
+    /// manager placement).  Deliberately NOT exposed in any config UI — it is
+    /// written automatically by the GUI, never hand-edited.
+    pub gui_window_geometry: String,
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     /// Groq API key. If empty, AI chat is disabled.
@@ -612,6 +618,7 @@ impl Default for Config {
             username: DEFAULT_USERNAME.into(),
             password: DEFAULT_PASSWORD.into(),
             transfer_dir: DEFAULT_TRANSFER_DIR.into(),
+            gui_window_geometry: String::new(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             groq_api_key: DEFAULT_GROQ_API_KEY.into(),
@@ -817,6 +824,10 @@ fn read_config_file(path: &str) -> Config {
             .filter(|v| !v.is_empty())
             .cloned()
             .unwrap_or_else(|| DEFAULT_TRANSFER_DIR.into()),
+        gui_window_geometry: map
+            .get("gui_window_geometry")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default(),
         max_sessions: map
             .get("max_sessions")
             .and_then(|v| v.parse().ok())
@@ -1382,6 +1393,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("# Directory for file transfers (relative to working directory)\n");
     write_kv_str(&mut content, "transfer_dir", &cfg.transfer_dir);
+    write_kv_str(&mut content, "gui_window_geometry", &cfg.gui_window_geometry);
     content.push('\n');
 
     content.push_str("# Maximum concurrent telnet sessions\n");
@@ -1840,6 +1852,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "username" => cfg.username = value.to_string(),
         "password" => cfg.password = value.to_string(),
         "transfer_dir" => cfg.transfer_dir = value.to_string(),
+        "gui_window_geometry" => cfg.gui_window_geometry = value.trim().to_string(),
         "max_sessions" => {
             if let Ok(v) = value.parse::<usize>() && v >= 1 {
                 cfg.max_sessions = v;
@@ -2479,6 +2492,7 @@ mod tests {
             username: "bob".into(),
             password: "secret".into(),
             transfer_dir: "myfiles".into(),
+            gui_window_geometry: "100,120,1280,900".into(),
             max_sessions: 5,
             idle_timeout_secs: 60,
             groq_api_key: "gsk_test123".into(),
