@@ -25,4 +25,24 @@ ignore = [
     #
     # Re-evaluate when `rsa` ≥ 0.11 ships the constant-time impl.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — DoS advisories in `quick-xml`
+    # (quadratic duplicate-attribute check; unbounded namespace allocation
+    # in `NsReader`), both reachable only when parsing UNTRUSTED XML at
+    # runtime, patched in quick-xml ≥ 0.41.0.
+    #
+    # Mitigation for our deployment:
+    #   * `quick-xml` is pulled in ONLY by `wayland-scanner`, a compile-time
+    #     PROC-MACRO (via winit → eframe / rfd, the desktop GUI stack).  It
+    #     parses the trusted, developer-supplied Wayland protocol XML at
+    #     BUILD time to generate bindings — it is never present in the
+    #     shipped binary and never touches runtime or attacker input.
+    #   * The gateway itself does ZERO runtime XML parsing (no quick-xml,
+    #     no NsReader in src/), so neither DoS path is reachable.
+    #   * `cargo update` can only reach quick-xml 0.39.x — `wayland-scanner`
+    #     pins it below 0.41 — so the fix must come from a GUI-stack bump.
+    #
+    # Re-evaluate when eframe/winit/wayland-scanner pull quick-xml ≥ 0.41.0.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
