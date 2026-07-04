@@ -2728,6 +2728,16 @@ async fn send_and_await_ack(
 ) -> Result<Vec<u8>, String> {
     let pkt = build_packet(kind, seq, payload, chkt, pad_count, pad_char, eol);
     let mut attempts = 0u32;
+    // Outer loop = one (re)transmit of the packet.  Inner loop = read
+    // responses to that transmit.  A stale/duplicate ACK for an earlier
+    // seq is discarded WITHOUT retransmitting — it only advances the
+    // inner read loop.  Retransmitting on a duplicate ACK would make the
+    // peer re-ACK the resent packet, whose ACK arrives as the next
+    // "stale" ACK and triggers another resend: a self-perpetuating
+    // duplicate-ACK cascade (observed as a burst of "retries" at the
+    // start of a serial transfer to G-Kermit / Kermit-80, seeded by the
+    // Send-Init exchange double-ACK).  We retransmit only on a NAK for
+    // the current seq or a read timeout.
     loop {
         // Log first-attempt sends for non-D packets, and any retry
         // attempt regardless of type.  The first-attempt send of a
@@ -2744,101 +2754,103 @@ async fn send_and_await_ack(
         }
         raw_write_bytes(writer, &pkt, is_tcp).await?;
 
-        // Wait for response.  Peer may send an unrelated NAK first; we
-        // discard that and try again until our deadline elapses.
-        match read_packet(reader, is_tcp, is_petscii, chkt, eol, verbose, state, deadline).await {
-            Ok(resp) => {
-                if resp.kind == TYPE_ERROR {
-                    let q = Quoting {
-                        qctl: DEFAULT_QCTL,
-                        qbin: None,
-                        rept: None,
-                        locking_shifts: false,
-                    };
-                    let msg = decode_error_message(&resp.payload, q);
-                    return Err(format!("Kermit: peer sent E-packet: {}", msg));
-                }
-                if resp.kind == TYPE_ACK && resp.seq == seq {
-                    // Suppress ACK confirmation on D-packets to keep
-                    // the multi-megabyte hot path quiet — the per-D
-                    // success trace is rate-limited upstream and
-                    // failure paths log unconditionally.
-                    if verbose && kind != TYPE_DATA {
-                        glog!(
-                            "Kermit send: ACK seq={} for type='{}'",
-                            seq,
-                            kind as char
-                        );
+        // `resend` is set true when we need to break out and retransmit
+        // (NAK for our seq, or a read timeout); left false, a definitive
+        // outcome has already returned from the function.
+        let mut resend = false;
+        while !resend {
+            match read_packet(reader, is_tcp, is_petscii, chkt, eol, verbose, state, deadline)
+                .await
+            {
+                Ok(resp) => {
+                    if resp.kind == TYPE_ERROR {
+                        let q = Quoting {
+                            qctl: DEFAULT_QCTL,
+                            qbin: None,
+                            rept: None,
+                            locking_shifts: false,
+                        };
+                        let msg = decode_error_message(&resp.payload, q);
+                        return Err(format!("Kermit: peer sent E-packet: {}", msg));
                     }
-                    return Ok(resp.payload);
+                    if resp.kind == TYPE_ACK && resp.seq == seq {
+                        // Suppress ACK confirmation on D-packets to keep
+                        // the multi-megabyte hot path quiet — the per-D
+                        // success trace is rate-limited upstream and
+                        // failure paths log unconditionally.
+                        if verbose && kind != TYPE_DATA {
+                            glog!("Kermit send: ACK seq={} for type='{}'", seq, kind as char);
+                        }
+                        return Ok(resp.payload);
+                    }
+                    if resp.kind == TYPE_NAK && resp.seq == seq {
+                        attempts += 1;
+                        if verbose {
+                            glog!(
+                                "Kermit send: NAK seq={} for type='{}' — retrying ({}/{})",
+                                seq,
+                                kind as char,
+                                attempts,
+                                max_retries
+                            );
+                        }
+                        if attempts >= max_retries {
+                            return Err(format!(
+                                "Kermit: too many NAKs (>{}) for seq {} type '{}'",
+                                max_retries, seq, kind as char
+                            ));
+                        }
+                        resend = true;
+                        continue;
+                    }
+                    if resp.kind == TYPE_ACK && is_send_init {
+                        // Some peers ACK with seq != ours during init noise
+                        // (stale ACKs from a previous aborted session, etc.).
+                        // Log when verbose so a debug session can spot it.
+                        if verbose && resp.seq != seq {
+                            glog!(
+                                "Kermit send: Send-Init ACK seq mismatch (got {}, expected {}) — accepting anyway",
+                                resp.seq, seq
+                            );
+                        }
+                        return Ok(resp.payload);
+                    }
+                    if resp.kind == TYPE_ACK {
+                        // Stale ACK for an already-advanced seq.  Some peers
+                        // (G-Kermit / Kermit-80, AnzioWin) re-emit ACKs from
+                        // earlier packets.  Discard and keep reading for the
+                        // right ACK — crucially WITHOUT retransmitting, so we
+                        // don't seed a duplicate-ACK cascade.
+                        if verbose {
+                            glog!(
+                                "Kermit send: stale ACK seq={} (waiting for seq={}) — discarding, not resending",
+                                resp.seq, seq
+                            );
+                        }
+                        continue;
+                    }
+                    // Unexpected packet — surface as protocol error.
+                    return Err(format!(
+                        "Kermit: unexpected response type='{}' seq={} (expected ACK seq={})",
+                        resp.kind as char, resp.seq, seq
+                    ));
                 }
-                if resp.kind == TYPE_NAK && resp.seq == seq {
+                Err(e) => {
                     attempts += 1;
                     if verbose {
                         glog!(
-                            "Kermit send: NAK seq={} for type='{}' — retrying ({}/{})",
+                            "Kermit send: read error after seq={} type='{}' — retrying ({}/{}): {}",
                             seq,
                             kind as char,
                             attempts,
-                            max_retries
+                            max_retries,
+                            e
                         );
                     }
                     if attempts >= max_retries {
-                        return Err(format!(
-                            "Kermit: too many NAKs (>{}) for seq {} type '{}'",
-                            max_retries, seq, kind as char
-                        ));
+                        return Err(format!("Kermit: too many timeouts: {}", e));
                     }
-                    continue;
-                }
-                if resp.kind == TYPE_ACK && is_send_init {
-                    // Some peers ACK with seq != ours during init noise
-                    // (stale ACKs from a previous aborted session, etc.).
-                    // Log when verbose so a debug session can spot it.
-                    if verbose && resp.seq != seq {
-                        glog!(
-                            "Kermit send: Send-Init ACK seq mismatch (got {}, expected {}) — accepting anyway",
-                            resp.seq, seq
-                        );
-                    }
-                    return Ok(resp.payload);
-                }
-                if resp.kind == TYPE_ACK {
-                    // Stale ACK for an already-advanced seq.  Some peers
-                    // (AnzioWin observed) re-emit ACKs from earlier
-                    // packets after we've already moved on — typically
-                    // happens when our retransmits stack up in their
-                    // input buffer and they ACK each one in order.
-                    // Discard and keep waiting for the right ACK rather
-                    // than aborting the transfer.
-                    if verbose {
-                        glog!(
-                            "Kermit send: stale ACK seq={} (waiting for seq={}) — discarding and continuing",
-                            resp.seq, seq
-                        );
-                    }
-                    continue;
-                }
-                // Unexpected packet — surface as protocol error.
-                return Err(format!(
-                    "Kermit: unexpected response type='{}' seq={} (expected ACK seq={})",
-                    resp.kind as char, resp.seq, seq
-                ));
-            }
-            Err(e) => {
-                attempts += 1;
-                if verbose {
-                    glog!(
-                        "Kermit send: read error after seq={} type='{}' — retrying ({}/{}): {}",
-                        seq,
-                        kind as char,
-                        attempts,
-                        max_retries,
-                        e
-                    );
-                }
-                if attempts >= max_retries {
-                    return Err(format!("Kermit: too many timeouts: {}", e));
+                    resend = true;
                 }
             }
         }
@@ -6665,6 +6677,57 @@ mod tests {
         let mut c = cursor(pkt);
         let result = read_packet(&mut c, false, false, b'3', CR, false, &mut state, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_does_not_retransmit_on_stale_ack() {
+        // Regression: a stale/duplicate ACK for an earlier seq must be
+        // discarded WITHOUT resending the current packet.  Resending
+        // makes the peer re-ACK the resend, whose ACK arrives as the
+        // next "stale" ACK and triggers another resend — the
+        // self-perpetuating duplicate-ACK cascade seen as a burst of
+        // "retries" at the start of a serial Kermit download.
+        let payload = b"data";
+        let seq = 2u8;
+        // Peer delivers a stale ACK (seq 1) before the real ACK (seq 2).
+        let mut wire = build_packet(TYPE_ACK, 1, &[], b'1', 0, 0, CR);
+        wire.extend(build_packet(TYPE_ACK, seq, &[], b'1', 0, 0, CR));
+        let mut reader = cursor(wire);
+        let mut writer: Vec<u8> = Vec::new();
+        let mut state = ReadState::default();
+        let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+        let out = send_and_await_ack(
+            &mut reader,
+            &mut writer,
+            TYPE_DATA,
+            seq,
+            payload,
+            b'1',
+            0,
+            0,
+            CR,
+            false, // is_tcp
+            false, // is_petscii
+            false, // verbose
+            &mut state,
+            deadline,
+            5, // max_retries
+            false, // is_send_init
+        )
+        .await
+        .expect("stale-then-real ACK should still succeed");
+        assert!(out.is_empty(), "D-packet ACK carries no payload");
+        // The D-packet must appear on the wire exactly once — the stale
+        // ACK did not cause a retransmit.
+        let pkt = build_packet(TYPE_DATA, seq, payload, b'1', 0, 0, CR);
+        let count = writer
+            .windows(pkt.len())
+            .filter(|w| *w == pkt.as_slice())
+            .count();
+        assert_eq!(
+            count, 1,
+            "packet should be transmitted once, not resent on a stale ACK"
+        );
     }
 
     #[tokio::test]
