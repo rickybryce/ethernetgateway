@@ -801,7 +801,7 @@ fn collect_form_updates(
     let plain_keys: &[&str] = &[
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "username", "password",
-        "transfer_dir", "max_sessions", "idle_timeout_secs",
+        "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
         "groq_api_key", "browser_homepage", "weather_zip",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
         "xmodem_max_retries", "xmodem_negotiation_retry_interval",
@@ -1360,12 +1360,27 @@ fn render_scripture_and_logo() -> String {
 
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
-    // Server More — session cap, idle timeout, gateway advanced settings.
+    // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
+    // factor so "1" and "1.0" both select 100% and any custom value still shows.
+    let zf = cfg.gui_zoom_factor();
+    let zsel = |target: f32| -> &'static str {
+        if zf.is_some_and(|z| (z - target).abs() < 0.01) { "selected" } else { "" }
+    };
+    // Server More — session cap, idle timeout, GUI scale, gateway advanced.
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-server\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">Server \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-server\">\u{00d7}</button></div>\
          <div class=\"row\">{sessions} {idle}</div>\
+         <div class=\"row\"><span class=\"label\">GUI display scale:</span>\
+         <select name=\"gui_zoom\">\
+         <option value=\"auto\" {z_auto}>Auto</option>\
+         <option value=\"0.75\" {z75}>75%</option>\
+         <option value=\"1.0\" {z100}>100%</option>\
+         <option value=\"1.25\" {z125}>125%</option>\
+         <option value=\"1.5\" {z150}>150%</option>\
+         <option value=\"2.0\" {z200}>200%</option>\
+         </select></div>\
          <div class=\"row\">{tneg} {traw}</div>\
          <div class=\"row\"><span class=\"label\">SSH Gateway Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
@@ -1376,6 +1391,12 @@ fn render_more_popups(cfg: &Config) -> String {
          </div></div>",
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),
+        z_auto = if zf.is_none() { "selected" } else { "" },
+        z75 = zsel(0.75),
+        z100 = zsel(1.0),
+        z125 = zsel(1.25),
+        z150 = zsel(1.5),
+        z200 = zsel(2.0),
         tneg = checkbox("telnet_gateway_negotiate", "Telnet Gateway: negotiate TTYPE/NAWS", cfg.telnet_gateway_negotiate),
         traw = checkbox("telnet_gateway_raw", "Telnet Gateway: raw TCP mode", cfg.telnet_gateway_raw),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },

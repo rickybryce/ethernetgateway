@@ -49,6 +49,13 @@ const DEFAULT_DISABLE_IP_SAFETY: bool = false;
 const DEFAULT_USERNAME: &str = "admin";
 const DEFAULT_PASSWORD: &str = "changeme";
 const DEFAULT_TRANSFER_DIR: &str = "transfer";
+/// GUI display scale.  `"auto"` (or empty) lets egui use the monitor's own
+/// scale factor; a number (e.g. `1.0`, `1.25`) pins the pixels-per-point
+/// absolutely so the console renders the same size on any display.
+const DEFAULT_GUI_ZOOM: &str = "auto";
+/// Clamp range for a numeric `gui_zoom`, matching egui's practical limits.
+const GUI_ZOOM_MIN: f32 = 0.5;
+const GUI_ZOOM_MAX: f32 = 3.0;
 const DEFAULT_MAX_SESSIONS: usize = 50;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900; // 15 minutes
 const DEFAULT_GROQ_API_KEY: &str = "";
@@ -442,6 +449,11 @@ pub struct Config {
     /// manager placement).  Deliberately NOT exposed in any config UI — it is
     /// written automatically by the GUI, never hand-edited.
     pub gui_window_geometry: String,
+    /// Desktop GUI display scale.  `"auto"` = follow the monitor's scale
+    /// factor (egui default); a number pins the absolute pixels-per-point so
+    /// the console isn't magnified on a high-DPI display.  See
+    /// [`Config::gui_zoom_factor`].
+    pub gui_zoom: String,
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     /// Groq API key. If empty, AI chat is disabled.
@@ -619,6 +631,7 @@ impl Default for Config {
             password: DEFAULT_PASSWORD.into(),
             transfer_dir: DEFAULT_TRANSFER_DIR.into(),
             gui_window_geometry: String::new(),
+            gui_zoom: DEFAULT_GUI_ZOOM.into(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             groq_api_key: DEFAULT_GROQ_API_KEY.into(),
@@ -693,6 +706,22 @@ impl Config {
             SerialPortId::A => &mut self.serial_a,
             SerialPortId::B => &mut self.serial_b,
         }
+    }
+
+    /// Resolve `gui_zoom` to an absolute pixels-per-point override for the
+    /// desktop GUI.  `None` means "auto" (empty or the literal `auto`) — let
+    /// egui follow the monitor's own scale factor.  A parsed number is clamped
+    /// to [`GUI_ZOOM_MIN`]..=[`GUI_ZOOM_MAX`] so a stray value can't render the
+    /// console unusably tiny or huge.
+    pub fn gui_zoom_factor(&self) -> Option<f32> {
+        let v = self.gui_zoom.trim();
+        if v.is_empty() || v.eq_ignore_ascii_case("auto") {
+            return None;
+        }
+        v.parse::<f32>()
+            .ok()
+            .filter(|z| z.is_finite())
+            .map(|z| z.clamp(GUI_ZOOM_MIN, GUI_ZOOM_MAX))
     }
 }
 
@@ -828,6 +857,11 @@ fn read_config_file(path: &str) -> Config {
             .get("gui_window_geometry")
             .map(|v| v.trim().to_string())
             .unwrap_or_default(),
+        gui_zoom: map
+            .get("gui_zoom")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_GUI_ZOOM.into()),
         max_sessions: map
             .get("max_sessions")
             .and_then(|v| v.parse().ok())
@@ -1396,6 +1430,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv_str(&mut content, "gui_window_geometry", &cfg.gui_window_geometry);
     content.push('\n');
 
+    content.push_str(
+        "# Desktop GUI display scale: \"auto\" follows the monitor's scale factor,\n\
+         # or set a number (e.g. 1.0, 1.25, 0.8) to pin the console size on a\n\
+         # display whose reported DPI makes the window too large or small.\n",
+    );
+    write_kv_str(&mut content, "gui_zoom", &cfg.gui_zoom);
+    content.push('\n');
+
     content.push_str("# Maximum concurrent telnet sessions\n");
     write_kv(&mut content, "max_sessions", cfg.max_sessions);
     content.push('\n');
@@ -1853,6 +1895,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "password" => cfg.password = value.to_string(),
         "transfer_dir" => cfg.transfer_dir = value.to_string(),
         "gui_window_geometry" => cfg.gui_window_geometry = value.trim().to_string(),
+        "gui_zoom" => cfg.gui_zoom = value.trim().to_string(),
         "max_sessions" => {
             if let Ok(v) = value.parse::<usize>() && v >= 1 {
                 cfg.max_sessions = v;
@@ -2493,6 +2536,7 @@ mod tests {
             password: "secret".into(),
             transfer_dir: "myfiles".into(),
             gui_window_geometry: "100,120,1280,900".into(),
+            gui_zoom: "auto".into(),
             max_sessions: 5,
             idle_timeout_secs: 60,
             groq_api_key: "gsk_test123".into(),
@@ -2767,6 +2811,7 @@ mod tests {
             "username",
             "password",
             "transfer_dir",
+            "gui_zoom",
             "max_sessions",
             "idle_timeout_secs",
             "groq_api_key",
@@ -3665,6 +3710,52 @@ mod tests {
     }
 
     // ─── normalize_phone_number ─────────────────────────
+
+    #[test]
+    fn test_gui_zoom_factor_auto_and_empty() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.gui_zoom, "auto");
+        assert_eq!(cfg.gui_zoom_factor(), None);
+        cfg.gui_zoom = "  AUTO  ".into();
+        assert_eq!(cfg.gui_zoom_factor(), None);
+        cfg.gui_zoom = "".into();
+        assert_eq!(cfg.gui_zoom_factor(), None);
+    }
+
+    #[test]
+    fn test_gui_zoom_factor_numeric_and_clamped() {
+        let mut cfg = Config::default();
+        cfg.gui_zoom = "1.0".into();
+        assert_eq!(cfg.gui_zoom_factor(), Some(1.0));
+        cfg.gui_zoom = " 1.25 ".into();
+        assert_eq!(cfg.gui_zoom_factor(), Some(1.25));
+        // Out-of-range values clamp into [GUI_ZOOM_MIN, GUI_ZOOM_MAX].
+        cfg.gui_zoom = "0.1".into();
+        assert_eq!(cfg.gui_zoom_factor(), Some(GUI_ZOOM_MIN));
+        cfg.gui_zoom = "99".into();
+        assert_eq!(cfg.gui_zoom_factor(), Some(GUI_ZOOM_MAX));
+        // Garbage / non-finite falls back to auto (None) rather than panicking.
+        cfg.gui_zoom = "big".into();
+        assert_eq!(cfg.gui_zoom_factor(), None);
+        cfg.gui_zoom = "nan".into();
+        assert_eq!(cfg.gui_zoom_factor(), None);
+    }
+
+    #[test]
+    fn test_gui_zoom_roundtrips_through_conf() {
+        let dir = std::env::temp_dir().join("egw_test_gui_zoom_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.conf");
+        let p = path.to_str().unwrap();
+
+        let cfg = Config { gui_zoom: "1.25".into(), ..Config::default() };
+        write_config_file(p, &cfg).unwrap();
+        let loaded = read_config_file(p);
+        assert_eq!(loaded.gui_zoom, "1.25");
+        assert_eq!(loaded.gui_zoom_factor(), Some(1.25));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_normalize_phone_number_digits_only() {

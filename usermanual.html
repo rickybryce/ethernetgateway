@@ -580,6 +580,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>slave_master_password</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified password.</td></tr>
         <tr><td><code>relay_transport</code></td><td>string</td><td><code>ssh</code></td><td>Relay transport; only <code>ssh</code> is implemented.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
+        <tr><td><code>gui_zoom</code></td><td>string</td><td><code>auto</code></td><td>Desktop GUI display scale. <code>auto</code> follows the monitor's scale factor; a number (e.g. <code>1.0</code>, <code>1.25</code>) pins the console window's pixels-per-point so an over-reported DPI doesn't render it oversized. Clamped to 0.5&ndash;3.0.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>Session idle timeout. 0 disables.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, the gateway accepts inbound telnet/SSH from any address. Default <code>false</code> restricts to RFC-1918 private ranges and loopback. See §5.4.</td></tr>

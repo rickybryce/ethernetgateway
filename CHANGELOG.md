@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - Unreleased
 
 ### Added
+- **Configurable desktop GUI display scale (`gui_zoom`).** The console window
+  now honors a `gui_zoom` setting: `auto` (default) follows the monitor's own
+  scale factor as before, while a number (e.g. `1.0`, `1.25`, `0.8`) pins the
+  window's pixels-per-point absolutely so a display that reports an inflated
+  DPI no longer renders the GUI oversized. Selectable as "Display scale" from
+  the GUI's Server → More panel and the web config's Server → More page
+  (Auto / 75% / 100% / 125% / 150% / 200%), and clamped to 0.5–3.0.
 - **Show the file being downloaded on the SELECT PROTOCOL screen.** The
   download protocol picker now displays the file name (truncated to the
   terminal width) and byte size above the protocol list, so the user can

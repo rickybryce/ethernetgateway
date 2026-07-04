@@ -763,6 +763,32 @@ impl App {
             ui.add_space(8.0);
             labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
         });
+        ui.add_space(4.0);
+        // Display scale for THIS console window. "Auto" follows the monitor's
+        // reported DPI; a fixed percentage pins the size so a display that
+        // over-reports its scale factor doesn't blow the window up.
+        ui.horizontal(|ui| {
+            ui.label("Display scale:");
+            let selected = match self.cfg.gui_zoom_factor() {
+                None => "Auto".to_string(),
+                Some(z) => format!("{}%", (z * 100.0).round() as i32),
+            };
+            egui::ComboBox::from_id_salt("gui_zoom_combo")
+                .width(90.0)
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (label, val) in [
+                        ("Auto", "auto"),
+                        ("75%", "0.75"),
+                        ("100%", "1.0"),
+                        ("125%", "1.25"),
+                        ("150%", "1.5"),
+                        ("200%", "2.0"),
+                    ] {
+                        ui.selectable_value(&mut self.cfg.gui_zoom, val.to_string(), label);
+                    }
+                });
+        });
     }
 
     /// Render the Server frame's advanced options — outbound Telnet and
@@ -1955,6 +1981,18 @@ impl eframe::App for App {
         if !self.theme_applied {
             apply_theme(ui.ctx());
             self.theme_applied = true;
+        }
+
+        // Pin the display scale when the operator set an explicit `gui_zoom`.
+        // `None` ("auto") leaves egui following the monitor's own scale factor;
+        // a number overrides pixels-per-point absolutely so a display that
+        // reports an inflated DPI doesn't render the console oversized.  egui
+        // only repaints on an actual change, and the guard keeps us from
+        // requesting one every frame once the value has settled.
+        if let Some(ppp) = self.cfg.gui_zoom_factor() {
+            if (ui.ctx().pixels_per_point() - ppp).abs() > f32::EPSILON {
+                ui.ctx().set_pixels_per_point(ppp);
+            }
         }
 
         // Close the GUI window when the server shuts down

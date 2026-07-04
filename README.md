@@ -531,6 +531,13 @@ password = changeme
 # Directory for file transfers (relative to working directory)
 transfer_dir = transfer
 
+# Desktop GUI display scale. "auto" follows the monitor's own scale factor;
+# set a number (e.g. 1.0, 1.25, 0.8) to pin the console window's size on a
+# display whose reported DPI otherwise renders it too large or too small.
+# Clamped to 0.5-3.0. Also selectable from the GUI's Server "More" panel
+# and the web config's Server -> More page.
+gui_zoom = auto
+
 # Maximum concurrent telnet sessions
 max_sessions = 50
 
