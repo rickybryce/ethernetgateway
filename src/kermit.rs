@@ -4454,6 +4454,29 @@ fn ensure_crlf_terminator(body: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Promote every bare LF in a multi-line text body to CRLF (leaving
+/// existing CRLFs intact).  Kermit's canonical text-mode record
+/// separator is CRLF; the receiver converts it to the local convention
+/// on display.  A hardware CP/M client (Kermit-80) does NO translation,
+/// so a bare LF leaves the cursor at the current column and the listing
+/// "staircases" down and to the right.  C-Kermit on Unix hides the bug
+/// because its tty adds the CR (ONLCR).  Applied to our synthetic text
+/// replies (DIR listing, HELP) before they ride the inverse-file
+/// transfer; NOT applied to `TYPE`, whose caller-supplied file bytes
+/// must go out unmodified.
+fn crlf_encode_text(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + body.len() / 16 + 2);
+    let mut prev = 0u8;
+    for &b in body {
+        if b == b'\n' && prev != b'\r' {
+            out.push(b'\r');
+        }
+        out.push(b);
+        prev = b;
+    }
+    out
+}
+
 /// Multi-line help text sent in response to `G H` (or `G ?`).  Lists
 /// every G subcommand we recognise so a peer doing `remote help`
 /// gets a useful answer instead of a no-op ACK.  Kept ASCII-only —
@@ -4872,11 +4895,14 @@ pub(crate) async fn kermit_server_with_outcome(
                             tokio::task::spawn_blocking(move || format_dir_listing(&dir_path))
                                 .await
                                 .unwrap_or_default();
+                        // CRLF-encode so a hardware CP/M client (Kermit-80)
+                        // sees proper line breaks instead of a staircase.
+                        let listing = crlf_encode_text(listing.as_bytes());
                         send_g_inverse_file_response(
                             reader,
                             writer,
                             "DIR",
-                            listing.as_bytes(),
+                            &listing,
                             is_tcp,
                             is_petscii,
                             verbose,
@@ -4936,12 +4962,14 @@ pub(crate) async fn kermit_server_with_outcome(
                         // HELP — reply with the list of supported G
                         // subcommands.  C-Kermit's `remote help`
                         // sends G ?; some implementations use G H.
-                        // We accept both.
+                        // We accept both.  CRLF-encode so a CP/M client
+                        // (Kermit-80) renders the lines without staircasing.
+                        let help = crlf_encode_text(kermit_g_help_text().as_bytes());
                         send_g_inverse_file_response(
                             reader,
                             writer,
                             "HELP",
-                            kermit_g_help_text().as_bytes(),
+                            &help,
                             is_tcp,
                             is_petscii,
                             verbose,
@@ -6138,6 +6166,38 @@ mod tests {
     use super::*;
 
     // ---------- Encoding primitives ----------
+
+    #[test]
+    fn test_crlf_encode_text_promotes_bare_lf() {
+        // Bare LFs become CRLF; existing CRLFs are left intact; content
+        // with no newline is unchanged.  This is what keeps a hardware
+        // Kermit-80 (CP/M) `remote dir` from staircasing.
+        assert_eq!(crlf_encode_text(b"a\nb\n"), b"a\r\nb\r\n");
+        assert_eq!(crlf_encode_text(b"a\r\nb\r\n"), b"a\r\nb\r\n");
+        assert_eq!(crlf_encode_text(b"no newline"), b"no newline");
+        assert_eq!(crlf_encode_text(b""), b"");
+        // Mixed: a bare LF next to an already-correct CRLF.
+        assert_eq!(crlf_encode_text(b"x\r\ny\nz"), b"x\r\ny\r\nz");
+        // A lone CR (no following LF) is left untouched.
+        assert_eq!(crlf_encode_text(b"a\rb"), b"a\rb");
+    }
+
+    #[test]
+    fn test_kermit_g_help_text_crlf_encodes_cleanly() {
+        // Every LF in the help/DIR bodies must ride the wire as CRLF so
+        // a CP/M client renders line breaks.  Re-encoding an already
+        // CRLF-encoded body is idempotent (no doubled CRs).
+        let once = crlf_encode_text(kermit_g_help_text().as_bytes());
+        let twice = crlf_encode_text(&once);
+        assert_eq!(once, twice);
+        assert!(!once.windows(3).any(|w| w == b"\r\r\n"));
+        // No LF is left without a preceding CR.
+        for i in 0..once.len() {
+            if once[i] == b'\n' {
+                assert!(i > 0 && once[i - 1] == b'\r', "bare LF at index {i}");
+            }
+        }
+    }
 
     #[test]
     fn test_tochar_unchar_roundtrip() {
