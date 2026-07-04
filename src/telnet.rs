@@ -14169,10 +14169,10 @@ impl TelnetSession {
             "       auto-detected from block 0.",
             "    Z  ZMODEM - full Forsberg",
             "       batch with ZSKIP handling.",
-            "    K  Kermit - any flavor (also",
-            "       a server in the K slot).",
             "    P  Punter - Commodore C1",
             "       (CCGMS / Novaterm).",
+            "    Kermit is not a picker option",
+            "    - use K (server mode) above.",
             "",
             "  Picking a protocol on download:",
             "    X  Classic XMODEM (128 B)",
@@ -14182,8 +14182,9 @@ impl TelnetSession {
             "       header, then 1K data)",
             "    Z  ZMODEM (auto-starts in",
             "       most modern terminals)",
-            "    K  Kermit (client or server)",
             "    P  Punter (Commodore C1)",
+            "    Kermit is not a picker option",
+            "    - use K (server mode) above.",
             "",
             "  IAC escaping (I toggle):",
             "    Telnet reserves byte 0xFF as",
@@ -16292,15 +16293,14 @@ mod tests {
             // cyan() key, matching how the rest of this test models width.
             "  X  XMODEM/YMODEM  128/1K, auto",
             "  Z  ZMODEM         1K, autostart",
-            "  K  KERMIT         any flavor, auto",
             "  P  PUNTER         C1 CCGMS/Novaterm",
             // Download protocol picker (reached from D).  PUNTER's
             // "C1 CCGMS/Novaterm" row is the tightest of these at 37 chars.
+            // (KERMIT is intentionally not a picker option — server mode only.)
             "  X  XMODEM     128-byte blocks",
             "  1  XMODEM-1K  1024-byte blocks",
             "  Y  YMODEM     name+size hdr, 1K",
             "  Z  ZMODEM     autostart, 1K",
-            "  K  KERMIT     any flavor, auto",
             "  P  PUNTER     C1 CCGMS/Novaterm",
             // Navigation footers
             "  R=Refresh Q=Back H=Help",

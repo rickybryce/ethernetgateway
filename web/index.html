@@ -1974,7 +1974,7 @@ relay_transport = ssh</span></code></pre>
                     <tr><th>Symptom</th><th>Solution</th></tr>
                     <tr>
                         <td>Transfer times out before starting</td>
-                        <td>Pick the same protocol on both sides: the gateway's upload menu expects XMODEM/YMODEM, ZMODEM, Kermit, or Punter, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter explicitly. If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM, default 45 s), <code>zmodem_negotiation_timeout</code> (ZMODEM, default 45 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s) in <code>egateway.conf</code>.</td>
+                        <td>Pick the same protocol on both sides: the gateway's upload menu expects XMODEM/YMODEM, ZMODEM, or Punter, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Punter explicitly. (Kermit is not on either picker &mdash; use Kermit server mode.) If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM, default 45 s), <code>zmodem_negotiation_timeout</code> (ZMODEM, default 45 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s) in <code>egateway.conf</code>.</td>
                     </tr>
                     <tr>
                         <td>Transfer fails partway through</td>
