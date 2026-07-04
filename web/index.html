@@ -886,12 +886,12 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>If the file already exists, confirm overwrite with <strong>Y</strong></li>
                         <li>On the <strong>SELECT UPLOAD PROTOCOL</strong> screen press
                             <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected),
-                            <strong>Z</strong> (ZMODEM),
-                            <strong>K</strong> (Kermit, any flavor &mdash; see the <a href="kermit.html">Kermit Reference</a>), or
-                            <strong>P</strong> (Punter C1)</li>
-                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), <code>kermit_negotiation_timeout</code> (Kermit, default 300 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s)</li>
-                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog, or for Kermit a client like <code>kermit -s file</code> (C-Kermit) / Kermit-95</li>
-                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP). Kermit batches use the same per-file save-as behavior</li>
+                            <strong>Z</strong> (ZMODEM), or
+                            <strong>P</strong> (Punter C1). Kermit is not on this menu &mdash; use <strong>Kermit server mode</strong> (see below)</li>
+                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), or <code>punter_negotiation_timeout</code> (Punter, default 45 s)</li>
+                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, or any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog</li>
+                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP)</li>
+                        <li><strong>Kermit:</strong> to transfer with Kermit, use <strong>Kermit server mode</strong> instead (main menu &rarr; <strong>F</strong> &rarr; <strong>K</strong>) &mdash; interactive menu-driven Kermit is unreliable with some vintage clients. Idle the gateway as a server and drive it from your client's <code>send</code> / <code>get</code> commands (see the <a href="kermit.html">Kermit Reference</a>)</li>
                     </ol>
                 </div>
 
@@ -906,8 +906,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                             <strong>1</strong> (XMODEM-1K, 1024-byte blocks with SOH fallback),
                             <strong>Y</strong> (YMODEM, filename + size header),
                             <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals),
-                            <strong>K</strong> (Kermit, any flavor &mdash; see <a href="kermit.html">Kermit Reference</a>),
-                            or <strong>P</strong> (Punter C1; the outbound file type &mdash; PRG, SEQ, or USR &mdash; is auto-detected from the filename extension)</li>
+                            or <strong>P</strong> (Punter C1; the outbound file type &mdash; PRG, SEQ, or USR &mdash; is auto-detected from the filename extension). Kermit is not on this menu &mdash; use <strong>Kermit server mode</strong> and pull the file with your client's <code>get</code> command (see the <a href="kermit.html">Kermit Reference</a>)</li>
                         <li>Start the matching receive in your terminal and choose where to save the file locally</li>
                         <li>The file is transmitted and the server reports bytes / blocks / elapsed time on completion</li>
                     </ol>

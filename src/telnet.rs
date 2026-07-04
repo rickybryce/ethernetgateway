@@ -148,6 +148,14 @@ enum UploadProtocol {
     /// Kermit — receiver waits for the peer's Send-Init; flavor
     /// (C-Kermit, G-Kermit, etc.) is auto-detected from the peer's
     /// CAPAS bits and surfaced in the post-transfer summary.
+    ///
+    /// No longer offered on the interactive upload menu: interactive
+    /// Kermit transfer is unreliable with some vintage clients (see the
+    /// QTerm/SC126 investigation in `kermitTest.md`), whereas Kermit
+    /// *server mode* works.  The variant + its receive path are kept so
+    /// server mode still functions and the menu option can be restored
+    /// easily once interactive Kermit is fixed.
+    #[allow(dead_code)]
     Kermit,
     /// Punter (C1) — the protocol CCGMS / Novaterm speak natively on
     /// Commodore BBSes.  Receiver drives the GOO/ACK/S-B handshake and
@@ -174,6 +182,14 @@ enum DownloadProtocol {
     /// Kermit — full-spec Kermit with negotiated long packets,
     /// sliding window, streaming, and attribute packets per the
     /// peer's CAPAS bits.
+    ///
+    /// No longer offered on the interactive download menu: interactive
+    /// Kermit transfer is unreliable with some vintage clients (see the
+    /// QTerm/SC126 investigation in `kermitTest.md`), whereas Kermit
+    /// *server mode* works for downloads.  The variant + its send path
+    /// are kept so server mode still functions and the menu option can
+    /// be restored easily once interactive Kermit is fixed.
+    #[allow(dead_code)]
     Kermit,
     /// Punter (C1) — Commodore BBS protocol; sender drives the
     /// ACK/block handshake.  File type (PRG/SEQ) is auto-detected from
@@ -4254,11 +4270,9 @@ impl TelnetSession {
             self.cyan("Z")
         ))
         .await?;
-        self.send_line(&format!(
-            "  {}  KERMIT         any flavor, auto",
-            self.cyan("K")
-        ))
-        .await?;
+        // KERMIT is intentionally omitted: interactive Kermit upload is
+        // unreliable with some vintage clients; use Kermit server mode
+        // instead.  See the DownloadProtocol/UploadProtocol Kermit docs.
         self.send_line(&format!(
             "  {}  PUNTER         C1 CCGMS/Novaterm",
             self.cyan("P")
@@ -4292,7 +4306,7 @@ impl TelnetSession {
             let chosen = match ch {
                 'x' | 'y' => Some(UploadProtocol::XmodemYmodem),
                 'z' => Some(UploadProtocol::Zmodem),
-                'k' => Some(UploadProtocol::Kermit),
+                // 'k' (Kermit) intentionally unmapped — use server mode.
                 'p' => Some(UploadProtocol::Punter),
                 _ => None,
             };
@@ -4953,11 +4967,9 @@ impl TelnetSession {
             self.cyan("Z")
         ))
         .await?;
-        self.send_line(&format!(
-            "  {}  KERMIT     any flavor, auto",
-            self.cyan("K")
-        ))
-        .await?;
+        // KERMIT is intentionally omitted: interactive Kermit download is
+        // unreliable with some vintage clients; use Kermit server mode
+        // instead.  See the DownloadProtocol Kermit doc comment.
         self.send_line(&format!(
             "  {}  PUNTER     C1 CCGMS/Novaterm",
             self.cyan("P")
@@ -4990,7 +5002,7 @@ impl TelnetSession {
                 '1' => Some(DownloadProtocol::Xmodem1k),
                 'y' => Some(DownloadProtocol::Ymodem),
                 'z' => Some(DownloadProtocol::Zmodem),
-                'k' => Some(DownloadProtocol::Kermit),
+                // 'k' (Kermit) intentionally unmapped — use server mode.
                 'p' => Some(DownloadProtocol::Punter),
                 _ => None,
             };
