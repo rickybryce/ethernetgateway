@@ -65,6 +65,27 @@ pub fn run(
     // before this call), so this never delays telnet/SSH/serial.
     wait_for_display(&shutdown);
 
+    // A monitor that advertises a high DPI — e.g. a large `Xft.dpi` on this
+    // display's X session — makes winit choose a big scale factor, so both the
+    // window *and* its egui content come up oversized and the window can spill
+    // off the screen edges (winit 0.30 uses `Xft.dpi / 96` when
+    // `WINIT_X11_SCALE_FACTOR` is unset).  When the operator pins `gui_zoom` to
+    // a number, enforce it at the windowing layer via that variable so the
+    // window is sized at that scale too — not just the content.  The per-frame
+    // `set_pixels_per_point` in `ui()` still scales the content and covers
+    // Wayland, where this X11-only override is ignored.  Leave "auto" to read
+    // the display as before, and don't clobber an operator-set value.
+    if let Some(z) = cfg.gui_zoom_factor() {
+        if std::env::var_os("WINIT_X11_SCALE_FACTOR").is_none() {
+            // SAFETY: set once here at GUI startup, before `run_native` below
+            // creates the winit event loop that reads it; no other thread
+            // reads or writes this variable.
+            unsafe {
+                std::env::set_var("WINIT_X11_SCALE_FACTOR", format!("{z}"));
+            }
+        }
+    }
+
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // `mut` is only needed on ARM, where we patch wgpu limits below.
         // Restore the saved window geometry (position + inner size) so the GUI
