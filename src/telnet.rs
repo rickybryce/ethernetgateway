@@ -7819,9 +7819,17 @@ impl TelnetSession {
     /// transport failure (connect drop, reset).  Returns the body bytes or a
     /// short error string.
     fn weather_http_get(agent: &ureq::Agent, url: &str, cap: u64) -> Result<Vec<u8>, String> {
+        // MET Norway (the fallback provider) rejects requests without a
+        // descriptive User-Agent (HTTP 403); Open-Meteo accepts it too, so set
+        // it on every weather call.
+        const UA: &str = concat!(
+            "ethernet-gateway/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://github.com/rickybryce/ethernet-gateway)"
+        );
         let mut last = String::new();
         for _ in 0..2 {
-            match agent.get(url).call() {
+            match agent.get(url).header("User-Agent", UA).call() {
                 Ok(resp) => {
                     let mut bytes = Vec::new();
                     resp.into_body()
@@ -7877,8 +7885,12 @@ impl TelnetSession {
              &timezone={}&forecast_days=3",
             lat, lon, timezone
         );
-        let wx_bytes = Self::weather_http_get(&agent, &wx_url, 128 * 1024)
-            .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
+        let wx_bytes = match Self::weather_http_get(&agent, &wx_url, 128 * 1024) {
+            Ok(b) => b,
+            // Primary forecast host unreachable — fall back to MET Norway,
+            // reusing the coordinates we already geocoded via Open-Meteo.
+            Err(_) => return Self::fetch_weather_metno(&agent, lat, lon, city, region),
+        };
         let wx: serde_json::Value = serde_json::from_slice(&wx_bytes)
             .map_err(|_| "Weather service returned bad data.".to_string())?;
 
@@ -7927,6 +7939,180 @@ impl TelnetSession {
             desc: desc.to_string(),
             forecast,
         })
+    }
+
+    /// Fallback forecast provider: MET Norway (api.met.no) Locationforecast
+    /// 2.0 — free, no API key (needs the descriptive User-Agent set in
+    /// `weather_http_get`).  Reuses the lat/lon/city/region already geocoded
+    /// via Open-Meteo and maps MET's Celsius / metres-per-second timeseries
+    /// into our Fahrenheit/mph `WeatherData`.  Daily high/low are aggregated by
+    /// UTC date (a fallback approximation — the primary Open-Meteo path uses
+    /// the location's local day boundaries).
+    fn fetch_weather_metno(
+        agent: &ureq::Agent,
+        lat: f64,
+        lon: f64,
+        city: &str,
+        region: &str,
+    ) -> Result<WeatherData, String> {
+        let url = format!(
+            "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={:.4}&lon={:.4}",
+            lat, lon
+        );
+        let bytes = Self::weather_http_get(agent, &url, 512 * 1024)
+            .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
+        let doc: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "Weather service returned bad data.".to_string())?;
+
+        let series = doc
+            .get("properties")
+            .and_then(|p| p.get("timeseries"))
+            .and_then(|t| t.as_array())
+            .ok_or("Weather service returned bad data.")?;
+        let first = series.first().ok_or("No current weather")?;
+        let inst = first
+            .get("data")
+            .and_then(|d| d.get("instant"))
+            .and_then(|i| i.get("details"))
+            .ok_or("No current weather")?;
+
+        let c_to_f = |c: f64| c * 9.0 / 5.0 + 32.0;
+        let ms_to_mph = |ms: f64| ms * 2.236_936;
+
+        let temp_c = inst.get("air_temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let humidity = inst.get("relative_humidity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let wind_ms = inst.get("wind_speed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let wind_deg = inst.get("wind_from_direction").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+        // Current condition: prefer the next-hour symbol, else the 6-hour one.
+        let desc = first
+            .get("data")
+            .and_then(|d| d.get("next_1_hours").or_else(|| d.get("next_6_hours")))
+            .and_then(|n| n.get("summary"))
+            .and_then(|s| s.get("symbol_code"))
+            .and_then(|v| v.as_str())
+            .map(Self::metno_symbol_description)
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // 3-day forecast: group instant air temps by UTC date → min/max, and
+        // take the first symbol seen for each day.
+        let mut days: std::collections::BTreeMap<String, (f64, f64, Option<String>)> =
+            std::collections::BTreeMap::new();
+        for entry in series {
+            let time = match entry.get("time").and_then(|v| v.as_str()) {
+                Some(t) if t.len() >= 10 => t,
+                _ => continue,
+            };
+            let date = time[..10].to_string();
+            let Some(data) = entry.get("data") else { continue };
+            let Some(t) = data
+                .get("instant")
+                .and_then(|i| i.get("details"))
+                .and_then(|d| d.get("air_temperature"))
+                .and_then(|v| v.as_f64())
+            else {
+                continue;
+            };
+            let e = days.entry(date).or_insert((t, t, None));
+            if t < e.0 {
+                e.0 = t;
+            }
+            if t > e.1 {
+                e.1 = t;
+            }
+            if e.2.is_none() {
+                if let Some(sym) = data
+                    .get("next_6_hours")
+                    .or_else(|| data.get("next_1_hours"))
+                    .and_then(|n| n.get("summary"))
+                    .and_then(|s| s.get("symbol_code"))
+                    .and_then(|v| v.as_str())
+                {
+                    e.2 = Some(sym.to_string());
+                }
+            }
+        }
+        let forecast: Vec<ForecastDay> = days
+            .into_iter()
+            .take(3)
+            .map(|(date, (lo, hi, sym))| ForecastDay {
+                date,
+                high: format!("{:.0}", c_to_f(hi)),
+                low: format!("{:.0}", c_to_f(lo)),
+                desc: sym
+                    .map(|s| Self::metno_symbol_description(&s))
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            })
+            .collect();
+
+        Ok(WeatherData {
+            city: city.to_string(),
+            region: region.to_string(),
+            temp_f: format!("{:.0}", c_to_f(temp_c)),
+            // MET's compact product has no apparent temperature; use air temp.
+            feels_like: format!("{:.0}", c_to_f(temp_c)),
+            humidity: format!("{:.0}", humidity),
+            wind_mph: format!("{:.0}", ms_to_mph(wind_ms)),
+            wind_dir: Self::degrees_to_compass(wind_deg).to_string(),
+            desc,
+            forecast,
+        })
+    }
+
+    /// Map a MET Norway `symbol_code` (e.g. `partlycloudy_day`) to a short
+    /// description.  The `_day` / `_night` / `_polartwilight` variant suffix is
+    /// dropped; unknown codes fall back to the raw base code.
+    fn metno_symbol_description(code: &str) -> String {
+        let base = code.split('_').next().unwrap_or(code);
+        let d = match base {
+            "clearsky" => "Clear sky",
+            "fair" => "Fair",
+            "partlycloudy" => "Partly cloudy",
+            "cloudy" => "Cloudy",
+            "fog" => "Fog",
+            "rain" => "Rain",
+            "lightrain" => "Light rain",
+            "heavyrain" => "Heavy rain",
+            "rainandthunder" => "Rain and thunder",
+            "lightrainandthunder" => "Light rain, thunder",
+            "heavyrainandthunder" => "Heavy rain, thunder",
+            "rainshowers" => "Rain showers",
+            "lightrainshowers" => "Light rain showers",
+            "heavyrainshowers" => "Heavy rain showers",
+            "rainshowersandthunder" => "Rain showers, thunder",
+            "lightrainshowersandthunder" => "Light rain showers, thunder",
+            "heavyrainshowersandthunder" => "Heavy rain showers, thunder",
+            "sleet" => "Sleet",
+            "lightsleet" => "Light sleet",
+            "heavysleet" => "Heavy sleet",
+            "sleetandthunder" => "Sleet and thunder",
+            "lightsleetandthunder" => "Light sleet, thunder",
+            "heavysleetandthunder" => "Heavy sleet, thunder",
+            "sleetshowers" => "Sleet showers",
+            "lightsleetshowers" => "Light sleet showers",
+            "heavysleetshowers" => "Heavy sleet showers",
+            "sleetshowersandthunder" => "Sleet showers, thunder",
+            "lightssleetshowersandthunder" => "Light sleet showers, thunder",
+            "heavysleetshowersandthunder" => "Heavy sleet showers, thunder",
+            "snow" => "Snow",
+            "lightsnow" => "Light snow",
+            "heavysnow" => "Heavy snow",
+            "snowandthunder" => "Snow and thunder",
+            "lightsnowandthunder" => "Light snow, thunder",
+            "heavysnowandthunder" => "Heavy snow, thunder",
+            "snowshowers" => "Snow showers",
+            "lightsnowshowers" => "Light snow showers",
+            "heavysnowshowers" => "Heavy snow showers",
+            "snowshowersandthunder" => "Snow showers, thunder",
+            "lightssnowshowersandthunder" => "Light snow showers, thunder",
+            "heavysnowshowersandthunder" => "Heavy snow showers, thunder",
+            _ => "",
+        };
+        if d.is_empty() {
+            base.to_string()
+        } else {
+            d.to_string()
+        }
     }
 
     fn degrees_to_compass(deg: f64) -> &'static str {

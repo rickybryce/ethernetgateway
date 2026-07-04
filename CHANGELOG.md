@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates a subdirectory inside the current transfer working directory (the
   name is validated like a filename — a single component, no `..` or `/`), then
   asks whether to make it the working directory.
+- **Weather falls back to MET Norway when Open-Meteo is unreachable.** If the
+  Open-Meteo forecast host can't be reached, the Weather menu now automatically
+  retries the forecast against MET Norway (`api.met.no` Locationforecast 2.0 —
+  free, no API key, independent infrastructure), reusing the coordinates
+  already geocoded via Open-Meteo. MET's Celsius/m-per-s data is converted to
+  °F/mph and its symbol codes mapped to descriptions; you only see an error if
+  both providers fail.
 
 ### Changed
 - **Weather fetch fails fast with a clearer message.** The Open-Meteo request
