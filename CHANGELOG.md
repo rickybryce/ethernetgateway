@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already geocoded via Open-Meteo. MET's Celsius/m-per-s data is converted to
   °F/mph and its symbol codes mapped to descriptions; you only see an error if
   both providers fail.
+- **Wait for the receiver before starting a Kermit download
+  (`kermit_wait_for_receiver`, default on).** A Kermit transfer is
+  receiver-driven at the start — the receiving side sends a `NAK` to solicit the
+  sender's Send-Init (Frank da Cruz, *Kermit Protocol Manual* §4). The gateway
+  now holds its Send-Init until that poke arrives and then sends exactly one, on
+  both interactive downloads and Kermit server GET responses. A client that
+  never pokes (e.g. C-Kermit) falls through a short bounded wait and gets an
+  unprompted Send-Init as before. Wired into the telnet Kermit-settings menu
+  (**G**), the web config page, and the GUI.
 
 ### Changed
 - **Weather fetch fails fast with a clearer message.** The Open-Meteo request
@@ -38,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer hangs the Weather menu for 15 s. Errors are distinguished:
   "Zip code not found." (bad zip) vs "Weather service unreachable. Try again
   later." (network/host down) vs "Weather service returned bad data." (parse).
+
+### Fixed
+- **Kermit server GET is now case-insensitive.** A client requesting a file in
+  a different case than it is stored on disk — CP/M clients such as kercpm3
+  uppercase filenames — no longer fails "File not found" and burns a retry
+  re-requesting under another case. The server prefers an exact match, then
+  falls back to a case-insensitive match among the transfer directory's direct
+  entries, so the path-traversal protection is unchanged.
+- **Kermit server downloads no longer provoke spurious retransmissions on
+  vintage receivers.** The server was sending its Send-Init unsolicited; a
+  receiver-driven client (e.g. kercpm3 on CP/M) pokes with a `NAK` to solicit
+  it, that poke crossed our Send-Init on the wire, and we resent it — delivering
+  a duplicate the client tallied as a retry. The server now waits for the poke
+  and answers with a single Send-Init. Combined with the case-insensitive fix
+  above, this cuts the retry count such clients report on a clean download from
+  2–3 down to the single, unavoidable initiating `NAK` that the Kermit
+  receiver-driven start requires (uploads read 0 — there the client is the
+  sender and never pokes). Documented in `usermanual.html` and `kermit.html`.
 
 ### Security
 - **Refreshed dependencies to clear RustSec advisories.** `cargo update`
