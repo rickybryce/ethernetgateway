@@ -1749,6 +1749,27 @@ directions. Example invocations:
 # Kermit Server Mode (File Transfer menu &rarr; K) when ckermit dials in.</span>
 </pre>
 
+<aside class="note">
+<span class="label">Why a download shows &ldquo;1 retry&rdquo; on some clients</span>
+When a vintage client (for example <code>kercpm3</code> on an SC126/CP&#8209;M
+machine) pulls a file from the Kermit server, its status display may report
+<em>Number of retries: 1</em> even though the transfer is completely clean.
+This is normal and expected &mdash; it is <strong>not</strong> an error or a
+lost packet. Kermit&rsquo;s file transfer is <em>receiver&#8209;driven at the
+start</em> (Frank da Cruz, <em>Kermit Protocol Manual</em> §4): the receiving
+side sends a single <code>NAK</code> to solicit the sender&rsquo;s Send&#8209;Init
+(<code>S</code>) packet. The gateway waits for that solicitation and answers it
+with exactly one Send&#8209;Init, so nothing is retransmitted &mdash; but the
+client still counts the <code>NAK</code> it sent to get things going, and shows
+it as one retry. <strong>Uploads</strong> read <em>0 retries</em> because there
+the client is the <em>sender</em> and initiates with the Send&#8209;Init
+directly, so it never has to poke. Earlier gateway builds showed 2&ndash;3
+retries here because a case&#8209;sensitive filename lookup and an unsolicited
+Send&#8209;Init (which crossed the client&rsquo;s poke and was resent as a
+duplicate) each cost an extra retry; both are fixed, leaving only the
+client&rsquo;s own initiating <code>NAK</code>.
+</aside>
+
 <aside class="tip">
 <span class="label">Full Kermit reference</span>
 A standalone reference page <code>kermit.html</code> documents every
