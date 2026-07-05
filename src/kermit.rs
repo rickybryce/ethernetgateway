@@ -99,6 +99,12 @@ pub(crate) const TYPE_R: u8 = b'R';
 /// payload is a freshly-built Send-Init.
 pub(crate) const TYPE_INIT: u8 = b'I';
 
+/// Pause after ACKing a server GET (`R`) command before sending the first
+/// Send-Init, giving a serial receiver time to turn the line around and
+/// arm itself so the S packet isn't NAKed as garbage.  See the R-dispatch
+/// site; applied only when `kermit_wait_for_receiver` is on.
+const KERMIT_SERVER_SEND_SETTLE_MS: u64 = 500;
+
 // CAPAS bit positions in the first capability byte (bits are read after
 // stripping the LSB continuation flag — i.e. real bit n of capability
 // equals bit (n+1) of the unchar'd byte).
@@ -4404,6 +4410,35 @@ fn effective_transfer_path(cfg: &config::Config, subdir: &str) -> std::path::Pat
     p
 }
 
+/// Resolve a GET-requested filename against `dir`, preferring an exact
+/// match but falling back to a case-insensitive one.  CP/M and other
+/// vintage Kermit clients uppercase (or lowercase) the filename before
+/// sending it, so an exact-case `fs::read` on a case-sensitive host
+/// (Linux) misses a file stored in the other case — the peer's first GET
+/// then fails "File not found" and it burns a retry re-requesting under a
+/// different case (observed with kercpm3 on an SC126: `witness.com` →
+/// refused, `WITNESS.COM` → found).  Only direct entries of the
+/// already-validated `dir` are considered, so this never widens the
+/// path-traversal surface.  Returns the real on-disk path, or `None` if
+/// nothing matches even case-insensitively.
+async fn resolve_get_path(dir: &std::path::Path, requested: &str) -> Option<std::path::PathBuf> {
+    let exact = dir.join(requested);
+    if tokio::fs::metadata(&exact).await.is_ok() {
+        return Some(exact);
+    }
+    let mut rd = tokio::fs::read_dir(dir).await.ok()?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.eq_ignore_ascii_case(requested))
+        {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
 /// Build a one-line-per-file directory listing for a `G D` reply.
 /// Skips entries whose names start with `.` (hidden), unreadable
 /// entries, and reports `<dir>` / `<file size>` annotations.
@@ -5474,7 +5509,34 @@ pub(crate) async fn kermit_server_with_outcome(
                     // Spec §6.7: stay idle for the next command.
                     continue;
                 }
-                let path = effective_transfer_path(&cfg, &subdir).join(&fname);
+                let dir = effective_transfer_path(&cfg, &subdir);
+                // Resolve case-insensitively: a CP/M peer that uppercases
+                // the name shouldn't fail against a lower-case on-disk file
+                // (or vice versa) and burn a retry re-requesting.
+                let path = match resolve_get_path(&dir, &fname).await {
+                    Some(p) => p,
+                    None => {
+                        send_error(
+                            writer,
+                            pkt.seq,
+                            "File not found",
+                            b'1',
+                            0,
+                            0,
+                            CR,
+                            is_tcp,
+                        )
+                        .await?;
+                        if verbose {
+                            glog!(
+                                "Kermit server: refused R '{}' (file not found)",
+                                fname
+                            );
+                        }
+                        // Stay idle for the next command per spec.
+                        continue;
+                    }
+                };
                 let bytes = match tokio::fs::read(&path).await {
                     Ok(b) => b,
                     Err(_) => {
@@ -5491,7 +5553,7 @@ pub(crate) async fn kermit_server_with_outcome(
                         .await?;
                         if verbose {
                             glog!(
-                                "Kermit server: refused R '{}' (file not found)",
+                                "Kermit server: refused R '{}' (read failed)",
                                 fname
                             );
                         }
@@ -5550,6 +5612,24 @@ pub(crate) async fn kermit_server_with_outcome(
                         starting_seq
                     );
                 }
+                // Settle before the first Send-Init.  A serial receiver
+                // (kercpm3 on an SC126) needs a beat to turn the line
+                // around and arm its receiver after our R-ACK; sending S
+                // the instant we ACK lands its leading bytes while the peer
+                // is still transitioning, so the peer NAKs a garbled S and
+                // burns a retry.  A brief pause lets the first S arrive
+                // clean.  Gated on `kermit_wait_for_receiver` (default on),
+                // the same knob that guards the interactive download's S;
+                // reliable/loopback peers can turn it off.  We can't *wait
+                // for the peer's poke* here the way the interactive path
+                // does — a GET client (our own included) sits reading for
+                // the S and never solicits, so a wait would stall.
+                if cfg.kermit_wait_for_receiver {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        KERMIT_SERVER_SEND_SETTLE_MS,
+                    ))
+                    .await;
+                }
                 kermit_send_with_starting_seq(
                     reader,
                     writer,
@@ -5559,7 +5639,7 @@ pub(crate) async fn kermit_server_with_outcome(
                     verbose,
                     starting_seq,
                     false,
-                    false, // server R-dispatch: drives both ends, no wait
+                    false, // server R-dispatch: settle above, don't wait for a poke
                 )
                 .await?;
                 continue;
@@ -9738,6 +9818,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = client_result.expect("GET should succeed");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].data, payload);
+    }
+
+    #[tokio::test]
+    async fn test_client_get_is_case_insensitive() {
+        // A CP/M peer (kercpm3) uppercases the requested name, but the file
+        // on a case-sensitive host may be stored in the other case.  The
+        // server must resolve case-insensitively so the first GET succeeds
+        // instead of failing "File not found" and burning a retry.  Here
+        // the file is UPPER on disk and the client asks for lower.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_get_case_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload: Vec<u8> = (0..2048u32).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        std::fs::write(dir.join("WITNESS.COM"), &payload).unwrap();
+        config::update_config_value("transfer_dir", dir.to_str().unwrap());
+
+        let (client_result, _server_result) =
+            run_client_get_against_server("witness.com").await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let received = client_result.expect("case-insensitive GET should succeed");
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].data, payload);
     }
