@@ -608,6 +608,39 @@
                     actually executing peer-supplied shell commands is out of scope
                     and unsafe regardless of who you trust.
                 </div>
+
+                <div class="callout callout-info">
+                    <strong>A download that shows "1 retry" is clean — that's the
+                    receiver's initiating NAK.</strong>
+                    When a client pulls a file (an <code>R</code> request, or a
+                    <code>get</code> at the C-Kermit prompt), a receiver-driven
+                    client such as <code>kercpm3</code> on CP/M may report
+                    <em>Number of retries: 1</em> even on a flawless transfer. It is
+                    not an error or a lost packet. Kermit's start is receiver-driven
+                    (Frank da Cruz, <em>Kermit Protocol Manual</em> §4): after the
+                    server Y-ACKs the <code>R</code>, the receiving client sends a
+                    single <code>NAK</code> to solicit the server's Send-Init
+                    (<code>S</code>). The gateway <em>waits</em> for that poke and
+                    answers it with exactly one <code>S</code> — nothing is
+                    retransmitted — but the client still tallies the <code>NAK</code>
+                    it sent to get things moving. The poke fires the instant the
+                    client becomes a receiver, before our <code>S</code> could reach
+                    it, so there is no spec-compliant way for the server to suppress
+                    it. <strong>Uploads read <em>0 retries</em></strong> because
+                    there the client is the <em>sender</em> and opens with the
+                    Send-Init directly, never needing to poke.
+                    <p style="margin: 8px 0 0 0;">
+                    Earlier gateway builds showed 2–3 retries here for two reasons,
+                    both fixed: a case-sensitive filename lookup (a lowercase
+                    <code>get witness.com</code> failed against an on-disk
+                    <code>WITNESS.COM</code> and cost a re-request), and an
+                    <em>unsolicited</em> Send-Init that crossed the client's poke on
+                    the wire and was resent as a duplicate the client counted. The
+                    server now resolves filenames case-insensitively and waits for
+                    the poke before sending one <code>S</code>, leaving only the
+                    client's own initiating <code>NAK</code>.
+                    </p>
+                </div>
             </div>
 
             <hr class="divider">
