@@ -99,11 +99,17 @@ pub(crate) const TYPE_R: u8 = b'R';
 /// payload is a freshly-built Send-Init.
 pub(crate) const TYPE_INIT: u8 = b'I';
 
-/// Pause after ACKing a server GET (`R`) command before sending the first
-/// Send-Init, giving a serial receiver time to turn the line around and
-/// arm itself so the S packet isn't NAKed as garbage.  See the R-dispatch
-/// site; applied only when `kermit_wait_for_receiver` is on.
-const KERMIT_SERVER_SEND_SETTLE_MS: u64 = 500;
+/// Bounded wait for the GET client's initiating NAK ("poke") after we ACK
+/// its `R` command, before the server sends its first Send-Init.  Kermit's
+/// canonical start is receiver-driven — the receiver NAKs to solicit the
+/// sender's S (Frank da Cruz, "Kermit Protocol Manual" §4: "the receiver
+/// … sends a NAK … the sender responds by sending the Send-Init packet").
+/// Answering the poke means S is sent once, into a ready receiver, instead
+/// of crossing the poke and being resent as a duplicate.  Kept well under
+/// the negotiation timeout so a sender-driven peer that never pokes just
+/// falls through and gets an unprompted S.  See the R-dispatch site;
+/// applied only when `kermit_wait_for_receiver` is on.
+const KERMIT_SERVER_POKE_WAIT_MS: u64 = 1500;
 
 // CAPAS bit positions in the first capability byte (bits are read after
 // stripping the LSB continuation flag — i.e. real bit n of capability
@@ -5612,22 +5618,34 @@ pub(crate) async fn kermit_server_with_outcome(
                         starting_seq
                     );
                 }
-                // Settle before the first Send-Init.  A serial receiver
-                // (kercpm3 on an SC126) needs a beat to turn the line
-                // around and arm its receiver after our R-ACK; sending S
-                // the instant we ACK lands its leading bytes while the peer
-                // is still transitioning, so the peer NAKs a garbled S and
-                // burns a retry.  A brief pause lets the first S arrive
-                // clean.  Gated on `kermit_wait_for_receiver` (default on),
-                // the same knob that guards the interactive download's S;
-                // reliable/loopback peers can turn it off.  We can't *wait
-                // for the peer's poke* here the way the interactive path
-                // does — a GET client (our own included) sits reading for
-                // the S and never solicits, so a wait would stall.
+                // Receiver-driven start: a Kermit GET client (kercpm3 on
+                // the SC126) pokes the sender with an initiating NAK to
+                // solicit the Send-Init.  Consume that poke *first* so our
+                // S is the reply to it.  Sending S unsolicited crosses the
+                // poke on the wire; we'd then read the NAK, treat it as a
+                // rejection, and resend S — delivering a duplicate the
+                // client tallies as a retry (observed: kercpm3 counting 2–3
+                // retries per download).  Waiting for the poke means we send
+                // S exactly once, into a receiver that's ready for it.
+                //
+                // Bounded well under the negotiation timeout (not the full
+                // window the interactive download uses) so a peer that never
+                // pokes isn't stalled: a strict sender-driven peer, or our
+                // own `kermit_client_get` in tests, just falls through after
+                // the short wait and gets an unprompted S as before.  Gated
+                // on `kermit_wait_for_receiver` (default on); reliable
+                // loopback peers can turn it off.
                 if cfg.kermit_wait_for_receiver {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        KERMIT_SERVER_SEND_SETTLE_MS,
-                    ))
+                    let poke_deadline = tokio::time::Instant::now()
+                        + tokio::time::Duration::from_millis(KERMIT_SERVER_POKE_WAIT_MS);
+                    let _ = wait_for_initiating_nak(
+                        reader,
+                        is_tcp,
+                        is_petscii,
+                        verbose,
+                        &mut state,
+                        poke_deadline,
+                    )
                     .await;
                 }
                 kermit_send_with_starting_seq(
@@ -5639,7 +5657,7 @@ pub(crate) async fn kermit_server_with_outcome(
                     verbose,
                     starting_seq,
                     false,
-                    false, // server R-dispatch: settle above, don't wait for a poke
+                    false, // poke already consumed above; send S once, now
                 )
                 .await?;
                 continue;
