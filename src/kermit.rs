@@ -2078,11 +2078,62 @@ pub(crate) fn compute_resume_offset(
 // SENDER STATE MACHINE
 // =============================================================================
 
+/// Wait for the receiver's initiating NAK before we send our Send-Init on
+/// a download (gateway = sender).  A Kermit receiver pokes the sender with
+/// periodic NAK packets once it enters receive mode; holding our Send-Init
+/// until we see that first packet keeps it from painting as garbage on the
+/// user's terminal before their client is ready to receive.
+///
+/// Returns `Ok(())` as soon as any well-formed packet arrives *or* the
+/// `deadline` elapses without one — a peer that never NAKs still works,
+/// just without the guard.  A user/peer abort (ESC / CAN×2) surfaced by
+/// `read_packet` is propagated so the transfer cancels cleanly.
+async fn wait_for_initiating_nak(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    state: &mut ReadState,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    match read_packet(reader, is_tcp, is_petscii, b'1', CR, verbose, state, Some(deadline)).await {
+        Ok(p) => {
+            if verbose {
+                glog!(
+                    "Kermit send: receiver poke type='{}' seq={} — proceeding with Send-Init",
+                    p.kind as char,
+                    p.seq
+                );
+            }
+            Ok(())
+        }
+        Err(e) if e.contains("cancelled by user") || e.contains("peer aborted") => Err(e),
+        Err(e) => {
+            // Plain read timeout or a malformed poke: the peer either
+            // stayed silent or is already transmitting.  Either way, stop
+            // waiting and send the Send-Init.
+            if verbose {
+                glog!(
+                    "Kermit send: no clean initiating NAK ({}) — sending Send-Init unprompted",
+                    e
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Send one or more files via Kermit to a peer over the given duplex
 /// stream.  Handles Send-Init negotiation, optional A-packet metadata,
 /// data-packet streaming/sliding/stop-and-wait based on the negotiated
 /// capabilities, EOF + EOT, and graceful abort on E-packet receipt or
 /// CAN×2.
+///
+/// Convenience wrapper (seq 0, not a text response, no receiver-NAK wait)
+/// used by the test suite; production download drives
+/// [`kermit_send_with_starting_seq`] directly so it can gate the wait on
+/// `kermit_wait_for_receiver`.
+#[cfg(test)]
 pub(crate) async fn kermit_send(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -2091,8 +2142,10 @@ pub(crate) async fn kermit_send(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<(), String> {
-    kermit_send_with_starting_seq(reader, writer, files, is_tcp, is_petscii, verbose, 0, false)
-        .await
+    kermit_send_with_starting_seq(
+        reader, writer, files, is_tcp, is_petscii, verbose, 0, false, false,
+    )
+    .await
 }
 
 /// Same as `kermit_send` but lets the caller seed the initial sequence
@@ -2107,6 +2160,12 @@ pub(crate) async fn kermit_send(
 /// the way file uploads do.  Used by the four G-text dispatch sites
 /// (DIR / SPACE / KERMIT / HELP) to drive a spec-correct inverse file
 /// transfer back to the peer.
+///
+/// `wait_for_receiver = true` holds the Send-Init until the receiver's
+/// initiating NAK arrives (see [`wait_for_initiating_nak`]); only the
+/// interactive telnet download passes it (from `kermit_wait_for_receiver`).
+/// Server / test callers pass `false` — they drive both ends and there is
+/// no user terminal to protect from garbage, so waiting would only stall.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn kermit_send_with_starting_seq(
     reader: &mut (impl AsyncRead + Unpin),
@@ -2117,6 +2176,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
     verbose: bool,
     starting_seq: u8,
     text_response: bool,
+    wait_for_receiver: bool,
 ) -> Result<(), String> {
     // Strict spec (Frank da Cruz, "Kermit Protocol Manual"): if the transfer
     // aborts after Send-Init, the sender sends an Error ('E') packet so the
@@ -2135,6 +2195,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
         verbose,
         starting_seq,
         text_response,
+        wait_for_receiver,
         &mut abort_framing,
     )
     .await;
@@ -2164,6 +2225,7 @@ async fn kermit_send_impl(
     verbose: bool,
     starting_seq: u8,
     text_response: bool,
+    wait_for_receiver: bool,
     abort_framing: &mut Option<(u8, u8, u8, u8)>,
 ) -> Result<(), String> {
     let cfg = config::get_config();
@@ -2189,13 +2251,28 @@ async fn kermit_send_impl(
 
     let mut our_caps = config_capabilities();
     let mut state = ReadState::default();
-    let neg_deadline = tokio::time::Instant::now()
+    let mut neg_deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout);
     // pkt_timeout is set after Send-Init using the peer's negotiated
     // TIME field (spec §3.2: peer's TIME tells us how long it wants us
     // to wait before retransmitting to it).  During Send-Init itself
     // we use `neg_deadline` derived from `kermit_negotiation_timeout`.
     let max_retries = cfg.kermit_max_retries;
+
+    // On an interactive download, hold the Send-Init until the receiver's
+    // initiating NAK arrives (or the negotiation window elapses).  Sending
+    // it the instant the protocol is picked paints the S packet as garbage
+    // on the user's terminal before their Kermit client is in receive mode.
+    if wait_for_receiver {
+        wait_for_initiating_nak(reader, is_tcp, is_petscii, verbose, &mut state, neg_deadline)
+            .await?;
+        // Brief settle so the receiver is fully in receive mode before our
+        // Send-Init lands, then give the exchange a fresh negotiation
+        // deadline — the wait above consumed part of the original window.
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        neg_deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout);
+    }
 
     // 1. Send Send-Init (S, seq=0) and wait for ACK with peer's caps.
     let s_payload = build_send_init_payload(&our_caps);
@@ -4428,6 +4505,7 @@ async fn send_g_inverse_file_response(
         verbose,
         0,
         true,
+        false, // server text-response: no user terminal to protect
     )
     .await
 }
@@ -5481,6 +5559,7 @@ pub(crate) async fn kermit_server_with_outcome(
                     verbose,
                     starting_seq,
                     false,
+                    false, // server R-dispatch: drives both ends, no wait
                 )
                 .await?;
                 continue;
@@ -7915,6 +7994,7 @@ mod tests {
                 false,
                 0,
                 text_response,
+                false,
             )
             .await
         });
@@ -8021,6 +8101,7 @@ mod tests {
                 false,
                 false,
                 0,
+                false,
                 false,
             )
             .await

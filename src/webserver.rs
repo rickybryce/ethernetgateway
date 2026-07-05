@@ -842,6 +842,7 @@ fn collect_form_updates(
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
+        "kermit_wait_for_receiver",
         "allow_atdt_kermit",
         "allow_peer_dial",
         "punter_hangup_on_failure",
@@ -1431,6 +1432,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{kst} {kap}</div>\
          <div class=\"row\">{krc} {krp}</div>\
          <div class=\"row\">{kma} {kls}</div>\
+         <div class=\"row\">{kwr}</div>\
          <div class=\"row\">{atd}</div>\
          <div class=\"row\">{apd}</div>\
          <h3>Punter (C1)</h3>\
@@ -1463,6 +1465,7 @@ fn render_more_popups(cfg: &Config) -> String {
         krp = checkbox("kermit_resume_partial", "Resume partial", cfg.kermit_resume_partial),
         kma = numfield("kermit_resume_max_age_hours", "Resume max age (h)", cfg.kermit_resume_max_age_hours),
         kls = checkbox("kermit_locking_shifts", "Locking shifts", cfg.kermit_locking_shifts),
+        kwr = checkbox("kermit_wait_for_receiver", "Wait for receiver NAK (download)", cfg.kermit_wait_for_receiver),
         atd = checkbox("allow_atdt_kermit", "Allow ATDT KERMIT (modem emulator)", cfg.allow_atdt_kermit),
         apd = checkbox("allow_peer_dial", "Allow peer-dial (ATD Port@IP / ring modem ports)", cfg.allow_peer_dial),
         pbs = numfield("punter_block_size", "Block size (8-255)", cfg.punter_block_size),

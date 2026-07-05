@@ -152,6 +152,15 @@ const DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS: u32 = 168;
 /// E-Kermit) negotiates it; flip it on if you're talking to a
 /// strict-spec implementation that does.
 const DEFAULT_KERMIT_LOCKING_SHIFTS: bool = false;
+/// Wait for the receiver's initiating NAK before sending our Send-Init on
+/// a Kermit *download* (gateway = sender).  A real Kermit receiver pokes
+/// the sender with periodic NAKs once it enters receive mode; waiting for
+/// that first NAK keeps our Send-Init from landing on the terminal as
+/// on-screen garbage before the user's client is ready.  On by default;
+/// only the interactive telnet download consults it (server / test paths
+/// never wait).  Falls through and sends anyway if no NAK arrives within
+/// the negotiation timeout, so peers that don't NAK still work.
+const DEFAULT_KERMIT_WAIT_FOR_RECEIVER: bool = true;
 /// Allow `ATDT KERMIT` (or `ATDT kermit-server`) from the serial modem
 /// emulator to drop directly into Kermit server mode without going
 /// through the telnet menu's auth gate.  Off by default because it
@@ -528,6 +537,11 @@ pub struct Config {
     /// Advertise locking-shift (SO/SI) capability for 8-bit transit
     /// over 7-bit-only links.  Off by default; modern peers use QBIN.
     pub kermit_locking_shifts: bool,
+    /// On a Kermit download, wait for the receiver's initiating NAK before
+    /// sending our Send-Init (avoids on-screen garbage before the client is
+    /// in receive mode).  On by default; only the interactive telnet
+    /// download honors it.
+    pub kermit_wait_for_receiver: bool,
     /// Allow `ATDT KERMIT` to drop callers directly into Kermit server
     /// mode from the serial modem emulator, bypassing any telnet-menu
     /// auth gate.  Off by default.
@@ -662,6 +676,7 @@ impl Default for Config {
             kermit_resume_partial: DEFAULT_KERMIT_RESUME_PARTIAL,
             kermit_resume_max_age_hours: DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS,
             kermit_locking_shifts: DEFAULT_KERMIT_LOCKING_SHIFTS,
+            kermit_wait_for_receiver: DEFAULT_KERMIT_WAIT_FOR_RECEIVER,
             allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
             allow_peer_dial: DEFAULT_ALLOW_PEER_DIAL,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
@@ -1006,6 +1021,10 @@ fn read_config_file(path: &str) -> Config {
             .get("kermit_locking_shifts")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_KERMIT_LOCKING_SHIFTS),
+        kermit_wait_for_receiver: map
+            .get("kermit_wait_for_receiver")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_KERMIT_WAIT_FOR_RECEIVER),
         allow_atdt_kermit: map
             .get("allow_atdt_kermit")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1536,6 +1555,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #                              peer (C-Kermit, G-Kermit, Kermit-95, E-Kermit)
 #                              negotiates it; flip on only if you're talking
 #                              to a strict-spec implementation that does.
+# kermit_wait_for_receiver:    on a download, wait for the receiver's first
+#                              NAK before sending our Send-Init, so it doesn't
+#                              land as on-screen garbage before the client is
+#                              in receive mode.  On by default; sends anyway if
+#                              no NAK arrives within kermit_negotiation_timeout.
 # allow_atdt_kermit:           let `ATDT KERMIT` from the serial modem
 #                              emulator drop directly into Kermit server mode
 #                              without going through the telnet menu.  Off
@@ -1569,6 +1593,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "kermit_resume_partial", cfg.kermit_resume_partial);
     write_kv(&mut content, "kermit_resume_max_age_hours", cfg.kermit_resume_max_age_hours);
     write_kv(&mut content, "kermit_locking_shifts", cfg.kermit_locking_shifts);
+    write_kv(&mut content, "kermit_wait_for_receiver", cfg.kermit_wait_for_receiver);
     write_kv(&mut content, "allow_atdt_kermit", cfg.allow_atdt_kermit);
     write_kv(&mut content, "allow_peer_dial", cfg.allow_peer_dial);
     content.push('\n');
@@ -2019,6 +2044,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_locking_shifts" => {
             cfg.kermit_locking_shifts = value.eq_ignore_ascii_case("true");
         }
+        "kermit_wait_for_receiver" => {
+            cfg.kermit_wait_for_receiver = value.eq_ignore_ascii_case("true");
+        }
         "allow_peer_dial" => {
             cfg.allow_peer_dial = value.eq_ignore_ascii_case("true");
         }
@@ -2308,6 +2336,7 @@ mod tests {
         assert!(!cfg.kermit_resume_partial);
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
+        assert!(cfg.kermit_wait_for_receiver);
         assert!(!cfg.allow_atdt_kermit);
         assert!(!cfg.allow_peer_dial);
         assert!(!cfg.punter_hangup_on_failure);
@@ -2567,6 +2596,7 @@ mod tests {
             kermit_resume_partial: true,
             kermit_resume_max_age_hours: 72,
             kermit_locking_shifts: true,
+            kermit_wait_for_receiver: false,
             allow_atdt_kermit: true,
             allow_peer_dial: true,
             kermit_server_enabled: true,
@@ -2721,6 +2751,10 @@ mod tests {
             loaded.kermit_locking_shifts,
             original.kermit_locking_shifts
         );
+        assert_eq!(
+            loaded.kermit_wait_for_receiver,
+            original.kermit_wait_for_receiver
+        );
         assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
         assert_eq!(loaded.allow_peer_dial, original.allow_peer_dial);
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
@@ -2842,6 +2876,7 @@ mod tests {
             "kermit_resume_partial",
             "kermit_resume_max_age_hours",
             "kermit_locking_shifts",
+            "kermit_wait_for_receiver",
             "punter_block_size",
             "punter_negotiation_timeout",
             "punter_block_timeout",

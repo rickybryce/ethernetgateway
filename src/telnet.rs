@@ -5151,13 +5151,21 @@ impl TelnetSession {
                 modtime: file_modtime,
                 mode: file_mode,
             }];
-            crate::kermit::kermit_send(
+            // Interactive download: hold the Send-Init until the receiver's
+            // initiating NAK arrives (gated by `kermit_wait_for_receiver`) so
+            // the S packet doesn't paint as garbage on a vintage client (e.g.
+            // QTerm) that isn't yet in receive mode when the menu selection
+            // is made.  Server mode never takes this path.
+            crate::kermit::kermit_send_with_starting_seq(
                 &mut self.reader,
                 &mut *writer_guard,
                 &files,
                 self.xmodem_iac,
                 is_petscii,
                 verbose,
+                0,
+                false,
+                cfg.kermit_wait_for_receiver,
             )
             .await
         } else if matches!(protocol, DownloadProtocol::Punter) {
@@ -12769,6 +12777,11 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  Wait for rx: {}",
+                self.amber(if cfg.kermit_wait_for_receiver { "on" } else { "off" }),
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  ATDT KERMIT: {}",
                 self.amber(if cfg.allow_atdt_kermit { "enabled" } else { "disabled" })
             ))
@@ -12871,6 +12884,11 @@ impl TelnetSession {
                 "  {}  Resume max age   {}  Toggle ATDT KERMIT",
                 self.cyan("D"),
                 self.cyan("K"),
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Wait for rx",
+                self.cyan("G"),
             ))
             .await?;
             self.send_line("").await?;
@@ -13058,6 +13076,14 @@ impl TelnetSession {
                         "Resume partial uploads",
                         "kermit_resume_partial",
                         cfg.kermit_resume_partial,
+                    )
+                    .await?;
+                }
+                "g" => {
+                    self.kermit_toggle_bool(
+                        "Wait for receiver NAK on download",
+                        "kermit_wait_for_receiver",
+                        cfg.kermit_wait_for_receiver,
                     )
                     .await?;
                 }

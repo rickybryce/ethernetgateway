@@ -1500,6 +1500,12 @@ impl App {
             ui.checkbox(&mut self.cfg.kermit_resume_partial, "Resume partial uploads");
         });
         ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.cfg.kermit_wait_for_receiver,
+                "Wait for receiver NAK (download)",
+            );
+        });
+        ui.horizontal(|ui| {
             labeled_field(
                 ui,
                 "Resume max age (h):",
