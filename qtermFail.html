@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QTerm Kermit Interop — Investigation Report</title>
+<style>
+    :root {
+        --green: #33ff33;
+        --cyan: #00ffff;
+        --yellow: #ffff00;
+        --white: #f0f0f0;
+        --amber: #ffcc00;
+        --magenta: #ff66ff;
+        --red: #ff4444;
+        --dim: #888888;
+        --bg: #0a0a2e;
+        --bg-dark: #060620;
+        --bg-light: #101040;
+        --border: #3333aa;
+        --border-bright: #5555ff;
+        --link: #00ccff;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+        background: var(--bg);
+        color: var(--white);
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 17px;
+        line-height: 1.6;
+    }
+    .page {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 0 0 60px;
+        border-left: 2px solid var(--border);
+        border-right: 2px solid var(--border);
+        background: var(--bg-dark);
+    }
+    header {
+        background: var(--bg-dark);
+        padding: 34px 32px 22px;
+        border-bottom: 2px solid var(--border-bright);
+    }
+    h1 { color: var(--yellow); font-size: 30px; line-height: 1.2; }
+    h2 {
+        color: var(--cyan);
+        font-size: 23px;
+        margin: 38px 0 12px;
+        padding: 6px 0 6px 12px;
+        border-left: 4px solid var(--border-bright);
+    }
+    h3 { color: var(--amber); font-size: 19px; margin: 24px 0 8px; }
+    p, li { margin: 8px 0; }
+    ul, ol { margin: 8px 0 8px 26px; }
+    section { padding: 0 32px; }
+    code { color: var(--green); background: var(--bg-light); padding: 1px 5px; border-radius: 3px; }
+    strong { color: var(--white); }
+    a { color: var(--link); }
+    .sub { color: var(--dim); font-size: 15px; margin-top: 8px; }
+    .status {
+        display: inline-block; margin-top: 14px; padding: 6px 14px;
+        border: 2px solid var(--red); color: var(--red); border-radius: 4px;
+        font-weight: bold; letter-spacing: 1px;
+    }
+    .callout {
+        margin: 16px 0; padding: 14px 18px; border-radius: 5px;
+        background: var(--bg-light); border-left: 5px solid var(--amber);
+    }
+    .callout.key { border-left-color: var(--red); }
+    .callout.good { border-left-color: var(--green); }
+    .callout.info { border-left-color: var(--cyan); }
+    .callout strong { color: var(--amber); }
+    .callout.key strong { color: var(--red); }
+    .callout.good strong { color: var(--green); }
+    .callout.info strong { color: var(--cyan); }
+    pre {
+        background: #02020f; border: 1px solid var(--border); border-radius: 5px;
+        padding: 14px 16px; margin: 12px 0; overflow-x: auto;
+        color: var(--white); font-size: 15px; line-height: 1.5;
+    }
+    pre .c { color: var(--cyan); }
+    pre .a { color: var(--amber); }
+    pre .g { color: var(--green); }
+    pre .r { color: var(--red); }
+    pre .d { color: var(--dim); }
+    table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 15px; overflow-x: auto; display: block; }
+    th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--bg-light); color: var(--cyan); }
+    .ok { color: var(--green); }
+    .no { color: var(--red); }
+    .toc { background: var(--bg-light); border: 1px solid var(--border); border-radius: 5px; padding: 14px 18px; margin: 18px 32px; }
+    .toc a { display: inline-block; margin: 2px 14px 2px 0; }
+    footer { padding: 24px 32px; color: var(--dim); font-size: 14px; border-top: 1px solid var(--border); margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+    <h1>QTerm 4.3e ↔ Ethernet Gateway<br>Kermit Interop Investigation</h1>
+    <div class="sub">Ethernet Gateway project · <code>qtermh1.com</code> on an SC126 (Z80 / CP/M / RomWBW)<br>
+    Author: Ricky Bryce · investigation captured 2026-07-04 → 2026-07-05</div>
+    <div class="status">UNRESOLVED — root cause is the qtermh1.com binary</div>
+</header>
+
+<div class="toc">
+    <strong style="color:var(--cyan)">Contents:</strong><br>
+    <a href="#tldr">TL;DR</a>
+    <a href="#rig">Test rig</a>
+    <a href="#symptom">Symptom</a>
+    <a href="#journey">The journey</a>
+    <a href="#wire">Wire captures</a>
+    <a href="#rpack">Why "invalid packet type"</a>
+    <a href="#decisive">The decisive test</a>
+    <a href="#ruledout">Ruled out</a>
+    <a href="#conclusion">Conclusion</a>
+    <a href="#works">What does work</a>
+    <a href="#shipped">Gateway changes</a>
+</div>
+
+<section id="tldr">
+<h2>TL;DR</h2>
+<div class="callout key">
+<strong>We made the gateway send QTerm a byte-for-byte identical copy of QTerm's own Kermit Send-Init packet, and QTerm still rejected it with "Invalid packet type."</strong>
+That is proof the problem is not anything the gateway sends — <code>qtermh1.com</code>'s Kermit
+<em>receive</em> parser is defective. It does not behave like its own published source
+(<code>RECVK.Z</code> / <code>KUTIL.Z</code>), and it will not accept even its own packet format.
+No change on the gateway side can fix it.
+</div>
+<p><strong>What works instead:</strong> XMODEM between QTerm and the gateway is rock-solid at
+the same 9600&nbsp;8N1. Kermit works fine with other CP/M clients (<code>kercpm3</code> in
+server mode) and with C-Kermit 10.0. Interactive Kermit remains available in the gateway's
+upload/download menus for those clients; QTerm users should use XMODEM (or a different QTerm
+build — see <a href="#conclusion">Conclusion</a>).</p>
+</section>
+
+<section id="rig">
+<h2>Test rig</h2>
+<ul>
+    <li><strong>Gateway:</strong> Raspberry&nbsp;Pi&nbsp;5 at <code>192.168.1.178</code>, release build in <code>~/ethernet-gateway/target/release/</code>, verbose per-packet Kermit trace on the web <code>/logs</code> page (<code>:8080</code>).</li>
+    <li><strong>Client:</strong> QTerm 4.3e, binary <code>qtermh1.com</code>, on an <strong>SC126</strong> (Z80, CP/M / RomWBW). Source repo: <code>~/AltairRepos/qterm</code> (also <code>git.imzadi.de/acn/qterm</code>). Key files: <code>source/RECVK.Z</code> (receive state machine), <code>source/SENDK.Z</code> (send), <code>source/KUTIL.Z</code> (<code>rpack</code>/<code>spack</code>/checksums), <code>KERMIT.I</code>.</li>
+    <li><strong>Link:</strong> direct serial cable, SC126 UART ↔ Pi FTDI (<code>/dev/ttyUSB1</code> = <code>serial_b</code>, modem-emulator mode, <strong>9600 8N1</strong>, no flow control). "Modem mode" only emulates Hayes AT so QTerm can "dial"; there is no real modem.</li>
+    <li><strong>Wire tap:</strong> <code>socat -x -v</code> interposed between the gateway and the FTDI, logging both directions to <code>~/serialtap.log</code>. In captures below, <code class="d">&gt;</code> = gateway→SC126, <code class="d">&lt;</code> = SC126→gateway.</li>
+</ul>
+<pre><span class="d"># recreate the tap (gateway must be stopped first so ttyUSB1 is free):</span>
+socat -x -v PTY,link=~/ttyKTAP,raw,b9600,clocal=1 /dev/ttyUSB1,raw,b9600,clocal=1 &gt; ~/serialtap.log 2&gt;&amp;1 &amp;
+<span class="d"># then point the gateway at the PTY:</span>  serial_b_port = /home/ricky/ttyKTAP</pre>
+</section>
+
+<section id="symptom">
+<h2>Symptom</h2>
+<p>Kermit transfers between the gateway and QTerm fail in <strong>both directions</strong>, with
+QTerm displaying <strong class="no">"Invalid packet type."</strong> XMODEM works perfectly to the
+same machine at the same baud.</p>
+<ul>
+    <li><strong>Download</strong> (gateway = Kermit <em>sender</em>): QTerm sends its initiating NAK, the gateway replies with the Send-Init (<code>S</code>), and QTerm rejects the <code>S</code>. Traces to <code>RECVK.Z</code> <code>rinit</code> → <code>retab</code> → <code>dbadp</code> (<code>KUTIL.Z</code>, string "Invalid packet type").</li>
+    <li><strong>Upload</strong> (QTerm = Kermit <em>sender</em>): also "Invalid packet type", immediately, at <code>SENDK.Z</code> (<code>sireta</code>) → <code>dbadp</code>.</li>
+    <li>On the failing download, a stray <code>~</code> (tilde, byte <code>0x7e</code>) is spilled to QTerm's terminal — a byte lifted straight out of our Send-Init (the REPT field). A healthy Kermit receiver never dumps packet bytes to the screen; a confused one does.</li>
+</ul>
+</section>
+
+<section id="journey">
+<h2>The journey</h2>
+<ol>
+    <li><strong>Kermit <em>server</em> mode was fixed first (a different client).</strong> With <code>kercpm3</code> on RomWBW, server-mode downloads worked but showed "2–3 retries" every time. Live captures root-caused two real gateway bugs — a case-sensitive GET lookup, and an unsolicited Send-Init that crossed the receiver's initiating NAK and got resent as a duplicate — both fixed (retries → 1, the single unavoidable receiver-init NAK). Those fixes shipped. See <a href="#shipped">Gateway changes</a>.</li>
+    <li><strong>Kermit was re-enabled in the interactive upload/download menus</strong> (it had been hidden while unreliable), now that the send path was solid for the clients that work.</li>
+    <li><strong>Interactive Kermit download to QTerm.</strong> The wait-for-receiver logic worked exactly as designed: QTerm sent its initiating NAK, the gateway consumed it and sent one Send-Init. QTerm rejected the <code>S</code>: "invalid packet type."</li>
+    <li><strong>Wire tap.</strong> Confirmed our Send-Init is byte-perfect on the wire and correctly checksummed, and that the gateway does <em>not</em> echo/reflect QTerm's NAK in data mode.</li>
+    <li><strong>Source analysis of <code>rpack</code>/<code>rinit</code>.</strong> Showed that with our exact bytes, QTerm's own source must parse the packet as type <code>'S'</code> and accept it. The binary disagrees. (Details below.)</li>
+    <li><strong>QTerm-compat experiment.</strong> Emitted a Send-Init byte-structurally identical to QTerm's own — the full 13-field layout, <code>QBIN='&amp;'</code>, <code>CHKT='3'</code>. Still rejected.</li>
+    <li><strong>Trailing-XON experiment.</strong> QTerm terminates every packet with <code>CR&nbsp;+&nbsp;XON&nbsp;(0x11)</code>; we did not. Appended the trailing XON so our Send-Init became <em>100% byte-identical</em> to QTerm's own, all 20 bytes. <strong class="no">Still rejected.</strong></li>
+</ol>
+</section>
+
+<section id="wire">
+<h2>Wire captures (ground truth)</h2>
+
+<h3>QTerm's own Send-Init (captured when QTerm was the sender) — the reference</h3>
+<pre><span class="a">01 30 20 53</span>  <span class="c">7a 2c 20 40 2d 23 26 33 7e 20 20 20 20</span>  <span class="g">31</span>  <span class="r">0d 11</span>
+SOH LEN SEQ 'S'  MAXL TIME NPD PAD EOL QC QB CK RP CAP W  X1 X2  CHK  CR XON</pre>
+<p><code>LEN 0x30</code> = <code>tochar(16)</code> → 13 data bytes. <code>MAXL=90</code>, <code>TIME=12</code>,
+NPAD=0, PADC=NUL, EOL=CR, QCTL=<code>#</code>, <strong>QBIN=<code>&amp;</code></strong>,
+<strong>CHKT=<code>3</code></strong>, REPT=<code>~</code>, then CAPAS/WINDO/MAXLX all zero. Every QTerm
+packet ends <code>CR + 0x11 (XON)</code> — its fixed trailer.</p>
+
+<h3>The gateway's normal Send-Init (10-field) — first rejected</h3>
+<pre><span class="a">01 2d 20 53</span>  <span class="c">7e 27 20 40 2d 23 59 31 20 20</span>  <span class="g">21</span>  <span class="r">0d</span>
+SOH LEN SEQ 'S'  MAXL TIME NPD PAD EOL QC QB CK RP CAP  CHK  CR</pre>
+<p><code>LEN 0x2d</code> = <code>tochar(13)</code> → 10 data bytes. Spec-valid, checksum verified
+correct. QTerm rejects it "invalid packet type." (It omits the WINDO/MAXLX trailer that QTerm
+always emits — the only structural difference at this stage.)</p>
+
+<h3>The gateway's QTerm-compat Send-Init (final experiment) vs QTerm's own</h3>
+<pre>ours:        <span class="a">01 30 20 53</span> <span class="c">7a 2c 20 40 2d 23 26 33 7e 20 20 20 20</span> <span class="g">31</span> <span class="r">0d 11</span>
+QTerm's own: <span class="a">01 30 20 53</span> <span class="c">7a 2c 20 40 2d 23 26 33 7e 20 20 20 20</span> <span class="g">31</span> <span class="r">0d 11</span>
+             <span class="d">^^^^^^^^^^^^^^^^^^^^^^^^ byte-for-byte identical, all 20 bytes ^^^^^^^^^^^^^^^^^^^^^^^^</span></pre>
+<div class="callout key"><strong>This is the whole case in one line.</strong> Two identical byte streams; QTerm produces one and rejects the other. The difference is not in the bytes.</div>
+
+<h3>QTerm's initiating NAK (download, SC126→gateway)</h3>
+<pre><span class="a">01 23 20 4e 33 0d 11</span>
+SOH LEN SEQ 'N' CHK CR XON</pre>
+<p>Arrives clean and parses perfectly on the gateway side — so the SC126→gateway direction is
+byte-clean, and (with XMODEM working) so is gateway→SC126.</p>
+</section>
+
+<section id="rpack">
+<h2>Why "invalid packet type" cannot come from our bytes</h2>
+<p>Reading QTerm's own source, the <code>rinit</code> (Send-Init-wait) state does this after
+<code>rpack</code> returns the packet type in <code>A</code>:</p>
+<pre>call  rpack        <span class="d">; A = packet type, or 0 on timeout/bad-checksum</span>
+cp    'S'          <span class="d">; type 'S'?  -&gt; accept, ACK, move to file state</span>
+jr    nz,noris
+...
+noris: or a        <span class="d">; A == 0 (timeout / checksum fail)?  -&gt; send NAK</span>
+       jr nz,norif
+       ...
+norif: cp 'E'      <span class="d">; type 'E' (error packet)?  -&gt; handle error</span>
+       jr nz,retab
+retab: call dbadp  <span class="r">; else -&gt; "Invalid packet type"</span></pre>
+<p>So <code>dbadp</code> fires only when <code>rpack</code> returns a <strong>checksum-valid packet
+whose type is neither <code>'S'</code>, <code>'E'</code>, nor 0</strong>. Two facts follow:</p>
+<ul>
+    <li>A garbled or wrong-length Send-Init fails the checksum → <code>rpack</code> returns 0 → QTerm <strong>NAKs</strong> (not "invalid packet type"). So our packet is <em>not</em> simply corrupted.</li>
+    <li><code>rpack</code> reads the type byte at a <strong>fixed offset</strong> (3rd char after <code>SOH</code>), independent of the length field. Our type byte is <code>0x53 = 'S'</code>. The data-length formula (<code>E = LEN − cktyp − 0xF2</code>) correctly yields our data count when the check type is <code>'1'</code> — which it must be, since the Send-Init bootstrap always uses a type-1 checksum.</li>
+</ul>
+<p>Therefore, per the published source, our Send-Init <em>must</em> parse as <code>'S'</code> and be
+accepted. The running <code>qtermh1.com</code> binary does something different — and the
+byte-identical test below proves the divergence is in the binary, not in us.</p>
+</section>
+
+<section id="decisive">
+<h2>The decisive test</h2>
+<p>We eliminated every wire-level difference in turn until our Send-Init was a perfect copy of
+QTerm's own — same length, same 13 fields, same <code>QBIN='&amp;'</code>, same <code>CHKT='3'</code>,
+same checksum <code>'1'</code>, and finally the same trailing <code>XON</code>. All 20 bytes
+identical. QTerm rejected it exactly as before.</p>
+<div class="callout key"><strong>A Kermit receiver that rejects a byte-for-byte copy of its own Send-Init is broken.</strong> There is no packet we can construct that QTerm will accept, because we already sent it the one it emits itself.</div>
+<p>The stray <code>~</code> spilled to the terminal on failure is consistent: <code>0x7e</code> is a
+byte inside that Send-Init (the REPT field), and QTerm's receiver is dumping packet bytes to the
+display instead of consuming them — a confused parser, not a clean rejection.</p>
+</section>
+
+<section id="ruledout">
+<h2>What was ruled out (do not re-chase)</h2>
+<table>
+    <tr><th>Hypothesis</th><th>Verdict</th><th>Evidence</th></tr>
+    <tr><td>Gateway framing / checksum bug</td><td class="no">Ruled out</td><td>Send-Init byte-perfect, checksum hand-verified; matches QTerm's own format exactly.</td></tr>
+    <tr><td>Premature send / on-screen garbage</td><td class="no">Ruled out</td><td>Fixed by waiting for the receiver's initiating NAK before sending <code>S</code> (wire-confirmed). QTerm still rejects the correctly-timed <code>S</code>.</td></tr>
+    <tr><td>Block-check type mismatch</td><td class="no">Ruled out</td><td>Fails identically with <code>CHKT=1</code> (matching QTerm's <code>check=1</code> menu setting) and <code>CHKT=3</code>.</td></tr>
+    <tr><td>UART overrun / pacing</td><td class="no">Ruled out</td><td>Inter-byte pacing at 10&nbsp;ms/byte (≈10× the natural byte time) did not help.</td></tr>
+    <tr><td>Baud rate</td><td class="no">Ruled out</td><td>XMODEM works at the same 9600&nbsp;8N1.</td></tr>
+    <tr><td>8th-bit / parity corruption</td><td class="no">Ruled out</td><td>Tap shows both directions are clean 7-bit; QTerm's own NAK arrives byte-clean.</td></tr>
+    <tr><td>Reflection / echo of QTerm's NAK</td><td class="no">Ruled out</td><td>Tap shows the gateway does not echo in data mode — it consumes the NAK and sends only the <code>S</code>.</td></tr>
+    <tr><td>Packet content / structure / field set</td><td class="no">Ruled out</td><td>A byte-for-byte copy of QTerm's own Send-Init is rejected.</td></tr>
+    <tr><td><strong>qtermh1.com binary parser</strong></td><td class="ok">Root cause</td><td>By elimination, and per the source-vs-behavior contradiction above.</td></tr>
+</table>
+</section>
+
+<section id="conclusion">
+<h2>Conclusion &amp; recommendations</h2>
+<div class="callout key"><strong><code>qtermh1.com</code>'s Kermit <em>receive</em> path is defective.</strong> It rejects even its own Send-Init format, so it cannot be made to work by any change on the gateway side.</div>
+<p>Options, in order of value:</p>
+<ol>
+    <li><strong>Use a different QTerm build.</strong> The QTerm repo ships other binaries — <code>qtermh2.com</code>, <code>qterm84.com</code>, <code>qterm82.com</code>, <code>qtermc3.com</code>. If any has a working Kermit receiver, interactive Kermit will just work with no gateway change. <em>(Untested as of this report — the recommended next step.)</em></li>
+    <li><strong>Use XMODEM for QTerm.</strong> Proven reliable at 9600&nbsp;8N1, both directions.</li>
+    <li><strong>Disassemble <code>qtermh1.com</code>'s <code>rpack</code></strong> to pinpoint the defect — rigorous but slow Z80 reverse-engineering, and even if found we cannot patch the binary.</li>
+</ol>
+</section>
+
+<section id="works">
+<h2>What does work (verified)</h2>
+<ul>
+    <li><span class="ok">✓</span> <strong>XMODEM</strong> — QTerm ↔ gateway, 9600&nbsp;8N1, both directions.</li>
+    <li><span class="ok">✓</span> <strong>Kermit server mode with <code>kercpm3</code></strong> (RomWBW CP/M) — clean downloads (one canonical receiver-init NAK, which the client tallies as "1 retry").</li>
+    <li><span class="ok">✓</span> <strong>Kermit with C-Kermit 10.0</strong> — full interop, verified by the test suite.</li>
+    <li><span class="no">✗</span> <strong>Kermit with <code>qtermh1.com</code></strong> — both directions, "invalid packet type" (this report).</li>
+</ul>
+</section>
+
+<section id="shipped">
+<h2>Gateway changes that came out of this investigation</h2>
+<h3>Shipped (real fixes, kept)</h3>
+<ul>
+    <li><strong><code>kermit_wait_for_receiver</code></strong> (default on) — wait for the receiver's initiating NAK before sending the Send-Init, on both interactive downloads and server GET responses. Canonical receiver-driven start (da Cruz §4); avoids crossing the poke and sending a duplicate <code>S</code>.</li>
+    <li><strong>Case-insensitive server GET</strong> — a CP/M client that uppercases a filename no longer fails "File not found" against a lower-case on-disk file.</li>
+    <li><strong>Kermit re-enabled in the interactive upload/download menus</strong> — for the clients that work (C-Kermit, kercpm3, modern terminals).</li>
+</ul>
+<h3>Reverted (did not help)</h3>
+<ul>
+    <li><strong><code>kermit_qterm_compat</code></strong> — a QTerm-shaped Send-Init (full 13-field layout, <code>QBIN='&amp;'</code>, <code>CHKT='3'</code>, trailing XON). Since a byte-identical Send-Init is still rejected, this shim provided no benefit and was removed to keep the code clean. This report is the record of that experiment.</li>
+</ul>
+</section>
+
+<footer>
+Ethernet Gateway — QTerm Kermit interop investigation. Status: unresolved (client-binary defect).
+XMODEM and other-client Kermit remain the working paths. Companion docs:
+<code>usermanual.html</code> §8.8, <code>web/kermit.html</code>.
+</footer>
+</div>
+</body>
+</html>
