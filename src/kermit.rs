@@ -2212,6 +2212,12 @@ pub(crate) async fn kermit_send_with_starting_seq(
     )
     .await;
     if let Err(ref e) = result {
+        // DIAGNOSTIC: surface the underlying send error (write failure,
+        // over-MAXL rejection, timeout, etc.) which was previously
+        // discarded — the abort log below only said "transfer aborted".
+        if verbose {
+            glog!("Kermit send: send failed — {}", e);
+        }
         // Don't echo 'E' back at a peer that already aborted us (E / CAN×2).
         let peer_aborted = e.contains("peer sent E-packet") || e.contains("peer aborted");
         if !peer_aborted
