@@ -71,8 +71,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code to extract Groq's descriptive `error.message` (e.g. "Invalid API Key",
   rate-limit text) never ran. It now reads the body on error responses and
   reports Groq's own message.
+- **ZMODEM downloads are no longer throttled to ~5 KB/s on fast links.** When
+  reading a hex header the receiver drained up to three trailing bytes (CR, LF,
+  and an optional XON), but Forsberg's `zsendhdr` omits the XON for `ZACK` and
+  `ZFIN` frames — so on those the drain blocked the full 200 ms per frame
+  waiting for an XON that never comes. Because our sender ACK-gates every
+  1 KB subpacket (`ZCRCQ` → read `ZACK`), that phantom wait capped throughput
+  near one subpacket per 200 ms regardless of link speed. The receiver now
+  waits for the third trailing byte only for frame types that actually carry
+  it. No wire bytes change; slow retro links are unaffected (a subpacket's own
+  transmission already dwarfs 200 ms there).
+- **Plain XMODEM sends no longer report a false failure at `xmodem_max_retries
+  = 1`.** A Forsberg-compliant receiver NAKs the *first* `EOT` to verify
+  end-of-file and ACKs only the resent one (our own receiver does this), so
+  completing the handshake requires at least two `EOT` attempts. The send-side
+  `EOT` loop was bounded by `xmodem_max_retries`, so at the minimum setting of
+  1 it sent a single `EOT`, took the expected verification `NAK` as failure,
+  and reported an error on a transfer that had actually succeeded. The `EOT`
+  budget now floors at 2; a receiver that ACKs the first `EOT` still returns on
+  the first pass, so the common case is unchanged.
 
 ### Security
+- **Punter receive can no longer be hung by a flood of empty blocks.** A peer
+  that streamed valid-checksum, non-final, zero-payload blocks would spin the
+  receive loop forever: an empty block never grows the output (so the file-size
+  cap never trips) and passes the checksum (so the bad-block cap never trips).
+  A conformant C1 sender emits exactly one header-only block per phase (block 0,
+  which only announces block 1's size), so the receiver now bounds the number
+  of accepted empty non-final blocks and gives up on a peer that exceeds it.
 - **Text-mode web browser can no longer be crashed by a deeply-nested page.**
   A page whose HTML nested tags tens of thousands deep (e.g. unclosed `<div>`s,
   well under the 1 MB body cap) parsed into a DOM so deep that any recursive

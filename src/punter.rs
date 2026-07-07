@@ -99,6 +99,17 @@ const DATA_PHASE_FIRST_SIZE: u8 = DATAPOS as u8; // 7
 /// Fixed length of the (single) type-phase block: header + one type byte.
 const TYPE_PHASE_SIZE: u8 = DATAPOS as u8 + 1; // 8
 
+/// Upper bound on accepted non-final blocks that carry no payload.  A
+/// conformant C1 sender emits exactly one such block per phase — block 0,
+/// the header-only opener that only announces block 1's size (see
+/// [`build_data_blocks`]); every later non-final block carries payload.  A
+/// peer that instead streams valid-checksum, non-final, empty blocks would
+/// otherwise spin `receive_phase` forever: `out` never grows (so
+/// `MAX_FILE_SIZE` never trips) and the checksum passes (so `max_bad_rounds`
+/// never trips).  The cushion above 1 tolerates trivial retransmit oddities
+/// while still bounding that path.
+const MAX_EMPTY_NONFINAL_BLOCKS: u32 = 4;
+
 /// Hard cap on a transferred file, shared with the other protocols via
 /// `tnio::MAX_FILE_SIZE` so all of XMODEM/YMODEM/ZMODEM/Kermit/Punter agree.
 const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
@@ -543,6 +554,10 @@ async fn receive_phase(
 ) -> Result<Vec<u8>, String> {
     let mut out: Vec<u8> = Vec::new();
     let mut next_size = initial_size;
+    // Non-final blocks accepted with an empty payload.  Bounded by
+    // MAX_EMPTY_NONFINAL_BLOCKS so a peer streaming valid empty blocks can't
+    // spin this loop forever (they neither grow `out` nor fail the checksum).
+    let mut empty_nonfinal_blocks: u32 = 0;
     // What to send at the top of each round: GOO when the previous block was
     // good (or it's the first round), BAD to demand a resend.
     let mut signal = Code::Goo;
@@ -604,6 +619,19 @@ async fn receive_phase(
             next_size = blk[SIZEPOS];
             signal = Code::Goo;
             bad_rounds = 0;
+
+            // Bound the one otherwise-unbounded accept path: a non-final block
+            // that carries no payload.  Exactly one is legitimate (block 0);
+            // a peer streaming more is malfunctioning or hostile.
+            if payload_len == 0 && !final_block {
+                empty_nonfinal_blocks += 1;
+                if empty_nonfinal_blocks > MAX_EMPTY_NONFINAL_BLOCKS {
+                    return Err(format!(
+                        "Punter receive: {} empty non-final blocks, giving up",
+                        empty_nonfinal_blocks
+                    ));
+                }
+            }
 
             if final_block {
                 // End-off: send GOO (acks the final block), wait ACK, send
@@ -1601,6 +1629,75 @@ mod tests {
             elapsed < std::time::Duration::from_secs(6),
             "send_phase took {elapsed:?}; expected ~negotiation_timeout"
         );
+    }
+
+    #[tokio::test]
+    async fn receive_phase_bounds_a_flood_of_empty_nonfinal_blocks() {
+        // A peer that streams valid-checksum, non-final, zero-payload blocks
+        // neither grows `out` (so MAX_FILE_SIZE never trips) nor fails the
+        // checksum (so max_bad_rounds never trips).  Only block 0 is
+        // legitimately empty; the receiver must give up once the count passes
+        // MAX_EMPTY_NONFINAL_BLOCKS instead of spinning forever.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let t = Tunables {
+            negotiation_timeout: 2,
+            block_timeout: 1,
+            max_retries: 5,
+            max_bad_rounds: 30,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+
+        // receiver writes → peer reads; peer writes → receiver reads.
+        let (recv_to_peer_a, recv_to_peer_b) = duplex(1 << 16);
+        let (peer_to_recv_a, peer_to_recv_b) = duplex(1 << 16);
+
+        // Malicious peer: ACK every GOO/BAD, and answer every S/B with an
+        // empty, non-final block that announces a 7-byte (header-only) next
+        // block — so it can keep this up indefinitely.
+        let peer = tokio::spawn(async move {
+            let mut rd = recv_to_peer_b;
+            let mut wr = peer_to_recv_a;
+            let mut buf = [0u8; 3];
+            loop {
+                if rd.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                match &buf {
+                    b"GOO" | b"BAD" => {
+                        if wr.write_all(b"ACK").await.is_err() {
+                            break;
+                        }
+                    }
+                    b"S/B" => {
+                        let blk = build_block(DATA_PHASE_FIRST_SIZE, 0x0000, &[]);
+                        if wr.write_all(&blk).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut rd = peer_to_recv_b;
+        let mut wr = recv_to_peer_a;
+        let mut state = ReadState::default();
+        let res = receive_phase(
+            &mut rd, &mut wr, false, false, false, &mut state, DATA_PHASE_FIRST_SIZE, &t,
+        )
+        .await;
+        drop(wr); // let the peer observe EOF and exit
+        let _ = peer.await;
+
+        match res {
+            Err(e) => assert!(
+                e.contains("empty non-final"),
+                "expected the empty-block bound to fire, got: {e}"
+            ),
+            Ok(_) => panic!("a flood of empty non-final blocks must be rejected"),
+        }
     }
 
     #[tokio::test]
