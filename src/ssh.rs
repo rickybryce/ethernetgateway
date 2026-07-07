@@ -164,7 +164,15 @@ fn warn_if_key_perms_insecure(_path: &str) {}
 fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     use russh::keys::ssh_key::LineEnding;
 
-    // Try to load existing key
+    // Try to load existing key.  If the file exists but won't parse, REFUSE
+    // rather than overwriting it with a fresh key: silently minting a new
+    // identity would change the server's host key and trip every client's
+    // "REMOTE HOST IDENTIFICATION HAS CHANGED" MITM warning (and could clobber
+    // a key that was merely truncated by a full disk and is otherwise
+    // recoverable).  sshd refuses to start on a bad host key for the same
+    // reason.  The caller logs this and simply doesn't start the SSH server,
+    // leaving the file untouched for the operator to fix or remove.  Only a
+    // *missing* file falls through to generation below.
     if std::path::Path::new(SSH_HOST_KEY_FILE).exists() {
         warn_if_key_perms_insecure(SSH_HOST_KEY_FILE);
         match russh::keys::load_secret_key(SSH_HOST_KEY_FILE, None) {
@@ -173,10 +181,12 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
                 return Ok(key);
             }
             Err(e) => {
-                glog!(
-                    "SSH server: could not read {}: {} (generating new key)",
+                return Err(format!(
+                    "host key {} exists but could not be read: {}. \
+                     Refusing to overwrite it with a new key (that would change \
+                     the server identity). Remove or restore the file, then restart.",
                     SSH_HOST_KEY_FILE, e
-                );
+                ));
             }
         }
     }
