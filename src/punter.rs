@@ -1664,19 +1664,14 @@ mod tests {
                 if rd.read_exact(&mut buf).await.is_err() {
                     break;
                 }
-                match &buf {
-                    b"GOO" | b"BAD" => {
-                        if wr.write_all(b"ACK").await.is_err() {
-                            break;
-                        }
-                    }
-                    b"S/B" => {
-                        let blk = build_block(DATA_PHASE_FIRST_SIZE, 0x0000, &[]);
-                        if wr.write_all(&blk).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
+                let reply: Option<Vec<u8>> = match &buf {
+                    b"GOO" | b"BAD" => Some(b"ACK".to_vec()),
+                    b"S/B" => Some(build_block(DATA_PHASE_FIRST_SIZE, 0x0000, &[])),
+                    _ => None,
+                };
+                let Some(bytes) = reply else { continue };
+                if wr.write_all(&bytes).await.is_err() {
+                    break;
                 }
             }
         });
