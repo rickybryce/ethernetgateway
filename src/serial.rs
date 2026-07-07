@@ -3335,8 +3335,12 @@ fn connect_local_peer(state: &mut ModemState, target: SerialPortId) {
 /// bridge this UART to the target's through the duplex.  `BUSY` / `NO
 /// ANSWER` / `NO CARRIER` follow the caller's ATX result-code level.
 fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
-    // Wait bounded by the caller's S7 (wait-for-answer); S7=0 → 1 s.
-    let answer_wait = Duration::from_secs((state.s_regs[7].max(1)) as u64);
+    // Wait bounded by the caller's S7 (wait-for-answer); S7=0 → 1 s, and
+    // clamped to MAX_CONNECT_TIMEOUT like dial_tcp so a large S7 can't pin
+    // the caller's serial thread (and its config-restart responsiveness) for
+    // up to 255 s while the peer rings.
+    let answer_wait =
+        Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
     match state.handle.block_on(request_peer_call(target, answer_wait)) {
         Ok(caller_end) => bridge_duplex_online(state, caller_end),
         Err(PeerCallOutcome::Busy) => {
@@ -3700,6 +3704,17 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     let mut connected = None;
     let mut last_err: Option<std::io::Error> = None;
     for addr in &addrs {
+        // The per-address timeout is capped, but a name resolving to several
+        // dead records would otherwise block the serial thread for
+        // addr_count × that — during which the thread can't see a server
+        // shutdown or a per-port config restart.  Bail between attempts so
+        // those stay responsive.
+        if state.shutdown.load(Ordering::SeqCst)
+            || SERIAL_RESTART[state.port_id.index()].load(Ordering::SeqCst)
+        {
+            send_result(state, "NO CARRIER");
+            return;
+        }
         match std::net::TcpStream::connect_timeout(addr, s7_timeout) {
             Ok(s) => {
                 if escape_trace_enabled() {

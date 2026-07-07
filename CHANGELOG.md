@@ -90,8 +90,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reported an error on a transfer that had actually succeeded. The `EOT`
   budget now floors at 2; a receiver that ACKs the first `EOT` still returns on
   the first pass, so the common case is unchanged.
+- **Serial dial-out stays responsive to shutdown and config restarts.** When
+  an `ATDT` target resolved to several unreachable addresses, the modem tried
+  each in turn and could block the serial thread for (address count × the S7
+  timeout) — during which a server shutdown or a per-port config restart was
+  stalled. The dial loop now checks the shutdown/restart flags between address
+  attempts and bails with `NO CARRIER`. The peer-dial answer-wait is likewise
+  clamped to the same 60 s ceiling `ATDT` uses, so a large S7 can't pin the
+  caller's port for up to 255 s while a local peer rings.
 
 ### Security
+- **SSH server refuses to overwrite an unreadable host key.** If the host-key
+  file existed but failed to parse (e.g. truncated by a full disk), the server
+  silently generated a new key and wrote it over the old one — changing the
+  server's SSH identity and tripping every client's "REMOTE HOST
+  IDENTIFICATION HAS CHANGED" warning (and potentially clobbering a merely
+  truncated, recoverable key). It now refuses to start the SSH server in that
+  case, leaving the file untouched for the operator to restore or remove, the
+  way `sshd` treats a bad host key. A *missing* key file is still generated
+  normally on first run.
 - **Punter receive can no longer be hung by a flood of empty blocks.** A peer
   that streamed valid-checksum, non-final, zero-payload blocks would spin the
   receive loop forever: an empty block never grows the output (so the file-size
