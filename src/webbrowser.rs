@@ -25,6 +25,16 @@ const HTTP_TIMEOUT_SECS: u64 = 15;
 /// auto-follow is disabled) so each hop is SSRF-checked before we connect;
 /// 10 matches ureq's former default.
 const MAX_REDIRECTS: usize = 10;
+/// Maximum DOM nesting depth we will render.  html5ever parses without a
+/// depth limit, so an adversarial page of deeply-nested tags (e.g. tens of
+/// thousands of unclosed `<div>`s, well under `MAX_BODY_SIZE`) builds a very
+/// deep tree.  Every recursive walk over that tree — our own title/form
+/// extractors, html2text's render pass, and even the recursive `Drop` of the
+/// parsed tree — would then overflow the modest `spawn_blocking` thread stack
+/// and abort the *entire* gateway process (SIGABRT), not just the one request.
+/// Real pages nest only tens of levels deep; browsers historically cap near
+/// 512, so 256 is safe and generous.  See `render_html_body`.
+const MAX_DOM_DEPTH: usize = 256;
 
 /// Result of fetching and rendering a web page.
 pub(crate) struct WebPage {
@@ -492,6 +502,15 @@ fn render_html_body(body_bytes: &[u8], final_url: String, width: usize) -> Resul
     let dom = cfg.parse_html(body_bytes)
         .map_err(|e| format!("Parse error: {}", e))?;
 
+    // Guard against pathologically deep DOMs before any recursive walk (ours
+    // or html2text's) — and before the tree's own recursive Drop — can
+    // overflow the stack and abort the whole process.  On rejection we tear
+    // the tree down iteratively so even dropping it is safe.
+    if dom_depth_exceeds(&dom, MAX_DOM_DEPTH) {
+        drop_dom_iteratively(dom);
+        return Err("Page is too deeply nested to render.".to_string());
+    }
+
     let title = extract_title_from_dom(&dom);
     let forms = extract_forms_from_dom(&dom);
 
@@ -646,6 +665,42 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
         let truncated: String = s.chars().take(max_width - 3).collect();
         format!("{}...", truncated)
     }
+}
+
+/// Return `true` if the DOM nests deeper than `limit` element levels.
+/// Iterative (explicit stack) so it never recurses, and short-circuits as
+/// soon as the limit is exceeded — safe on adversarially deep trees.
+fn dom_depth_exceeds(dom: &RcDom, limit: usize) -> bool {
+    let mut stack = vec![(dom.document.clone(), 1usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        for child in node.children.borrow().iter() {
+            stack.push((child.clone(), depth + 1));
+        }
+    }
+    false
+}
+
+/// Drop a parsed DOM without recursion.  A deeply-nested `RcDom` would
+/// otherwise overflow the stack when dropped, because each node's `Drop`
+/// recursively drops its children.  We first collect every node while it is
+/// still kept alive by the collection, then clear all child lists, so the
+/// final Rc drops are all leaf drops with no recursion.
+fn drop_dom_iteratively(dom: RcDom) {
+    let mut all = Vec::new();
+    let mut stack = vec![dom.document.clone()];
+    while let Some(node) = stack.pop() {
+        for child in node.children.borrow().iter() {
+            stack.push(child.clone());
+        }
+        all.push(node);
+    }
+    for node in &all {
+        node.children.borrow_mut().clear();
+    }
+    // `all` and `dom` now drop as a flat set of childless nodes.
 }
 
 /// Extract the `<title>` text by walking the parsed DOM tree.
@@ -1263,6 +1318,45 @@ pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_moderately_nested_html_renders() {
+        // Depth comfortably under MAX_DOM_DEPTH must render normally.
+        let depth = 200usize;
+        let mut body = String::with_capacity(depth * 11);
+        for _ in 0..depth { body.push_str("<div>"); }
+        body.push_str("hello world");
+        for _ in 0..depth { body.push_str("</div>"); }
+        let page = render_html_body(body.as_bytes(), "http://x/".to_string(), 73)
+            .expect("moderately-nested page should render");
+        assert!(
+            page.lines.iter().any(|l| l.contains("hello world")),
+            "rendered text should contain the body content"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_html_rejected_without_stack_overflow() {
+        // ~20k nested <div>s parses into a tree far deeper than MAX_DOM_DEPTH
+        // and far past the point where a recursive walk or recursive Drop of
+        // the tree overflows the (~2 MB) thread stack and aborts the whole
+        // process.  Rendering must instead return a clean Err.  Reaching the
+        // assert proves both the depth guard and the iterative teardown work.
+        // (Depth kept at 20k, not higher, because html5ever's nested-element
+        // parse cost grows ~quadratically with depth.)
+        let depth = 20_000usize;
+        let mut body = String::with_capacity(depth * 6);
+        for _ in 0..depth { body.push_str("<div>"); }
+        body.push_str("boom");
+        for _ in 0..depth { body.push_str("</div>"); }
+        match render_html_body(body.as_bytes(), "http://x/".to_string(), 73) {
+            Err(e) => assert!(
+                e.contains("deeply nested"),
+                "rejection should explain the reason, got: {e}"
+            ),
+            Ok(_) => panic!("deeply-nested page must be rejected"),
+        }
+    }
 
     #[test]
     fn test_is_internal_ip_classification() {

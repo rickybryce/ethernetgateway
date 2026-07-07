@@ -65,8 +65,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2–3 down to the single, unavoidable initiating `NAK` that the Kermit
   receiver-driven start requires (uploads read 0 — there the client is the
   sender and never pokes). Documented in `usermanual.html` and `kermit.html`.
+- **Web browser surfaces the real error when the AI chat API rejects a
+  request.** The Groq client treated every non-2xx response as an opaque
+  transport error (`http status: 401`) and discarded the JSON body, so its
+  code to extract Groq's descriptive `error.message` (e.g. "Invalid API Key",
+  rate-limit text) never ran. It now reads the body on error responses and
+  reports Groq's own message.
 
 ### Security
+- **Text-mode web browser can no longer be crashed by a deeply-nested page.**
+  A page whose HTML nested tags tens of thousands deep (e.g. unclosed `<div>`s,
+  well under the 1 MB body cap) parsed into a DOM so deep that any recursive
+  walk over it — the title/form extractors, html2text's render pass, or even
+  the tree's own recursive `Drop` — overflowed the worker-thread stack and
+  aborted the **entire gateway process** (all telnet/SSH sessions), a
+  remotely-content-triggered denial of service. The browser now rejects a
+  document nested deeper than 256 element levels ("Page is too deeply nested to
+  render.") and tears the parsed tree down iteratively so even discarding it
+  cannot overflow the stack.
 - **Refreshed dependencies to clear RustSec advisories.** `cargo update`
   moved `aes` (yanked) → 0.9.1, `memmap2` (RUSTSEC-2026-0186 unsound) → 0.9.11,
   dropped `anyhow` (RUSTSEC-2026-0190 unsound), and bumped the egui/eframe stack
