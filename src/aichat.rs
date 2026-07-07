@@ -23,6 +23,12 @@ pub(crate) fn ask(api_key: &str, question: &str) -> Result<String, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(API_TIMEOUT_SECS)))
+            // Read the body on non-2xx responses instead of collapsing them into
+            // an opaque "http status: 401" transport error.  Groq returns a JSON
+            // body with a descriptive `error.message` (e.g. "Invalid API Key")
+            // even on failures; keeping the response lets the extraction below
+            // surface that message to the user.
+            .http_status_as_error(false)
             .build(),
     );
 
