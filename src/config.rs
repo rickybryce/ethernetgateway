@@ -3759,8 +3759,10 @@ mod tests {
 
     #[test]
     fn test_gui_zoom_factor_numeric_and_clamped() {
-        let mut cfg = Config::default();
-        cfg.gui_zoom = "1.0".into();
+        let mut cfg = Config {
+            gui_zoom: "1.0".into(),
+            ..Default::default()
+        };
         assert_eq!(cfg.gui_zoom_factor(), Some(1.0));
         cfg.gui_zoom = " 1.25 ".into();
         assert_eq!(cfg.gui_zoom_factor(), Some(1.25));
