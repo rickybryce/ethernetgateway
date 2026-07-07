@@ -1115,8 +1115,16 @@ pub(crate) async fn xmodem_send(
         }
     }
 
-    // Send EOT and wait for ACK
-    for _ in 0..max_retries {
+    // Send EOT and wait for ACK.  A Forsberg-compliant receiver NAKs the
+    // *first* EOT to verify end-of-file (guarding against a spurious EOT from
+    // line noise) and ACKs only the resent one — our own receiver does exactly
+    // this.  Completing that handshake therefore requires at least two EOT
+    // attempts, so floor the budget at 2 even when `xmodem_max_retries` is 1;
+    // otherwise a clean transfer to a verifying receiver would be reported as
+    // failed after the single, *expected* verification NAK.  A receiver that
+    // ACKs the first EOT still returns on the first pass, so the wire exchange
+    // is unchanged in the common case.
+    for _ in 0..max_retries.max(2) {
         raw_write_byte(writer, EOT, is_tcp).await?;
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
