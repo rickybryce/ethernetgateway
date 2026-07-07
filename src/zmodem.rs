@@ -588,9 +588,18 @@ async fn read_hex_body(
             actual, expected
         ));
     }
-    // Swallow the trailing CR LF (and optional XON) so the stream lines
-    // up for the next frame.  Up to 3 trailing bytes per spec.
-    for _ in 0..3 {
+    // Swallow the trailing CR LF (and optional XON) so the stream lines up
+    // for the next frame.  Forsberg's `zsendhdr` terminates a hex header with
+    // CR LF, followed by XON (0x11) for every frame type EXCEPT ZACK and ZFIN
+    // (our own `build_hex_header` does the same).  Only wait for that third
+    // trailing byte when the type actually carries it: otherwise the drain
+    // blocks the full 200 ms per frame waiting for an XON that never arrives.
+    // Because our sender ACK-gates every subpacket (ZCRCQ → read ZACK), that
+    // phantom wait would cap throughput near one subpacket per 200 ms on a
+    // fast link.  Under-consuming a trailing byte is safe — `read_header`'s
+    // sync hunt discards any stray CR/LF/XON before the next prologue.
+    let trailing = if raw[0] == ZACK || raw[0] == ZFIN { 2 } else { 3 };
+    for _ in 0..trailing {
         let next_res =
             tokio::time::timeout(tokio::time::Duration::from_millis(200), async {
                 nvt_read_byte(reader, is_tcp, state).await
