@@ -68,7 +68,7 @@ fn main() {
                 glog!("Info: SSH server is disabled. Enable it in {} if needed.", config::CONFIG_FILE);
             }
         }
-        if cfg.security_enabled && cfg.password == "changeme" {
+        if cfg.security_enabled && cfg.password == config::DEFAULT_PASSWORD {
             glog!("WARNING: Security is enabled with the default password. Change it in {}.", config::CONFIG_FILE);
         }
 

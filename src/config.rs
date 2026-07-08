@@ -47,7 +47,10 @@ const DEFAULT_SECURITY_ENABLED: bool = false;
 /// and an unauthenticated telnet session.
 const DEFAULT_DISABLE_IP_SAFETY: bool = false;
 const DEFAULT_USERNAME: &str = "admin";
-const DEFAULT_PASSWORD: &str = "changeme";
+/// The default password, exposed crate-wide so callers (e.g. main.rs's
+/// insecure-default warning) test against this constant rather than a
+/// duplicated string literal that could silently drift from the real default.
+pub(crate) const DEFAULT_PASSWORD: &str = "changeme";
 const DEFAULT_TRANSFER_DIR: &str = "transfer";
 /// GUI display scale.  `"auto"` (or empty) lets egui use the monitor's own
 /// scale factor; a number (e.g. `1.0`, `1.25`) pins the pixels-per-point
