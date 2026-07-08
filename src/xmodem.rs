@@ -1124,7 +1124,8 @@ pub(crate) async fn xmodem_send(
     // failed after the single, *expected* verification NAK.  A receiver that
     // ACKs the first EOT still returns on the first pass, so the wire exchange
     // is unchanged in the common case.
-    for _ in 0..max_retries.max(2) {
+    let eot_attempts = max_retries.max(2);
+    for _ in 0..eot_attempts {
         raw_write_byte(writer, EOT, is_tcp).await?;
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
@@ -1179,8 +1180,8 @@ pub(crate) async fn xmodem_send(
     // EOT exhausted without an ACK — the receiver may not have committed
     // the file.  Surface this so the caller can flag the transfer as
     // failed rather than silently claiming success.
-    if verbose { glog!("XMODEM send: EOT not ACKed after {} retries, returning error", max_retries); }
-    Err(format!("EOT not ACKed after {} retries", max_retries))
+    if verbose { glog!("XMODEM send: EOT not ACKed after {} attempts, returning error", eot_attempts); }
+    Err(format!("EOT not ACKed after {} attempts", eot_attempts))
 }
 
 /// Build and transmit YMODEM block 0 (filename + size header).
