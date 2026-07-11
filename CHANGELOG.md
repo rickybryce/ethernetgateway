@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - Unreleased
 
 ### Added
+- **YMODEM receives multi-file batches (`sb file1 file2 …`).** The receiver
+  previously ran the end-of-batch handshake right after the first file's EOT,
+  so a batch sender lost every file after the first (and could hang waiting for
+  the receiver). It now reads the next block 0 at each EOT — a named block 0
+  starts the next file, the null block 0 ends the batch — and returns every
+  file. The first file keeps the user-entered name; files 2..N use the sender's
+  (sanitized) block-0 name, saved atomically like ZMODEM/Kermit batches. A
+  corrupt inter-file block 0 is NAK-retried (bounded), the batch is capped at
+  1000 files, and a non-UTF-8 file name is received under a generated name
+  rather than truncating the batch.
 - **Weather works worldwide, not just US zip codes.** The Weather menu now
   accepts any city name or postal code (`London`, `SW1A 1AA`, `Zürich`,
   `62051`), percent-encoding the query so spaces and non-ASCII are safe. A

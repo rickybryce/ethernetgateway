@@ -2960,7 +2960,9 @@ impl TelnetSession {
         let mut skipped: Vec<(String, &'static str)> = Vec::new();
         for rx in &received {
             if Self::validate_filename(&rx.filename).is_err() {
-                skipped.push((rx.filename.clone(), "invalid filename"));
+                // Sanitize the sender-supplied name before it can reach the
+                // terminal in the skipped summary (it may carry ANSI escapes).
+                skipped.push((crate::aichat::sanitize_for_terminal(&rx.filename), "invalid filename"));
                 continue;
             }
             let filepath = target_dir.join(&rx.filename);
@@ -4944,10 +4946,16 @@ impl TelnetSession {
                 // symmetric.
                 let name = match sender_name {
                     Some(n) => n.clone(),
-                    None => continue,
+                    // A YMODEM batch file whose block-0 name wasn't valid UTF-8
+                    // arrives nameless — save it under a generated name rather
+                    // than silently dropping it (ZMODEM/Kermit always name theirs).
+                    None => format!("ymodem_file_{}", idx + 1),
                 };
                 if Self::validate_filename(&name).is_err() {
-                    skipped.push((name, "invalid filename"));
+                    // Sanitize the sender-supplied name before it reaches the
+                    // terminal (a rejected name can carry ANSI escapes).
+                    let safe = crate::aichat::sanitize_for_terminal(&name);
+                    skipped.push((safe, "invalid filename"));
                     continue;
                 }
                 let batch_path = self.transfer_path().join(&name);
@@ -5652,7 +5660,8 @@ impl TelnetSession {
                     // stays because validate_filename is cheap and
                     // closes the door on any future kermit-side bypass.
                     if Self::validate_filename(&rx.filename).is_err() {
-                        skipped.push((rx.filename.clone(), "invalid filename"));
+                        // Sanitize before the name can reach the terminal summary.
+                        skipped.push((crate::aichat::sanitize_for_terminal(&rx.filename), "invalid filename"));
                         return;
                     }
                     // Defense-in-depth: re-validate the subdir before joining
@@ -15431,7 +15440,8 @@ pub fn start_kermit_server(
                                     verbose,
                                     |rx| {
                                         if TelnetSession::validate_filename(&rx.filename).is_err() {
-                                            skipped.push((rx.filename.clone(), "invalid filename"));
+                                            // Sanitize before the name can reach the terminal summary.
+                                            skipped.push((crate::aichat::sanitize_for_terminal(&rx.filename), "invalid filename"));
                                             return;
                                         }
                                         // Defense-in-depth: re-validate the

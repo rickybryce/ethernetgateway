@@ -35,8 +35,29 @@ pub(crate) const XMODEM_1K_BLOCK_SIZE: usize = 1024;
 /// four protocols agree on a single value.  Cast to `usize` once here
 /// because XMODEM's frame counter is already `usize`.
 const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
+/// Hard cap on the number of files accepted in one YMODEM batch, so a sender
+/// that never sends the end-of-batch terminator (or a hostile peer streaming
+/// endless files) can't accumulate files without bound.  This bounds the file
+/// *count*; each file is separately capped at `MAX_FILE_SIZE`, so the batch's
+/// aggregate memory is bounded by `MAX_BATCH_FILES × MAX_FILE_SIZE`.  Mirrors
+/// Kermit's `MAX_BATCH_FILES`.
+const MAX_BATCH_FILES: usize = 1000;
 /// Time allowed for the full 131-byte block body (after SOH) to arrive.
 const BLOCK_BODY_TIMEOUT_SECS: u64 = 60;
+
+/// Classification of the block read between YMODEM batch files (after an EOT).
+enum InterFileBlock0 {
+    /// A block 0 carrying a filename — the next file in the batch.  The name is
+    /// `None` when it wasn't valid UTF-8 (the file is still received; the caller
+    /// generates a fallback name).
+    File(Option<String>, Option<YmodemReceiveMeta>),
+    /// The end-of-batch terminator (block 0 whose filename field starts NUL).
+    Terminator,
+    /// A block 0 that failed CRC / header validation — retryable via NAK.
+    Invalid,
+    /// The peer sent something other than a block 0 (or nothing) — end the batch.
+    NotBlock0,
+}
 
 #[derive(Clone, Copy)]
 enum TransferMode {
@@ -288,7 +309,7 @@ pub(crate) async fn xmodem_receive_batch(
                         )
                         .await
                         {
-                            Ok(Ok((true, filename, meta))) => {
+                            Ok(Ok((true, _is_terminator, filename, meta))) => {
                                 raw_write_byte(writer, ACK, is_tcp).await?;
                                 // Second 'C' starts the data phase.
                                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
@@ -303,7 +324,7 @@ pub(crate) async fn xmodem_receive_batch(
                                 current_filename = filename;
                                 break;
                             }
-                            Ok(Ok((false, _, _))) => {
+                            Ok(Ok((false, _, _, _))) => {
                                 if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error, NAKing for retransmit"); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
                                 // Stay in negotiation: the sender will
@@ -411,6 +432,9 @@ pub(crate) async fn xmodem_receive_batch(
     // infinite NAK loop).
     let mut eot_naked = false;
     loop {
+        // Per-file cap.  In a YMODEM batch this aborts the whole session
+        // (CAN×3 + Err), discarding any earlier files too — an oversize file is
+        // treated as a hard error, not skip-and-continue.
         if file_data.len() > MAX_FILE_SIZE {
             raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
             return Err("File exceeds 8 MB size limit".into());
@@ -531,61 +555,100 @@ pub(crate) async fn xmodem_receive_batch(
                 }
 
                 // YMODEM inter-file / end-of-batch (Forsberg §7.4): after ACKing
-                // the EOT, send one more 'C' and read the next block 0.  A block
-                // 0 that carries a filename is the NEXT file in the batch — reset
-                // per-file state and continue receiving it.  A "null" block 0
-                // (filename starts with NUL) means "no more files": ACK it and
-                // finish.  Strict senders (sb, Tera Term, PuTTY) wait for this
-                // exchange; skipping it hangs them after the last data block.
+                // the EOT, request the next block 0.  A named block 0 is the NEXT
+                // file (reset per-file state, continue); the null-terminator block
+                // ends the batch.  A corrupt-but-present block 0 is NAK-retried
+                // (bounded) so a noisy line can't silently truncate the batch —
+                // matching file 1's negotiation.  Nothing coherent arriving (lax
+                // sender that skipped the terminator) just ends the batch.
                 if verbose { glog!("XMODEM recv: YMODEM inter-file, sending 'C'"); }
                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
-                let next = tokio::time::timeout(
-                    std::time::Duration::from_secs(block_timeout),
-                    async {
-                        let b = nvt_read_byte(reader, is_tcp, state).await?;
-                        if b != SOH {
-                            // Not a block 0 (lax sender skipped the terminator,
-                            // or line noise) — end the batch.
-                            return Ok::<Option<(Option<String>, Option<YmodemReceiveMeta>)>, String>(None);
+                let mut b0_attempt: usize = 0;
+                let inter = loop {
+                    let outcome = tokio::time::timeout(
+                        std::time::Duration::from_secs(block_timeout),
+                        async {
+                            let b = nvt_read_byte(reader, is_tcp, state).await?;
+                            if b != SOH {
+                                return Ok::<InterFileBlock0, String>(InterFileBlock0::NotBlock0);
+                            }
+                            let bn = nvt_read_byte(reader, is_tcp, state).await?;
+                            let bc = nvt_read_byte(reader, is_tcp, state).await?;
+                            if bn != 0 || bc != 0xFF {
+                                // Header isn't a block 0 (stray data block / noise).
+                                return Ok(InterFileBlock0::Invalid);
+                            }
+                            let (valid, is_term, filename, meta) = read_ymodem_block_zero_body(
+                                reader, TransferMode::Crc16, is_tcp, verbose, state,
+                            )
+                            .await?;
+                            Ok(if !valid {
+                                InterFileBlock0::Invalid
+                            } else if is_term {
+                                InterFileBlock0::Terminator
+                            } else {
+                                InterFileBlock0::File(filename, meta)
+                            })
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        // A corrupt-but-present block 0 is the only case we
+                        // retry: NAK for a retransmit, bounded like the first
+                        // file's block-0 retries, then give up as `NotBlock0`.
+                        Ok(Ok(InterFileBlock0::Invalid)) => {
+                            b0_attempt += 1;
+                            if b0_attempt > max_retries {
+                                if verbose { glog!("XMODEM recv: inter-file block 0 corrupt past retries, ending batch"); }
+                                break InterFileBlock0::NotBlock0;
+                            }
+                            if verbose { glog!("XMODEM recv: inter-file block 0 CRC/header error, NAKing"); }
+                            raw_write_byte(writer, NAK, is_tcp).await?;
                         }
-                        // Consume block_num + complement, then the payload+CRC.
-                        let _ = nvt_read_byte(reader, is_tcp, state).await?;
-                        let _ = nvt_read_byte(reader, is_tcp, state).await?;
-                        let (valid, filename, meta) = read_ymodem_block_zero_body(
-                            reader, TransferMode::Crc16, is_tcp, verbose, state,
-                        )
-                        .await?;
-                        Ok(if valid { Some((filename, meta)) } else { None })
-                    },
-                )
-                .await;
-                match next {
-                    Ok(Ok(Some((Some(filename), meta)))) => {
-                        // Next file in the batch: ACK its block 0, send 'C' to
-                        // start its data phase, reset per-file state, and loop.
+                        // File / Terminator / NotBlock0 pass straight through.
+                        Ok(Ok(other)) => break other,
+                        // Nothing coherent (read error / timeout) — end the
+                        // batch now, keeping already-received files.
+                        Ok(Err(e)) => {
+                            if verbose { glog!("XMODEM recv: inter-file read error: {}", e); }
+                            break InterFileBlock0::NotBlock0;
+                        }
+                        Err(_) => {
+                            if verbose { glog!("XMODEM recv: inter-file timeout — lax sender, ending batch"); }
+                            break InterFileBlock0::NotBlock0;
+                        }
+                    }
+                };
+                match inter {
+                    InterFileBlock0::File(filename, meta) => {
+                        // Cap the batch so an unterminated / hostile stream can't
+                        // grow the in-memory file list without bound.
+                        if files.len() >= MAX_BATCH_FILES {
+                            raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                            return Err("YMODEM batch exceeds file-count limit".into());
+                        }
+                        // Next file: ACK its block 0, send 'C' to start its data
+                        // phase, reset per-file state, and loop.  `filename` may be
+                        // None (non-UTF-8 name) — the caller assigns a fallback.
                         raw_write_byte(writer, ACK, is_tcp).await?;
                         raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
-                        current_filename = Some(filename);
+                        current_filename = filename;
                         ymodem_meta = meta;
                         expected_block = 1;
                         error_count = 0;
                         if verbose { glog!("XMODEM recv: YMODEM next file in batch"); }
                         continue;
                     }
-                    Ok(Ok(Some((None, _)))) => {
-                        // Valid null block 0 — end of batch.  ACK and finish.
+                    InterFileBlock0::Terminator => {
+                        // Null block 0 — end of batch.  ACK and finish.
                         raw_write_byte(writer, ACK, is_tcp).await?;
                         if verbose { glog!("XMODEM recv: YMODEM end-of-batch ACKed"); }
                     }
-                    Ok(Ok(None)) => {
-                        if verbose { glog!("XMODEM recv: end-of-batch — no valid terminator block, ending session"); }
-                    }
-                    Ok(Err(e)) => {
-                        if verbose { glog!("XMODEM recv: end-of-batch read error: {}", e); }
-                    }
-                    Err(_) => {
-                        if verbose { glog!("XMODEM recv: end-of-batch timeout — lax sender, ending session"); }
-                    }
+                    // NotBlock0 (incl. retries-exhausted): end without ACK.
+                    // `Invalid` never reaches here — the loop always converts it
+                    // to a NAK-retry or a `NotBlock0` break — but the arm is
+                    // required for exhaustiveness.
+                    InterFileBlock0::Invalid | InterFileBlock0::NotBlock0 => {}
                 }
                 break;
             }
@@ -658,7 +721,7 @@ async fn read_ymodem_block_zero_body(
     is_tcp: bool,
     verbose: bool,
     state: &mut ReadState,
-) -> Result<(bool, Option<String>, Option<YmodemReceiveMeta>), String> {
+) -> Result<(bool, bool, Option<String>, Option<YmodemReceiveMeta>), String> {
     let mut payload = [0u8; XMODEM_BLOCK_SIZE];
     for b in payload.iter_mut() {
         *b = nvt_read_byte(reader, is_tcp, state).await?;
@@ -677,11 +740,16 @@ async fn read_ymodem_block_zero_body(
         }
     };
     if !valid {
-        return Ok((false, None, None));
+        return Ok((false, false, None, None));
     }
-    // Extract the filename (bytes up to the first NUL).  A leading NUL is the
-    // end-of-batch terminator block → no name.  Non-UTF-8 names are dropped
-    // (the caller falls back to a user-entered / generated name).
+    // The end-of-batch terminator is defined by the filename field starting with
+    // NUL (Forsberg §7.4) — NOT by the name failing to decode.  Keying off
+    // `payload[0] == 0` keeps a legitimately-named but non-UTF-8 file (whose
+    // `filename` below is `None`) from being mistaken for the terminator, which
+    // would silently drop it and every later file in the batch.
+    let is_terminator = payload[0] == 0;
+    // Extract the filename (bytes up to the first NUL).  Non-UTF-8 names decode
+    // to `None`; the file is still received and the caller generates a name.
     let filename = payload
         .iter()
         .position(|&b| b == 0)
@@ -715,7 +783,7 @@ async fn read_ymodem_block_zero_body(
                 .unwrap_or_else(|| "<unknown>".into()),
         );
     }
-    Ok((true, filename, parsed))
+    Ok((true, is_terminator, filename, parsed))
 }
 
 /// Parse the 128-byte block-0 payload into a `YmodemReceiveMeta`.  Returns
@@ -5024,9 +5092,18 @@ mod tests {
 
     /// Build a YMODEM block-0 payload: `filename\0<size>` then NUL fill.
     fn ymodem_block0_payload(name: &str, size: usize) -> [u8; 128] {
+        ymodem_block0_payload_bytes(name.as_bytes(), size)
+    }
+
+    /// Like `ymodem_block0_payload` but takes the filename as raw bytes, so a
+    /// test can build a block 0 with a non-UTF-8 name (`name\0<size>\0…`).
+    fn ymodem_block0_payload_bytes(name: &[u8], size: usize) -> [u8; 128] {
         let mut p = [0u8; 128];
-        let s = format!("{}\0{}", name, size);
-        p[..s.len()].copy_from_slice(s.as_bytes());
+        let mut v = Vec::new();
+        v.extend_from_slice(name);
+        v.push(0);
+        v.extend_from_slice(size.to_string().as_bytes());
+        p[..v.len()].copy_from_slice(&v);
         p
     }
 
@@ -5102,6 +5179,116 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename.as_deref(), Some("solo.dat"));
         assert_eq!(files[0].data, data);
+    }
+
+    /// Regression for the review finding: a mid-batch file whose block-0 name
+    /// is NOT valid UTF-8 must still be received (with `filename == None`, so
+    /// the caller names it) — it must NOT be mistaken for the null-block-0
+    /// terminator, which would silently drop it and every later file.
+    #[tokio::test]
+    async fn test_ymodem_batch_non_utf8_middle_name() {
+        let data_a = b"first".to_vec();
+        let data_b = b"second file's bytes".to_vec();
+        let data_c = b"third".to_vec();
+        // Hand-build: A (ascii), B with a Latin-1 name (0xE9 = é, invalid UTF-8),
+        // C (ascii), then the null terminator.
+        let mut wire = Vec::new();
+        wire.extend(ymodem_frame(0, &ymodem_block0_payload("a.txt", data_a.len())));
+        wire.extend(ymodem_frame(1, &{
+            let mut p = [SUB; XMODEM_BLOCK_SIZE];
+            p[..data_a.len()].copy_from_slice(&data_a);
+            p
+        }));
+        wire.push(EOT);
+        wire.extend(ymodem_frame(0, &ymodem_block0_payload_bytes(b"caf\xe9.txt", data_b.len())));
+        wire.extend(ymodem_frame(1, &{
+            let mut p = [SUB; XMODEM_BLOCK_SIZE];
+            p[..data_b.len()].copy_from_slice(&data_b);
+            p
+        }));
+        wire.push(EOT);
+        wire.extend(ymodem_frame(0, &ymodem_block0_payload("c.txt", data_c.len())));
+        wire.extend(ymodem_frame(1, &{
+            let mut p = [SUB; XMODEM_BLOCK_SIZE];
+            p[..data_c.len()].copy_from_slice(&data_c);
+            p
+        }));
+        wire.push(EOT);
+        wire.extend(ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE]));
+
+        let files = replay_ymodem_batch(&wire).await.expect("batch failed");
+        assert_eq!(files.len(), 3, "the non-UTF-8-named file must not truncate the batch");
+        assert_eq!(files[0].filename.as_deref(), Some("a.txt"));
+        assert_eq!(files[1].filename, None, "non-UTF-8 name decodes to None, file still received");
+        assert_eq!(files[1].data, data_b, "the non-UTF-8-named file's data must survive");
+        assert_eq!(files[2].filename.as_deref(), Some("c.txt"));
+        assert_eq!(files[2].data, data_c);
+    }
+
+    /// A 3-file batch where a NON-first file ends in 0x1A — proves per-file
+    /// size truncation runs for files 2..N (not just file 1), in CI.
+    #[tokio::test]
+    async fn test_ymodem_batch_three_files_trailing_sub() {
+        let data_a = b"alpha".to_vec();
+        let data_b = vec![0x1A_u8; 40]; // all-SUB payload; size truncation must keep them
+        let data_c: Vec<u8> = (0u8..=255).cycle().take(200).collect();
+        let wire = build_ymodem_batch_wire(&[
+            ("a.bin", &data_a),
+            ("b.bin", &data_b),
+            ("c.bin", &data_c),
+        ]);
+        let files = replay_ymodem_batch(&wire).await.expect("3-file batch failed");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[1].data, data_b, "file 2's trailing 0x1A must survive via size truncation");
+        assert_eq!(files[2].data, data_c);
+    }
+
+    /// The batch file-count cap (MAX_BATCH_FILES) must bound an unterminated /
+    /// hostile stream rather than accumulate files without limit.
+    #[tokio::test]
+    async fn test_ymodem_batch_file_count_cap() {
+        // MAX_BATCH_FILES + 1 tiny (empty) files, no early terminator.
+        let names: Vec<String> = (0..=MAX_BATCH_FILES).map(|i| format!("f{i}.dat")).collect();
+        let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &[][..])).collect();
+        let wire = build_ymodem_batch_wire(&files);
+        let err = replay_ymodem_batch(&wire)
+            .await
+            .expect_err("a batch over the file-count cap must be rejected");
+        assert!(
+            err.contains("file-count"),
+            "must reject for the file-count cap specifically, got: {err}"
+        );
+    }
+
+    /// A corrupt inter-file block 0 (bad CRC) with no following retransmit must
+    /// end the batch gracefully — keeping the already-received files — rather
+    /// than hang or drop file 1.  Exercises the give-up side of the bounded
+    /// inter-file NAK-retry (the recovery side mirrors the first-file block-0
+    /// retry, which `test_ymodem_receive_block_zero_crc_error_recovery` covers).
+    #[tokio::test]
+    async fn test_ymodem_batch_corrupt_interfile_block0_ends_gracefully() {
+        let data_a = b"the first file survives".to_vec();
+        let mut wire = Vec::new();
+        wire.extend(ymodem_frame(0, &ymodem_block0_payload("a.txt", data_a.len())));
+        wire.extend(ymodem_frame(1, &{
+            let mut p = [SUB; XMODEM_BLOCK_SIZE];
+            p[..data_a.len()].copy_from_slice(&data_a);
+            p
+        }));
+        wire.push(EOT);
+        // A would-be file 2 block 0 with valid framing but a flipped CRC byte,
+        // and nothing after it (no retransmit) → receiver NAKs, re-reads, hits
+        // EOF, and ends the batch keeping file 1.
+        let mut bad = ymodem_frame(0, &ymodem_block0_payload("b.txt", 5));
+        *bad.last_mut().unwrap() ^= 0xFF;
+        wire.extend(bad);
+
+        let files = replay_ymodem_batch(&wire)
+            .await
+            .expect("batch should end gracefully, not error");
+        assert_eq!(files.len(), 1, "file 1 must survive a corrupt inter-file block 0");
+        assert_eq!(files[0].filename.as_deref(), Some("a.txt"));
+        assert_eq!(files[0].data, data_a);
     }
 
     /// Capture the wire bytes a real `sx` emits for a plain-XMODEM
