@@ -714,8 +714,10 @@ async fn write_redirect(
 
 /// Percent-encode a string for inclusion in a query parameter value.
 /// Conservative: only ASCII alphanumerics and a handful of safe
-/// punctuation pass through; everything else is `%xx`.
-fn encode_query(input: &str) -> String {
+/// punctuation pass through; everything else is `%xx`.  `pub(crate)` so the
+/// weather fetch in telnet.rs can safely encode worldwide location queries
+/// (city names, postal codes with spaces, UTF-8) into the geocoder URL.
+pub(crate) fn encode_query(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.bytes() {
         match b {
@@ -841,7 +843,7 @@ fn collect_form_updates(
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
-        "groq_api_key", "browser_homepage", "weather_zip",
+        "groq_api_key", "browser_homepage", "weather_location", "weather_units",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
         "xmodem_max_retries", "xmodem_negotiation_retry_interval",
         "zmodem_negotiation_timeout", "zmodem_frame_timeout",
@@ -1270,14 +1272,24 @@ fn frame_ai_browser(cfg: &Config) -> String {
          <div class=\"row\"><span class=\"label\">API Key:</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\"></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
-         <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
-         <span class=\"label\">Zip:</span>\
-         <input type=\"text\" name=\"weather_zip\" value=\"{zip}\" size=\"6\"></div>\
+         <input type=\"text\" name=\"browser_homepage\" value=\"{home}\"></div>\
+         <div class=\"row\"><span class=\"label\">Location:</span>\
+         <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
+         placeholder=\"city or postal code\">\
+         <span class=\"label\">Units:</span>\
+         <select name=\"weather_units\">\
+         <option value=\"auto\" {u_auto}>Auto</option>\
+         <option value=\"us\" {u_us}>US (F/mph)</option>\
+         <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
+         </select></div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         key = html_escape(&cfg.groq_api_key),
         home = html_escape(&cfg.browser_homepage),
-        zip = html_escape(&cfg.weather_zip),
+        loc = html_escape(&cfg.weather_location),
+        u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
+        u_us = if cfg.weather_units == "us" { "selected" } else { "" },
+        u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
     )
 }
 

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - Unreleased
 
 ### Added
+- **Weather works worldwide, not just US zip codes.** The Weather menu now
+  accepts any city name or postal code (`London`, `SW1A 1AA`, `Zürich`,
+  `62051`), percent-encoding the query so spaces and non-ASCII are safe. A
+  `City, Country` or `City, Region` qualifier disambiguates common names
+  (`London, GB` vs `London, Ontario`; `Paris, France` vs `Paris, Texas`), and
+  the matched country is shown. A new **`weather_units`** setting — `auto`
+  (default: Fahrenheit/mph for the US, Celsius/km/h elsewhere), `us`, or
+  `metric` — controls display units; press **U** on the weather screen to cycle
+  them in place (no re-fetch). Wired into the telnet Other-Settings menu, the
+  web config page, and the GUI. The config key `weather_zip` is renamed to
+  **`weather_location`**; an existing `weather_zip` value migrates automatically
+  on first load, and any saved location persists across sessions as before.
 - **Configurable desktop GUI display scale (`gui_zoom`).** The console window
   now honors a `gui_zoom` setting: `auto` (default) follows the monitor's own
   scale factor as before, while a number (e.g. `1.0`, `1.25`, `0.8`) pins the
@@ -27,9 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Open-Meteo forecast host can't be reached, the Weather menu now automatically
   retries the forecast against MET Norway (`api.met.no` Locationforecast 2.0 —
   free, no API key, independent infrastructure), reusing the coordinates
-  already geocoded via Open-Meteo. MET's Celsius/m-per-s data is converted to
-  °F/mph and its symbol codes mapped to descriptions; you only see an error if
-  both providers fail.
+  already geocoded via Open-Meteo (worldwide coverage, so the fallback works for
+  any location). MET's data is kept in metric and converted to your chosen units
+  at display time, and its symbol codes mapped to descriptions; you only see an
+  error if both providers fail.
 - **Wait for the receiver before starting a Kermit download
   (`kermit_wait_for_receiver`, default on).** A Kermit transfer is
   receiver-driven at the start — the receiving side sends a `NAK` to solicit the
@@ -45,8 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses a 5 s connect timeout (was a single 15 s global) and retries once on
   a transient transport failure, so an unreachable/blocked forecast host no
   longer hangs the Weather menu for 15 s. Errors are distinguished:
-  "Zip code not found." (bad zip) vs "Weather service unreachable. Try again
-  later." (network/host down) vs "Weather service returned bad data." (parse).
+  "Not found - try 'City, Country'." (no geocoder match) vs "Weather service
+  unreachable. Try again later." (network/host down) vs "Weather service
+  returned bad data." (parse).
 
 ### Fixed
 - **Kermit server GET is now case-insensitive.** A client requesting a file in

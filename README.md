@@ -487,7 +487,7 @@ Most settings can be changed from within a telnet or SSH session using the
     per-block timeout, retry limit, max bad-block rounds, block size,
     and the hang-up-on-failure toggle (drops carrier on give-up, since
     C1 has no in-band abort to free a stranded C64)
-- **O** Other Settings -- AI API key, browser homepage, weather zip, verbose
+- **O** Other Settings -- AI API key, browser homepage, weather location, verbose
   logging, GUI on startup, gateway debug trace
 - **R** Reset Defaults -- restore all settings to factory defaults
 
@@ -557,8 +557,12 @@ groq_api_key =
 # Leave empty to start with a blank prompt.
 browser_homepage = http://telnetbible.com
 
-# Last-used weather zip code (updated automatically when you check weather)
-weather_zip =
+# Last-used weather location: city or postal code, worldwide
+# (e.g. 62051, "London, GB", Zurich) -- updated automatically when you check weather
+weather_location =
+
+# Weather units: auto (infer from country), us (F/mph), or metric (C/km/h)
+weather_units = auto
 
 # Verbose logging: set to true for detailed per-block / per-subpacket
 # protocol diagnostics across XMODEM, YMODEM, ZMODEM, Kermit, and Punter.
@@ -1719,15 +1723,24 @@ Responses are word-wrapped to fit the terminal width (38 columns for PETSCII,
 ## Weather
 
 The Weather feature displays current conditions and a 3-day forecast for any
-US zip code, powered by [Open-Meteo](https://open-meteo.com) (free, no API
-key required).
+city or postal code **worldwide**, powered by [Open-Meteo](https://open-meteo.com)
+(free, no API key required), with [MET Norway](https://api.met.no) as an
+automatic fallback forecast provider.
 
 1. From the main menu, press **W** (Weather)
-2. Enter a 5-digit US zip code, or press Enter to use the last one
-3. Current temperature, humidity, wind, and a 3-day forecast are displayed
+2. Enter a city or postal code, or press Enter to use the last one. Examples:
+   `62051`, `London`, `London, GB` (or `London, Ontario`), `Zürich`,
+   `Tokyo, JP`. A `City, Country` (or `City, Region`) qualifier disambiguates
+   common names; the matched country is shown so you can confirm.
+3. Current temperature, humidity, wind, and a 3-day forecast are displayed.
+   Press **U** on the weather screen to cycle display units.
 
-The last-used zip code is saved to `egateway.conf` so it becomes the default
-for all future sessions.
+Units follow the `weather_units` setting: `auto` (the default — Fahrenheit/mph
+for the US, Celsius/km/h everywhere else), `us`, or `metric`.
+
+The last-used location is saved to `egateway.conf` (key `weather_location`) so
+it becomes the default for all future sessions. An older config's `weather_zip`
+value is migrated automatically on first load.
 
 ## Signals
 

@@ -1444,21 +1444,249 @@ fn atomic_write(path: &str, content: &str) -> Result<(), std::io::Error> {
 
 struct ForecastDay {
     date: String,
-    high: String,
-    low: String,
+    // Stored in metric (Celsius) and converted to the display unit at render
+    // time, so a units toggle never needs to re-fetch.
+    high_c: f64,
+    low_c: f64,
     desc: String,
 }
 
 struct WeatherData {
     city: String,
     region: String,
-    temp_f: String,
-    feels_like: String,
-    humidity: String,
-    wind_mph: String,
+    country: String,
+    // Retained for "auto" units resolution (US -> imperial, else metric); not
+    // displayed directly.
+    country_code: String,
+    // All values are metric as fetched; display converts per `WeatherUnits`.
+    temp_c: f64,
+    feels_like_c: f64,
+    humidity: i64,
+    wind_kmh: f64,
     wind_dir: String,
     desc: String,
     forecast: Vec<ForecastDay>,
+}
+
+/// One geocoding hit, parsed out of the Open-Meteo `results` array so the
+/// selection logic can be unit-tested without any JSON or network.
+#[derive(Clone, Debug, PartialEq)]
+struct GeoResult {
+    name: String,
+    admin1: String,
+    country: String,
+    country_code: String,
+    lat: f64,
+    lon: f64,
+    timezone: String,
+}
+
+/// Weather display units.  Resolved once per fetch from the `weather_units`
+/// config setting and the geocoded country.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum WeatherUnits {
+    Imperial,
+    Metric,
+}
+
+impl WeatherUnits {
+    fn is_imperial(self) -> bool {
+        self == WeatherUnits::Imperial
+    }
+    /// Short temperature unit label (`F` / `C`) — no degree sign, since
+    /// PETSCII/ASCII terminals can't render one.
+    fn temp_label(self) -> &'static str {
+        if self.is_imperial() { "F" } else { "C" }
+    }
+    /// Wind speed unit label (`mph` / `km/h`).
+    fn wind_label(self) -> &'static str {
+        if self.is_imperial() { "mph" } else { "km/h" }
+    }
+}
+
+/// Resolve display units from the `weather_units` setting and a geocoded
+/// ISO-3166 country code.  `auto` (or any unrecognized value) uses Fahrenheit
+/// for the US and Celsius everywhere else — matching each locale's norm while
+/// preserving the historical US-only behavior.
+fn resolve_weather_units(setting: &str, country_code: &str) -> WeatherUnits {
+    match setting.trim().to_ascii_lowercase().as_str() {
+        "us" => WeatherUnits::Imperial,
+        "metric" => WeatherUnits::Metric,
+        _ => {
+            if country_code.eq_ignore_ascii_case("US") {
+                WeatherUnits::Imperial
+            } else {
+                WeatherUnits::Metric
+            }
+        }
+    }
+}
+
+/// Format a Celsius temperature for display in the chosen units (rounded, no
+/// unit suffix — the caller appends the label).  Rounds to a whole integer so
+/// a value in the (-0.5, 0) band shows as `0`, never `-0`.
+fn format_temp(temp_c: f64, units: WeatherUnits) -> String {
+    let v = if units.is_imperial() { temp_c * 9.0 / 5.0 + 32.0 } else { temp_c };
+    format!("{}", v.round() as i64)
+}
+
+/// Format a km/h wind speed for display in the chosen units (rounded).
+fn format_wind(wind_kmh: f64, units: WeatherUnits) -> String {
+    let v = if units.is_imperial() { wind_kmh * 0.621_371 } else { wind_kmh };
+    format!("{}", v.round() as i64)
+}
+
+/// Clean and validate a user-entered weather location.  Accepts city names and
+/// postal codes worldwide (any script) — the only rejections are empty input
+/// and absurdly long input.  Control characters are stripped so the value
+/// can't corrupt the geocoder URL or the saved `egateway.conf` line.  Returns
+/// the cleaned query, or a short error message for the terminal.
+fn validate_weather_location(input: &str) -> Result<String, &'static str> {
+    let cleaned: String = input.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return Err("Enter a city or postal code.");
+    }
+    // Generous cap: real place/"city, country" queries are well under this;
+    // the bound just stops a pathological paste from reaching the URL.
+    if cleaned.chars().count() > 60 {
+        return Err("Location too long.");
+    }
+    Ok(cleaned.to_string())
+}
+
+/// Split a location query into a geocoder search term and an optional
+/// disambiguating qualifier, on the LAST comma.  `"London, GB"` ->
+/// `("London", Some("GB"))`; `"62051"` -> `("62051", None)`.  A trailing or
+/// leading empty side is ignored (treated as no qualifier).
+fn split_location_query(query: &str) -> (String, Option<String>) {
+    if let Some((name, qual)) = query.rsplit_once(',') {
+        let name = name.trim();
+        let qual = qual.trim();
+        if !name.is_empty() && !qual.is_empty() {
+            return (name.to_string(), Some(qual.to_string()));
+        }
+    }
+    (query.trim().to_string(), None)
+}
+
+/// Choose a geocoding result.  Without a qualifier, take the first (Open-Meteo
+/// ranks by prominence, so "London" -> UK, "Paris" -> France).  With a
+/// qualifier, pick the first result whose country code, country name, or
+/// region (`admin1`) matches it case-insensitively — enabling "London, GB",
+/// "London, Ontario", "Paris, France", "Paris, Texas".  Returns `None` when a
+/// qualifier is given but nothing matches (so the caller reports "not found"
+/// rather than silently showing the wrong city).
+fn pick_geo_result<'a>(results: &'a [GeoResult], qualifier: Option<&str>) -> Option<&'a GeoResult> {
+    match qualifier {
+        None => results.first(),
+        Some(q) => {
+            let q = q.trim();
+            // Two passes so matching is deterministic when a qualifier is
+            // ambiguous.  An exact country-code / country-name / region match
+            // wins first (so "London, CA" resolves to Canada, not California);
+            // only if nothing matches exactly do we expand a US state
+            // abbreviation ("Springfield, IL" -> Illinois), which is why
+            // "Paris, TX" still works.
+            let exact = results.iter().find(|r| {
+                r.country_code.eq_ignore_ascii_case(q)
+                    || r.country.eq_ignore_ascii_case(q)
+                    || r.admin1.eq_ignore_ascii_case(q)
+            });
+            if exact.is_some() {
+                return exact;
+            }
+            expand_us_state(q)
+                .and_then(|full| results.iter().find(|r| r.admin1.eq_ignore_ascii_case(full)))
+        }
+    }
+}
+
+/// Expand a USPS 2-letter state/territory code to the full state name
+/// Open-Meteo reports in `admin1`.  Returns `None` for anything that isn't a
+/// recognized code, so non-US qualifiers fall through to the other matchers.
+fn expand_us_state(code: &str) -> Option<&'static str> {
+    let full = match code.to_ascii_uppercase().as_str() {
+        "AL" => "Alabama",
+        "AK" => "Alaska",
+        "AZ" => "Arizona",
+        "AR" => "Arkansas",
+        "CA" => "California",
+        "CO" => "Colorado",
+        "CT" => "Connecticut",
+        "DE" => "Delaware",
+        "FL" => "Florida",
+        "GA" => "Georgia",
+        "HI" => "Hawaii",
+        "ID" => "Idaho",
+        "IL" => "Illinois",
+        "IN" => "Indiana",
+        "IA" => "Iowa",
+        "KS" => "Kansas",
+        "KY" => "Kentucky",
+        "LA" => "Louisiana",
+        "ME" => "Maine",
+        "MD" => "Maryland",
+        "MA" => "Massachusetts",
+        "MI" => "Michigan",
+        "MN" => "Minnesota",
+        "MS" => "Mississippi",
+        "MO" => "Missouri",
+        "MT" => "Montana",
+        "NE" => "Nebraska",
+        "NV" => "Nevada",
+        "NH" => "New Hampshire",
+        "NJ" => "New Jersey",
+        "NM" => "New Mexico",
+        "NY" => "New York",
+        "NC" => "North Carolina",
+        "ND" => "North Dakota",
+        "OH" => "Ohio",
+        "OK" => "Oklahoma",
+        "OR" => "Oregon",
+        "PA" => "Pennsylvania",
+        "RI" => "Rhode Island",
+        "SC" => "South Carolina",
+        "SD" => "South Dakota",
+        "TN" => "Tennessee",
+        "TX" => "Texas",
+        "UT" => "Utah",
+        "VT" => "Vermont",
+        "VA" => "Virginia",
+        "WA" => "Washington",
+        "WV" => "West Virginia",
+        "WI" => "Wisconsin",
+        "WY" => "Wyoming",
+        _ => return None,
+    };
+    Some(full)
+}
+
+/// Parse the Open-Meteo geocoder JSON `results` array into `GeoResult`s,
+/// skipping any entry missing coordinates.
+fn parse_geo_results(v: &serde_json::Value) -> Vec<GeoResult> {
+    let Some(arr) = v.get("results").and_then(|r| r.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|r| {
+            let lat = r.get("latitude").and_then(|v| v.as_f64())?;
+            let lon = r.get("longitude").and_then(|v| v.as_f64())?;
+            let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(GeoResult {
+                name: s("name"),
+                admin1: s("admin1"),
+                country: s("country"),
+                country_code: s("country_code"),
+                lat,
+                lon,
+                timezone: {
+                    let tz = s("timezone");
+                    if tz.is_empty() { "auto".to_string() } else { tz }
+                },
+            })
+        })
+        .collect()
 }
 
 // ─── SharedWriter ───────────────────────────────────────────
@@ -1538,7 +1766,7 @@ pub(crate) struct TelnetSession {
     web_url: Option<String>,
     web_title: Option<String>,
     web_forms: Vec<crate::webbrowser::WebForm>,
-    weather_zip: String,
+    weather_location: String,
     is_serial: bool,
     /// True for a master/slave **relay** session (a remote device bridged
     /// in from a slave).  Such a session behaves like a serial caller
@@ -1636,7 +1864,7 @@ impl TelnetSession {
             web_url: None,
             web_title: None,
             web_forms: Vec::new(),
-            weather_zip: config::get_config().weather_zip,
+            weather_location: config::get_config().weather_location,
             is_serial: true,
             is_relay: false,
             serial_port_id: Some(port_id),
@@ -1692,7 +1920,7 @@ impl TelnetSession {
             web_url: None,
             web_title: None,
             web_forms: Vec::new(),
-            weather_zip: config::get_config().weather_zip,
+            weather_location: config::get_config().weather_location,
             is_serial: false,
             is_relay: false,
             serial_port_id: None,
@@ -1764,7 +1992,7 @@ impl TelnetSession {
             web_url: None,
             web_title: None,
             web_forms: Vec::new(),
-            weather_zip: config::get_config().weather_zip,
+            weather_location: config::get_config().weather_location,
             is_serial: true,
             is_relay: true,
             serial_port_id: None,
@@ -7764,7 +7992,7 @@ impl TelnetSession {
     // ─── WEATHER ────────────────────────────────────────────
 
     async fn weather(&mut self) -> Result<(), std::io::Error> {
-        let saved_zip = self.weather_zip.clone();
+        let saved_location = self.weather_location.clone();
 
         self.clear_screen().await?;
         let sep = self.separator();
@@ -7774,15 +8002,20 @@ impl TelnetSession {
         self.send_line(&sep).await?;
         self.send_line("").await?;
 
-        // Prompt for zip code with default
-        if saved_zip.is_empty() {
-            self.send(&format!("  {}: ", self.cyan("Zip code")))
+        // Prompt for a location (city or postal code, worldwide) with default.
+        self.send_line(&format!(
+            "  {}",
+            self.dim("City or postal code, e.g. London, GB")
+        ))
+        .await?;
+        if saved_location.is_empty() {
+            self.send(&format!("  {}: ", self.cyan("Location")))
                 .await?;
         } else {
             self.send(&format!(
                 "  {} [{}]: ",
-                self.cyan("Zip code"),
-                self.amber(&saved_zip)
+                self.cyan("Location"),
+                self.amber(&saved_location)
             ))
             .await?;
         }
@@ -7793,18 +8026,19 @@ impl TelnetSession {
             None => return Ok(()),
         };
 
-        let zip = if input.is_empty() {
-            if saved_zip.is_empty() {
+        let location = if input.trim().is_empty() {
+            if saved_location.is_empty() {
                 return Ok(());
             }
-            saved_zip
+            saved_location
         } else {
-            // Validate: digits only, 5 chars
-            if !input.chars().all(|c| c.is_ascii_digit()) || input.len() != 5 {
-                self.show_error("Enter a 5-digit US zip code.").await?;
-                return Ok(());
+            match validate_weather_location(&input) {
+                Ok(loc) => loc,
+                Err(msg) => {
+                    self.show_error(msg).await?;
+                    return Ok(());
+                }
             }
-            input
         };
 
         self.send_line("").await?;
@@ -7812,30 +8046,32 @@ impl TelnetSession {
             .await?;
         self.flush().await?;
 
-        // Save the zip code for next time (session + config file)
-        self.weather_zip = zip.clone();
-        let zip_for_save = zip.clone();
+        // Save the location for next time (session + config file).
+        self.weather_location = location.clone();
+        let loc_for_save = location.clone();
         tokio::task::spawn_blocking(move || {
-            config::update_config_value("weather_zip", &zip_for_save);
+            config::update_config_value("weather_location", &loc_for_save);
         })
         .await
         .ok();
 
-        // Fetch weather from Open-Meteo (free, no API key)
-        let zip_owned = zip.clone();
+        // Fetch weather from Open-Meteo (free, no API key). Always fetched in
+        // metric; the display converts to the user's units.
+        let loc_owned = location.clone();
         let result = tokio::task::spawn_blocking(move || {
-            Self::fetch_weather(&zip_owned)
+            Self::fetch_weather(&loc_owned)
         })
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         match result {
             Ok(weather) => {
-                self.display_weather(&zip, &weather).await?;
+                self.display_weather(&weather).await?;
             }
             Err(e) => {
                 let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
-                self.show_error(&truncate_to_width(&e, max_w)).await?;
+                let safe = crate::aichat::sanitize_for_terminal(&e);
+                self.show_error(&truncate_to_width(&safe, max_w)).await?;
             }
         }
         Ok(())
@@ -7871,7 +8107,12 @@ impl TelnetSession {
         Err(last)
     }
 
-    fn fetch_weather(zip: &str) -> Result<WeatherData, String> {
+    fn fetch_weather(location: &str) -> Result<WeatherData, String> {
+        // Clean/bound the query here too — not just at the interactive prompt —
+        // so a value loaded from egateway.conf (hand-edited, or a legacy
+        // migration) can't reach the geocoder URL unchecked.
+        let location = validate_weather_location(location).map_err(|e| e.to_string())?;
+
         // Short connect timeout so an unreachable/blocked host fails fast (don't
         // leave the menu hanging on a dead endpoint), with a modest overall cap.
         let agent = ureq::Agent::new_with_config(
@@ -7881,57 +8122,60 @@ impl TelnetSession {
                 .build(),
         );
 
-        // Step 1: Geocode zip code via Open-Meteo
+        // Step 1: Geocode the location via Open-Meteo.  Split off an optional
+        // "City, Qualifier" so a common name can be disambiguated by country or
+        // region; percent-encode the search term (city names / postal codes may
+        // contain spaces or non-ASCII).  Fetch several candidates so the
+        // qualifier can select among them.
+        let (name, qualifier) = split_location_query(&location);
         let geo_url = format!(
-            "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
-            zip
+            "https://geocoding-api.open-meteo.com/v1/search?name={}&count=25&language=en&format=json",
+            crate::webserver::encode_query(&name)
         );
-        let geo_bytes = Self::weather_http_get(&agent, &geo_url, 64 * 1024)
+        let geo_bytes = Self::weather_http_get(&agent, &geo_url, 128 * 1024)
             .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
         let geo: serde_json::Value = serde_json::from_slice(&geo_bytes)
             .map_err(|_| "Weather service returned bad data.".to_string())?;
 
-        let result = geo
-            .get("results")
-            .and_then(|r| r.get(0))
-            .ok_or("Zip code not found.")?;
-        let lat = result.get("latitude").and_then(|v| v.as_f64()).ok_or("No coordinates")?;
-        let lon = result.get("longitude").and_then(|v| v.as_f64()).ok_or("No coordinates")?;
-        let city = result.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
-        let region = result.get("admin1").and_then(|v| v.as_str()).unwrap_or("");
-        let timezone = result.get("timezone").and_then(|v| v.as_str()).unwrap_or("auto");
+        let results = parse_geo_results(&geo);
+        let result = pick_geo_result(&results, qualifier.as_deref())
+            .ok_or("Not found - try 'City, Country'.")?
+            .clone();
+        let lat = result.lat;
+        let lon = result.lon;
 
-        // Step 2: Fetch weather from Open-Meteo
+        // Step 2: Fetch weather from Open-Meteo, always in metric — the display
+        // layer converts to the user's units, so a units change never re-fetches.
         let wx_url = format!(
             "https://api.open-meteo.com/v1/forecast?\
              latitude={}&longitude={}\
              &current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m\
              &daily=weather_code,temperature_2m_max,temperature_2m_min\
-             &temperature_unit=fahrenheit&wind_speed_unit=mph\
+             &temperature_unit=celsius&wind_speed_unit=kmh\
              &timezone={}&forecast_days=3",
-            lat, lon, timezone
+            lat, lon, crate::webserver::encode_query(&result.timezone)
         );
         let wx_bytes = match Self::weather_http_get(&agent, &wx_url, 128 * 1024) {
             Ok(b) => b,
             // Primary forecast host unreachable — fall back to MET Norway,
             // reusing the coordinates we already geocoded via Open-Meteo.
-            Err(_) => return Self::fetch_weather_metno(&agent, lat, lon, city, region),
+            Err(_) => return Self::fetch_weather_metno(&agent, &result),
         };
         let wx: serde_json::Value = serde_json::from_slice(&wx_bytes)
             .map_err(|_| "Weather service returned bad data.".to_string())?;
 
         let current = wx.get("current").ok_or("No current weather")?;
-        let temp_f = current.get("temperature_2m").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let feels_like = current.get("apparent_temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let temp_c = current.get("temperature_2m").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let feels_like_c = current.get("apparent_temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let humidity = current.get("relative_humidity_2m").and_then(|v| v.as_i64()).unwrap_or(0);
-        let wind_mph = current.get("wind_speed_10m").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let wind_kmh = current.get("wind_speed_10m").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let wind_deg = current.get("wind_direction_10m").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let weather_code = current.get("weather_code").and_then(|v| v.as_i64()).unwrap_or(-1);
 
         let wind_dir = Self::degrees_to_compass(wind_deg);
         let desc = Self::wmo_weather_description(weather_code);
 
-        // Extract 3-day forecast
+        // Extract 3-day forecast (Celsius; converted at display time).
         let mut forecast = Vec::new();
         if let Some(daily) = wx.get("daily") {
             let dates = daily.get("time").and_then(|v| v.as_array());
@@ -7939,15 +8183,19 @@ impl TelnetSession {
             let lows = daily.get("temperature_2m_min").and_then(|v| v.as_array());
             let codes = daily.get("weather_code").and_then(|v| v.as_array());
             if let (Some(dates), Some(highs), Some(lows), Some(codes)) = (dates, highs, lows, codes) {
-                for i in 0..dates.len().min(3) {
-                    let date = dates[i].as_str().unwrap_or("?").to_string();
-                    let high = highs[i].as_f64().map(|v| format!("{:.0}", v)).unwrap_or("?".into());
-                    let low = lows[i].as_f64().map(|v| format!("{:.0}", v)).unwrap_or("?".into());
-                    let code = codes[i].as_i64().unwrap_or(-1);
+                for (i, date_v) in dates.iter().enumerate().take(3) {
+                    // Index the sibling arrays defensively via `.get(i)` — a
+                    // malformed upstream response can return a `time` array
+                    // longer than the value arrays, and a bare `highs[i]` would
+                    // then panic (the rest of this parser is fault-tolerant).
+                    let date = date_v.as_str().unwrap_or("?").to_string();
+                    let high_c = highs.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let low_c = lows.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let code = codes.get(i).and_then(|v| v.as_i64()).unwrap_or(-1);
                     forecast.push(ForecastDay {
                         date,
-                        high,
-                        low,
+                        high_c,
+                        low_c,
                         desc: Self::wmo_weather_description(code).to_string(),
                     });
                 }
@@ -7955,12 +8203,14 @@ impl TelnetSession {
         }
 
         Ok(WeatherData {
-            city: city.to_string(),
-            region: region.to_string(),
-            temp_f: format!("{:.0}", temp_f),
-            feels_like: format!("{:.0}", feels_like),
-            humidity: format!("{}", humidity),
-            wind_mph: format!("{:.0}", wind_mph),
+            city: result.name.clone(),
+            region: result.admin1.clone(),
+            country: result.country.clone(),
+            country_code: result.country_code.clone(),
+            temp_c,
+            feels_like_c,
+            humidity,
+            wind_kmh,
             wind_dir: wind_dir.to_string(),
             desc: desc.to_string(),
             forecast,
@@ -7969,21 +8219,19 @@ impl TelnetSession {
 
     /// Fallback forecast provider: MET Norway (api.met.no) Locationforecast
     /// 2.0 — free, no API key (needs the descriptive User-Agent set in
-    /// `weather_http_get`).  Reuses the lat/lon/city/region already geocoded
-    /// via Open-Meteo and maps MET's Celsius / metres-per-second timeseries
-    /// into our Fahrenheit/mph `WeatherData`.  Daily high/low are aggregated by
-    /// UTC date (a fallback approximation — the primary Open-Meteo path uses
+    /// `weather_http_get`).  Reuses the `GeoResult` already geocoded via
+    /// Open-Meteo (worldwide coverage, so this works for any location, not just
+    /// the US) and keeps MET's native Celsius / km-h into the metric
+    /// `WeatherData` the display layer converts.  Daily high/low are aggregated
+    /// by UTC date (a fallback approximation — the primary Open-Meteo path uses
     /// the location's local day boundaries).
     fn fetch_weather_metno(
         agent: &ureq::Agent,
-        lat: f64,
-        lon: f64,
-        city: &str,
-        region: &str,
+        geo: &GeoResult,
     ) -> Result<WeatherData, String> {
         let url = format!(
             "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={:.4}&lon={:.4}",
-            lat, lon
+            geo.lat, geo.lon
         );
         let bytes = Self::weather_http_get(agent, &url, 512 * 1024)
             .map_err(|_| "Weather service unreachable. Try again later.".to_string())?;
@@ -8002,8 +8250,7 @@ impl TelnetSession {
             .and_then(|i| i.get("details"))
             .ok_or("No current weather")?;
 
-        let c_to_f = |c: f64| c * 9.0 / 5.0 + 32.0;
-        let ms_to_mph = |ms: f64| ms * 2.236_936;
+        let ms_to_kmh = |ms: f64| ms * 3.6;
 
         let temp_c = inst.get("air_temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let humidity = inst.get("relative_humidity").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -8063,8 +8310,8 @@ impl TelnetSession {
             .take(3)
             .map(|(date, (lo, hi, sym))| ForecastDay {
                 date,
-                high: format!("{:.0}", c_to_f(hi)),
-                low: format!("{:.0}", c_to_f(lo)),
+                high_c: hi,
+                low_c: lo,
                 desc: sym
                     .map(|s| Self::metno_symbol_description(&s))
                     .unwrap_or_else(|| "Unknown".to_string()),
@@ -8072,13 +8319,15 @@ impl TelnetSession {
             .collect();
 
         Ok(WeatherData {
-            city: city.to_string(),
-            region: region.to_string(),
-            temp_f: format!("{:.0}", c_to_f(temp_c)),
+            city: geo.name.clone(),
+            region: geo.admin1.clone(),
+            country: geo.country.clone(),
+            country_code: geo.country_code.clone(),
+            temp_c,
             // MET's compact product has no apparent temperature; use air temp.
-            feels_like: format!("{:.0}", c_to_f(temp_c)),
-            humidity: format!("{:.0}", humidity),
-            wind_mph: format!("{:.0}", ms_to_mph(wind_ms)),
+            feels_like_c: temp_c,
+            humidity: humidity as i64,
+            wind_kmh: ms_to_kmh(wind_ms),
             wind_dir: Self::degrees_to_compass(wind_deg).to_string(),
             desc,
             forecast,
@@ -8186,87 +8435,121 @@ impl TelnetSession {
 
     async fn display_weather(
         &mut self,
-        zip: &str,
         w: &WeatherData,
     ) -> Result<(), std::io::Error> {
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
+        // Render in a loop so 'U' can toggle the display units in place —
+        // the data is stored in metric, so switching never needs a re-fetch.
+        loop {
+            let units_setting = config::get_config().weather_units;
+            let units = resolve_weather_units(&units_setting, &w.country_code);
+            let tl = units.temp_label();
 
-        let is_petscii = self.terminal_type == TerminalType::Petscii;
-        let max_loc = if is_petscii { 30 } else { 48 };
-        let location = if w.region.is_empty() {
-            w.city.clone()
-        } else {
-            format!("{}, {}", w.city, w.region)
-        };
-        let loc_display = truncate_to_width(&location, max_loc);
-        self.send_line(&format!("  {}", self.yellow(&loc_display)))
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+
+            let is_petscii = self.terminal_type == TerminalType::Petscii;
+            let max_loc = if is_petscii { 30 } else { 48 };
+            // City, region, and country — so the user can tell which match they
+            // got (e.g. London GB vs London CA vs London US).
+            let location = [w.city.as_str(), w.region.as_str(), w.country.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let loc_display = truncate_to_width(&location, max_loc);
+            self.send_line(&format!("  {}", self.yellow(&loc_display)))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            // Current conditions
+            let max_desc = if is_petscii { 26 } else { 40 };
+            self.send_line(&format!(
+                "  Current: {}",
+                self.white(&truncate_to_width(&w.desc, max_desc))
+            ))
             .await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
+            self.send_line(&format!(
+                "  Temp: {}{} (Feels like {}{})",
+                self.white(&format_temp(w.temp_c, units)),
+                tl,
+                self.white(&format_temp(w.feels_like_c, units)),
+                tl,
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Humidity: {}%",
+                self.white(&w.humidity.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Wind: {} {} {}",
+                self.white(&w.wind_dir),
+                self.white(&format_wind(w.wind_kmh, units)),
+                units.wind_label(),
+            ))
+            .await?;
+            self.send_line("").await?;
 
-        // Current conditions
-        let max_desc = if is_petscii { 26 } else { 40 };
-        self.send_line(&format!(
-            "  Current: {}",
-            self.white(&truncate_to_width(&w.desc, max_desc))
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  Temp: {}F (Feels like {}F)",
-            self.white(&w.temp_f),
-            self.white(&w.feels_like)
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  Humidity: {}%",
-            self.white(&w.humidity)
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  Wind: {} {} mph",
-            self.white(&w.wind_dir),
-            self.white(&w.wind_mph)
-        ))
-        .await?;
-        self.send_line("").await?;
-
-        // Forecast
-        if !w.forecast.is_empty() {
-            self.send_line(&format!("  {}", self.yellow("Forecast:")))
-                .await?;
-            for (i, day) in w.forecast.iter().enumerate() {
-                let label = match i {
-                    0 => "Today",
-                    1 => "Tomorrow",
-                    _ => &day.date,
-                };
-                let max_fd = if is_petscii { 12 } else { 20 };
-                let desc_part = if day.desc.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", truncate_to_width(&day.desc, max_fd))
-                };
-                self.send_line(&format!(
-                    "  {}: {}F / {}F{}",
-                    self.cyan(label),
-                    day.high,
-                    day.low,
-                    desc_part,
-                ))
-                .await?;
+            // Forecast
+            if !w.forecast.is_empty() {
+                self.send_line(&format!("  {}", self.yellow("Forecast:")))
+                    .await?;
+                for (i, day) in w.forecast.iter().enumerate() {
+                    let label = match i {
+                        0 => "Today",
+                        1 => "Tomorrow",
+                        _ => &day.date,
+                    };
+                    let max_fd = if is_petscii { 12 } else { 20 };
+                    let desc_part = if day.desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", truncate_to_width(&day.desc, max_fd))
+                    };
+                    self.send_line(&format!(
+                        "  {}: {}{} / {}{}{}",
+                        self.cyan(label),
+                        format_temp(day.high_c, units),
+                        tl,
+                        format_temp(day.low_c, units),
+                        tl,
+                        desc_part,
+                    ))
+                    .await?;
+                }
             }
-        }
 
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.dim(&format!("Zip: {}", zip))))
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.dim(&format!("Units: {}", units_setting))
+            ))
             .await?;
-        self.send_line("").await?;
-        self.send("  Press any key to continue.").await?;
-        self.flush().await?;
-        self.wait_for_key().await?;
-        Ok(())
+            self.send_line("").await?;
+            self.send("  U=change units   other key=back").await?;
+            self.flush().await?;
+
+            let key = self.wait_for_key_returning().await?;
+            if key == b'u' || key == b'U' {
+                // Cycle auto -> us -> metric -> auto and persist, then re-render.
+                let next = match units_setting.as_str() {
+                    "auto" => "us",
+                    "us" => "metric",
+                    _ => "auto",
+                }
+                .to_string();
+                tokio::task::spawn_blocking(move || {
+                    config::update_config_value("weather_units", &next);
+                })
+                .await
+                .ok();
+                continue;
+            }
+            return Ok(());
+        }
     }
 
     // ─── MODEM EMULATOR ──────────────────────────────────────
@@ -10057,13 +10340,25 @@ impl TelnetSession {
                 self.amber(&cfg.browser_homepage)
             ))
             .await?;
-            let zip_display = if cfg.weather_zip.is_empty() {
+            // Truncate the location to what fits on one line — a saved value
+            // can be up to 60 chars, which on a 40-col PETSCII screen would
+            // wrap and push this exactly-22-row menu past the budget (the
+            // prompt would scroll off a C64).  Width leaves room for the
+            // "  Weather:     " prefix and the " [units]" suffix.
+            let loc_display = if cfg.weather_location.is_empty() {
                 self.dim("(not set)")
             } else {
-                self.amber(&cfg.weather_zip)
+                let max_loc = if self.terminal_type == TerminalType::Petscii { 16 } else { 48 };
+                self.amber(&truncate_to_width(&cfg.weather_location, max_loc))
             };
-            self.send_line(&format!("  Weather zip: {}", zip_display))
-                .await?;
+            // Show the units alongside the location so this menu mirrors the
+            // web/GUI (which place the units control next to the location).
+            self.send_line(&format!(
+                "  Weather:     {} [{}]",
+                loc_display,
+                self.dim(&cfg.weather_units)
+            ))
+            .await?;
 
             let verbose_status = if cfg.verbose {
                 self.green("ON")
@@ -10101,8 +10396,13 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Set weather zip code",
+                "  {}  Set weather location",
                 self.cyan("W")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Cycle weather units",
+                self.cyan("U")
             ))
             .await?;
             self.send_line(&format!(
@@ -10163,12 +10463,27 @@ impl TelnetSession {
                 }
                 "w" => {
                     self.other_set_field(
-                        "Weather zip code",
-                        "weather_zip",
-                        &cfg.weather_zip,
+                        "Weather location",
+                        "weather_location",
+                        &cfg.weather_location,
                         false,
                     )
                     .await?;
+                }
+                "u" => {
+                    // Cycle auto -> us -> metric -> auto (mirrors the weather
+                    // screen's own toggle and the web/GUI picker).
+                    let next = match cfg.weather_units.as_str() {
+                        "auto" => "us",
+                        "us" => "metric",
+                        _ => "auto",
+                    }
+                    .to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("weather_units", &next);
+                    })
+                    .await
+                    .ok();
                 }
                 "v" => {
                     let new_val = if cfg.verbose { "false" } else { "true" };
@@ -10205,7 +10520,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press A, B, W, V, G, D, R, H, or Q.").await?;
+                    self.show_error("Press A, B, W, U, V, G, D, R, H, or Q.").await?;
                 }
             }
         }
@@ -10282,8 +10597,10 @@ impl TelnetSession {
                 "     (get one free at groq.com)",
                 "  B  Default homepage URL for",
                 "     the built-in web browser",
-                "  W  Default zip code for the",
-                "     weather feature",
+                "  W  Weather location (city or",
+                "     postal code, worldwide)",
+                "  U  Cycle weather units",
+                "     (auto / us / metric)",
                 "  V  Toggle verbose transfer log",
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
@@ -10296,7 +10613,8 @@ impl TelnetSession {
                 "     free at console.groq.com)",
                 "  B  Default homepage URL for the",
                 "     built-in web browser",
-                "  W  Default zip code for weather",
+                "  W  Weather location (city or postal code)",
+                "  U  Cycle weather units (auto / us / metric)",
                 "  V  Toggle verbose transfer logging",
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
@@ -14089,7 +14407,7 @@ impl TelnetSession {
             "     remote server via SSH",
             "  T  Telnet Gateway: connect to a",
             "     remote server via telnet",
-            "  W  Weather: check weather by zip",
+            "  W  Weather: by city or postal code",
             "  X  Exit: disconnect from server",
         ]
     }
@@ -14174,8 +14492,8 @@ impl TelnetSession {
                 "  Everything else (file-transfer",
                 "  timings, gateway mode, modem AT",
                 "  settings, AI key, homepage, weather",
-                "  zip) applies at the next session or",
-                "  transfer without a restart.",
+                "  location) applies at the next session",
+                "  or transfer without a restart.",
             ]
         }
     }
@@ -14967,7 +15285,7 @@ pub fn start_server(
                                     web_url: None,
                                     web_title: None,
                                     web_forms: Vec::new(),
-                                    weather_zip: config::get_config().weather_zip,
+                                    weather_location: config::get_config().weather_location,
                                     is_serial: false,
                                     is_relay: false,
                                     serial_port_id: None,
@@ -15615,7 +15933,7 @@ mod tests {
             web_url: None,
             web_title: None,
             web_forms: Vec::new(),
-            weather_zip: String::new(),
+            weather_location: String::new(),
             is_serial: false,
             is_relay: false,
             serial_port_id: None,
@@ -15666,7 +15984,7 @@ mod tests {
             web_url: None,
             web_title: None,
             web_forms: Vec::new(),
-            weather_zip: String::new(),
+            weather_location: String::new(),
             is_serial: false,
             is_relay: false,
             serial_port_id: None,
@@ -16189,7 +16507,9 @@ mod tests {
             "Press any key to continue.",
             "No API key configured.",
             // Weather
-            "Enter a 5-digit US zip code.",
+            "Enter a city or postal code.",
+            "Location too long.",
+            "Not found - try 'City, Country'.",
             // Web browser
             "Press G, K, H, or Q.",
             "End of page.",
@@ -16288,7 +16608,8 @@ mod tests {
             // Other settings menu
             "  A  Set AI API key (Groq)",
             "  B  Set browser homepage",
-            "  W  Set weather zip code",
+            "  W  Set weather location",
+            "  U  Cycle weather units",
             "  V  Toggle verbose transfer logging",
             "  G  Toggle GUI on startup",
             // Security menu (post unified-credentials merge — the
@@ -16715,10 +17036,12 @@ mod tests {
     }
 
     /// Other settings menu row count:
-    /// header(3) + blank + 6 values + blank + 7 items + blank + Q/H + prompt = 21
+    /// header(3) + blank + 6 values + blank + 8 items + blank + Q/H + prompt = 22
+    /// (units fold into the Weather value line, so no extra value row; the
+    /// new `U` "Cycle weather units" action is the 8th item.)
     #[test]
     fn test_other_settings_menu_row_count() {
-        let rows = 3 + 1 + 6 + 1 + 7 + 1 + 1 + 1; // 21
+        let rows = 3 + 1 + 6 + 1 + 8 + 1 + 1 + 1; // 22
         assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
     }
 
@@ -16761,11 +17084,11 @@ mod tests {
         assert!(rows <= 22, "punter settings menu is {} rows, exceeds 22", rows);
     }
 
-    /// Other settings help screen (PETSCII): header(3) + blank + 11 content +
-    /// blank + "Press any key" = 17 rows.
+    /// Other settings help screen (PETSCII): header(3) + blank + 13 content +
+    /// blank + "Press any key" = 19 rows.
     #[test]
     fn test_other_help_screen_row_count() {
-        let rows = 3 + 1 + 11 + 1 + 1; // 17
+        let rows = 3 + 1 + 13 + 1 + 1; // 19
         assert!(rows <= 22, "other help screen is {} rows, exceeds 22", rows);
     }
 
@@ -20238,5 +20561,174 @@ mod tests {
         // promptly instead of waiting the real 15s.
         let ev = read_gateway_event(&mut reader).await.unwrap();
         assert_eq!(ev, GatewayInboundEvent::Eof);
+    }
+
+    // ─── Weather: worldwide location + units helpers ──────────
+
+    fn geo(name: &str, admin1: &str, country: &str, cc: &str) -> GeoResult {
+        GeoResult {
+            name: name.into(),
+            admin1: admin1.into(),
+            country: country.into(),
+            country_code: cc.into(),
+            lat: 1.0,
+            lon: 2.0,
+            timezone: "auto".into(),
+        }
+    }
+
+    #[test]
+    fn test_validate_weather_location_accepts_worldwide() {
+        // US zip, city names, a UK postcode with a space, and non-ASCII all pass.
+        for good in ["62051", "London", "London, GB", "SW1A 1AA", "Zürich", "São Paulo", "東京"] {
+            assert!(validate_weather_location(good).is_ok(), "should accept {good:?}");
+        }
+        // Surrounding whitespace and control chars are cleaned, not rejected.
+        assert_eq!(validate_weather_location("  Paris\t ").unwrap(), "Paris");
+        assert_eq!(validate_weather_location("Lon\x07don").unwrap(), "London");
+    }
+
+    #[test]
+    fn test_validate_weather_location_rejects_empty_and_overlong() {
+        assert!(validate_weather_location("").is_err());
+        assert!(validate_weather_location("    ").is_err());
+        assert!(validate_weather_location("\x01\x02").is_err()); // only control chars
+        assert!(validate_weather_location(&"x".repeat(61)).is_err());
+    }
+
+    #[test]
+    fn test_split_location_query() {
+        assert_eq!(split_location_query("London, GB"), ("London".into(), Some("GB".into())));
+        assert_eq!(split_location_query("Paris, France"), ("Paris".into(), Some("France".into())));
+        assert_eq!(split_location_query("London, Ontario"), ("London".into(), Some("Ontario".into())));
+        // No comma -> whole string, no qualifier (US zip still works).
+        assert_eq!(split_location_query("62051"), ("62051".into(), None));
+        // Empty side is ignored.
+        assert_eq!(split_location_query("London,"), ("London,".into(), None));
+        assert_eq!(split_location_query(", GB"), (", GB".into(), None));
+    }
+
+    #[test]
+    fn test_pick_geo_result_disambiguates_by_country_and_region() {
+        let londons = [
+            geo("London", "England", "United Kingdom", "GB"),
+            geo("London", "Ontario", "Canada", "CA"),
+            geo("London", "Ohio", "United States", "US"),
+        ];
+        // No qualifier -> first (prominence-ranked) result.
+        assert_eq!(pick_geo_result(&londons, None).unwrap().country_code, "GB");
+        // Country code (case-insensitive).
+        assert_eq!(pick_geo_result(&londons, Some("ca")).unwrap().country_code, "CA");
+        // Country name.
+        assert_eq!(pick_geo_result(&londons, Some("United States")).unwrap().country_code, "US");
+        // Region (admin1).
+        assert_eq!(pick_geo_result(&londons, Some("Ontario")).unwrap().country_code, "CA");
+        // A qualifier that matches nothing -> None (caller reports not-found).
+        assert!(pick_geo_result(&londons, Some("ZZ")).is_none());
+        // Empty list -> None.
+        assert!(pick_geo_result(&[], None).is_none());
+    }
+
+    #[test]
+    fn test_pick_geo_result_us_state_abbreviation() {
+        // A US state abbreviation expands to the full admin1 name, so the
+        // natural "City, ST" form works, not just "City, StateName".
+        let parises = [
+            geo("Paris", "Île-de-France", "France", "FR"),
+            geo("Paris", "Texas", "United States", "US"),
+            geo("Paris", "Tennessee", "United States", "US"),
+        ];
+        assert_eq!(pick_geo_result(&parises, Some("TX")).unwrap().admin1, "Texas");
+        assert_eq!(pick_geo_result(&parises, Some("tn")).unwrap().admin1, "Tennessee");
+        // Full name still works.
+        assert_eq!(pick_geo_result(&parises, Some("Texas")).unwrap().admin1, "Texas");
+        // Springfield, IL — the motivating case.
+        let springs = [
+            geo("Springfield", "Missouri", "United States", "US"),
+            geo("Springfield", "Illinois", "United States", "US"),
+        ];
+        assert_eq!(pick_geo_result(&springs, Some("IL")).unwrap().admin1, "Illinois");
+        // A bogus 2-letter code is not a state and matches nothing.
+        assert!(pick_geo_result(&springs, Some("ZZ")).is_none());
+    }
+
+    #[test]
+    fn test_pick_geo_result_precedence_and_ambiguity() {
+        // "CA" is both Canada's country code and California's abbreviation.
+        // The exact country-code match must win deterministically (not depend
+        // on Open-Meteo's result ordering).
+        let londons = [
+            geo("London", "England", "United Kingdom", "GB"),
+            geo("London", "Ontario", "Canada", "CA"),
+            geo("London", "California", "United States", "US"),
+        ];
+        assert_eq!(pick_geo_result(&londons, Some("CA")).unwrap().country, "Canada");
+        // With no country match, the US-state expansion resolves "CA" to
+        // California.
+        let no_canada = [
+            geo("London", "England", "United Kingdom", "GB"),
+            geo("London", "California", "United States", "US"),
+        ];
+        assert_eq!(pick_geo_result(&no_canada, Some("CA")).unwrap().admin1, "California");
+        // Multiple same-country matches -> first wins (prominence order).
+        let two_us = [
+            geo("Paris", "Texas", "United States", "US"),
+            geo("Paris", "Tennessee", "United States", "US"),
+        ];
+        assert_eq!(pick_geo_result(&two_us, Some("United States")).unwrap().admin1, "Texas");
+    }
+
+    #[test]
+    fn test_parse_geo_results_and_pick() {
+        let json = serde_json::json!({
+            "results": [
+                {"name":"Paris","admin1":"Île-de-France","country":"France","country_code":"FR",
+                 "latitude":48.85,"longitude":2.35,"timezone":"Europe/Paris"},
+                {"name":"Paris","admin1":"Texas","country":"United States","country_code":"US",
+                 "latitude":33.66,"longitude":-95.55},
+                {"name":"NoCoords","country":"X"} // skipped: missing lat/lon
+            ]
+        });
+        let results = parse_geo_results(&json);
+        assert_eq!(results.len(), 2, "entry without coordinates is dropped");
+        assert_eq!(results[0].timezone, "Europe/Paris");
+        assert_eq!(results[1].timezone, "auto", "missing timezone defaults to auto");
+        // "Paris, Texas" selects the US result, not the (default) France one.
+        assert_eq!(pick_geo_result(&results, Some("Texas")).unwrap().country_code, "US");
+        assert_eq!(pick_geo_result(&results, None).unwrap().country_code, "FR");
+    }
+
+    #[test]
+    fn test_resolve_weather_units() {
+        // Auto: US -> imperial, everywhere else -> metric.
+        assert_eq!(resolve_weather_units("auto", "US"), WeatherUnits::Imperial);
+        assert_eq!(resolve_weather_units("auto", "us"), WeatherUnits::Imperial);
+        assert_eq!(resolve_weather_units("auto", "GB"), WeatherUnits::Metric);
+        assert_eq!(resolve_weather_units("auto", "FR"), WeatherUnits::Metric);
+        // Unknown setting behaves like auto.
+        assert_eq!(resolve_weather_units("", "US"), WeatherUnits::Imperial);
+        assert_eq!(resolve_weather_units("", "DE"), WeatherUnits::Metric);
+        // Explicit overrides ignore the country.
+        assert_eq!(resolve_weather_units("us", "GB"), WeatherUnits::Imperial);
+        assert_eq!(resolve_weather_units("metric", "US"), WeatherUnits::Metric);
+    }
+
+    #[test]
+    fn test_weather_unit_formatting_and_labels() {
+        // 20 C == 68 F; imperial rounds to F, metric keeps C.
+        assert_eq!(format_temp(20.0, WeatherUnits::Imperial), "68");
+        assert_eq!(format_temp(20.0, WeatherUnits::Metric), "20");
+        assert_eq!(format_temp(0.0, WeatherUnits::Imperial), "32");
+        // A value rounding toward negative zero must show "0", never "-0".
+        assert_eq!(format_temp(-0.3, WeatherUnits::Metric), "0");
+        assert_eq!(format_wind(-0.2, WeatherUnits::Metric), "0");
+        // 100 km/h ≈ 62 mph.
+        assert_eq!(format_wind(100.0, WeatherUnits::Imperial), "62");
+        assert_eq!(format_wind(100.0, WeatherUnits::Metric), "100");
+        // Labels.
+        assert_eq!(WeatherUnits::Imperial.temp_label(), "F");
+        assert_eq!(WeatherUnits::Metric.temp_label(), "C");
+        assert_eq!(WeatherUnits::Imperial.wind_label(), "mph");
+        assert_eq!(WeatherUnits::Metric.wind_label(), "km/h");
     }
 }

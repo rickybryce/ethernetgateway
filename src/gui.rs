@@ -2220,7 +2220,31 @@ impl eframe::App for App {
                                 ui.horizontal(|ui| {
                                     ui.label("Home:");
                                     singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
-                                    labeled_field(ui, "Zip:", &mut self.cfg.weather_zip, 60.0);
+                                });
+                                ui.horizontal(|ui| {
+                                    labeled_field(ui, "Location:", &mut self.cfg.weather_location, 120.0);
+                                    ui.label("Units:");
+                                    let sel = match self.cfg.weather_units.as_str() {
+                                        "us" => "US (F/mph)",
+                                        "metric" => "Metric (C/km/h)",
+                                        _ => "Auto",
+                                    };
+                                    egui::ComboBox::from_id_salt("weather_units_combo")
+                                        .width(120.0)
+                                        .selected_text(sel)
+                                        .show_ui(ui, |ui| {
+                                            for (label, val) in [
+                                                ("Auto", "auto"),
+                                                ("US (F/mph)", "us"),
+                                                ("Metric (C/km/h)", "metric"),
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut self.cfg.weather_units,
+                                                    val.to_string(),
+                                                    label,
+                                                );
+                                            }
+                                        });
                                 });
                             });
                         },

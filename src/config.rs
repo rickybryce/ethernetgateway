@@ -63,7 +63,10 @@ const DEFAULT_MAX_SESSIONS: usize = 50;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900; // 15 minutes
 const DEFAULT_GROQ_API_KEY: &str = "";
 const DEFAULT_BROWSER_HOMEPAGE: &str = "http://telnetbible.com";
-const DEFAULT_WEATHER_ZIP: &str = "";
+const DEFAULT_WEATHER_LOCATION: &str = "";
+// Weather units: "auto" infers from the geocoded country (US -> Fahrenheit/mph,
+// everywhere else -> Celsius/km/h); "us" and "metric" force it.
+const DEFAULT_WEATHER_UNITS: &str = "auto";
 const DEFAULT_VERBOSE: bool = false;
 const DEFAULT_SERIAL_ENABLED: bool = false;
 /// Default serial console mode.  `"modem"` runs the Hayes AT emulator on the
@@ -474,8 +477,13 @@ pub struct Config {
     pub groq_api_key: String,
     /// Browser homepage URL. If empty, browser opens to a blank prompt.
     pub browser_homepage: String,
-    /// Last-used weather zip code. If empty, user is prompted without a default.
-    pub weather_zip: String,
+    /// Last-used weather location — a city name or postal code, worldwide
+    /// (e.g. "62051", "London, GB", "Zürich").  If empty, the user is prompted
+    /// without a default.  Migrated from the legacy `weather_zip` key.
+    pub weather_location: String,
+    /// Weather display units: "auto" (infer from country), "us"
+    /// (Fahrenheit/mph), or "metric" (Celsius/km/h).
+    pub weather_units: String,
     /// Enable verbose XMODEM protocol logging to stderr.
     pub verbose: bool,
     /// XMODEM negotiation timeout in seconds.  Shared with XMODEM-1K
@@ -657,7 +665,8 @@ impl Default for Config {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             groq_api_key: DEFAULT_GROQ_API_KEY.into(),
             browser_homepage: DEFAULT_BROWSER_HOMEPAGE.into(),
-            weather_zip: DEFAULT_WEATHER_ZIP.into(),
+            weather_location: DEFAULT_WEATHER_LOCATION.into(),
+            weather_units: DEFAULT_WEATHER_UNITS.into(),
             verbose: DEFAULT_VERBOSE,
             xmodem_negotiation_timeout: DEFAULT_XMODEM_NEGOTIATION_TIMEOUT,
             xmodem_block_timeout: DEFAULT_XMODEM_BLOCK_TIMEOUT,
@@ -975,10 +984,19 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("browser_homepage")
             .cloned()
             .unwrap_or_else(|| DEFAULT_BROWSER_HOMEPAGE.into()),
-        weather_zip: map
-            .get("weather_zip")
+        // Prefer the current key; fall back to the legacy `weather_zip` so an
+        // upgrading config keeps its saved location until the next save rewrites
+        // it under `weather_location`.
+        weather_location: map
+            .get("weather_location")
+            .or_else(|| map.get("weather_zip"))
             .cloned()
-            .unwrap_or_else(|| DEFAULT_WEATHER_ZIP.into()),
+            .unwrap_or_else(|| DEFAULT_WEATHER_LOCATION.into()),
+        weather_units: map
+            .get("weather_units")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "auto" | "us" | "metric"))
+            .unwrap_or_else(|| DEFAULT_WEATHER_UNITS.into()),
         verbose: map
             .get("verbose")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1565,8 +1583,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv_str(&mut content, "browser_homepage", &cfg.browser_homepage);
     content.push('\n');
 
-    content.push_str("# Last-used weather zip code (updated automatically when you check weather)\n");
-    write_kv_str(&mut content, "weather_zip", &cfg.weather_zip);
+    content.push_str("# Last-used weather location: city or postal code, worldwide\n");
+    content.push_str("# (e.g. 62051, \"London, GB\", Zurich) -- updated automatically when you check weather\n");
+    write_kv_str(&mut content, "weather_location", &cfg.weather_location);
+    content.push('\n');
+
+    content.push_str("# Weather units: auto (infer from country), us (F/mph), or metric (C/km/h)\n");
+    write_kv_str(&mut content, "weather_units", &cfg.weather_units);
     content.push('\n');
 
     content.push_str("# Verbose logging: set to true for detailed XMODEM protocol diagnostics\n");
@@ -2047,7 +2070,15 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "groq_api_key" => cfg.groq_api_key = value.to_string(),
         "browser_homepage" => cfg.browser_homepage = value.to_string(),
-        "weather_zip" => cfg.weather_zip = value.to_string(),
+        // Accept the legacy key name too so a live update via the old name
+        // still lands (mirrors the reader's fallback).
+        "weather_location" | "weather_zip" => cfg.weather_location = value.to_string(),
+        "weather_units" => {
+            let v = value.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "auto" | "us" | "metric") {
+                cfg.weather_units = v;
+            }
+        }
         "verbose" => cfg.verbose = value.eq_ignore_ascii_case("true"),
         "xmodem_negotiation_timeout" => {
             if let Ok(v) = value.parse::<u64>() && v >= 1 {
@@ -2432,7 +2463,8 @@ mod tests {
         assert_eq!(cfg.idle_timeout_secs, 900);
         assert_eq!(cfg.groq_api_key, "");
         assert_eq!(cfg.browser_homepage, "http://telnetbible.com");
-        assert_eq!(cfg.weather_zip, "");
+        assert_eq!(cfg.weather_location, "");
+        assert_eq!(cfg.weather_units, "auto");
         assert!(!cfg.verbose);
         assert_eq!(cfg.xmodem_negotiation_timeout, 45);
         assert_eq!(cfg.xmodem_block_timeout, 20);
@@ -2747,7 +2779,8 @@ mod tests {
             idle_timeout_secs: 60,
             groq_api_key: "gsk_test123".into(),
             browser_homepage: "https://example.com".into(),
-            weather_zip: "90210".into(),
+            weather_location: "90210".into(),
+            weather_units: "metric".into(),
             verbose: true,
             xmodem_negotiation_timeout: 120,
             xmodem_block_timeout: 30,
@@ -2870,7 +2903,8 @@ mod tests {
         assert_eq!(loaded.idle_timeout_secs, original.idle_timeout_secs);
         assert_eq!(loaded.groq_api_key, original.groq_api_key);
         assert_eq!(loaded.browser_homepage, original.browser_homepage);
-        assert_eq!(loaded.weather_zip, original.weather_zip);
+        assert_eq!(loaded.weather_location, original.weather_location);
+        assert_eq!(loaded.weather_units, original.weather_units);
         assert_eq!(loaded.verbose, original.verbose);
         assert_eq!(loaded.xmodem_negotiation_timeout, original.xmodem_negotiation_timeout);
         assert_eq!(loaded.xmodem_block_timeout, original.xmodem_block_timeout);
@@ -3027,7 +3061,8 @@ mod tests {
             "idle_timeout_secs",
             "groq_api_key",
             "browser_homepage",
-            "weather_zip",
+            "weather_location",
+            "weather_units",
             "verbose",
             "xmodem_negotiation_timeout",
             "xmodem_block_timeout",
@@ -3387,10 +3422,77 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_config_key_weather_zip() {
+    fn test_apply_config_key_weather_location() {
         let mut cfg = Config::default();
-        apply_config_key(&mut cfg, "weather_zip", "90210");
-        assert_eq!(cfg.weather_zip, "90210");
+        apply_config_key(&mut cfg, "weather_location", "London, GB");
+        assert_eq!(cfg.weather_location, "London, GB");
+        // The legacy key name still lands on the new field.
+        let mut cfg2 = Config::default();
+        apply_config_key(&mut cfg2, "weather_zip", "90210");
+        assert_eq!(cfg2.weather_location, "90210");
+    }
+
+    #[test]
+    fn test_apply_config_key_weather_units() {
+        let mut cfg = Config::default();
+        apply_config_key(&mut cfg, "weather_units", "METRIC");
+        assert_eq!(cfg.weather_units, "metric"); // normalized
+        // Invalid values are rejected, leaving the prior value intact.
+        apply_config_key(&mut cfg, "weather_units", "kelvin");
+        assert_eq!(cfg.weather_units, "metric");
+    }
+
+    #[test]
+    fn test_weather_units_invalid_in_file_falls_back_to_auto() {
+        // A hand-edited invalid units value loaded from disk must fall back to
+        // the "auto" default (reader-side validation), not persist verbatim.
+        let dir = std::env::temp_dir().join("xmodem_test_wx_units");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("units.conf");
+        std::fs::write(&path, "weather_units = kelvin\n").unwrap();
+        assert_eq!(read_config_file(path.to_str().unwrap()).weather_units, "auto");
+        // A valid value loads as-is.
+        std::fs::write(&path, "weather_units = metric\n").unwrap();
+        assert_eq!(read_config_file(path.to_str().unwrap()).weather_units, "metric");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_legacy_weather_zip_migrates_to_location() {
+        // An upgrading config that still has only the old `weather_zip` key
+        // must load into `weather_location` (so Ricky's Pi keeps 62051).
+        let dir = std::env::temp_dir().join("xmodem_test_wx_legacy");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy.conf");
+        std::fs::write(&path, "weather_zip = 62051\n").unwrap();
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.weather_location, "62051");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_weather_location_persists_foreign_values() {
+        // City names, postcodes with spaces, commas, and UTF-8 must round-trip
+        // through the config file writer + reader unchanged — persistence works
+        // for other countries exactly as for a US zip.
+        let dir = std::env::temp_dir().join("xmodem_test_wx_foreign");
+        let _ = std::fs::create_dir_all(&dir);
+        for (i, loc) in ["London, GB", "SW1A 1AA", "Zürich", "São Paulo", "東京", "62051"]
+            .iter()
+            .enumerate()
+        {
+            let path = dir.join(format!("wx_{i}.conf"));
+            let original = Config {
+                weather_location: loc.to_string(),
+                weather_units: "metric".to_string(),
+                ..Config::default()
+            };
+            write_config_file(path.to_str().unwrap(), &original).unwrap();
+            let loaded = read_config_file(path.to_str().unwrap());
+            assert_eq!(loaded.weather_location, *loc, "location {loc:?} must round-trip");
+            assert_eq!(loaded.weather_units, "metric");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
