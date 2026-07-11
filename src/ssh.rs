@@ -441,6 +441,8 @@ impl SshHandler {
         }
 
         // A registered idle port consumes a session slot for its lifetime.
+        // Like the relay path (see exec_request), this is on TOP of the auth
+        // slot — an accepted over-count (M-11, fails safe); see that note.
         let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
         if prev >= self.max_sessions {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
@@ -779,10 +781,21 @@ impl russh::server::Handler for SshHandler {
         }
 
         // Count this relay channel against the session cap.  Each relay
-        // channel spawns a full master session, so (like the interactive
-        // shell) it must occupy a slot — previously relay sessions bypassed
-        // max_sessions, letting one authenticated slave spawn unbounded
-        // master sessions (review finding).
+        // channel spawns a full master session, so it must occupy a slot —
+        // previously relay sessions bypassed max_sessions, letting one
+        // authenticated slave spawn unbounded master sessions (review finding).
+        //
+        // NOTE (M-11, accepted): unlike the interactive shell — which rides
+        // the slot claimed at auth (see auth_password) — each relay/register
+        // channel claims its OWN slot on top of that auth slot.  So a
+        // single-channel relay connection occupies two slots where an
+        // interactive user occupies one.  This OVER-counts (fails safe: a
+        // master hosts fewer relay sessions than max_sessions, never more),
+        // and the per-channel count is what bounds a slave from opening
+        // unbounded relay channels on one connection.  Left as-is on the
+        // trusted-LAN master/slave threat model rather than converting the
+        // auth slot per-channel, which risks a fails-open under-count in
+        // this concurrency-critical path (three release sites).
         let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
         if prev >= self.max_sessions {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
