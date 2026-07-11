@@ -4765,7 +4765,7 @@ impl TelnetSession {
                     })
                     .collect()
             }),
-            UploadProtocol::XmodemYmodem => crate::xmodem::xmodem_receive(
+            UploadProtocol::XmodemYmodem => crate::xmodem::xmodem_receive_batch(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -4773,7 +4773,20 @@ impl TelnetSession {
                 verbose,
             )
             .await
-            .map(|(data, meta)| vec![(None, data, meta)]),
+            // A YMODEM batch yields multiple files.  The first keeps the
+            // user-entered name (matching plain XMODEM / ZMODEM / Kermit); files
+            // 2..N take the sender's block-0 filename (the save path sanitizes
+            // it against path traversal, as it does for ZMODEM/Kermit names).
+            .map(|files| {
+                files
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let name = if i == 0 { None } else { f.filename };
+                        (name, f.data, f.meta)
+                    })
+                    .collect()
+            }),
             UploadProtocol::Kermit => crate::kermit::kermit_receive(
                 &mut self.reader,
                 &mut *writer_guard,
@@ -4923,12 +4936,12 @@ impl TelnetSession {
                     }
                 }
             } else {
-                // Batch file 2..N: save under sender's name.  Only ZMODEM
-                // can produce these (XMODEM/YMODEM always yields a single
-                // entry), so `sender_name` will be Some here.  Routes
-                // through the same atomic save_received_file helper as
-                // the autostart and Kermit-server batch paths so the
-                // create_new + tokio::fs guarantees stay symmetric.
+                // Batch file 2..N: save under sender's name.  ZMODEM, Kermit,
+                // and a YMODEM batch (`sb file1 file2 …`) all produce these, so
+                // `sender_name` is Some here.  Routes through the same atomic
+                // save_received_file helper as the autostart and Kermit-server
+                // batch paths so the create_new + tokio::fs guarantees stay
+                // symmetric.
                 let name = match sender_name {
                     Some(n) => n.clone(),
                     None => continue,

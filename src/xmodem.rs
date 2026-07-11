@@ -74,10 +74,58 @@ pub(crate) struct YmodemReceiveMeta {
     pub mode: Option<u32>,
 }
 
+/// One file received by `xmodem_receive_batch`.  Plain XMODEM and single-file
+/// YMODEM yield a one-element `Vec`; a YMODEM batch (`sb file1 file2 …`) yields
+/// one entry per file.  `filename` is the YMODEM block-0 name (needed to name
+/// files 2..N in a batch); it is `None` for plain XMODEM, which carries no name.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct XmodemReceivedFile {
+    pub filename: Option<String>,
+    pub data: Vec<u8>,
+    pub meta: Option<YmodemReceiveMeta>,
+}
+
 // =============================================================================
 // XMODEM PROTOCOL - RECEIVE (UPLOAD)
 // =============================================================================
 
+/// Apply YMODEM end-of-file truncation to one received file's bytes: prefer the
+/// exact size reported in block 0 (Forsberg 1988 §5 — preserves files that
+/// legitimately end in 0x1A), else strip trailing SUB padding.  Extracted so
+/// `xmodem_receive_batch` can finalize every file in a batch, not just the last.
+fn finalize_received_file(
+    mut data: Vec<u8>,
+    meta: &Option<YmodemReceiveMeta>,
+    verbose: bool,
+) -> Vec<u8> {
+    let reported_size = meta.as_ref().and_then(|m| m.size);
+    let truncated_by_size = if let Some(size) = reported_size {
+        let target = size as usize;
+        if target <= data.len() {
+            data.truncate(target);
+            if verbose { glog!("XMODEM recv: truncated to YMODEM size {} bytes", target); }
+            true
+        } else {
+            if verbose { glog!("XMODEM recv: reported size {} > received {}, falling back to SUB strip", target, data.len()); }
+            false
+        }
+    } else {
+        false
+    };
+    if !truncated_by_size {
+        while data.last() == Some(&SUB) {
+            data.pop();
+        }
+    }
+    data
+}
+
+/// Single-file wrapper around `xmodem_receive_batch` — returns the first (and,
+/// for plain XMODEM or a single-file YMODEM transfer, only) received file.
+/// Test-only: production code calls `xmodem_receive_batch` directly, but the
+/// extensive single-file test suite drives this shape unchanged, which keeps
+/// it as the regression guard for the per-file receive path.
+#[cfg(test)]
 pub(crate) async fn xmodem_receive(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -85,6 +133,21 @@ pub(crate) async fn xmodem_receive(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<(Vec<u8>, Option<YmodemReceiveMeta>), String> {
+    let mut files = xmodem_receive_batch(reader, writer, is_tcp, is_petscii, verbose).await?;
+    if files.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let first = files.remove(0);
+    Ok((first.data, first.meta))
+}
+
+pub(crate) async fn xmodem_receive_batch(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<Vec<XmodemReceivedFile>, String> {
     let cfg = config::get_config();
     let negotiation_timeout = cfg.xmodem_negotiation_timeout;
     let block_timeout = cfg.xmodem_block_timeout;
@@ -104,6 +167,11 @@ pub(crate) async fn xmodem_receive(
     // bytes.  Modtime and mode are returned to the caller for fs-attribute
     // application after save; we don't apply them ourselves.
     let mut ymodem_meta: Option<YmodemReceiveMeta> = None;
+    // Completed files, and the filename of the file currently being received
+    // (from its YMODEM block 0).  For a YMODEM batch these accumulate one
+    // entry per file; plain XMODEM / single-file YMODEM push exactly one.
+    let mut files: Vec<XmodemReceivedFile> = Vec::new();
+    let mut current_filename: Option<String> = None;
     let negotiation_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(negotiation_timeout);
 
@@ -220,7 +288,7 @@ pub(crate) async fn xmodem_receive(
                         )
                         .await
                         {
-                            Ok(Ok((true, meta))) => {
+                            Ok(Ok((true, filename, meta))) => {
                                 raw_write_byte(writer, ACK, is_tcp).await?;
                                 // Second 'C' starts the data phase.
                                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
@@ -232,9 +300,10 @@ pub(crate) async fn xmodem_receive(
                                 mode = TransferMode::Crc16;
                                 ymodem_mode = true;
                                 ymodem_meta = meta;
+                                current_filename = filename;
                                 break;
                             }
-                            Ok(Ok((false, _))) => {
+                            Ok(Ok((false, _, _))) => {
                                 if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error, NAKing for retransmit"); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
                                 // Stay in negotiation: the sender will
@@ -306,7 +375,14 @@ pub(crate) async fn xmodem_receive(
                 }
                 if byte == EOT {
                     raw_write_byte(writer, ACK, is_tcp).await?;
-                    return Ok((file_data, ymodem_meta));
+                    // EOT before any data block: an empty transfer.  Return the
+                    // (empty) file so the wrapper's single-file contract holds.
+                    files.push(XmodemReceivedFile {
+                        filename: current_filename.take(),
+                        data: std::mem::take(&mut file_data),
+                        meta: ymodem_meta.take(),
+                    });
+                    return Ok(files);
                 }
                 // CAN handled above by is_can_abort + single-CAN continue.
                 if verbose { glog!("XMODEM recv: ignoring unexpected byte 0x{:02X}", byte); }
@@ -438,56 +514,77 @@ pub(crate) async fn xmodem_receive(
                 }
                 if verbose { glog!("XMODEM recv: EOT confirmed, ACKing"); }
                 raw_write_byte(writer, ACK, is_tcp).await?;
-                if ymodem_mode {
-                    // YMODEM end-of-batch handshake (Forsberg §7.4):
-                    // after ACKing the final EOT, send one more 'C' and
-                    // expect a "null" block 0 (filename starts with NUL)
-                    // meaning "no more files in this batch."  ACK it and
-                    // we're done.  Strict senders (sb, Tera Term, PuTTY
-                    // family) wait for this exchange; if we skip it they
-                    // hang after the last data block is accepted.
-                    if verbose { glog!("XMODEM recv: YMODEM end-of-batch, sending 'C'"); }
-                    raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(block_timeout),
-                        nvt_read_byte(reader, is_tcp, state),
-                    )
-                    .await
-                    {
-                        Ok(Ok(SOH)) => {
-                            // Consume block_num + complement + 128-byte
-                            // payload + 2-byte CRC.  We do NOT verify
-                            // the CRC or the block number — lax senders
-                            // may skip parts of this handshake, and any
-                            // read error just ends the session normally.
-                            // Best-effort drain, bounded so a sender that
-                            // emits the end-of-batch SOH then stalls can't
-                            // hang the (already-completed) session.
-                            let _ = tokio::time::timeout(
-                                std::time::Duration::from_secs(block_timeout),
-                                async {
-                                    let _ = nvt_read_byte(reader, is_tcp, state).await;
-                                    let _ = nvt_read_byte(reader, is_tcp, state).await;
-                                    for _ in 0..XMODEM_BLOCK_SIZE + 2 {
-                                        if nvt_read_byte(reader, is_tcp, state).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                },
-                            )
-                            .await;
-                            raw_write_byte(writer, ACK, is_tcp).await?;
-                            if verbose { glog!("XMODEM recv: YMODEM end-of-batch ACKed"); }
+
+                // Finalize the file that just completed (truncate to block-0
+                // size, else strip SUB padding) and record it.
+                let meta = ymodem_meta.take();
+                let data = finalize_received_file(std::mem::take(&mut file_data), &meta, verbose);
+                files.push(XmodemReceivedFile {
+                    filename: current_filename.take(),
+                    data,
+                    meta,
+                });
+
+                if !ymodem_mode {
+                    // Plain XMODEM: a single file, done.
+                    break;
+                }
+
+                // YMODEM inter-file / end-of-batch (Forsberg §7.4): after ACKing
+                // the EOT, send one more 'C' and read the next block 0.  A block
+                // 0 that carries a filename is the NEXT file in the batch — reset
+                // per-file state and continue receiving it.  A "null" block 0
+                // (filename starts with NUL) means "no more files": ACK it and
+                // finish.  Strict senders (sb, Tera Term, PuTTY) wait for this
+                // exchange; skipping it hangs them after the last data block.
+                if verbose { glog!("XMODEM recv: YMODEM inter-file, sending 'C'"); }
+                raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                let next = tokio::time::timeout(
+                    std::time::Duration::from_secs(block_timeout),
+                    async {
+                        let b = nvt_read_byte(reader, is_tcp, state).await?;
+                        if b != SOH {
+                            // Not a block 0 (lax sender skipped the terminator,
+                            // or line noise) — end the batch.
+                            return Ok::<Option<(Option<String>, Option<YmodemReceiveMeta>)>, String>(None);
                         }
-                        Ok(Ok(b)) => {
-                            if verbose { glog!("XMODEM recv: end-of-batch unexpected byte 0x{:02X}, ending session", b); }
-                        }
-                        Ok(Err(e)) => {
-                            if verbose { glog!("XMODEM recv: end-of-batch read error: {}", e); }
-                        }
-                        Err(_) => {
-                            if verbose { glog!("XMODEM recv: end-of-batch timeout — lax sender, ending session"); }
-                        }
+                        // Consume block_num + complement, then the payload+CRC.
+                        let _ = nvt_read_byte(reader, is_tcp, state).await?;
+                        let _ = nvt_read_byte(reader, is_tcp, state).await?;
+                        let (valid, filename, meta) = read_ymodem_block_zero_body(
+                            reader, TransferMode::Crc16, is_tcp, verbose, state,
+                        )
+                        .await?;
+                        Ok(if valid { Some((filename, meta)) } else { None })
+                    },
+                )
+                .await;
+                match next {
+                    Ok(Ok(Some((Some(filename), meta)))) => {
+                        // Next file in the batch: ACK its block 0, send 'C' to
+                        // start its data phase, reset per-file state, and loop.
+                        raw_write_byte(writer, ACK, is_tcp).await?;
+                        raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                        current_filename = Some(filename);
+                        ymodem_meta = meta;
+                        expected_block = 1;
+                        error_count = 0;
+                        if verbose { glog!("XMODEM recv: YMODEM next file in batch"); }
+                        continue;
+                    }
+                    Ok(Ok(Some((None, _)))) => {
+                        // Valid null block 0 — end of batch.  ACK and finish.
+                        raw_write_byte(writer, ACK, is_tcp).await?;
+                        if verbose { glog!("XMODEM recv: YMODEM end-of-batch ACKed"); }
+                    }
+                    Ok(Ok(None)) => {
+                        if verbose { glog!("XMODEM recv: end-of-batch — no valid terminator block, ending session"); }
+                    }
+                    Ok(Err(e)) => {
+                        if verbose { glog!("XMODEM recv: end-of-batch read error: {}", e); }
+                    }
+                    Err(_) => {
+                        if verbose { glog!("XMODEM recv: end-of-batch timeout — lax sender, ending session"); }
                     }
                 }
                 break;
@@ -505,37 +602,9 @@ pub(crate) async fn xmodem_receive(
         }
     }
 
-    // YMODEM: truncate to the exact size reported in block 0 (Forsberg
-    // 1988 §5).  This preserves files that legitimately end in 0x1A,
-    // which SUB-stripping would corrupt.  Fall back to SUB-stripping
-    // when the sender didn't report a size, or when we're in plain
-    // XMODEM / XMODEM-1K mode (no block 0 at all).
-    let reported_size = ymodem_meta.as_ref().and_then(|m| m.size);
-    let truncated_by_size = if let Some(size) = reported_size {
-        let target = size as usize;
-        if target <= file_data.len() {
-            file_data.truncate(target);
-            if verbose { glog!("XMODEM recv: truncated to YMODEM size {} bytes", target); }
-            true
-        } else {
-            // Reported size > received bytes — don't extend, just keep
-            // what we have and fall back to SUB-stripping.  This can
-            // happen if the last block was lost mid-transfer and the
-            // transfer somehow still "completed" from the receiver's
-            // view, or if the sender reported a bogus size.
-            if verbose { glog!("XMODEM recv: reported size {} > received {}, falling back to SUB strip", target, file_data.len()); }
-            false
-        }
-    } else {
-        false
-    };
-    if !truncated_by_size {
-        while file_data.last() == Some(&SUB) {
-            file_data.pop();
-        }
-    }
-
-    Ok((file_data, ymodem_meta))
+    // Every completed file was finalized (size-truncated / SUB-stripped) and
+    // pushed at its EOT; nothing to do here but hand back the batch.
+    Ok(files)
 }
 
 /// Receive and validate a single XMODEM block (after SOH or STX was
@@ -589,7 +658,7 @@ async fn read_ymodem_block_zero_body(
     is_tcp: bool,
     verbose: bool,
     state: &mut ReadState,
-) -> Result<(bool, Option<YmodemReceiveMeta>), String> {
+) -> Result<(bool, Option<String>, Option<YmodemReceiveMeta>), String> {
     let mut payload = [0u8; XMODEM_BLOCK_SIZE];
     for b in payload.iter_mut() {
         *b = nvt_read_byte(reader, is_tcp, state).await?;
@@ -608,8 +677,17 @@ async fn read_ymodem_block_zero_body(
         }
     };
     if !valid {
-        return Ok((false, None));
+        return Ok((false, None, None));
     }
+    // Extract the filename (bytes up to the first NUL).  A leading NUL is the
+    // end-of-batch terminator block → no name.  Non-UTF-8 names are dropped
+    // (the caller falls back to a user-entered / generated name).
+    let filename = payload
+        .iter()
+        .position(|&b| b == 0)
+        .filter(|&n| n > 0)
+        .and_then(|n| std::str::from_utf8(&payload[..n]).ok())
+        .map(|s| s.to_string());
     let parsed = parse_ymodem_block_zero_payload(&payload);
     if verbose {
         let name = payload
@@ -637,7 +715,7 @@ async fn read_ymodem_block_zero_body(
                 .unwrap_or_else(|| "<unknown>".into()),
         );
     }
-    Ok((true, parsed))
+    Ok((true, filename, parsed))
 }
 
 /// Parse the 128-byte block-0 payload into a `YmodemReceiveMeta`.  Returns
@@ -4646,9 +4724,9 @@ mod tests {
     /// deliberately ends in 0x1A so a SUB-strip would corrupt it; if
     /// the assertion passes, size-truncation is working.
     ///
-    /// NOTE: our `xmodem_receive` returns one file per call and closes
-    /// the YMODEM batch after the first file, so multi-file `sb` is
-    /// outside the current API and is not tested here.
+    /// The multi-file batch case (`sb file1 file2`) is covered by
+    /// `test_lrzsz_ymodem_sb_to_us_batch` below (and deterministically, without
+    /// lrzsz, by `test_ymodem_batch_two_files`).
     #[cfg(unix)]
     #[tokio::test]
     #[ignore]
@@ -4742,6 +4820,72 @@ mod tests {
             "sb mode ({:o}) must be a valid permission word",
             mode,
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The originally-deferred case: `sb file1 file2` → our batch receiver must
+    /// recover BOTH files with the sender's block-0 names, exact bytes, and
+    /// sizes.  This is the lrzsz ground-truth for the multi-file path;
+    /// `test_ymodem_batch_two_files` covers the same logic in CI without lrzsz.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn test_lrzsz_ymodem_sb_to_us_batch() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        if Command::new("sb")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            panic!("sb (lrzsz) not found on PATH");
+        }
+
+        let tmp = std::env::temp_dir().join(format!("ymodem_sb_batch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // File A: small.  File B: multi-block, ending in 0x1A (exercises
+        // size-truncation on a non-first file).
+        let data_a = b"first file in the batch".to_vec();
+        let mut data_b: Vec<u8> = (0..400u32).map(|i| (i.wrapping_mul(7) & 0xFF) as u8).collect();
+        data_b.push(0x1A);
+        data_b.push(0x1A);
+        let path_a = tmp.join("batch_a.bin");
+        let path_b = tmp.join("batch_b.dat");
+        std::fs::write(&path_a, &data_a).unwrap();
+        std::fs::write(&path_b, &data_b).unwrap();
+
+        let mut sb = Command::new("sb")
+            .arg(&path_a)
+            .arg(&path_b)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn sb");
+        let mut sb_stdin = sb.stdin.take().unwrap();
+        let mut sb_stdout = sb.stdout.take().unwrap();
+
+        let recv = xmodem_receive_batch(&mut sb_stdout, &mut sb_stdin, false, false, true).await;
+        let _ = sb.wait().await;
+        let files = recv.expect("xmodem_receive_batch against sb failed");
+
+        assert_eq!(files.len(), 2, "sb sent two files; both must be received");
+        assert_eq!(files[0].filename.as_deref(), Some("batch_a.bin"));
+        assert_eq!(files[0].data, data_a, "file A must round-trip exactly");
+        assert_eq!(files[1].filename.as_deref(), Some("batch_b.dat"));
+        assert_eq!(
+            files[1].data, data_b,
+            "file B (multi-block, trailing 0x1A) must round-trip exactly via size truncation"
+        );
+        assert_eq!(files[1].meta.as_ref().and_then(|m| m.size), Some(data_b.len() as u64));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -4864,6 +5008,100 @@ mod tests {
             Some(expected.len() as u64),
             "YMODEM block-0 size must match the payload length",
         );
+    }
+
+    // ─── YMODEM batch (multi-file) receive ────────────────────────────────
+
+    /// Frame one 128-byte block: `SOH seq ~seq payload[128] crchi crclo`.
+    fn ymodem_frame(seq: u8, payload: &[u8; 128]) -> Vec<u8> {
+        let crc = crc16_xmodem(payload);
+        let mut v = vec![SOH, seq, !seq];
+        v.extend_from_slice(payload);
+        v.push((crc >> 8) as u8);
+        v.push((crc & 0xFF) as u8);
+        v
+    }
+
+    /// Build a YMODEM block-0 payload: `filename\0<size>` then NUL fill.
+    fn ymodem_block0_payload(name: &str, size: usize) -> [u8; 128] {
+        let mut p = [0u8; 128];
+        let s = format!("{}\0{}", name, size);
+        p[..s.len()].copy_from_slice(s.as_bytes());
+        p
+    }
+
+    /// Assemble the full wire stream a YMODEM batch sender (`sb file1 file2 …`)
+    /// emits: per file a block 0 (name + size), its 128-byte data blocks
+    /// (padded with SUB), and an EOT — then a single null block 0 to close the
+    /// batch.  The receiver reads these in order, so a prefilled stream drives
+    /// the whole exchange without a live sender.
+    fn build_ymodem_batch_wire(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for (name, data) in files {
+            wire.extend(ymodem_frame(0, &ymodem_block0_payload(name, data.len())));
+            for (i, chunk) in data.chunks(XMODEM_BLOCK_SIZE).enumerate() {
+                let mut payload = [SUB; XMODEM_BLOCK_SIZE];
+                payload[..chunk.len()].copy_from_slice(chunk);
+                wire.extend(ymodem_frame((i + 1) as u8, &payload));
+            }
+            wire.push(EOT);
+        }
+        // End-of-batch: a block 0 whose filename starts with NUL.
+        wire.extend(ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE]));
+        wire
+    }
+
+    async fn replay_ymodem_batch(capture: &[u8]) -> Result<Vec<XmodemReceivedFile>, String> {
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(capture.len() + 8192);
+        inbound_writer.write_all(capture).await.expect("prefill inbound");
+        drop(inbound_writer);
+        let (mut discard_reader, mut outbound_writer) = tokio::io::duplex(64 * 1024);
+        let drain = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = discard_reader.read(&mut buf).await {
+                if n == 0 { break; }
+            }
+        });
+        let result =
+            xmodem_receive_batch(&mut inbound_reader, &mut outbound_writer, false, false, false)
+                .await;
+        drop(outbound_writer);
+        let _ = drain.await;
+        result
+    }
+
+    /// The regression that was deferred: a multi-file YMODEM batch must yield
+    /// every file (name + exact bytes + size), not just the first.  File A is
+    /// sub-block-sized; file B spans multiple blocks and holds all byte values
+    /// (protocol bytes included) so framing/CRC and per-file size truncation
+    /// are both exercised.
+    #[tokio::test]
+    async fn test_ymodem_batch_two_files() {
+        let data_a = b"Alpha file: hello, batch world!".to_vec();
+        let data_b: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+        let wire = build_ymodem_batch_wire(&[("alpha.txt", &data_a), ("beta.bin", &data_b)]);
+
+        let files = replay_ymodem_batch(&wire).await.expect("batch receive failed");
+
+        assert_eq!(files.len(), 2, "both files in the batch must be received");
+        assert_eq!(files[0].filename.as_deref(), Some("alpha.txt"));
+        assert_eq!(files[0].data, data_a, "file A bytes must round-trip exactly");
+        assert_eq!(files[0].meta.as_ref().and_then(|m| m.size), Some(data_a.len() as u64));
+        assert_eq!(files[1].filename.as_deref(), Some("beta.bin"));
+        assert_eq!(files[1].data, data_b, "file B (multi-block) bytes must round-trip exactly");
+        assert_eq!(files[1].meta.as_ref().and_then(|m| m.size), Some(data_b.len() as u64));
+    }
+
+    /// A single-file YMODEM stream through the batch fn must still yield exactly
+    /// one file (guards the wrapper's contract and the null-block-0 terminator).
+    #[tokio::test]
+    async fn test_ymodem_batch_single_file() {
+        let data = b"just one file".to_vec();
+        let wire = build_ymodem_batch_wire(&[("solo.dat", &data)]);
+        let files = replay_ymodem_batch(&wire).await.expect("single-file batch failed");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename.as_deref(), Some("solo.dat"));
+        assert_eq!(files[0].data, data);
     }
 
     /// Capture the wire bytes a real `sx` emits for a plain-XMODEM
