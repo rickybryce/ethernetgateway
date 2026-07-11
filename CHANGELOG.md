@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (**G**), the web config page, and the GUI.
 
 ### Changed
+- **Config UI: tidier frames via "More" popups.** The web config page now keeps
+  the **Master/Slave** relay settings under the Server frame's **More…** popup
+  (they were a separate card), matching the GUI and returning the page to six
+  frames. The **AI Chat, Browser, and Weather** frame (both web and GUI) is now
+  three rows — API key and homepage on the frame, with a **More…** button that
+  opens the weather location and units.
 - **Weather fetch fails fast with a clearer message.** The Open-Meteo request
   now uses a 5 s connect timeout (was a single 15 s global) and retries once on
   a transient transport failure, so an unreachable/blocked forecast host no

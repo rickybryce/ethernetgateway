@@ -708,10 +708,10 @@ and a console panel at the bottom:
 </p>
 
 <ul>
-    <li><strong>Server</strong> — toggle telnet/SSH, set the ports, set the session cap, set the idle timeout. A <em>More&#8230;</em> button reveals the Telnet Gateway options popup.</li>
+    <li><strong>Server</strong> — toggle telnet/SSH/Web/Kermit listeners and set their ports. A <em>More&#8230;</em> button opens a popup with the session cap, idle timeout, GUI display scale, the Telnet/SSH gateway options, and the <strong>Master/Slave</strong> relay settings.</li>
     <li><strong>Security</strong> — Require Login toggle, plus separate username and password fields for telnet and SSH.</li>
     <li><strong>File Transfer (XMODEM)</strong> — transfer directory, XMODEM-family timeouts (negotiation, per-block, retries). The card's subtitle reads <em>(More for YMODEM / ZMODEM / Punter)</em>: a <em>More&#8230;</em> button opens a popup with the full per-protocol breakdown covering the XMODEM/XMODEM-1K/YMODEM shared keys, the independent ZMODEM tunables (handshake timeout, frame timeout, retry cap, and retry interval), and the Punter C1 tunables (block size, negotiation timeout, retry interval, block timeout, max retries).</li>
-    <li><strong>AI Chat, Browser, and Weather</strong> — Groq API key (rendered as a password field), browser homepage URL, weather location, and weather units.</li>
+    <li><strong>AI Chat, Browser, and Weather</strong> — Groq API key (rendered as a password field) and browser homepage URL. A <em>More&#8230;</em> button opens a popup with the weather location and units.</li>
     <li><strong>Serial Port</strong> — three-row layout for the dual-port subsystem.  The header row carries an <em>Enabled</em> checkbox each for <em>Serial Port A</em> and <em>Serial Port B</em>, plus a single <em>Save</em> button on the right that persists both ports atomically and signals each manager to reconfigure.  The two rows below show one port apiece: a device-path dropdown (with a refresh &#8634; button on Port A's row that re-scans and refreshes both dropdowns), a baud field, and a per-port <em>More&#8230;</em> button that opens that port's advanced popup (mode, framing, flow, full Hayes AT state).  The two popups are independent so you can compare settings side-by-side.</li>
     <li><strong>General</strong> — Verbose XMODEM Logging, Show GUI on Startup.</li>
 </ul>

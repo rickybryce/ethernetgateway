@@ -397,11 +397,13 @@ opens on startup. The GUI provides:
   Mode* or *Telnet-Serial Mode* — see Console Mode below), framing,
   flow control, and the full Hayes AT-state surface.  The two popups
   are independent so you can compare settings side-by-side.
-- **"More..." popups** -- the Server, File Transfer, and per-port Serial
-  Port frames each have a **More...** button that opens an advanced-
-  options window. The File Transfer popup exposes the XMODEM-family
-  timeouts plus the independent ZMODEM tunables (handshake, frame
-  timeout, retry cap) side by side.
+- **"More..." popups** -- the Server, File Transfer, AI/Browser/Weather,
+  and per-port Serial Port frames each have a **More...** button that opens
+  an advanced-options window. The Server popup holds the session cap, idle
+  timeout, GUI display scale, gateway modes, and the **Master/Slave** relay
+  settings; the File Transfer popup exposes the XMODEM-family timeouts plus
+  the independent ZMODEM tunables (handshake, frame timeout, retry cap) side
+  by side; the AI/Browser/Weather popup holds the weather location and units.
 - **User Manual button** -- opens the PDF user manual on GitHub in your browser
 - **Save and Restart Server** -- writes changes to `egateway.conf` and restarts
   the server so all changes (including security, ports, and credentials) take
@@ -1100,7 +1102,8 @@ enter `slave_master_username` / `slave_master_password` — which **must match t
 master's unified username/password**. The slave pins the master's SSH host key
 on first contact (TOFU, in `gateway_hosts`) and refuses a changed key. All of
 this is editable from the **Configuration > S Server > M Master/Slave**
-sub-screen (telnet/SSH), the web config card, and the GUI Server "More…" popup.
+sub-screen (telnet/SSH), and the Server "More…" popup in both the web config
+page and the GUI.
 
 Each serial port relays according to its own mode:
 

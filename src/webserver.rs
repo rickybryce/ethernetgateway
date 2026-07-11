@@ -1081,7 +1081,6 @@ fn render_grid(cfg: &Config) -> String {
     out.push_str("<div class=\"grid\">");
     out.push_str(&frame_server(cfg));
     out.push_str(&frame_security(cfg));
-    out.push_str(&frame_master_slave(cfg));
     out.push_str(&frame_file_transfer(cfg));
     out.push_str(&frame_ai_browser(cfg));
     out.push_str(&frame_serial(cfg));
@@ -1185,14 +1184,16 @@ fn frame_security(cfg: &Config) -> String {
     )
 }
 
-/// Master/Slave serial-extender card.  `gateway_role` is an enum select;
-/// the master gate is a checkbox; the slave's master host/port/credentials
-/// are text fields (password masked).  Changing role/relays needs a server
-/// restart, so the card's save button restarts.  (`relay_transport` has no
-/// control here — SSH is the only implemented transport; the raw
-/// alternative will add one when it lands.)  See the Master/Slave design
-/// note.
-fn frame_master_slave(cfg: &Config) -> String {
+/// Master/Slave serial-extender rows for the Server "More" modal (mirrors the
+/// GUI, where these live under the Server frame's More popup — `draw_server_-
+/// relay`).  `gateway_role` is an enum select; the master gate is a checkbox;
+/// the slave's master host/port/credentials are text fields (password masked).
+/// Changing role/relays needs a server restart, which the modal's own "Save
+/// and Restart" button provides — so these rows carry no separate save button.
+/// (`relay_transport` has no control here — SSH is the only implemented
+/// transport; the raw alternative will add one when it lands.)  See the
+/// Master/Slave design note.
+fn master_slave_rows(cfg: &Config) -> String {
     let role_sel = |v: &str| if cfg.gateway_role == v { "selected" } else { "" };
     let is_master = cfg.gateway_role == "master";
     let is_slave = cfg.gateway_role == "slave";
@@ -1208,9 +1209,7 @@ fn frame_master_slave(cfg: &Config) -> String {
     let dis_accept = if is_master { "" } else { "disabled" };
     let dis_slave = if is_slave { "" } else { "disabled" };
     format!(
-        "<section class=\"frame\"><div class=\"frame-head\">\
-         <span class=\"title\">Master/Slave</span>\
-         <span class=\"head-right\">{save}</span></div>\
+        "<h3>Master/Slave</h3>\
          <div class=\"row\"><span class=\"label\">Role:</span>\
          <select name=\"gateway_role\" onchange=\"onRoleChange(this)\">\
          <option value=\"standalone\" {st_sel}>Standalone</option>\
@@ -1218,9 +1217,7 @@ fn frame_master_slave(cfg: &Config) -> String {
          <option value=\"slave\" {sl_sel}>Slave</option>\
          </select> {accept_chk}</div>\
          <div class=\"row\">{host} {port}</div>\
-         <div class=\"row\">{user} {pass}</div>\
-         </section>",
-        save = save_button("save_and_restart", "Save and Restart", "secondary"),
+         <div class=\"row\">{user} {pass}</div>",
         st_sel = role_sel("standalone"),
         ma_sel = role_sel("master"),
         sl_sel = role_sel("slave"),
@@ -1265,6 +1262,9 @@ fn frame_file_transfer(cfg: &Config) -> String {
 }
 
 fn frame_ai_browser(cfg: &Config) -> String {
+    // Three rows: title+Save, API Key, and Home with a right-aligned "More…"
+    // button.  The weather location + units live in the `more-ai` modal
+    // (render_more_popups) so this frame stays compact, mirroring the GUI.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">AI Chat, Browser, and Weather</span>\
@@ -1272,24 +1272,12 @@ fn frame_ai_browser(cfg: &Config) -> String {
          <div class=\"row\"><span class=\"label\">API Key:</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\"></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
-         <input type=\"text\" name=\"browser_homepage\" value=\"{home}\"></div>\
-         <div class=\"row\"><span class=\"label\">Location:</span>\
-         <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
-         placeholder=\"city or postal code\">\
-         <span class=\"label\">Units:</span>\
-         <select name=\"weather_units\">\
-         <option value=\"auto\" {u_auto}>Auto</option>\
-         <option value=\"us\" {u_us}>US (F/mph)</option>\
-         <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
-         </select></div>\
+         <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
+         <button type=\"button\" class=\"more\" data-target=\"more-ai\">More\u{2026}</button></div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         key = html_escape(&cfg.groq_api_key),
         home = html_escape(&cfg.browser_homepage),
-        loc = html_escape(&cfg.weather_location),
-        u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
-        u_us = if cfg.weather_units == "us" { "selected" } else { "" },
-        u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
     )
 }
 
@@ -1439,6 +1427,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"key\" {key_sel}>Key</option>\
          <option value=\"password\" {pwd_sel}>Password</option>\
          </select></div>\
+         {master_slave}\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
@@ -1453,7 +1442,36 @@ fn render_more_popups(cfg: &Config) -> String {
         traw = checkbox("telnet_gateway_raw", "Telnet Gateway: raw TCP mode", cfg.telnet_gateway_raw),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
         pwd_sel = if cfg.ssh_gateway_auth == "password" { "selected" } else { "" },
+        // Master/Slave lives under Server → More (mirrors the GUI); the modal's
+        // own Save-and-Restart covers the restart a role change needs.
+        master_slave = master_slave_rows(cfg),
         save = save_button("save_and_restart", "Save and Restart", "primary"),
+    ));
+
+    // AI/Browser/Weather More — weather location + units (moved off the
+    // primary frame so it stays at three rows, mirroring the GUI).  The API
+    // key + homepage remain on the main frame, so they are NOT repeated here
+    // (a duplicate name= in this single form would clobber the value).
+    out.push_str(&format!(
+        "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body\">\
+         <div class=\"modal-head\"><span class=\"title\">AI, Browser &amp; Weather \u{2014} More</span>\
+         <button type=\"button\" class=\"close\" data-close=\"more-ai\">\u{00d7}</button></div>\
+         <div class=\"row\"><span class=\"label\">Location:</span>\
+         <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
+         placeholder=\"city or postal code\"></div>\
+         <div class=\"row\"><span class=\"label\">Units:</span>\
+         <select name=\"weather_units\">\
+         <option value=\"auto\" {u_auto}>Auto</option>\
+         <option value=\"us\" {u_us}>US (F/mph)</option>\
+         <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
+         </select></div>\
+         <div class=\"modal-foot\">{save}</div>\
+         </div></div>",
+        loc = html_escape(&cfg.weather_location),
+        u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
+        u_us = if cfg.weather_units == "us" { "selected" } else { "" },
+        u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
+        save = save_button("save", "Save", "secondary"),
     ));
 
     // File-transfer More — XMODEM-family retry interval (moved off

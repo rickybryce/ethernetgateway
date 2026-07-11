@@ -497,6 +497,10 @@ struct App {
     serial_popup_open: [bool; 2],
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
+    /// Whether the "AI, Browser & Weather — More..." popup is open.  Holds the
+    /// weather location + units (and re-shows the API key / homepage) so the
+    /// main frame stays at three rows.
+    ai_browser_popup_open: bool,
     /// Whether the security-warning popup for `Allow ATDT KERMIT` is
     /// open.  Shown when the operator first ticks the checkbox; gated
     /// behind explicit confirmation because enabling the feature
@@ -614,6 +618,7 @@ impl App {
             server_popup_open: false,
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
+            ai_browser_popup_open: false,
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
@@ -807,6 +812,47 @@ impl App {
                         ("200%", "2.0"),
                     ] {
                         ui.selectable_value(&mut self.cfg.gui_zoom, val.to_string(), label);
+                    }
+                });
+        });
+    }
+
+    /// Contents of the "AI, Browser & Weather — More" popup: every option in
+    /// the group.  The main frame shows only the API key + homepage (three-row
+    /// budget); the weather location + units live here.
+    fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("API Key:");
+            singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Home:");
+            singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
+        });
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Location:", &mut self.cfg.weather_location, 160.0);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Units:");
+            let sel = match self.cfg.weather_units.as_str() {
+                "us" => "US (F/mph)",
+                "metric" => "Metric (C/km/h)",
+                _ => "Auto",
+            };
+            egui::ComboBox::from_id_salt("weather_units_combo")
+                .width(160.0)
+                .selected_text(sel)
+                .show_ui(ui, |ui| {
+                    for (label, val) in [
+                        ("Auto", "auto"),
+                        ("US (F/mph)", "us"),
+                        ("Metric (C/km/h)", "metric"),
+                    ] {
+                        ui.selectable_value(
+                            &mut self.cfg.weather_units,
+                            val.to_string(),
+                            label,
+                        );
                     }
                 });
         });
@@ -2217,34 +2263,15 @@ impl eframe::App for App {
                                     ui.label("API Key:");
                                     singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
                                 });
+                                // Home row carries the "More..." button (weather
+                                // location + units live in that popup), keeping
+                                // this frame at three rows.  The homepage field
+                                // is width-bounded so the button has room.
                                 ui.horizontal(|ui| {
-                                    ui.label("Home:");
-                                    singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
-                                });
-                                ui.horizontal(|ui| {
-                                    labeled_field(ui, "Location:", &mut self.cfg.weather_location, 120.0);
-                                    ui.label("Units:");
-                                    let sel = match self.cfg.weather_units.as_str() {
-                                        "us" => "US (F/mph)",
-                                        "metric" => "Metric (C/km/h)",
-                                        _ => "Auto",
-                                    };
-                                    egui::ComboBox::from_id_salt("weather_units_combo")
-                                        .width(120.0)
-                                        .selected_text(sel)
-                                        .show_ui(ui, |ui| {
-                                            for (label, val) in [
-                                                ("Auto", "auto"),
-                                                ("US (F/mph)", "us"),
-                                                ("Metric (C/km/h)", "metric"),
-                                            ] {
-                                                ui.selectable_value(
-                                                    &mut self.cfg.weather_units,
-                                                    val.to_string(),
-                                                    label,
-                                                );
-                                            }
-                                        });
+                                    labeled_field(ui, "Home:", &mut self.cfg.browser_homepage, 190.0);
+                                    if right_aligned_small_button(ui, "More...") {
+                                        self.ai_browser_popup_open = true;
+                                    }
                                 });
                             });
                         },
@@ -2439,6 +2466,40 @@ impl eframe::App for App {
                 }
             });
         self.server_popup_open = server_open;
+
+        // AI, Browser & Weather — More popup.  Surfaces every option in the
+        // group (API key, homepage, weather location, weather units); the main
+        // frame shows only the API key + homepage to stay at three rows.
+        let mut ai_browser_open = self.ai_browser_popup_open;
+        egui::Window::new(
+            egui::RichText::new("AI, Browser & Weather — More")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut ai_browser_open)
+        .resizable(true)
+        .collapsible(false)
+        .default_width(420.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            self.draw_ai_browser_more(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Save")
+                        .strong()
+                        .size(16.0)
+                        .color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                self.save_config_now();
+            }
+        });
+        self.ai_browser_popup_open = ai_browser_open;
 
         // One independent popup per port — each shows that port's
         // mode selector, framing/flow row, AT/S-register state, stored
