@@ -1522,9 +1522,10 @@ where
         }
     }
 
-    // Truncate to announced length if the sender provided one.  Handles
-    // sub-1024 final subpackets that get padded to the subpacket
-    // boundary in some sender implementations.
+    // Truncate to the ZFILE-announced length if the sender provided one.
+    // ZMODEM subpackets are byte-exact (not padded to a block boundary), so
+    // for a conformant sender this is a no-op; it defends only against a
+    // sender that transmits trailing bytes past the announced EOF.
     if let Some(sz) = expected_size {
         if (file_data.len() as u64) > sz {
             file_data.truncate(sz as usize);

@@ -722,14 +722,19 @@
                     (<span class="kbd">C</span>).
                 </div>
                 <div class="callout callout-warn">
-                    <strong>Signal pins are not physically driven.</strong> <code>&amp;C</code>,
-                    <code>&amp;D</code>, and <code>&amp;K</code> are parsed, stored, persisted,
-                    and shown by <code>AT&amp;V</code>, but the emulator does not toggle the
-                    real RS-232 DCD / DTR / DSR / RI pins. Actual wire flow control is set by
-                    each port's <code>serial_<em>x</em>_flowcontrol</code> config key, not by
-                    <code>&amp;K</code>. If your terminal program insists on DCD before it will
-                    talk, look for its &ldquo;ignore carrier&rdquo; / &ldquo;force DTR&rdquo;
-                    option.
+                    <strong>Signal pins are driven only when you opt in.</strong>
+                    <code>&amp;C</code>, <code>&amp;D</code>, and <code>&amp;K</code> are always
+                    parsed, stored, persisted, and shown by <code>AT&amp;V</code>. By default the
+                    emulator does not toggle the real RS-232 lines. Set a port's
+                    <code>serial_<em>x</em>_drive_carrier = true</code> and the gateway drives
+                    <strong>DTR</strong> as a carrier proxy under <code>&amp;C</code> control
+                    (a null-modem cable crosses DTR&rarr;DCD into the vintage machine, the same
+                    trick tcpser uses): <code>&amp;C0</code> holds it asserted, <code>&amp;C1</code>
+                    tracks the connection. DSR / RI are still not driven, and actual wire flow
+                    control is set by each port's <code>serial_<em>x</em>_flowcontrol</code> key,
+                    not by <code>&amp;K</code>. If your terminal program insists on DCD before it
+                    will talk, either enable <code>serial_<em>x</em>_drive_carrier</code> or use
+                    its &ldquo;ignore carrier&rdquo; / &ldquo;force DTR&rdquo; option.
                 </div>
             </div>
 
