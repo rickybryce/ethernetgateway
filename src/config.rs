@@ -231,8 +231,10 @@ const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// Configuration web server.  Off by default.  Port 8080 is the
 /// canonical "alternate HTTP" port — high enough to avoid the
 /// `<1024 needs root` trap and unlikely to collide with system
-/// services.  Honors the same `disable_ip_safety` allowlist and
-/// `security_enabled` HTTP Basic auth as the telnet listener.
+/// services.  Uses the same `security_enabled` credentials for HTTP Basic
+/// auth as the telnet listener, and the same `disable_ip_safety` escape
+/// hatch — but, unlike telnet, applies the private-IP allowlist regardless of
+/// whether login is required (M-9; the page renders secrets).
 const DEFAULT_WEB_ENABLED: bool = false;
 const DEFAULT_WEB_PORT: u16 = 8080;
 const DEFAULT_SERIAL_ECHO: bool = true;
@@ -583,10 +585,12 @@ pub struct Config {
     /// hanging.  Off by default (it tears down the whole session).
     pub punter_hangup_on_failure: bool,
     /// Run the HTTP configuration web server.  Mirrors the GUI's
-    /// settings page in a browser.  Honors the same IP-safety
-    /// allowlist as the telnet listener (private/loopback only,
-    /// unless `disable_ip_safety` is set), and the same
-    /// `security_enabled` flag for HTTP Basic auth.
+    /// settings page in a browser.  Accepts only private/loopback source
+    /// IPs unless `disable_ip_safety` is set — applied regardless of whether
+    /// login is required (unlike the telnet listener, which drops the
+    /// allowlist once `security_enabled` is on; the web page renders the
+    /// password + API key, so it doesn't — M-9).  HTTP Basic auth is gated by
+    /// the same `security_enabled` flag.
     pub web_enabled: bool,
     /// Port for the configuration web server.  Only consulted when
     /// `web_enabled` is true.
@@ -832,9 +836,10 @@ fn read_config_file(path: &str) -> Config {
 }
 
 /// Like `read_config_file`, but surfaces a read failure — missing file,
-/// non-UTF-8 bytes, or a permission/I/O error — as an `Err` instead of
-/// falling back to defaults.  Per-key parsing stays lenient: missing or
-/// malformed individual keys still resolve to their documented defaults.
+/// non-UTF-8 bytes, a permission/I/O error, or an existing file with no
+/// recognizable `key = value` lines — as an `Err` instead of falling back to
+/// defaults.  Per-key parsing stays lenient: missing or malformed individual
+/// keys still resolve to their documented defaults.
 fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
     let content = std::fs::read_to_string(path)?;
 
@@ -847,6 +852,21 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
         if let Some((key, value)) = trimmed.split_once('=') {
             map.insert(key.trim().to_string(), value.trim().to_string());
         }
+    }
+
+    // An existing file that yields NO key=value pairs (empty, whitespace-only,
+    // or comments-only) is treated as unreadable rather than parsed as "all
+    // defaults" (M-12 residual).  Otherwise an external truncation to zero
+    // bytes — or a file emptied before the fsync-before-rename fix landed —
+    // would silently downgrade a secured gateway to security-off / password
+    // "changeme" and get rewritten with those defaults.  A real config always
+    // has at least one recognized key; a genuinely first-run install has no
+    // file at all and takes the create-with-defaults path in the caller.
+    if map.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "config file has no recognizable settings (empty or corrupt)",
+        ));
     }
 
     let mut cfg = Config {
@@ -1462,11 +1482,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # listener normally rejects every non-private source IP and every
 # gateway-style *.*.*.1 address — that allowlist is the only thing
 # standing between a public IP and an unauthenticated session.  Set this
-# to true to accept connections from every source regardless.  Has no
-# effect when security_enabled is true (auth runs in either case).
-# Toggleable from the GUI Security frame and the telnet Server
-# Configuration menu — both gate the off→on transition behind a
-# security-warning confirmation.
+# to true to accept connections from every source regardless.  For the
+# TELNET listener it has no effect when security_enabled is true (auth
+# runs in either case).  The WEB server is different: it keeps the
+# allowlist even with login on (the config page shows the password / API
+# key), so `disable_ip_safety = true` is the ONLY way to reach the web UI
+# from a non-private IP.  Toggleable from the GUI Security frame and the
+# telnet Server Configuration menu — both gate the off→on transition
+# behind a security-warning confirmation.
 ");
     write_kv(&mut content, "disable_ip_safety", cfg.disable_ip_safety);
     content.push('\n');
@@ -1684,10 +1707,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("\
 # Configuration web server.  Renders the same settings page the GUI
-# does, in a browser.  Honors the same `disable_ip_safety` allowlist as
-# the telnet listener (private/loopback only unless disabled), and the
-# same `security_enabled` flag for HTTP Basic auth (uses `username` /
-# `password`).
+# does, in a browser.  Accepts only private/loopback source IPs unless
+# `disable_ip_safety` is set; unlike the telnet listener this allowlist
+# applies whether or not login is required (the page shows the password /
+# API key).  HTTP Basic auth uses the same `security_enabled` flag and the
+# `username` / `password` credentials.
 # web_enabled: bind a TCP listener on `web_port` and serve the
 #              configuration page.
 # web_port:    TCP port for the web listener (default 8080).
@@ -2548,6 +2572,34 @@ mod tests {
         let result =
             read_config_file_checked("/nonexistent/path/that/does/not/exist_checked.conf");
         assert!(result.is_err(), "missing config must be reported as an error");
+    }
+
+    // M-12 residual: an existing file that parses to no recognized settings
+    // (empty / whitespace / comments-only — e.g. a zero-byte truncation) must
+    // be reported as unreadable, not accepted as "all defaults" (which would
+    // silently downgrade security_enabled/password on the rewrite).
+    #[test]
+    fn test_read_config_file_checked_rejects_empty_and_commentonly() {
+        let dir = std::env::temp_dir().join("xmodem_test_empty_cfg");
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, body) in [
+            ("empty.conf", ""),
+            ("blank.conf", "   \n\t\n  \n"),
+            ("comments.conf", "# just a comment\n# another\n"),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            assert!(
+                read_config_file_checked(path.to_str().unwrap()).is_err(),
+                "{name}: a config with no recognized keys must be an error"
+            );
+        }
+        // Sanity: one real key makes it parse cleanly.
+        let ok = dir.join("ok.conf");
+        std::fs::write(&ok, "telnet_port = 2323\n").unwrap();
+        assert!(read_config_file_checked(ok.to_str().unwrap()).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

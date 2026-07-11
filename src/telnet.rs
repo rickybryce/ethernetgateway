@@ -14539,11 +14539,19 @@ impl TelnetSession {
                     crate::webbrowser::FormField::Text { label, value, .. }
                     | crate::webbrowser::FormField::TextArea { label, value, .. } => {
                         field_num += 1;
-                        let display_val = if value.is_empty() { "(empty)" } else { value.as_str() };
+                        // Sanitize the value for display only — the stored
+                        // `value` is submitted verbatim, so we must not strip
+                        // control bytes from it (M-8; labels/option-text are
+                        // already sanitized in WebPage::sanitize).
+                        let display_val = if value.is_empty() {
+                            "(empty)".to_string()
+                        } else {
+                            crate::aichat::sanitize_for_terminal(value)
+                        };
                         Some(format!("  {}.{}: {}",
                             field_num,
                             crate::webbrowser::truncate_to_width(label, max_label),
-                            crate::webbrowser::truncate_to_width(display_val, max_val),
+                            crate::webbrowser::truncate_to_width(&display_val, max_val),
                         ))
                     }
                     crate::webbrowser::FormField::Select { label, options, selected, .. } => {

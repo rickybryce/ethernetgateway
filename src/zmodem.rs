@@ -842,7 +842,7 @@ pub(crate) struct ZfileInfo {
 ///   → ZRINIT
 ///   ← ZFIN
 ///   → ZFIN
-///   → "OO"
+///   ← "OO"                     (sender's trailer; we stop, §8.4)
 ///
 /// Returns one [`ZmodemReceive`] per file the receiver chose to
 /// accept.  The `decide` callback runs after each ZFILE header is
@@ -4980,8 +4980,8 @@ mod tests {
             response
         );
 
-        // Tear down: send a ZFIN.  Receiver mirrors and emits "OO",
-        // session ends cleanly.
+        // Tear down: send a ZFIN.  Receiver mirrors the ZFIN and stops (it no
+        // longer emits "OO" — that is the sender's role, §8.4); session ends.
         let zfin = build_hex_header(ZFIN, [0, 0, 0, 0]);
         s_write.write_all(&zfin).await.unwrap();
         // Drain whatever the receiver emits during teardown.

@@ -111,6 +111,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertising one capability without the other (e.g. G-Kermit, MS-DOS Kermit —
   long packets, no windows) was misread, desyncing the rest of the Send-Init.
   Now fixed and pinned against the C-Kermit source.
+- **Serial console/modem no longer busy-loops at 100% CPU on a port EOF
+  (macOS).** `run_console_bridge` and `command_mode_tick` treated a
+  zero-length read (`Ok(0)`) as "no data" and re-polled immediately. The port
+  is opened with a read timeout, so an idle read is `Err(TimedOut)` — `Ok(0)`
+  actually means the device closed (e.g. a PTY master after its slave exits,
+  where loss surfaces as EOF rather than the `Err(EIO)` a real ttyUSB gives).
+  Both now treat it as a disconnect (reopening in modem mode), matching the
+  online-path readers. Inert on Linux.
+- **ZMODEM receiver no longer emits the sender's `OO` trailer.** Per Forsberg
+  §8.4 the receiver replies ZFIN and then *reads* the sender's `OO`; emitting
+  our own was a role inversion (harmless in practice — the peer had already
+  sent its own and exited).
 
 ### Security
 - **SSH server refuses to overwrite an unreadable host key.** If the host-key
@@ -171,14 +183,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content (HTML, `text/plain`, and gopher) now passes through the same
   `sanitize_for_terminal` filter as the AI-chat path, stripping ANSI/CSI/OSC
   escape sequences a malicious or MITM'd page could use to manipulate a retro
-  terminal. Link-number sentinels are preserved.
+  terminal. Link-number sentinels are preserved. Coverage also includes the
+  page URL (a gopher selector can carry escapes into the status line) and all
+  rendered form text — form/field labels, Select option text (sanitized in
+  place), and displayed field values (sanitized at display time so the
+  submitted value stays byte-exact) — which the form view/edit UI prints.
 - **An unreadable existing config is no longer reset to insecure defaults.** If
   `egateway.conf` is present but can't be read (non-UTF-8, corruption, or a
   permission/I/O error), the gateway now refuses to start rather than
   overwriting it with `security_enabled = false` / password `changeme`. Config
   and dial-map saves also `fsync` before the atomic rename, so a crash or power
   loss between write and rename can't publish a truncated file (which would
-  then trip the new fail-loud guard on the next start).
+  then trip the new fail-loud guard on the next start). An existing file that
+  parses to *no* recognized settings (empty, whitespace-only, or comments-only
+  — e.g. an external truncation to zero bytes) is likewise treated as
+  unreadable rather than as "all defaults," so it can't silently downgrade the
+  gateway either.
 - **Startup warns on the wide-open combination.** `disable_ip_safety = true`
   together with `security_enabled = false` — an unauthenticated gateway
   reachable from any IP — now emits a startup warning, matching the guard the

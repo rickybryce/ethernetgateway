@@ -63,9 +63,16 @@ impl Drop for PeerDialGuard {
 /// `PEER_DIAL_TEST_LOCK` serializes onward-dial tests so their set/restore
 /// can't race each other.
 async fn enable_peer_dial() -> PeerDialGuard {
+    set_peer_dial(true).await
+}
+
+/// Force `allow_peer_dial` to a specific value for the guard's lifetime.
+/// Used by the refusal test to hold the flag OFF while still serializing
+/// against the onward-dial tests via `PEER_DIAL_TEST_LOCK`.
+async fn set_peer_dial(enabled: bool) -> PeerDialGuard {
     let lock = PEER_DIAL_TEST_LOCK.lock().await;
     let prev = crate::config::get_config().allow_peer_dial;
-    crate::config::update_config_value("allow_peer_dial", "true");
+    crate::config::update_config_value("allow_peer_dial", if enabled { "true" } else { "false" });
     PeerDialGuard { _lock: lock, prev }
 }
 
@@ -550,6 +557,45 @@ async fn test_master_relay_dial_pipes_both_ways() {
     // Closing the device side tears the dial down cleanly.
     drop(d_write);
     drop(d_read);
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// M-7 negative test: with `allow_peer_dial` OFF, onward-dial must be refused
+/// — the relay stream is shut down and NO outbound connection is made.
+#[tokio::test]
+async fn test_master_relay_dial_refused_without_allow_peer_dial() {
+    let _peer_dial = set_peer_dial(false).await;
+
+    // A target that must NEVER be connected to.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (master_end, device_end) = tokio::io::duplex(8192);
+    let (mut d_read, mut d_write) = tokio::io::split(device_end);
+
+    let dialer = tokio::spawn(run_master_relay_dial(
+        master_end,
+        "127.0.0.1".to_string(),
+        addr.port(),
+    ));
+
+    // The gate refuses before connecting: it shuts the relay down and returns,
+    // so the device side sees an immediate EOF (0-byte read), not data or a hang.
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(5), d_read.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "refused onward-dial must close the relay (EOF), not send data or hang; got {read:?}"
+    );
+
+    // And it must not have dialed the target.
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(
+        accepted.is_err(),
+        "refused onward-dial must NOT open a connection to the target"
+    );
+
+    let _ = d_write.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
 }
 

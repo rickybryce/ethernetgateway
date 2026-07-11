@@ -521,9 +521,12 @@ security_enabled = false
 # Disable the IP-safety allowlist.  When security_enabled is false, the
 # telnet listener normally rejects non-private source IPs and *.*.*.1
 # gateway addresses; set true to accept connections from any source.
-# No effect when security_enabled = true.  The GUI Security frame and the
-# telnet Server Configuration menu gate the off->on transition behind a
-# security-warning confirmation.
+# No effect on TELNET when security_enabled = true.  The WEB server keeps
+# the allowlist even with login on (its page shows the password/API key),
+# so disable_ip_safety = true is the only way to reach the web UI from a
+# non-private IP.  The GUI Security frame and the telnet Server
+# Configuration menu gate the off->on transition behind a security-warning
+# confirmation.
 disable_ip_safety = false
 
 # Credentials (only used when security_enabled = true)

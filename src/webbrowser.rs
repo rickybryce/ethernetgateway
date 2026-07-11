@@ -72,11 +72,43 @@ impl WebPage {
     /// cosmetic sentinel-collision behavior, not an escape-injection vector.
     /// Idempotent.
     pub(crate) fn sanitize(&mut self) {
+        use crate::aichat::sanitize_for_terminal;
         if let Some(title) = self.title.as_mut() {
-            *title = crate::aichat::sanitize_for_terminal(title);
+            *title = sanitize_for_terminal(title);
         }
         for line in self.lines.iter_mut() {
             *line = sanitize_line_keep_markers(line);
+        }
+        // The URL is shown in the status line; a gopher selector can carry
+        // attacker-chosen bytes into it (`build_gopher_url`).
+        self.url = sanitize_for_terminal(&self.url);
+        // Form text is rendered by the telnet form UI (`web_show_forms` /
+        // `web_edit_form`).  Sanitize only the DISPLAY-only strings here —
+        // form/field labels and Select option display text — never a field
+        // `value` or `name`: those are submitted back to the server, and
+        // `sanitize_for_terminal` strips control bytes (incl. newlines) that a
+        // legitimate textarea value may need.  Field values are sanitized at
+        // display time instead (see `web_edit_form`), so the submitted copy
+        // stays byte-exact while the terminal never sees raw escapes (M-8).
+        for form in self.forms.iter_mut() {
+            form.label = sanitize_for_terminal(&form.label);
+            for field in form.fields.iter_mut() {
+                match field {
+                    FormField::Text { label, .. }
+                    | FormField::TextArea { label, .. }
+                    | FormField::Checkbox { label, .. }
+                    | FormField::Radio { label, .. } => {
+                        *label = sanitize_for_terminal(label);
+                    }
+                    FormField::Select { label, options, .. } => {
+                        *label = sanitize_for_terminal(label);
+                        for (_value, display) in options.iter_mut() {
+                            *display = sanitize_for_terminal(display);
+                        }
+                    }
+                    FormField::Hidden { .. } => {}
+                }
+            }
         }
     }
 }
@@ -1419,6 +1451,57 @@ mod tests {
         page.sanitize();
         assert_eq!(page.title, title_once);
         assert_eq!(page.lines, lines_once);
+    }
+
+    #[test]
+    fn test_sanitize_covers_url_and_form_display_text() {
+        // M-8: form/field labels and Select option text are rendered by the
+        // telnet form UI, and the page URL by the status line — all must be
+        // sanitized.  A field `value` is submitted verbatim, so it must NOT be
+        // mutated here (it is sanitized at display time instead).
+        let mut page = WebPage {
+            title: None,
+            lines: Vec::new(),
+            links: Vec::new(),
+            url: "gopher://h/1sel\x1b[2J".to_string(),
+            forms: vec![WebForm {
+                action: "/go".to_string(),
+                method: "post".to_string(),
+                label: "Login\x1b[31m form".to_string(),
+                fields: vec![
+                    FormField::Text {
+                        name: "u".to_string(),
+                        value: "keep\x1b[5mthis".to_string(),
+                        label: "User\x07name".to_string(),
+                        input_type: "text".to_string(),
+                    },
+                    FormField::Select {
+                        name: "c".to_string(),
+                        options: vec![("us".to_string(), "United\x1b[0m States".to_string())],
+                        selected: 0,
+                        label: "Country\u{9b}".to_string(),
+                    },
+                ],
+            }],
+        };
+        page.sanitize();
+        assert_eq!(page.url, "gopher://h/1sel[2J");
+        assert_eq!(page.forms[0].label, "Login[31m form");
+        match &page.forms[0].fields[0] {
+            FormField::Text { label, value, .. } => {
+                assert_eq!(label, "Username"); // display label cleaned
+                assert_eq!(value, "keep\x1b[5mthis"); // submitted value untouched
+            }
+            _ => panic!("expected Text field"),
+        }
+        match &page.forms[0].fields[1] {
+            FormField::Select { label, options, .. } => {
+                assert_eq!(label, "Country");
+                assert_eq!(options[0].1, "United[0m States"); // display text cleaned
+                assert_eq!(options[0].0, "us"); // submitted value untouched
+            }
+            _ => panic!("expected Select field"),
+        }
     }
 
     #[test]
