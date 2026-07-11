@@ -55,6 +55,54 @@ pub(crate) struct WebPage {
     pub forms: Vec<WebForm>,
 }
 
+impl WebPage {
+    /// Strip terminal-control bytes from all remote-derived text before it
+    /// reaches a retro terminal.  A hostile or MITM'd web page / gopher
+    /// server can embed ANSI/CSI/OSC escape sequences to move the cursor,
+    /// recolor the screen, or spoof the UI — the same threat the AI-chat
+    /// path defeats with `aichat::sanitize_for_terminal`.  We reuse that
+    /// exact filter here (rather than a second copy of the rule), applied to
+    /// the title and every rendered line.  The one wrinkle is the `\x02N\x03`
+    /// link-marker sentinels the renderers embed and the telnet consumer
+    /// parses: those framing bytes are C0 controls the filter would strip,
+    /// so `sanitize_line_keep_markers` splits them out and sanitizes only the
+    /// human-readable segments around them.  A page that injects literal
+    /// 0x02/0x03 can at most spoof a link *number* on screen (the
+    /// authoritative `links` array is built separately) — the pre-existing,
+    /// cosmetic sentinel-collision behavior, not an escape-injection vector.
+    /// Idempotent.
+    pub(crate) fn sanitize(&mut self) {
+        if let Some(title) = self.title.as_mut() {
+            *title = crate::aichat::sanitize_for_terminal(title);
+        }
+        for line in self.lines.iter_mut() {
+            *line = sanitize_line_keep_markers(line);
+        }
+    }
+}
+
+/// Apply `aichat::sanitize_for_terminal` to a rendered line while preserving
+/// the `\x02N\x03` link-marker sentinels (see [`WebPage::sanitize`]).
+fn sanitize_line_keep_markers(line: &str) -> String {
+    // Fast path: no sentinels, sanitize the whole line in one pass.
+    if !line.contains(['\u{02}', '\u{03}']) {
+        return crate::aichat::sanitize_for_terminal(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut segment = String::new();
+    for c in line.chars() {
+        if c == '\u{02}' || c == '\u{03}' {
+            out.push_str(&crate::aichat::sanitize_for_terminal(&segment));
+            segment.clear();
+            out.push(c);
+        } else {
+            segment.push(c);
+        }
+    }
+    out.push_str(&crate::aichat::sanitize_for_terminal(&segment));
+    out
+}
+
 /// A single field within an HTML form.
 #[derive(Clone, Debug)]
 pub(crate) enum FormField {
@@ -326,6 +374,8 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
         render_html_body(&body_bytes, final_url, width)?
     };
 
+    page.sanitize();
+
     if tls_downgraded {
         prepend_tls_downgrade_notice(&mut page, width);
     }
@@ -482,6 +532,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         } else {
             render_html_body(&body_bytes, final_url, width)?
         };
+        page.sanitize();
         if tls_downgraded {
             prepend_tls_downgrade_notice(&mut page, width);
         }
@@ -1123,7 +1174,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
     let text = String::from_utf8_lossy(&body);
     let final_url = build_gopher_url(&host, port, item_type, &selector);
 
-    match item_type {
+    let mut page = match item_type {
         '0' => {
             // Plain text file — just wrap and display
             let lines: Vec<String> = text
@@ -1134,17 +1185,17 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 })
                 .take(MAX_RENDERED_LINES)
                 .collect();
-            Ok(WebPage {
+            WebPage {
                 title: Some(selector.rsplit('/').next().unwrap_or("Text").to_string()),
                 lines,
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
-            })
+            }
         }
         '1' | '7' => {
             // Directory listing or search results — parse Gopher menu
-            render_gopher_directory(&text, &host, port, width, final_url)
+            render_gopher_directory(&text, &host, port, width, final_url)?
         }
         _ => {
             // Unsupported type — show as plain text
@@ -1153,15 +1204,21 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
-            Ok(WebPage {
+            WebPage {
                 title: Some(format!("Gopher (type {})", item_type)),
                 lines,
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
-            })
+            }
         }
-    }
+    };
+
+    // Strip any terminal-control bytes a hostile gopher server smuggled into
+    // the menu labels or text before they reach the terminal (see
+    // WebPage::sanitize).
+    page.sanitize();
+    Ok(page)
 }
 
 /// Parse a Gopher directory listing into a WebPage with numbered links.
@@ -1304,6 +1361,66 @@ pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_strips_terminal_escapes_from_lines_and_title() {
+        // A remote page must not smuggle ANSI/CSI escapes to the terminal:
+        // WebPage::sanitize reuses aichat's filter on the title and lines.
+        let mut page = WebPage {
+            title: Some("evil\x1b[2Jtitle".to_string()),
+            lines: vec![
+                "before\x1b[31mred\x1b[0m".to_string(),
+                "bell\x07 and null\0".to_string(),
+                "\u{9b}C1-CSI".to_string(),
+            ],
+            links: Vec::new(),
+            url: "http://example.com/".to_string(),
+            forms: Vec::new(),
+        };
+        page.sanitize();
+        assert_eq!(page.title.as_deref(), Some("evil[2Jtitle"));
+        assert_eq!(page.lines[0], "before[31mred[0m");
+        assert_eq!(page.lines[1], "bell and null");
+        assert_eq!(page.lines[2], "C1-CSI");
+        // No raw control bytes survive (tab is the only allowed C0).
+        for line in &page.lines {
+            assert!(!line.bytes().any(|b| b < 0x20 && b != b'\t'));
+        }
+    }
+
+    #[test]
+    fn test_sanitize_preserves_link_marker_sentinels() {
+        // The \x02N\x03 sentinels are C0 bytes the raw filter would strip,
+        // but they carry the link numbering the telnet consumer parses, so
+        // sanitize must keep them while still cleaning the text around them.
+        let mut page = WebPage {
+            title: None,
+            lines: vec!["Click here\x02\x1b[5m3\x03 now\x07".to_string()],
+            links: vec!["http://example.com/x".to_string()],
+            url: "http://example.com/".to_string(),
+            forms: Vec::new(),
+        };
+        page.sanitize();
+        // Sentinels intact; the escape inside and the bell outside are gone.
+        assert_eq!(page.lines[0], "Click here\x02[5m3\x03 now");
+    }
+
+    #[test]
+    fn test_sanitize_is_idempotent() {
+        let mut page = WebPage {
+            title: Some("t\x1b[Jt".to_string()),
+            lines: vec!["a\x02\x1b1\x03b\x07".to_string()],
+            links: Vec::new(),
+            url: "http://example.com/".to_string(),
+            forms: Vec::new(),
+        };
+        page.sanitize();
+        let title_once = page.title.clone();
+        let lines_once = page.lines.clone();
+        page.sanitize();
+        assert_eq!(page.title, title_once);
+        assert_eq!(page.lines, lines_once);
+    }
 
     #[test]
     fn test_moderately_nested_html_renders() {
