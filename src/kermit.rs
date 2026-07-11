@@ -111,23 +111,29 @@ pub(crate) const TYPE_INIT: u8 = b'I';
 /// applied only when `kermit_wait_for_receiver` is on.
 const KERMIT_SERVER_POKE_WAIT_MS: u64 = 1500;
 
-// CAPAS bit positions in the first capability byte (bits are read after
-// stripping the LSB continuation flag — i.e. real bit n of capability
-// equals bit (n+1) of the unchar'd byte).
+// CAPAS bit values in the first capability byte (applied to the unchar'd
+// byte; bit 0 / value 1 is the LSB "another CAPAS byte follows" flag).
 //
-// Bit layout (from Frank da Cruz, "Kermit Protocol Manual"):
-//   bit 0: continuation — another CAPAS byte follows
-//   bit 1: ability to do sliding-window
-//   bit 2: ability to do extended-length (long) packets
-//   bit 3: ability to handle attribute (A) packets
-//   bit 4: ability to do RESEND (resume partial transfers)
-//   bit 5: ability to use locking shifts (SO/SI region markers)
+// These MUST match the canonical Kermit capability mask.  Authoritative
+// source: C-Kermit 10.0 (Frank da Cruz), `ckcmai.c`:
+//   lpcapb = 2,   // Long Packet capability     (bit 1)
+//   swcapb = 4,   // Sliding Window capability  (bit 2)
+//   atcapb = 8,   // Attribute capability       (bit 3)
+//   rscapb = 16,  // RESEND capability          (bit 4)
+//   lscapb = 32,  // Locking Shift capability   (bit 5)
+// and the continuation bit is the low-order bit (`ckcfns.c` spar:
+// "CAPAS byte is continued if its low-order bit is 1").
 //
-// Streaming and other extended bits live in subsequent CAPAS bytes,
-// vendor-defined.  C-Kermit uses CAPAS byte 3 bit 2 for streaming.
+// NOTE: long-packets is bit 1 (0x02) and sliding-windows is bit 2 (0x04).
+// These were previously transposed here; because build and parse used the
+// same (swapped) values, gateway<->gateway and the test suite stayed self-
+// consistent, but a third-party peer advertising long XOR sliding (e.g.
+// G-Kermit / MS-DOS Kermit do long packets with no sliding windows) was
+// misread.  `test_capas_bits_match_ckermit` pins the wire values so this
+// can't silently regress.
 pub(crate) const CAPAS_ATTRIBUTE: u8 = 0x08;
-pub(crate) const CAPAS_LONGPKT: u8 = 0x04;
-pub(crate) const CAPAS_SLIDING: u8 = 0x02;
+pub(crate) const CAPAS_LONGPKT: u8 = 0x02;
+pub(crate) const CAPAS_SLIDING: u8 = 0x04;
 pub(crate) const CAPAS_CONTINUE: u8 = 0x01;
 pub(crate) const CAPAS_RESEND: u8 = 0x10;
 pub(crate) const CAPAS_LOCKING_SHIFT: u8 = 0x20;
@@ -11522,6 +11528,23 @@ mod tests {
     // set in CAPAS byte 1; MAXLX1/MAXLX2 are present iff the
     // long-packets bit is set.  Each combination is verified
     // separately against build/parse round-trip.
+
+    #[test]
+    fn test_capas_bits_match_ckermit() {
+        // Pin the raw CAPAS byte-1 bit values to the canonical Kermit
+        // capability mask so a transposition can't silently return.
+        // Ground truth: C-Kermit 10.0 `ckcmai.c` (Frank da Cruz):
+        //   lpcapb=2, swcapb=4, atcapb=8, rscapb=16, lscapb=32,
+        //   continuation = low-order bit (ckcfns.c `spar`).
+        // These are the numeric wire values, deliberately NOT written in
+        // terms of the constants — that's the whole point of the pin.
+        assert_eq!(CAPAS_CONTINUE, 0x01, "continuation = LSB");
+        assert_eq!(CAPAS_LONGPKT, 0x02, "long packets = bit 1 (lpcapb)");
+        assert_eq!(CAPAS_SLIDING, 0x04, "sliding windows = bit 2 (swcapb)");
+        assert_eq!(CAPAS_ATTRIBUTE, 0x08, "attributes = bit 3 (atcapb)");
+        assert_eq!(CAPAS_RESEND, 0x10, "RESEND = bit 4 (rscapb)");
+        assert_eq!(CAPAS_LOCKING_SHIFT, 0x20, "locking shift = bit 5 (lscapb)");
+    }
 
     #[test]
     fn test_send_init_no_windo_when_sliding_off() {
