@@ -908,8 +908,8 @@ cannot accidentally bridge a telnet session through your router.
 </p>
 
 <p>
-To accept connections from any IP address, enable security and configure a
-strong username and password.
+To accept telnet connections from any IP address, enable security and
+configure a strong username and password.
 </p>
 
 <p>
@@ -921,6 +921,16 @@ behind a confirmation popup that explains the risk before the change
 sticks; once enabled, <em>any</em> source address may connect with no
 credentials. Treat it as the explicit "I understand this is open" switch,
 not a default.
+</p>
+
+<p>
+<strong>The configuration web server behaves differently on purpose.</strong>
+Because its page renders the login password and Groq API key into form
+fields, enabling "Require Login" does <em>not</em> open it to any IP the way
+it does for telnet: the web server keeps the private-IP allowlist whether or
+not login is required, and <code>disable_ip_safety</code> is the only switch
+that lifts it. So to reach the web UI from a non-private address you must set
+<code>disable_ip_safety</code> — enabling security alone is not enough.
 </p>
 
 <h2>5.5 The Main Menu</h2>
@@ -2533,7 +2543,9 @@ sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
         to the master, which serves its menu or dials a resolved
         <code>host:port</code> onward.  The slave's <em>local</em> dial map
         resolves the number and the master performs the dial
-        ("resolve local, dial central").  <code>+++</code> / <code>ATO</code>
+        ("resolve local, dial central").  Onward-dial requires the master's
+        <code>allow_peer_dial</code> to be on — otherwise the master refuses
+        the outbound connection.  <code>+++</code> / <code>ATO</code>
         work normally.</li>
     <li><strong>Console-mode port</strong> — the slave registers the port
         with the master; a master user reaches it from the master's
@@ -2891,7 +2903,7 @@ pick a form, edit fields by number, <span class="kbd">S</span> to submit or
     <li>Maximum rendered lines: 5000.</li>
     <li>HTTP request timeout: 15 s.</li>
     <li>Page history depth: 50.</li>
-    <li>HTTPS connections that fail due to TLS errors retry over HTTP.</li>
+    <li>On a TLS error, an HTTPS <em>page load</em> (GET) retries over HTTP with a warning; a <em>form submission</em> (POST) is refused, never re-sent in the clear.</li>
 </ul>
 
 <!-- ═══════════════════ 14. Weather ═══════════════════ -->
@@ -3167,7 +3179,7 @@ numeric values fall back to the default.
     <tbody>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit</code> / <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
-        <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist that normally gates the telnet server when <code>security_enabled</code> is <code>false</code>. Lets any source address connect without auth. Use only on isolated networks &mdash; for any internet-exposed deployment, enable <code>security_enabled</code> instead.</td></tr>
+        <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
