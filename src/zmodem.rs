@@ -1024,6 +1024,14 @@ where
             ZFILE => {
                 // Forward progress — clear the chatty-peer budget.
                 progressless_frames = 0;
+                // Bound the batch BEFORE receiving this file, so a peer that
+                // keeps streaming files can't grow the in-memory list without
+                // limit — and so exactly MAX_BATCH_FILES are accepted (rejecting
+                // the (N+1)th's data outright), matching YMODEM/Kermit.
+                if files.len() >= MAX_BATCH_FILES {
+                    send_cancel(writer, is_tcp).await?;
+                    return Err("ZMODEM batch exceeds file-count limit".into());
+                }
                 let file_index = zfile_seen;
                 zfile_seen += 1;
                 let decision = receive_one_file(
@@ -1040,13 +1048,6 @@ where
                 let accepted = decision.is_some();
                 if let Some(rx) = decision {
                     files.push(rx);
-                }
-                // Bound the batch: a peer that keeps streaming files can't grow
-                // the in-memory list without limit.  Cancel and error rather
-                // than inviting the next file with ZRINIT (mirrors YMODEM/Kermit).
-                if files.len() >= MAX_BATCH_FILES {
-                    send_cancel(writer, is_tcp).await?;
-                    return Err("ZMODEM batch exceeds file-count limit".into());
                 }
                 // Per Forsberg §7.4.1 the receiver sends ZRINIT after a
                 // file *completes* (post-ZEOF) to signal "ready for
@@ -2995,6 +2996,24 @@ mod tests {
         assert!(
             err.contains("file-count"),
             "must reject for the file-count cap specifically, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zmodem_batch_at_cap_accepted() {
+        // Exactly MAX_BATCH_FILES must be ACCEPTED (the cap rejects only the
+        // (N+1)th), matching YMODEM/Kermit — guards against the off-by-one where
+        // the check fired one file too early.  The round-trip helper unwraps the
+        // receive, so a spurious rejection would panic the test.
+        let batch: Vec<(String, Vec<u8>)> = (0..MAX_BATCH_FILES)
+            .map(|i| (format!("f{i}.dat"), Vec::new()))
+            .collect();
+        let (received, send_result) = zmodem_batch_round_trip(batch, |_, _, _| true).await;
+        send_result.expect("sender failed");
+        assert_eq!(
+            received.len(),
+            MAX_BATCH_FILES,
+            "a batch of exactly the cap must be fully accepted, not rejected"
         );
     }
 

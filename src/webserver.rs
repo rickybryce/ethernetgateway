@@ -1052,7 +1052,7 @@ fn render_main_page(cfg: &Config, notice: Option<String>) -> String {
     out.push_str("<form method=\"post\" action=\"/save\" id=\"cfg-form\">");
     out.push_str(&render_grid(cfg));
     out.push_str(&render_more_popups(cfg));
-    out.push_str(render_warning_popups());
+    out.push_str(&render_warning_popups());
     out.push_str(&render_scripture_and_logo());
     out.push_str("</form>");
     out.push_str(&render_console());
@@ -1409,66 +1409,78 @@ fn render_scripture_and_logo() -> String {
     )
 }
 
+/// Build one dark-red warning modal.  Single-sources the modal id (used on the
+/// container div AND both buttons' `data-warn`) so a copy-paste id typo — which
+/// would silently make a warning never open — is impossible.  `show_cancel` is
+/// false for informational (OK-only) warnings.
+fn warn_modal(id: &str, title: &str, body: &str, confirm_label: &str, show_cancel: bool) -> String {
+    let cancel = if show_cancel {
+        format!("<button type=\"button\" class=\"warn-cancel\" data-warn=\"{id}\">Cancel</button>")
+    } else {
+        String::new()
+    };
+    format!(
+        "<div class=\"modal warn\" id=\"{id}\"><div class=\"modal-body warn\">\
+         <div class=\"modal-head\"><span class=\"title\">{title}</span></div>\
+         <p>{body}</p>\
+         <div class=\"modal-foot\">{cancel}\
+         <button type=\"button\" class=\"warn-continue\" data-warn=\"{id}\">{confirm_label}</button>\
+         </div></div></div>"
+    )
+}
+
 /// Dark-red warning modals that replace the old native `confirm()`/`alert()`
-/// dialogs.  Static content (no config interpolation); the JS in `SCRIPT`
-/// opens them and wires Continue/Cancel.  The overlay blocks the form behind
-/// it, and warning modals are excluded from backdrop-dismiss, so the operator
-/// must click a button to proceed.
-fn render_warning_popups() -> &'static str {
-    "<div class=\"modal warn\" id=\"warn-web-disable\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
-     <p>Disabling the web server will break this browser connection.</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-web-disable\">Cancel</button>\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-web-disable\">Continue</button>\
-     </div></div></div>\
-     <div class=\"modal warn\" id=\"warn-web-port\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
-     <p>Changing the web port will break this browser connection. Reconnect at \
-     the new port after saving.</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-web-port\">Cancel</button>\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-web-port\">Continue</button>\
-     </div></div></div>\
-     <div class=\"modal warn\" id=\"warn-master-ssh\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
-     <p>Master mode uses the SSH server for slave connections, but SSH is \
-     currently disabled. Enable SSH in Server settings and Save &amp; Restart, \
-     otherwise slaves cannot connect. (SSH is not changed automatically.)</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-master-ssh\">OK</button>\
-     </div></div></div>\
-     <div class=\"modal warn\" id=\"warn-ip-safety\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
-     <p>Disabling IP safety removes the private-IP allowlist entirely. Anyone \
-     on the public internet who can reach your telnet port will be able to \
-     connect \u{2014} and without Require Login, without a password. Enable only \
-     when a separate control fronts the listener (LAN-only firewall, VPN, port \
-     not exposed) or you are about to turn Require Login on.</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-ip-safety\">Cancel</button>\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-ip-safety\">Continue</button>\
-     </div></div></div>\
-     <div class=\"modal warn\" id=\"warn-kermit-server\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
-     <p>Enabling the Kermit server opens a dedicated TCP port that drops every \
-     connection straight into Kermit server mode \u{2014} no telnet menu, no \
-     username, no password, no private-IP filter. Anyone who can reach the \
-     listener can read and write files in your transfer directory.</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-kermit-server\">Cancel</button>\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-kermit-server\">Continue</button>\
-     </div></div></div>\
-     <div class=\"modal warn\" id=\"warn-atdt-kermit\"><div class=\"modal-body warn\">\
-     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
-     <p>Allowing ATDT KERMIT lets anyone who can dial the serial modem reach \
-     Kermit server mode directly, bypassing the telnet menu's username/password \
-     gate. There is no auth on this dial path. Enable only when the serial line \
-     itself is trusted.</p>\
-     <div class=\"modal-foot\">\
-     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-atdt-kermit\">Cancel</button>\
-     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-atdt-kermit\">Continue</button>\
-     </div></div></div>"
+/// dialogs.  The JS in `SCRIPT` opens them and wires Continue/Cancel; the
+/// overlay blocks the form behind it, and warning modals are excluded from
+/// backdrop-dismiss, so the operator must click a button to proceed.
+fn render_warning_popups() -> String {
+    let warn = "\u{26a0} Warning";
+    let sec = "\u{26a0} Security warning";
+    let mut out = String::new();
+    out.push_str(&warn_modal(
+        "warn-web-disable", warn,
+        "Disabling the web server will break this browser connection.",
+        "Continue", true,
+    ));
+    out.push_str(&warn_modal(
+        "warn-web-port", warn,
+        "Changing the web port will break this browser connection. Reconnect at \
+         the new port after saving.",
+        "Continue", true,
+    ));
+    out.push_str(&warn_modal(
+        "warn-master-ssh", warn,
+        "Master mode uses the SSH server for slave connections, but SSH is \
+         currently disabled. Enable SSH in Server settings and Save &amp; Restart, \
+         otherwise slaves cannot connect. (SSH is not changed automatically.)",
+        "OK", false,
+    ));
+    out.push_str(&warn_modal(
+        "warn-ip-safety", sec,
+        "Disabling IP safety removes the private-IP allowlist entirely. Anyone \
+         on the public internet who can reach your telnet port will be able to \
+         connect \u{2014} and without Require Login, without a password. Enable only \
+         when a separate control fronts the listener (LAN-only firewall, VPN, port \
+         not exposed) or you are about to turn Require Login on.",
+        "Continue", true,
+    ));
+    out.push_str(&warn_modal(
+        "warn-kermit-server", sec,
+        "Enabling the Kermit server opens a dedicated TCP port that drops every \
+         connection straight into Kermit server mode \u{2014} no telnet menu, no \
+         username, no password, no private-IP filter. Anyone who can reach the \
+         listener can read and write files in your transfer directory.",
+        "Continue", true,
+    ));
+    out.push_str(&warn_modal(
+        "warn-atdt-kermit", sec,
+        "Allowing ATDT KERMIT lets anyone who can dial the serial modem reach \
+         Kermit server mode directly, bypassing the telnet menu's username/password \
+         gate. There is no auth on this dial path. Enable only when the serial line \
+         itself is trusted.",
+        "Continue", true,
+    ));
+    out
 }
 
 fn render_more_popups(cfg: &Config) -> String {
@@ -2043,16 +2055,20 @@ document.querySelectorAll('.modal').forEach(function(m) {
 });
 // Warning modals replace the native browser dialogs: the fixed-position overlay
 // blocks the form behind it, so the operator must choose Continue or Cancel
-// before the next click lands.  warnCancelCb runs the revert on Cancel.
-var warnCancelCb = null;
-function showWarn(id, cancelCb) { warnCancelCb = cancelCb || null; openModal(id); }
+// before the next click lands.  Revert callbacks are keyed by modal id (not a
+// single global) so if a second warning is raised while one is open — e.g. via
+// keyboard focus reaching a control behind the overlay — each modal's Cancel
+// still runs its own revert.
+var warnCancelCb = {};
+function showWarn(id, cancelCb) { warnCancelCb[id] = cancelCb || null; openModal(id); }
 document.querySelectorAll('.warn-continue').forEach(function(b) {
-  b.addEventListener('click', function() { warnCancelCb = null; closeModal(b.dataset.warn); });
+  b.addEventListener('click', function() { delete warnCancelCb[b.dataset.warn]; closeModal(b.dataset.warn); });
 });
 document.querySelectorAll('.warn-cancel').forEach(function(b) {
   b.addEventListener('click', function() {
-    if (warnCancelCb) warnCancelCb();
-    warnCancelCb = null;
+    var cb = warnCancelCb[b.dataset.warn];
+    if (cb) cb();
+    delete warnCancelCb[b.dataset.warn];
     closeModal(b.dataset.warn);
   });
 });
