@@ -14757,8 +14757,14 @@ impl TelnetSession {
                 Ok(true)
             }
             Err(e) => {
+                // Sanitize before display: a fetch error can echo remote-derived
+                // bytes (e.g. "Bad URL: <href>" from a page link, or a network
+                // error carrying a remote host string), which would otherwise
+                // reach the terminal raw — the same escape-injection risk M-8
+                // closes on the page-render path.
                 let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
-                self.show_error(&crate::webbrowser::truncate_to_width(&e, max_w)).await?;
+                let safe = crate::aichat::sanitize_for_terminal(&e);
+                self.show_error(&crate::webbrowser::truncate_to_width(&safe, max_w)).await?;
                 Ok(false)
             }
         }

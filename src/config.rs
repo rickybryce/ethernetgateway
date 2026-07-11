@@ -796,13 +796,31 @@ pub fn load_or_create_config() -> Config {
             Err(e) => {
                 // An existing config we cannot read must NOT be silently
                 // overwritten with defaults — that would downgrade a secured
-                // gateway to security-off / password "changeme" on a
-                // transient permission blip or a corrupt/non-UTF-8 file.
-                // Fail loud and leave the file untouched for the operator.
-                glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
-                glog!("       Refusing to start rather than overwrite it with");
-                glog!("       insecure defaults. Fix or remove the file, then restart.");
-                std::process::exit(1);
+                // gateway to security-off / password "changeme" on a corrupt/
+                // non-UTF-8/empty file or a transient permission blip.
+                //
+                // On a RELOAD (SIGHUP re-runs this) we already hold a good
+                // in-memory config, so keep running on it — mirroring
+                // `update_config_values`' "keeping current settings" — rather
+                // than dying (which, under systemd `Restart=on-failure`, could
+                // restart-storm). Only on FIRST startup, with nothing to fall
+                // back to, do we fail loud and leave the file for the operator.
+                let existing = CONFIG.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                match resolve_unreadable_existing_config(existing) {
+                    Ok(kept) => {
+                        glog!(
+                            "Warning: {} could not be re-read ({}); keeping current settings.",
+                            CONFIG_FILE, e
+                        );
+                        return kept;
+                    }
+                    Err(()) => {
+                        glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
+                        glog!("       Refusing to start rather than overwrite it with");
+                        glog!("       insecure defaults. Fix or remove the file, then restart.");
+                        std::process::exit(1);
+                    }
+                }
             }
         }
     } else {
@@ -817,6 +835,19 @@ pub fn load_or_create_config() -> Config {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(cfg.clone());
     cfg
+}
+
+/// Decide what `load_or_create_config` does when an existing config file can't
+/// be read: keep the already-loaded config if we have one (a reload — don't
+/// take the service down over a transient/corrupt-file blip), or signal a
+/// fail-loud exit when there's nothing to fall back to (first startup — never
+/// silently run on insecure defaults). Pure so it can be unit-tested without
+/// touching the global singleton or `process::exit`.
+fn resolve_unreadable_existing_config(existing: Option<Config>) -> Result<Config, ()> {
+    match existing {
+        Some(cfg) => Ok(cfg),
+        None => Err(()),
+    }
 }
 
 /// Parse a config file into a `Config`, tolerating an unreadable file by
@@ -4377,5 +4408,25 @@ mod tests {
         cfg.port_mut(SerialPortId::B).baud = 9600;
         assert_eq!(cfg.serial_a.baud, 4800);
         assert_eq!(cfg.serial_b.baud, 9600);
+    }
+
+    #[test]
+    fn test_resolve_unreadable_existing_config() {
+        // Reload path: we already hold a good in-memory config, so keep it
+        // rather than taking the service down over a transient/corrupt-file
+        // blip (which would restart-storm under systemd Restart=on-failure).
+        let existing = Config {
+            security_enabled: true,
+            password: "secret".to_string(),
+            ..Config::default()
+        };
+        let kept = resolve_unreadable_existing_config(Some(existing.clone()))
+            .expect("should keep the already-loaded config on reload");
+        assert!(kept.security_enabled);
+        assert_eq!(kept.password, "secret");
+
+        // First-startup path: nothing to fall back to → signal fail-loud
+        // exit rather than silently running on insecure defaults.
+        assert!(resolve_unreadable_existing_config(None).is_err());
     }
 }

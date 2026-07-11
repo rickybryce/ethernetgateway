@@ -206,6 +206,29 @@ impl SaveAction {
     }
 }
 
+/// IP-policy decision for the web server (M-9). Returns `Some(reason)` to
+/// reject, `None` to allow. The private-IP allowlist applies whenever
+/// `disable_ip_safety` is off — INDEPENDENT of whether login is required.
+///
+/// `security_enabled` is intentionally IGNORED (it's a parameter only so a
+/// test can assert it makes no difference): unlike the telnet listener, which
+/// drops the allowlist once `security_enabled` is on, the web server keeps it
+/// because its page renders the password + API key. Keeping this decision in
+/// one named, tested function guards against a silent revert that re-couples
+/// the allowlist to `security_enabled`.
+fn web_ip_rejection(
+    security_enabled: bool,
+    disable_ip_safety: bool,
+    peer_ip: IpAddr,
+) -> Option<&'static str> {
+    let _ = security_enabled; // deliberately not consulted — see doc comment
+    if disable_ip_safety {
+        None
+    } else {
+        telnet::reject_insecure_ip(peer_ip)
+    }
+}
+
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     peer_ip: IpAddr,
@@ -236,9 +259,7 @@ async fn handle_connection(
     // whereas this page renders the password + API key. See the matching note
     // there.
     let (live_security, live_disable_safety) = config::get_security_flags();
-    if !live_disable_safety
-        && let Some(reason) = telnet::reject_insecure_ip(peer_ip)
-    {
+    if let Some(reason) = web_ip_rejection(live_security, live_disable_safety, peer_ip) {
         glog!("Web: rejected {} ({})", peer_ip, reason);
         let body = format!("403 Forbidden\n{}\n", reason);
         write_response(&mut stream, 403, "Forbidden", "text/plain; charset=utf-8", body.as_bytes(), false).await?;
@@ -2910,5 +2931,37 @@ mod tests {
             assert_eq!(counter.load(Ordering::SeqCst), 1);
         }
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_web_ip_rejection_ignores_security_enabled() {
+        // The whole point of the named helper: unlike the telnet listener,
+        // the web allowlist stays on regardless of `security_enabled`
+        // (the page renders the password + API key). Toggling
+        // `security_enabled` must not change the decision either way.
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let private: IpAddr = "192.168.1.10".parse().unwrap();
+
+        // Public IP is rejected whether or not login is required.
+        assert!(web_ip_rejection(false, false, public).is_some());
+        assert!(web_ip_rejection(true, false, public).is_some());
+        assert_eq!(
+            web_ip_rejection(false, false, public),
+            web_ip_rejection(true, false, public),
+            "security_enabled must not affect the web IP decision"
+        );
+
+        // Private IP is allowed whether or not login is required.
+        assert!(web_ip_rejection(false, false, private).is_none());
+        assert!(web_ip_rejection(true, false, private).is_none());
+    }
+
+    #[test]
+    fn test_web_ip_rejection_disable_safety_allows_all() {
+        // With the IP safety toggle off, even a public peer is allowed
+        // (operator opt-out), and `security_enabled` still doesn't matter.
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(web_ip_rejection(false, true, public).is_none());
+        assert!(web_ip_rejection(true, true, public).is_none());
     }
 }
