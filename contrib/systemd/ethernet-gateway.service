@@ -36,8 +36,10 @@ Group=ethernet-gateway
 WorkingDirectory=/var/lib/ethernet-gateway
 ExecStart=/usr/local/bin/ethernet-gateway
 
-; Reload semantics: the binary handles SIGHUP as "re-read config and
-; restart listeners without dropping sessions if possible."
+; Reload semantics: the binary handles SIGHUP as a config reload — it
+; re-reads egateway.conf and restarts its listeners.  Active sessions are
+; ended (with a goodbye broadcast), so this is a brief bounce rather than a
+; zero-downtime reload, but the service stays up on fresh config.
 ExecReload=/bin/kill -HUP $MAINPID
 
 ; ── Restart policy ────────────────────────────────────────

@@ -50,7 +50,12 @@ fn main() {
     let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
 
     // Register POSIX signal handlers (SIGINT, SIGTERM, SIGHUP)
-    register_signal_handlers(shutdown.clone(), shutdown_notify.clone(), gui_ctx.clone());
+    register_signal_handlers(
+        shutdown.clone(),
+        restart.clone(),
+        shutdown_notify.clone(),
+        gui_ctx.clone(),
+    );
 
     loop {
         // Load or create config (re-read from disk on each restart)
@@ -70,6 +75,11 @@ fn main() {
         }
         if cfg.security_enabled && cfg.password == config::DEFAULT_PASSWORD {
             glog!("WARNING: Security is enabled with the default password. Change it in {}.", config::CONFIG_FILE);
+        }
+        if cfg.disable_ip_safety && !cfg.security_enabled {
+            glog!("WARNING: disable_ip_safety=true with security_enabled=false — an");
+            glog!("         unauthenticated session is reachable from ANY IP address.");
+            glog!("         Enable security or restore IP safety in {}.", config::CONFIG_FILE);
         }
 
         // Master/Slave relay sanity checks — surface "silently armed but
@@ -219,6 +229,7 @@ fn main() {
 /// Register handlers for SIGINT, SIGTERM, and SIGHUP using signal-hook.
 fn register_signal_handlers(
     shutdown: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
     gui_ctx: GuiCtxSlot,
 ) {
@@ -230,20 +241,37 @@ fn register_signal_handlers(
     signal_hook::flag::register(SIGTERM, shutdown.clone())
         .expect("Failed to register SIGTERM handler");
 
+    // SIGHUP is a *reload* request, not a shutdown: systemd's ExecReload
+    // (`kill -HUP`) sends it and expects the service to come back up with
+    // fresh config.  Route it to a dedicated flag that the watcher below
+    // turns into a restart (arm `restart`, then trip `shutdown` to unwind
+    // the current server cycle — the main loop then re-reads egateway.conf
+    // and starts fresh).  Registering SIGHUP straight to `shutdown` — as we
+    // used to — exits cleanly with code 0, so `systemctl reload` would
+    // silently stop the gateway and `Restart=on-failure` would leave it
+    // down.
+    let sighup = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
         use signal_hook::consts::SIGHUP;
-        signal_hook::flag::register(SIGHUP, shutdown.clone())
+        signal_hook::flag::register(SIGHUP, sighup.clone())
             .expect("Failed to register SIGHUP handler");
     }
 
-    // Spawn a thread that watches the flag and fires the Notify.
+    // Spawn a thread that watches the flags and fires the Notify.
     // Loops to survive server restarts (flag resets to false between cycles).
     let shutdown_watch = shutdown.clone();
     std::thread::spawn(move || {
         loop {
-            while !shutdown_watch.load(Ordering::SeqCst) {
+            while !shutdown_watch.load(Ordering::SeqCst) && !sighup.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // A SIGHUP reload arms the restart path before we unwind the
+            // server cycle; a plain SIGINT/SIGTERM leaves `restart` unset,
+            // so the main loop exits instead of looping back.
+            if sighup.swap(false, Ordering::SeqCst) {
+                restart.store(true, Ordering::SeqCst);
+                shutdown_watch.store(true, Ordering::SeqCst);
             }
             notify.notify_waiters();
             // Force the GUI event loop to repaint AND queue the Close
@@ -306,10 +334,11 @@ mod tests {
     fn test_signal_handlers_register() {
         // Verify that signal registration doesn't panic
         let shutdown = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
         let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
         // This should not panic — signals can be registered multiple times
-        register_signal_handlers(shutdown, notify, gui_ctx);
+        register_signal_handlers(shutdown, restart, notify, gui_ctx);
     }
 
     #[test]
