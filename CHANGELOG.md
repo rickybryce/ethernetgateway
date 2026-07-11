@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (**G**), the web config page, and the GUI.
 
 ### Changed
+- **Warning popups are now dark red (GUI and web).** Security/confirmation
+  warnings previously looked identical to ordinary popups, so it wasn't obvious
+  the modal was blocking the next click and had to be acknowledged. The GUI's
+  four warning popups (ATDT-KERMIT, Kermit-server, disable-IP-safety,
+  master-needs-SSH) now use a dark-red panel + red border. On the web, the
+  native `confirm()`/`alert()` warnings (disable web server, change web port,
+  master-needs-SSH) are replaced with matching dark-red modal dialogs whose
+  overlay blocks the form until the operator chooses Continue/Cancel. The web
+  also gains the enable-guard warnings it was missing versus the GUI —
+  **Disable IP Safety**, **Kermit Server**, and **Allow ATDT KERMIT** now raise
+  the same red confirmation before they take effect.
+- **ZMODEM batch receive is capped at 1000 files** (`MAX_BATCH_FILES`, matching
+  YMODEM and Kermit), so a peer that streams endless files can't grow the
+  in-memory batch without bound; the receiver cancels and errors past the cap.
 - **Config UI: tidier frames via "More" popups.** The web config page now keeps
   the **Master/Slave** relay settings under the Server frame's **More…** popup
   (they were a separate card), matching the GUI and returning the page to six

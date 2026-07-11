@@ -1052,6 +1052,7 @@ fn render_main_page(cfg: &Config, notice: Option<String>) -> String {
     out.push_str("<form method=\"post\" action=\"/save\" id=\"cfg-form\">");
     out.push_str(&render_grid(cfg));
     out.push_str(&render_more_popups(cfg));
+    out.push_str(render_warning_popups());
     out.push_str(&render_scripture_and_logo());
     out.push_str("</form>");
     out.push_str(&render_console());
@@ -1144,7 +1145,12 @@ fn frame_server(cfg: &Config) -> String {
             cfg.web_port,
             Some("onchange=\"warnIfChangingWebPort(this)\""),
         ),
-        kermit_chk = checkbox("kermit_server_enabled", "Kermit Server", cfg.kermit_server_enabled),
+        kermit_chk = checkbox_with_attr(
+            "kermit_server_enabled",
+            "Kermit Server",
+            cfg.kermit_server_enabled,
+            "onchange=\"warnOnEnable(this, 'warn-kermit-server')\"",
+        ),
         kermit_port = port_input("kermit_server_port", cfg.kermit_server_port, None),
     )
 }
@@ -1178,7 +1184,12 @@ fn frame_security(cfg: &Config) -> String {
          </section>",
         save = save_button("save", "Save", "secondary"),
         sec_chk = checkbox("security_enabled", "Require Login", cfg.security_enabled),
-        ipsafe_chk = checkbox("disable_ip_safety", "Disable IP Safety", cfg.disable_ip_safety),
+        ipsafe_chk = checkbox_with_attr(
+            "disable_ip_safety",
+            "Disable IP Safety",
+            cfg.disable_ip_safety,
+            "onchange=\"warnOnEnable(this, 'warn-ip-safety')\"",
+        ),
         user = textfield("username", "User", &cfg.username, false, 12),
         pass = textfield("password", "Pass", &cfg.password, true, 12),
     )
@@ -1398,6 +1409,68 @@ fn render_scripture_and_logo() -> String {
     )
 }
 
+/// Dark-red warning modals that replace the old native `confirm()`/`alert()`
+/// dialogs.  Static content (no config interpolation); the JS in `SCRIPT`
+/// opens them and wires Continue/Cancel.  The overlay blocks the form behind
+/// it, and warning modals are excluded from backdrop-dismiss, so the operator
+/// must click a button to proceed.
+fn render_warning_popups() -> &'static str {
+    "<div class=\"modal warn\" id=\"warn-web-disable\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
+     <p>Disabling the web server will break this browser connection.</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-web-disable\">Cancel</button>\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-web-disable\">Continue</button>\
+     </div></div></div>\
+     <div class=\"modal warn\" id=\"warn-web-port\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
+     <p>Changing the web port will break this browser connection. Reconnect at \
+     the new port after saving.</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-web-port\">Cancel</button>\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-web-port\">Continue</button>\
+     </div></div></div>\
+     <div class=\"modal warn\" id=\"warn-master-ssh\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Warning</span></div>\
+     <p>Master mode uses the SSH server for slave connections, but SSH is \
+     currently disabled. Enable SSH in Server settings and Save &amp; Restart, \
+     otherwise slaves cannot connect. (SSH is not changed automatically.)</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-master-ssh\">OK</button>\
+     </div></div></div>\
+     <div class=\"modal warn\" id=\"warn-ip-safety\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
+     <p>Disabling IP safety removes the private-IP allowlist entirely. Anyone \
+     on the public internet who can reach your telnet port will be able to \
+     connect \u{2014} and without Require Login, without a password. Enable only \
+     when a separate control fronts the listener (LAN-only firewall, VPN, port \
+     not exposed) or you are about to turn Require Login on.</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-ip-safety\">Cancel</button>\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-ip-safety\">Continue</button>\
+     </div></div></div>\
+     <div class=\"modal warn\" id=\"warn-kermit-server\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
+     <p>Enabling the Kermit server opens a dedicated TCP port that drops every \
+     connection straight into Kermit server mode \u{2014} no telnet menu, no \
+     username, no password, no private-IP filter. Anyone who can reach the \
+     listener can read and write files in your transfer directory.</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-kermit-server\">Cancel</button>\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-kermit-server\">Continue</button>\
+     </div></div></div>\
+     <div class=\"modal warn\" id=\"warn-atdt-kermit\"><div class=\"modal-body warn\">\
+     <div class=\"modal-head\"><span class=\"title\">\u{26a0} Security warning</span></div>\
+     <p>Allowing ATDT KERMIT lets anyone who can dial the serial modem reach \
+     Kermit server mode directly, bypassing the telnet menu's username/password \
+     gate. There is no auth on this dial path. Enable only when the serial line \
+     itself is trusted.</p>\
+     <div class=\"modal-foot\">\
+     <button type=\"button\" class=\"warn-cancel\" data-warn=\"warn-atdt-kermit\">Cancel</button>\
+     <button type=\"button\" class=\"warn-continue\" data-warn=\"warn-atdt-kermit\">Continue</button>\
+     </div></div></div>"
+}
+
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
     // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
@@ -1535,7 +1608,12 @@ fn render_more_popups(cfg: &Config) -> String {
         kma = numfield("kermit_resume_max_age_hours", "Resume max age (h)", cfg.kermit_resume_max_age_hours),
         kls = checkbox("kermit_locking_shifts", "Locking shifts", cfg.kermit_locking_shifts),
         kwr = checkbox("kermit_wait_for_receiver", "Wait for receiver NAK (download)", cfg.kermit_wait_for_receiver),
-        atd = checkbox("allow_atdt_kermit", "Allow ATDT KERMIT (modem emulator)", cfg.allow_atdt_kermit),
+        atd = checkbox_with_attr(
+            "allow_atdt_kermit",
+            "Allow ATDT KERMIT (modem emulator)",
+            cfg.allow_atdt_kermit,
+            "onchange=\"warnOnEnable(this, 'warn-atdt-kermit')\"",
+        ),
         apd = checkbox("allow_peer_dial", "Allow peer-dial (ATD Port@IP / ring modem ports)", cfg.allow_peer_dial),
         pbs = numfield("punter_block_size", "Block size (8-255)", cfg.punter_block_size),
         pneg = numfield("punter_negotiation_timeout", "Neg (s)", cfg.punter_negotiation_timeout),
@@ -1760,6 +1838,8 @@ const STYLE: &str = "<style>
   --scripture: #c0aa60;
   --popup-bg: #04180a;
   --popup-input: #1c462a;
+  --warn-bg: #330606;
+  --warn-border: #e03a3a;
 }
 * { box-sizing: border-box; }
 body {
@@ -1928,6 +2008,10 @@ h3 { color: var(--amber); margin: 12px 0 4px; font-size: 14px; }
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .modal-head .title { color: var(--amber-bright); font-weight: bold; font-size: 16px; }
+/* Warning modals: dark-red panel + red border/title so they read as a
+   must-acknowledge alert, distinct from the ordinary (green) popups. */
+.modal-body.warn { background: var(--warn-bg); border: 2px solid var(--warn-border); }
+.modal-body.warn .modal-head .title { color: var(--warn-border); }
 .close { padding: 0 8px; font-size: 18px; line-height: 1; }
 .console-frame { margin-top: 14px; background: var(--console-bg); }
 #console {
@@ -1951,21 +2035,43 @@ document.querySelectorAll('.close').forEach(function(b) {
   b.addEventListener('click', function() { closeModal(b.dataset.close); });
 });
 document.querySelectorAll('.modal').forEach(function(m) {
-  m.addEventListener('click', function(e) { if (e.target === m) m.classList.remove('open'); });
+  // Ordinary popups dismiss on backdrop click; WARNING modals must be
+  // acknowledged with an explicit Continue/Cancel, so don't backdrop-dismiss them.
+  m.addEventListener('click', function(e) {
+    if (e.target === m && !m.classList.contains('warn')) m.classList.remove('open');
+  });
+});
+// Warning modals replace the native browser dialogs: the fixed-position overlay
+// blocks the form behind it, so the operator must choose Continue or Cancel
+// before the next click lands.  warnCancelCb runs the revert on Cancel.
+var warnCancelCb = null;
+function showWarn(id, cancelCb) { warnCancelCb = cancelCb || null; openModal(id); }
+document.querySelectorAll('.warn-continue').forEach(function(b) {
+  b.addEventListener('click', function() { warnCancelCb = null; closeModal(b.dataset.warn); });
+});
+document.querySelectorAll('.warn-cancel').forEach(function(b) {
+  b.addEventListener('click', function() {
+    if (warnCancelCb) warnCancelCb();
+    warnCancelCb = null;
+    closeModal(b.dataset.warn);
+  });
 });
 function warnIfDisablingWeb(cb) {
   if (!cb.checked) {
-    if (!confirm('Disabling the web server will break this browser connection. Continue?')) {
-      cb.checked = true;
-    }
+    showWarn('warn-web-disable', function() { cb.checked = true; });
   }
 }
 function warnIfChangingWebPort(input) {
   var orig = input.dataset.orig;
   if (input.value !== orig) {
-    if (!confirm('Changing the web port will break this browser connection. Reconnect at the new port after saving. Continue?')) {
-      input.value = orig;
-    }
+    showWarn('warn-web-port', function() { input.value = orig; });
+  }
+}
+// Security-sensitive ENABLE toggles (mirrors the GUI's confirm-on-enable
+// popups): warn when the box is checked; Cancel unchecks it.
+function warnOnEnable(cb, id) {
+  if (cb.checked) {
+    showWarn(id, function() { cb.checked = false; });
   }
 }
 // Grey out the Master/Slave fields that don't apply to the selected role:
@@ -1992,7 +2098,7 @@ function onRoleChange(sel) {
     // toggle it automatically.
     var ssh = document.querySelector('[name=ssh_enabled]');
     if (ssh && !ssh.checked) {
-      alert('Master mode uses the SSH server for slave connections, but SSH is currently disabled. Enable SSH in Server settings and Save & Restart, otherwise slaves cannot connect. (SSH is not changed automatically.)');
+      showWarn('warn-master-ssh', null);
     }
   }
   updateRelayFields();
@@ -2115,6 +2221,21 @@ mod tests {
         assert!(html.contains("slave_master_host"));
         // Scripture verse is part of the page.
         assert!(html.contains("John 3:16"));
+        // Warnings are custom dark-red modals, not native confirm()/alert().
+        assert!(html.contains("id=\"warn-web-disable\""));
+        assert!(html.contains("id=\"warn-web-port\""));
+        assert!(html.contains("id=\"warn-master-ssh\""));
+        assert!(html.contains("modal-body warn"));
+        assert!(!html.contains("confirm("), "native confirm() must be gone");
+        assert!(!html.contains("alert("), "native alert() must be gone");
+        // Enable-guard warnings for the security toggles (GUI parity).
+        assert!(html.contains("id=\"warn-ip-safety\""));
+        assert!(html.contains("id=\"warn-kermit-server\""));
+        assert!(html.contains("id=\"warn-atdt-kermit\""));
+        // …and the toggles are wired to raise them.
+        assert!(html.contains("warnOnEnable(this, 'warn-ip-safety')"));
+        assert!(html.contains("warnOnEnable(this, 'warn-kermit-server')"));
+        assert!(html.contains("warnOnEnable(this, 'warn-atdt-kermit')"));
     }
 
     #[test]

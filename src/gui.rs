@@ -34,6 +34,8 @@ const CONSOLE_BG: Color32 = Color32::from_rgb(0x08, 0x12, 0x28); // deeper blue 
 const SELECTION: Color32 = Color32::from_rgb(0x26, 0x4f, 0x78);
 const POPUP_BG: Color32 = Color32::from_rgb(0x04, 0x18, 0x0a);      // deep forest green — popup panel
 const POPUP_INPUT_BG: Color32 = Color32::from_rgb(0x1c, 0x46, 0x2a); // brighter green — text entry on popups
+const WARN_BG: Color32 = Color32::from_rgb(0x33, 0x06, 0x06);      // dark red — WARNING popup panel (must-acknowledge)
+const WARN_BORDER: Color32 = Color32::from_rgb(0xe0, 0x3a, 0x3a);  // red border for warning popups
 
 /// Launch the GUI window.  Blocks the calling thread until the window is closed.
 /// If the GUI fails to start (e.g. missing graphics drivers), logs the error and
@@ -2420,6 +2422,12 @@ impl eframe::App for App {
         let popup_frame = egui::Frame::window(&ctx.global_style())
             .fill(POPUP_BG)
             .stroke(Stroke::new(1.0_f32, AMBER));
+        // Warning popups get a dark-red panel + red border so they read as
+        // clearly distinct from ordinary (green) popups — making it obvious the
+        // modal must be acknowledged before the next click lands.
+        let warn_frame = egui::Frame::window(&ctx.global_style())
+            .fill(WARN_BG)
+            .stroke(Stroke::new(1.5_f32, WARN_BORDER));
 
         let mut server_open = self.server_popup_open;
         egui::Window::new(egui::RichText::new("Server — More").strong().color(AMBER_BRIGHT))
@@ -2599,7 +2607,7 @@ impl eframe::App for App {
         .resizable(false)
         .collapsible(false)
         .default_width(440.0)
-        .frame(popup_frame)
+        .frame(warn_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
             ui.label(
@@ -2678,7 +2686,7 @@ impl eframe::App for App {
         .resizable(false)
         .collapsible(false)
         .default_width(440.0)
-        .frame(popup_frame)
+        .frame(warn_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
             ui.label(
@@ -2726,7 +2734,7 @@ impl eframe::App for App {
         .resizable(false)
         .collapsible(false)
         .default_width(440.0)
-        .frame(popup_frame)
+        .frame(warn_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
             ui.label(
@@ -2810,7 +2818,7 @@ impl eframe::App for App {
         .resizable(false)
         .collapsible(false)
         .default_width(440.0)
-        .frame(popup_frame)
+        .frame(warn_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
             ui.label(

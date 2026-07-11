@@ -110,6 +110,11 @@ const MAX_SUBPACKET_DATA: usize = 8192;
 /// "good" subpacket resets the error budget.  64 is far beyond any
 /// legitimate run of empty frame boundaries.
 const MAX_EMPTY_SUBPACKETS: u32 = 64;
+/// Hard cap on the number of files accepted in one ZMODEM batch, so a peer that
+/// streams endless files can't grow the in-memory batch without bound.  Mirrors
+/// the YMODEM and Kermit `MAX_BATCH_FILES` caps; each file is separately bounded
+/// by `MAX_FILE_SIZE`, so aggregate memory is bounded by the product.
+const MAX_BATCH_FILES: usize = 1000;
 /// Free-space figure (bytes) reported in answer to a ZFREECNT query.
 /// Uploads are buffered in memory and not quota-checked here, so we
 /// advertise a generous ~2 GiB rather than a real disk-free value; a
@@ -1035,6 +1040,13 @@ where
                 let accepted = decision.is_some();
                 if let Some(rx) = decision {
                     files.push(rx);
+                }
+                // Bound the batch: a peer that keeps streaming files can't grow
+                // the in-memory list without limit.  Cancel and error rather
+                // than inviting the next file with ZRINIT (mirrors YMODEM/Kermit).
+                if files.len() >= MAX_BATCH_FILES {
+                    send_cancel(writer, is_tcp).await?;
+                    return Err("ZMODEM batch exceeds file-count limit".into());
                 }
                 // Per Forsberg §7.4.1 the receiver sends ZRINIT after a
                 // file *completes* (post-ZEOF) to signal "ready for
@@ -2948,6 +2960,42 @@ mod tests {
             zmodem_batch_round_trip(batch, |_, _, _| false).await;
         send_result.expect("sender failed");
         assert!(received.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_zmodem_batch_file_count_cap() {
+        // A batch over MAX_BATCH_FILES must be cancelled + rejected, not
+        // accumulated without bound.  Uses MAX_BATCH_FILES + 1 empty files.
+        // (Bypasses the round-trip helper, which unwraps the receive result.)
+        let batch: Vec<(String, Vec<u8>)> = (0..=MAX_BATCH_FILES)
+            .map(|i| (format!("f{i}.dat"), Vec::new()))
+            .collect();
+        let (sender_half, receiver_half) = tokio::io::duplex(1 << 20);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut r_read, mut r_write) = tokio::io::split(receiver_half);
+
+        let send_task = tokio::spawn(async move {
+            let refs: Vec<(&str, &[u8])> =
+                batch.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+            zmodem_send(&mut s_read, &mut s_write, &refs, false, false).await
+        });
+        let recv_result =
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await;
+        // The receiver cancelled; the sender will error on the cancel — don't
+        // block the test on it.
+        send_task.abort();
+
+        let err = match recv_result {
+            Err(e) => e,
+            Ok(files) => panic!(
+                "an over-cap ZMODEM batch must be rejected, got {} files",
+                files.len()
+            ),
+        };
+        assert!(
+            err.contains("file-count"),
+            "must reject for the file-count cap specifically, got: {err}"
+        );
     }
 
     // ─── ZABORT + resume ────────────────────────────────────
