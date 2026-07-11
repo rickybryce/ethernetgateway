@@ -115,6 +115,19 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
+    // Gate onward-dial behind `allow_peer_dial` (M-7).  Without this, any
+    // holder of the shared gateway credentials could make the master open
+    // outbound TCP to *any* reachable host:port — an SSRF/pivot/port-scan
+    // primitive — gated only by master + master_accept_relays.  Onward-dial
+    // to an arbitrary external host is at least as sensitive as peer-dial to
+    // a gateway's own ports (which already checks this flag, see
+    // `run_master_relay_peer`), so it shares the same operator opt-in.
+    if !crate::config::get_config().allow_peer_dial {
+        glog!("Relay: onward dial to {}:{} refused (allow_peer_dial=false)", host, port);
+        let _ = relay.shutdown().await;
+        return;
+    }
+
     let mut tcp = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
         Ok(s) => s,
         Err(e) => {

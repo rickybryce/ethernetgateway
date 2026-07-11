@@ -457,8 +457,15 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     );
 
     if form.method == "post" {
-        let mut tls_downgraded = false;
-        let mut post_url = action_url.clone();
+        // A form POST is NEVER auto-downgraded to cleartext HTTP (M-10).
+        // Unlike an idempotent GET, retrying a POST over http:// re-sends the
+        // form fields (which may be credentials) in the clear.  An active
+        // MITM can force a TLS error (`is_tls_error` matches "corrupt
+        // message" / "InvalidContentType") specifically to strip TLS and
+        // capture the body — and the old code sent it before the user ever
+        // saw a downgrade notice.  Refuse instead: the form is not
+        // resubmitted, and the user is told why.
+        let post_url = action_url.clone();
         let response = match agent
             .post(&post_url)
             .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -466,14 +473,12 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         {
             Ok(r) => r,
             Err(e) if post_url.starts_with("https://") && is_tls_error(&e) => {
-                tls_downgraded = true;
-                post_url = format!("http://{}", &post_url["https://".len()..]);
-                guard_public_url(&post_url)?;
-                agent
-                    .post(&post_url)
-                    .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
-                    .send_form(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                    .map_err(|e2| format!("{}", e2))?
+                return Err(
+                    "Secure connection failed and this form was NOT resubmitted \
+                     over an insecure (http://) link — form data can include \
+                     passwords. Try again later or use a secure site."
+                        .to_string(),
+                );
             }
             Err(e) => return Err(format!("{}", e)),
         };
@@ -489,10 +494,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             {
                 let next = resolve_url(&post_url, loc);
                 if next != post_url {
-                    let mut page = fetch_and_render(&next, width)?;
-                    if tls_downgraded {
-                        prepend_tls_downgrade_notice(&mut page, width);
-                    }
+                    let page = fetch_and_render(&next, width)?;
                     return Ok(page);
                 }
             }
@@ -533,9 +535,6 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             render_html_body(&body_bytes, final_url, width)?
         };
         page.sanitize();
-        if tls_downgraded {
-            prepend_tls_downgrade_notice(&mut page, width);
-        }
         Ok(page)
     } else {
         // GET: append query string to URL

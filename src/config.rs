@@ -753,6 +753,16 @@ pub fn get_config() -> Config {
     guard.clone().unwrap_or_default()
 }
 
+/// Test-only: overwrite the global in-memory config without touching
+/// `egateway.conf`.  Lets a test exercise a config-gated code path (e.g. the
+/// `allow_peer_dial` onward-dial gate) without the disk side effects of
+/// `update_config_value`.
+#[cfg(test)]
+pub(crate) fn set_config_for_test(cfg: Config) {
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(cfg);
+}
+
 /// Read the two boolean flags the telnet accept loop consults on every
 /// inbound connection without cloning the full Config (which allocates
 /// ~20 owned Strings per call).  Returned as a `(security_enabled,

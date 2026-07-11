@@ -216,13 +216,18 @@ async fn handle_connection(
 
     // Fresh per-connection snapshot of the live flags — toggles in the
     // GUI / telnet menu apply on the next connection without a restart.
-    // IP-safety check mirrors `telnet::start_server`: when security is
-    // on, HTTP Basic auth gates access regardless of source IP, so the
-    // private-only allowlist only applies when both auth is off AND
-    // the operator hasn't explicitly disabled the allowlist.
+    //
+    // The private-IP allowlist applies whenever `disable_ip_safety` is off,
+    // INDEPENDENT of whether login is required (M-9).  Enabling "Require
+    // Login" used to *drop* the allowlist (accepting any source IP gated only
+    // by cleartext-HTTP Basic auth, on a page that echoes the password and
+    // API key into value="…" attributes) — a counterintuitive "turning
+    // security on widens IP exposure" interaction.  Now auth and the IP
+    // allowlist are independent layers: an operator who genuinely wants
+    // login-gated access from arbitrary IPs opts in explicitly with
+    // `disable_ip_safety = true` (the single, documented escape hatch).
     let (live_security, live_disable_safety) = config::get_security_flags();
-    if !live_security
-        && !live_disable_safety
+    if !live_disable_safety
         && let Some(reason) = telnet::reject_insecure_ip(peer_ip)
     {
         glog!("Web: rejected {} ({})", peer_ip, reason);

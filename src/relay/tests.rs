@@ -25,6 +25,19 @@ use super::{
     RELAY_ACTIVATE_BYTE,
 };
 
+/// Enable the `allow_peer_dial` gate that `run_master_relay_dial` (onward
+/// dial, M-7) and `run_master_relay_peer` now require.  These tests drive
+/// those paths directly, so without the opt-in the relay would refuse and
+/// immediately shut the stream down (a transfer test would then hang waiting
+/// for bytes that never arrive).  No test asserts the flag is *off*, so
+/// setting it here is safe under parallel execution; we read-modify-write to
+/// preserve any other fields a concurrent test may have set.
+fn enable_peer_dial() {
+    let mut cfg = crate::config::get_config();
+    cfg.allow_peer_dial = true;
+    crate::config::set_config_for_test(cfg);
+}
+
 /// The connect-error classes carry their detail through `Display`/`message`
 /// (the slave reconnect loop, §9 #14, formats them into its log + chooses a
 /// backoff by variant).
@@ -450,6 +463,7 @@ async fn test_remote_port_reregister_generation_guard() {
 /// and pipes the relay channel through transparently in both directions.
 #[tokio::test]
 async fn test_master_relay_dial_pipes_both_ways() {
+    enable_peer_dial();
     // A fake "BBS" that echoes everything it receives.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -575,6 +589,7 @@ async fn onward_dial_endpoints() -> (
     tokio::net::TcpStream,
     tokio::task::JoinHandle<()>,
 ) {
+    enable_peer_dial();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // Ample buffer so neither direction blocks the copy loop on a slow
