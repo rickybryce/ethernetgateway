@@ -25,17 +25,48 @@ use super::{
     RELAY_ACTIVATE_BYTE,
 };
 
-/// Enable the `allow_peer_dial` gate that `run_master_relay_dial` (onward
-/// dial, M-7) and `run_master_relay_peer` now require.  These tests drive
-/// those paths directly, so without the opt-in the relay would refuse and
-/// immediately shut the stream down (a transfer test would then hang waiting
-/// for bytes that never arrive).  No test asserts the flag is *off*, so
-/// setting it here is safe under parallel execution; we read-modify-write to
-/// preserve any other fields a concurrent test may have set.
-fn enable_peer_dial() {
-    let mut cfg = crate::config::get_config();
-    cfg.allow_peer_dial = true;
-    crate::config::set_config_for_test(cfg);
+/// Serializes the onward-dial tests, which flip the global `allow_peer_dial`
+/// flag and restore it.  Holding this for a test's duration keeps two of them
+/// from interleaving their set/restore.  (Concurrency with *non-relay* tests
+/// that write config is handled by persisting to disk — see
+/// [`enable_peer_dial`] — not by this lock.)
+static PEER_DIAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// RAII guard that enables the `allow_peer_dial` gate which
+/// `run_master_relay_dial` (onward dial, M-7) and `run_master_relay_peer`
+/// now require.  These tests drive those paths directly; without the opt-in
+/// the relay refuses and shuts the stream down, so a transfer test would hang
+/// waiting for bytes that never arrive (and the `onward_dial_endpoints`
+/// helper's `listener.accept()` would block forever).  Restores the previous
+/// value on drop.
+struct PeerDialGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    prev: bool,
+}
+
+impl Drop for PeerDialGuard {
+    fn drop(&mut self) {
+        crate::config::update_config_value(
+            "allow_peer_dial",
+            if self.prev { "true" } else { "false" },
+        );
+    }
+}
+
+/// Turn on `allow_peer_dial` for the duration of the returned guard.
+///
+/// The flag is written to the config FILE (via `update_config_value`), not
+/// just the in-memory singleton: `update_config_value` re-reads the file, so
+/// a concurrent non-relay test's config write would otherwise clobber an
+/// in-memory-only flag back to the on-disk `false` and re-hang the onward-
+/// dial gate.  Persisting it means every such re-read preserves our `true`.
+/// `PEER_DIAL_TEST_LOCK` serializes onward-dial tests so their set/restore
+/// can't race each other.
+async fn enable_peer_dial() -> PeerDialGuard {
+    let lock = PEER_DIAL_TEST_LOCK.lock().await;
+    let prev = crate::config::get_config().allow_peer_dial;
+    crate::config::update_config_value("allow_peer_dial", "true");
+    PeerDialGuard { _lock: lock, prev }
 }
 
 /// The connect-error classes carry their detail through `Display`/`message`
@@ -463,7 +494,7 @@ async fn test_remote_port_reregister_generation_guard() {
 /// and pipes the relay channel through transparently in both directions.
 #[tokio::test]
 async fn test_master_relay_dial_pipes_both_ways() {
-    enable_peer_dial();
+    let _peer_dial = enable_peer_dial().await;
     // A fake "BBS" that echoes everything it receives.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -584,12 +615,16 @@ fn adversarial_payload() -> Vec<u8> {
 /// master dialed).  Every byte between them traverses
 /// `run_master_relay_dial`'s `copy_bidirectional`.  The returned join
 /// handle is the master dialer task (await it to confirm clean teardown).
+/// The `PeerDialGuard` is returned (last) so the caller keeps onward-dial
+/// enabled — and holds the serialization lock — for the whole test; dropping
+/// it restores the previous `allow_peer_dial` value.
 async fn onward_dial_endpoints() -> (
     tokio::io::DuplexStream,
     tokio::net::TcpStream,
     tokio::task::JoinHandle<()>,
+    PeerDialGuard,
 ) {
-    enable_peer_dial();
+    let guard = enable_peer_dial().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // Ample buffer so neither direction blocks the copy loop on a slow
@@ -601,7 +636,7 @@ async fn onward_dial_endpoints() -> (
         addr.port(),
     ));
     let (bbs, _) = listener.accept().await.unwrap();
-    (device_end, bbs, dialer)
+    (device_end, bbs, dialer, guard)
 }
 
 /// XMODEM upload over the relay: the relayed device SENDS, the external
@@ -610,7 +645,7 @@ async fn onward_dial_endpoints() -> (
 #[tokio::test]
 async fn test_relay_onward_dial_xmodem_upload() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -646,7 +681,7 @@ async fn test_relay_onward_dial_xmodem_upload() {
 #[tokio::test]
 async fn test_relay_onward_dial_xmodem_download() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -680,7 +715,7 @@ async fn test_relay_onward_dial_xmodem_download() {
 #[tokio::test]
 async fn test_relay_onward_dial_ymodem_upload() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let size = payload.len() as u64;
@@ -728,7 +763,7 @@ async fn test_relay_onward_dial_ymodem_upload() {
 #[tokio::test]
 async fn test_relay_onward_dial_zmodem_upload() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -762,7 +797,7 @@ async fn test_relay_onward_dial_zmodem_upload() {
 #[tokio::test]
 async fn test_relay_onward_dial_zmodem_download() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -798,7 +833,7 @@ async fn test_relay_onward_dial_zmodem_download() {
 #[tokio::test]
 async fn test_relay_onward_dial_kermit_upload() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -840,7 +875,7 @@ async fn test_relay_onward_dial_kermit_upload() {
 #[tokio::test]
 async fn test_relay_onward_dial_punter_upload() {
     let payload = adversarial_payload();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {
@@ -885,7 +920,7 @@ async fn test_relay_onward_dial_punter_upload() {
 async fn test_relay_onward_dial_zmodem_large() {
     // 64 KiB, every byte value cycling, so a dropped/duplicated chunk shows.
     let payload: Vec<u8> = (0..65536u32).map(|i| (i & 0xFF) as u8).collect();
-    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+    let (device_end, bbs, dialer, _peer_dial) = onward_dial_endpoints().await;
 
     let data = payload.clone();
     let sender = tokio::spawn(async move {

@@ -1,10 +1,12 @@
 //! Hand-rolled HTTP/1.1 configuration web server.
 //!
-//! Renders the same settings page the GUI does, in a browser.  Honors
-//! the same IP-safety allowlist as the telnet listener (private/loopback
-//! only unless `disable_ip_safety` is set), and the same
-//! `security_enabled` flag for HTTP Basic auth (using the telnet
-//! `username` / `password`).
+//! Renders the same settings page the GUI does, in a browser.  Accepts only
+//! private/loopback source IPs unless `disable_ip_safety` is set — applied
+//! regardless of whether login is required (M-9), which DIFFERS from the
+//! telnet listener (there, enabling `security_enabled` opens any IP; here it
+//! does not, because this page renders the password + API key).  HTTP Basic
+//! auth is gated by the same `security_enabled` flag using the telnet
+//! `username` / `password`.
 //!
 //! No external HTTP-crate dependency — the protocol surface is small
 //! (GET /, GET /logo.png, GET /logs, POST /save) and we already roll
@@ -226,6 +228,13 @@ async fn handle_connection(
     // allowlist are independent layers: an operator who genuinely wants
     // login-gated access from arbitrary IPs opts in explicitly with
     // `disable_ip_safety = true` (the single, documented escape hatch).
+    //
+    // This DELIBERATELY differs from the telnet accept loop
+    // (`telnet::start_server`), which still couples the allowlist to
+    // `security_enabled`: telnet echoes no secrets and is the retro-hardware
+    // path where "enable auth to expose it" is a legitimate deployment,
+    // whereas this page renders the password + API key. See the matching note
+    // there.
     let (live_security, live_disable_safety) = config::get_security_flags();
     if !live_disable_safety
         && let Some(reason) = telnet::reject_insecure_ip(peer_ip)

@@ -753,16 +753,6 @@ pub fn get_config() -> Config {
     guard.clone().unwrap_or_default()
 }
 
-/// Test-only: overwrite the global in-memory config without touching
-/// `egateway.conf`.  Lets a test exercise a config-gated code path (e.g. the
-/// `allow_peer_dial` onward-dial gate) without the disk side effects of
-/// `update_config_value`.
-#[cfg(test)]
-pub(crate) fn set_config_for_test(cfg: Config) {
-    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(cfg);
-}
-
 /// Read the two boolean flags the telnet accept loop consults on every
 /// inbound connection without cloning the full Config (which allocates
 /// ~20 owned Strings per call).  Returned as a `(security_enabled,
@@ -1615,6 +1605,10 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #                              gateway menu.  A dialed modem port rings and
 #                              answers per its own AT rules (S0 auto-answer /
 #                              manual ATA); a console port connects directly.
+#                              On a MASTER this flag ALSO gates a slave's relay
+#                              onward-dial (Model B): the master refuses to open
+#                              the outbound connection to a slave's requested
+#                              host:port unless this is on.
 #                              Off by default (opt-in even on a trusted LAN).
 ");
     write_kv(&mut content, "kermit_negotiation_timeout", cfg.kermit_negotiation_timeout);

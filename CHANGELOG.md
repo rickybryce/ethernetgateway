@@ -98,6 +98,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempts and bails with `NO CARRIER`. The peer-dial answer-wait is likewise
   clamped to the same 60 s ceiling `ATDT` uses, so a large S7 can't pin the
   caller's port for up to 255 s while a local peer rings.
+- **`SIGHUP` reloads instead of shutting the service down.** SIGHUP was wired
+  to the same shutdown flag as SIGINT/SIGTERM, so `systemctl reload` cleanly
+  stopped the gateway — and because the exit was clean (code 0), `Restart=on-failure`
+  did not bring it back, leaving the service down. SIGHUP now arms the
+  restart/reload path (re-reading config) instead of exiting, matching the
+  shipped systemd unit's `ExecReload`.
+- **Kermit CAPAS long-packet / sliding-window bits corrected.** The capability
+  mask had `LONGPKT` and `SLIDING` transposed versus the canonical layout
+  (C-Kermit `ckcmai.c`: long = 0x02, sliding = 0x04). Gateway↔gateway sessions
+  and the test suite were self-consistent and unaffected, but a third-party peer
+  advertising one capability without the other (e.g. G-Kermit, MS-DOS Kermit —
+  long packets, no windows) was misread, desyncing the rest of the Send-Init.
+  Now fixed and pinned against the C-Kermit source.
 
 ### Security
 - **SSH server refuses to overwrite an unreadable host key.** If the host-key
@@ -132,6 +145,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build-time proc-macro dependency (`wayland-scanner`) that parses trusted
   Wayland protocol XML at compile time — it is not in the shipped binary and the
   gateway does no runtime XML parsing, so neither DoS path is reachable.
+- **Web config UI: enabling login no longer widens IP exposure.** The
+  private-IP allowlist now applies whenever `disable_ip_safety` is off,
+  regardless of whether "Require Login" is on. Previously, enabling security
+  *dropped* the allowlist — accepting any source IP, gated only by
+  cleartext-HTTP Basic auth on a page that renders the login password and Groq
+  API key into form fields. Login-gated access from arbitrary IPs is now an
+  explicit `disable_ip_safety = true` opt-in. (The telnet listener is
+  unchanged and intentionally still opens to any IP under `security_enabled` —
+  it echoes no secrets and is the retro-hardware access path.)
+- **Relay onward-dial now requires the master's `allow_peer_dial`.** A slave's
+  Model-B onward-dial — asking the master to open an outbound TCP connection to
+  an arbitrary external `host:port` — was gated only by `gateway_role = master`
+  + `master_accept_relays`. It now also requires the master's `allow_peer_dial`
+  (the same opt-in that already governs peer-dial), closing an authenticated
+  SSRF/pivot/port-scan primitive available to any holder of the shared
+  credentials.
+- **Text-mode web browser no longer re-sends a form POST over cleartext.** On a
+  TLS error an HTTPS form submission was transparently retried over `http://`,
+  re-sending the form fields (possibly credentials) in the clear before the
+  downgrade notice was shown — an active MITM could force a TLS error to strip
+  encryption and capture the body. A POST is now refused on a TLS error;
+  idempotent GET page loads still downgrade with a warning banner.
+- **Web-browser page text is sanitized before it reaches the terminal.** Remote
+  content (HTML, `text/plain`, and gopher) now passes through the same
+  `sanitize_for_terminal` filter as the AI-chat path, stripping ANSI/CSI/OSC
+  escape sequences a malicious or MITM'd page could use to manipulate a retro
+  terminal. Link-number sentinels are preserved.
+- **An unreadable existing config is no longer reset to insecure defaults.** If
+  `egateway.conf` is present but can't be read (non-UTF-8, corruption, or a
+  permission/I/O error), the gateway now refuses to start rather than
+  overwriting it with `security_enabled = false` / password `changeme`. Config
+  and dial-map saves also `fsync` before the atomic rename, so a crash or power
+  loss between write and rename can't publish a truncated file (which would
+  then trip the new fail-loud guard on the next start).
+- **Startup warns on the wide-open combination.** `disable_ip_safety = true`
+  together with `security_enabled = false` — an unauthenticated gateway
+  reachable from any IP — now emits a startup warning, matching the guard the
+  GUI/telnet toggle popups already apply.
+- **ZMODEM: bound control-frame floods that make no forward progress.** The
+  45 s negotiation deadline and per-read timeout bound *silence*, not a peer
+  that streams valid control frames. The receiver now bounds progressless
+  control frames (ZRQINIT/ZSINIT/ZFREECNT/ZSTDERR/unknown), reset by a real
+  ZFILE, and the sender bounds stale-ZRINIT drains per ZFILE attempt, so a
+  chatty-but-progressless peer can no longer keep a session alive indefinitely.
+- **Telnet: the session subnegotiation reader is now slowloris-bounded.**
+  `read_subneg_payload` bounds each read with `SB_DRAIN_TIMEOUT`, so a peer that
+  sends `IAC SB` then stalls without `IAC SE` can no longer pin the session and
+  its `max_sessions` slot when `idle_timeout_secs = 0`. This matches the two
+  gateway-path SB readers, which were already bounded.
+- **Serial: the direct peer-dial ring is now shutdown/restart-aware.** While an
+  `ATD <Port>@<ip>` to a local modem port was ringing unanswered, the caller's
+  serial thread parked in a blocking wait and ignored shutdown/restart for up to
+  the clamped S7 window. The ring now races a shutdown/restart poll (the same
+  idiom the modem-port announcer uses), so a config restart or shutdown is
+  responsive within ~100 ms.
 
 ## [0.6.3] - 2026-07-03
 

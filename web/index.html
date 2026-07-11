@@ -1152,8 +1152,10 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         Hayes emulator locally; on connect it bridges the call to
                         the master, which serves its menu or dials a resolved
                         <code>host:port</code> onward (the slave's <em>local</em>
-                        phonebook resolves; the master dials). <code>+++</code>/<code>ATO</code>
-                        work normally.</li>
+                        phonebook resolves; the master dials). Onward-dial
+                        requires the master's <code>allow_peer_dial</code> to be
+                        on, or the master refuses the outbound connection.
+                        <code>+++</code>/<code>ATO</code> work normally.</li>
                     <li><strong>Console-mode port</strong> &mdash; the slave
                         registers the port with the master; a master user reaches it
                         from the master's <strong>Serial Gateway</strong> menu, which
@@ -1312,8 +1314,9 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <div class="callout callout-info">
                     <strong>Limits:</strong> Maximum response body is 1 MB. HTTP timeout
                     is 15 seconds. Maximum rendered lines per page is 5000. Page width
-                    adapts to terminal (33 columns for PETSCII, 73+ for ANSI/ASCII). HTTPS
-                    falls back to HTTP automatically if TLS fails.
+                    adapts to terminal (33 columns for PETSCII, 73+ for ANSI/ASCII). On a
+                    TLS failure an HTTPS page load (GET) falls back to HTTP with a warning,
+                    but a form submission (POST) is refused &mdash; never re-sent in the clear.
                 </div>
             </div>
 
@@ -1666,7 +1669,7 @@ relay_transport = ssh</span></code></pre>
                     <tr><td>Protocol</td><td>HTTP/1.1 (hand-rolled, no external HTTP dep)</td></tr>
                     <tr><td>Authentication</td><td>HTTP Basic, gated on <code>security_enabled</code></td></tr>
                     <tr><td>Credentials</td><td>Unified <code>username</code> / <code>password</code> (shared with telnet and SSH)</td></tr>
-                    <tr><td>IP allowlist</td><td>Same private/loopback rules as telnet (honors <code>disable_ip_safety</code>)</td></tr>
+                    <tr><td>IP allowlist</td><td>Private/loopback source IPs only, applied whether or not login is required; the single override is <code>disable_ip_safety</code>. (Differs from telnet, where enabling security opens any IP.)</td></tr>
                     <tr><td>Brute-force lockout</td><td>3 failed logins per IP — 5-minute ban, shared with telnet + SSH</td></tr>
                     <tr><td>Concurrent connection cap</td><td>16 (excess get HTTP 503)</td></tr>
                 </table>
@@ -1996,7 +1999,7 @@ relay_transport = ssh</span></code></pre>
                     <tr><th>Symptom</th><th>Solution</th></tr>
                     <tr>
                         <td>"Connection refused" from non-private IP</td>
-                        <td>Enable security for public IP access, or connect from a private network.</td>
+                        <td>For telnet, enable security for public-IP access. For the web UI, enabling login no longer opens any IP &mdash; set <code>disable_ip_safety = true</code>. Or connect from a private network.</td>
                     </tr>
                     <tr>
                         <td>Locked out after failed logins</td>

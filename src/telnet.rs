@@ -14885,6 +14885,19 @@ pub fn start_server(
                             // allocations.
                             let (live_security, live_disable_safety) =
                                 config::get_security_flags();
+                            // NOTE: telnet deliberately still couples the IP
+                            // allowlist to `security_enabled` — enabling auth
+                            // opens telnet to any source IP.  This is the
+                            // OPPOSITE of the web server (M-9,
+                            // `webserver.rs::handle_connection`), which now
+                            // applies the allowlist regardless of login.  The
+                            // asymmetry is intentional: the web page echoes the
+                            // password + API key into `value="…"` attributes,
+                            // so widening its IP exposure on auth is dangerous;
+                            // telnet echoes no secrets and is the retro-hardware
+                            // path where "turn on auth to expose it" is a
+                            // legitimate deployment.  `disable_ip_safety`
+                            // remains the escape hatch for both.
                             if !live_security
                                 && !live_disable_safety
                                 && let Some(reason) = reject_insecure_ip(addr.ip())

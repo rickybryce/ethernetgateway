@@ -80,7 +80,9 @@ bytes back to the device. The slave authenticates to the master with the
 master's credentials, so treat a slave (and the devices attached to it) as
 trusted to reach the master's network, exactly as you would a device attached
 directly to the master. Only enable `master_accept_relays` for slaves you trust
-at that level.
+at that level — and note that a slave's relay *onward-dial* additionally
+requires the master's `allow_peer_dial` to be on, so the master refuses the
+outbound connection when it is off.
 
 The text-mode **web browser** is the one exception: it *does* refuse internal
 addresses (an SSRF guard), because web fetches and HTTP redirects make that a
@@ -648,7 +650,9 @@ allow_atdt_kermit = false
 # allow_peer_dial:             let a modem port dial another port directly
 #                              (ATD <Port>@<IP>, or pick a modem port in the
 #                              Serial Gateway menu) instead of the gateway
-#                              menu.  Off by default (opt-in even on a LAN).
+#                              menu.  On a master, also gates a slave's relay
+#                              onward-dial (Model B) to an external host:port.
+#                              Off by default (opt-in even on a LAN).
 allow_peer_dial = false
 
 # Standalone Kermit server listener.
@@ -1097,8 +1101,9 @@ Each serial port relays according to its own mode:
   device dials (e.g. `ATDT ethernet-gateway`, or a number in the slave's *local*
   dial map), the slave bridges the call to the master, which serves its menu or
   dials the resolved `host:port` onward (the slave's local phonebook resolves;
-  the master dials). `+++`/`ATO` work (see **Relay limitations** below for the
-  menu-relay idle-timeout caveat).
+  the master dials). Onward-dial requires the master's `allow_peer_dial` to be
+  on — otherwise the master refuses the outbound connection. `+++`/`ATO` work
+  (see **Relay limitations** below for the menu-relay idle-timeout caveat).
 - **Console-mode port** — the slave registers the port with the master and a
   master user reaches it from the master's **Serial Gateway** menu, which lists
   local ports plus registered remote ports. (A slave's *own* Serial Gateway menu
@@ -1670,7 +1675,9 @@ detected, the status line shows the form count. Press **F** to interact:
 - Maximum rendered lines: 5,000
 - HTTP request timeout: 15 seconds
 - Page history depth: 50 pages
-- HTTPS connections that fail due to TLS errors automatically retry over HTTP
+- HTTPS **page loads** (GET) that fail due to TLS errors automatically retry
+  over HTTP with a warning banner; **form submissions (POST) are refused, not
+  downgraded**, so form data is never re-sent in the clear
 
 ### Gopher Protocol
 
