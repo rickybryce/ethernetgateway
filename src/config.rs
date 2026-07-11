@@ -781,12 +781,26 @@ pub fn get_gateway_debug() -> bool {
 /// Load (or create) the configuration file and store it in the global singleton.
 pub fn load_or_create_config() -> Config {
     let cfg = if Path::new(CONFIG_FILE).exists() {
-        let cfg = read_config_file(CONFIG_FILE);
-        // Rewrite to ensure all keys are present.
-        if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
-            glog!("Warning: {}", e);
+        match read_config_file_checked(CONFIG_FILE) {
+            Ok(cfg) => {
+                // Rewrite to ensure all keys are present.
+                if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
+                    glog!("Warning: {}", e);
+                }
+                cfg
+            }
+            Err(e) => {
+                // An existing config we cannot read must NOT be silently
+                // overwritten with defaults — that would downgrade a secured
+                // gateway to security-off / password "changeme" on a
+                // transient permission blip or a corrupt/non-UTF-8 file.
+                // Fail loud and leave the file untouched for the operator.
+                glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
+                glog!("       Refusing to start rather than overwrite it with");
+                glog!("       insecure defaults. Fix or remove the file, then restart.");
+                std::process::exit(1);
+            }
         }
-        cfg
     } else {
         let cfg = Config::default();
         match write_config_file(CONFIG_FILE, &cfg) {
@@ -801,15 +815,28 @@ pub fn load_or_create_config() -> Config {
     cfg
 }
 
-/// Parse a config file into a `Config`.
+/// Parse a config file into a `Config`, tolerating an unreadable file by
+/// returning defaults (with a warning).  A best-effort read that is only
+/// used by tests now — every runtime caller (startup and mid-run updates)
+/// uses `read_config_file_checked` so an unreadable *existing* file is never
+/// silently replaced with insecure defaults (see `load_or_create_config`).
+#[cfg(test)]
 fn read_config_file(path: &str) -> Config {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    match read_config_file_checked(path) {
+        Ok(cfg) => cfg,
         Err(e) => {
             glog!("Warning: could not read {}: {}", path, e);
-            return Config::default();
+            Config::default()
         }
-    };
+    }
+}
+
+/// Like `read_config_file`, but surfaces a read failure — missing file,
+/// non-UTF-8 bytes, or a permission/I/O error — as an `Err` instead of
+/// falling back to defaults.  Per-key parsing stays lenient: missing or
+/// malformed individual keys still resolve to their documented defaults.
+fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
+    let content = std::fs::read_to_string(path)?;
 
     let mut map = HashMap::new();
     for line in content.lines() {
@@ -1165,7 +1192,7 @@ fn read_config_file(path: &str) -> Config {
         );
         cfg.password = legacy.clone();
     }
-    cfg
+    Ok(cfg)
 }
 
 /// Read one port's settings from `map` under `prefix` (e.g. `"serial_a"`).
@@ -1757,6 +1784,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
 
+    // fsync the tmp file's contents to disk *before* the rename.  A rename
+    // is only atomic with respect to the directory entry, not the data
+    // blocks: on a crash or power loss between write and rename the entry
+    // can point at a zero-length or partially-written file.  That truncated
+    // config then fails to parse and — with the M-12 guard — halts startup,
+    // or (pre-guard) reset the gateway to insecure defaults.  fsync closes
+    // that window so a rename never publishes unflushed bytes.
     #[cfg(unix)]
     let write_result = {
         use std::io::Write;
@@ -1766,11 +1800,15 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
-            .and_then(|mut f| f.write_all(content.as_bytes()))
+            .and_then(|mut f| f.write_all(content.as_bytes()).and_then(|()| f.sync_all()))
             .and_then(|()| std::fs::rename(&tmp, path))
     };
     #[cfg(not(unix))]
-    let write_result = std::fs::write(&tmp, &content)
+    let write_result = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes()).and_then(|()| f.sync_all())
+        })
         .and_then(|()| std::fs::rename(&tmp, path));
 
     if let Err(e) = write_result {
@@ -1793,7 +1831,19 @@ pub fn update_config_value(key: &str, value: &str) {
 pub fn update_config_values(pairs: &[(&str, &str)]) {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     let mut cfg = if Path::new(CONFIG_FILE).exists() {
-        read_config_file(CONFIG_FILE)
+        match read_config_file_checked(CONFIG_FILE) {
+            Ok(c) => c,
+            // Unreadable mid-run: keep the current in-memory config rather
+            // than clobbering the on-disk file with defaults in the write
+            // below (same insecure-downgrade hazard as at startup).
+            Err(e) => {
+                glog!(
+                    "Warning: could not read {} ({}); keeping current settings.",
+                    CONFIG_FILE, e
+                );
+                guard.as_ref().cloned().unwrap_or_default()
+            }
+        }
     } else {
         Config::default()
     };
@@ -2247,6 +2297,9 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let tmp = format!("{}.{}.{}.tmp", DIALUP_FILE, std::process::id(), seq);
 
+    // fsync before rename (see `write_config_file`): a rename only makes the
+    // directory entry atomic, not the data blocks, so a crash between write
+    // and rename could publish a truncated mapping file.
     #[cfg(unix)]
     let write_result = {
         use std::io::Write;
@@ -2256,11 +2309,15 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
-            .and_then(|mut f| f.write_all(content.as_bytes()))
+            .and_then(|mut f| f.write_all(content.as_bytes()).and_then(|()| f.sync_all()))
             .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE))
     };
     #[cfg(not(unix))]
-    let write_result = std::fs::write(&tmp, &content)
+    let write_result = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes()).and_then(|()| f.sync_all())
+        })
         .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE));
 
     if let Err(e) = write_result {
@@ -2457,6 +2514,34 @@ mod tests {
         assert_eq!(cfg.idle_timeout_secs, 300);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // M-12: an existing-but-unreadable config must surface an Err from the
+    // checked reader so startup fails loud rather than silently overwriting
+    // the file with insecure defaults (security off, password "changeme").
+    #[test]
+    fn test_read_config_file_checked_rejects_non_utf8() {
+        let dir = std::env::temp_dir().join("xmodem_test_checked_nonutf8");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("corrupt.conf");
+        // Invalid UTF-8 byte sequence (0xFF is never valid in UTF-8) — the
+        // kind of garbage a power-loss truncation or disk corruption leaves.
+        std::fs::write(&path, [0xFF, 0xFE, 0x00, 0x80]).unwrap();
+
+        let result = read_config_file_checked(path.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "non-UTF-8 config must be reported as an error, not defaults"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_config_file_checked_rejects_missing_file() {
+        let result =
+            read_config_file_checked("/nonexistent/path/that/does/not/exist_checked.conf");
+        assert!(result.is_err(), "missing config must be reported as an error");
     }
 
     #[test]
