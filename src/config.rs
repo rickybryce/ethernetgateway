@@ -1178,9 +1178,11 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
     if cfg.username == DEFAULT_USERNAME
         && let Some(legacy) = map.get("ssh_username").filter(|v| !v.is_empty() && v.as_str() != DEFAULT_USERNAME)
     {
+        // Don't log the username *value* — it lands in the console log the
+        // web `/logs` snapshot exposes, and the parallel password migration
+        // below deliberately logs only that it happened, not the secret.
         glog!(
-            "Note: migrating legacy ssh_username={:?} to unified username (telnet+SSH+web share creds now).",
-            legacy,
+            "Note: migrating legacy ssh_username to unified username (telnet+SSH+web share creds now)."
         );
         cfg.username = legacy.clone();
     }

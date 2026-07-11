@@ -117,8 +117,11 @@ pub(crate) async fn xmodem_receive(
     let mut mode = TransferMode::Crc16;
     let mut attempt: u32 = 0;
 
+    // `.max(1)` on the divisor guards against a divide-by-zero panic if
+    // `negotiation_retry_interval` is ever 0 — today the config layer floors
+    // it at ≥1, but this keeps the invariant local rather than relying on it.
     let crc_attempts =
-        (negotiation_timeout * 2 / 3 / negotiation_retry_interval).max(3) as u32;
+        (negotiation_timeout * 2 / 3 / negotiation_retry_interval.max(1)).max(3) as u32;
     let max_negotiation_attempts = crc_attempts + max_retries as u32;
     loop {
         if tokio::time::Instant::now() >= negotiation_deadline {
@@ -1143,7 +1146,6 @@ pub(crate) async fn xmodem_send(
                         writer,
                         is_tcp,
                         block_timeout,
-                        max_retries,
                         verbose,
                         state,
                     )
@@ -1162,7 +1164,6 @@ pub(crate) async fn xmodem_send(
                         writer,
                         is_tcp,
                         block_timeout,
-                        max_retries,
                         verbose,
                         state,
                     )
@@ -1318,7 +1319,6 @@ async fn send_ymodem_end_of_batch(
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     block_timeout: u64,
-    _max_retries: usize,
     verbose: bool,
     state: &mut ReadState,
 ) -> Result<(), String> {

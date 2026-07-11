@@ -235,10 +235,26 @@ pub(crate) fn load_or_generate_client_key() -> Result<russh::keys::PrivateKey, S
                 return Ok(key);
             }
             Err(e) => {
+                // Do NOT overwrite a file that exists but won't parse — it may
+                // be a merely-truncated, recoverable key, and silently minting
+                // a new one changes the gateway's outbound identity (breaking
+                // pubkey auth on every remote that trusts the old key).  Unlike
+                // the host key we don't refuse outright: outbound SSH can still
+                // fall back to password auth.  So use an EPHEMERAL in-memory
+                // key for this session and leave the file untouched for the
+                // operator to restore or remove.  (This mirrors the host-key
+                // path's refuse-to-overwrite intent, minus the hard failure.)
                 glog!(
-                    "SSH gateway: could not read {}: {} (generating new key)",
+                    "SSH gateway: {} exists but could not be read: {}. Using an \
+                     ephemeral client key this session and leaving the file in \
+                     place; pubkey auth will fail until it is fixed or removed.",
                     GATEWAY_CLIENT_KEY_FILE, e
                 );
+                return russh::keys::PrivateKey::random(
+                    &mut rand::rng(),
+                    russh::keys::Algorithm::Ed25519,
+                )
+                .map_err(|e| format!("client key generation failed: {}", e));
             }
         }
     }

@@ -909,11 +909,14 @@ where
     let mut progressless_frames: u32 = 0;
 
     loop {
-        // Only the first file sees the 45 s negotiation deadline —
-        // once we've received at least one file the sender is clearly
-        // live, and the per-frame 10 s read timeout below is the
-        // relevant bound.
-        let deadline_active = files.is_empty();
+        // Only the pre-first-file window sees the 45 s negotiation deadline —
+        // once the sender has sent at least one ZFILE it is clearly live, and
+        // the per-frame 10 s read timeout below is the relevant bound.  Keyed
+        // on `zfile_seen` (ZFILEs the sender has sent) rather than `files`
+        // (files we *accepted*): a long batch the receiver skips
+        // (ZSKIP → not pushed to `files`) would otherwise keep `files` empty,
+        // hold the negotiation deadline active, and wrongly time out after 45 s.
+        let deadline_active = zfile_seen == 0;
 
         let read_res = tokio::time::timeout(
             tokio::time::Duration::from_secs(if deadline_active {
@@ -1045,10 +1048,15 @@ where
                 continue;
             }
             ZFIN => {
-                // Sender announces end of batch.  Mirror the ZFIN and
-                // emit the "OO" over-and-out trailer.
+                // Sender announces end of batch.  Mirror the ZFIN and stop.
+                // Per Forsberg §8.4 the "OO" over-and-out trailer is sent by
+                // the ZFIN *initiator* (the sender) after it reads our ZFIN;
+                // the receiver replies ZFIN and then *reads* OO.  Emitting our
+                // own OO here was a role inversion (M-1) — harmless in
+                // practice (the peer has already sent its OO and exited, so
+                // the bytes are discarded) but a protocol deviation.  The
+                // send path emits OO correctly.
                 send_zfin(writer, is_tcp, verbose).await?;
-                raw_write_bytes(writer, b"OO", is_tcp).await.ok();
                 break;
             }
             ZABORT => {

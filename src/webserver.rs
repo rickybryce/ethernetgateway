@@ -615,8 +615,12 @@ fn is_authorized(req: &HttpRequest) -> bool {
     let Some((user, pass)) = text.split_once(':') else {
         return false;
     };
-    telnet::constant_time_eq(user.as_bytes(), cfg.username.as_bytes())
-        && telnet::constant_time_eq(pass.as_bytes(), cfg.password.as_bytes())
+    // Evaluate BOTH comparisons before combining (no `&&` short-circuit) so a
+    // wrong username can't be distinguished from a wrong password by response
+    // time.  Mirrors the telnet/SSH auth paths.
+    let user_ok = telnet::constant_time_eq(user.as_bytes(), cfg.username.as_bytes());
+    let pass_ok = telnet::constant_time_eq(pass.as_bytes(), cfg.password.as_bytes());
+    user_ok && pass_ok
 }
 
 /// Tiny RFC 4648 base64 decoder.  Returns the empty vec for any input

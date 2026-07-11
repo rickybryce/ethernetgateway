@@ -1552,7 +1552,17 @@ fn run_console_bridge<S>(
         && !restart_flag.load(Ordering::SeqCst)
     {
         match port.read(&mut buf) {
-            Ok(0) => {}
+            // EOF: the port was opened with `.timeout(SERIAL_READ_TIMEOUT)`, so
+            // an idle read returns `Err(TimedOut)` (below), never `Ok(0)` — a
+            // zero-length read therefore means the device closed (e.g. a PTY
+            // master after its slave exits, where loss surfaces as EOF rather
+            // than the `Err(EIO)` a real ttyUSB gives).  Treat it as a
+            // disconnect like the online-path readers do, instead of
+            // re-polling forever at 100% CPU (M-6).
+            Ok(0) => {
+                glog!("Serial console (Port {}): port closed (EOF)", id.label());
+                break;
+            }
             Ok(n) => {
                 // Hand the bytes to the async pump, but stay responsive to
                 // shutdown / restart while doing so.  A stalled telnet peer
@@ -1867,6 +1877,16 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
             // ignored: AT commands are ASCII, and `byte as char` on a high
             // byte would push a multi-byte UTF-8 sequence the byte-offset
             // tokenizer in parse_at_command can't slice safely.
+        }
+        // EOF: with the read timeout set (see `open_port`) an idle read is
+        // `Err(TimedOut)` below, so `Ok(0)` means the device closed rather
+        // than "no data yet".  Signal a disconnect so the caller drops and
+        // reopens the port — otherwise a PTY master whose slave exited (EOF,
+        // not the `Err(EIO)` a real UART gives) would re-poll forever at 100%
+        // CPU and never reconnect (M-6).
+        Ok(0) => {
+            glog!("Serial modem (Port {}): port closed (EOF) — closing port", state.port_id.label());
+            return false;
         }
         Ok(_) => {}
         Err(ref e)
