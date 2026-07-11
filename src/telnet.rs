@@ -2071,12 +2071,23 @@ impl TelnetSession {
     /// terminating IAC SE. Returns the payload bytes with any escaped
     /// `IAC IAC` unescaped. First byte is the option code. Returns
     /// Ok(None) if the connection closes mid-sequence.
+    ///
+    /// Each read is bounded by `SB_DRAIN_TIMEOUT` (slowloris guard): a peer
+    /// that sends `IAC SB <opt>` and then stalls without `IAC SE` must not
+    /// pin the session task and its `max_sessions` slot indefinitely.  This
+    /// guard is independent of `idle_timeout_secs` (which can be 0 = off),
+    /// matching the two gateway-path SB readers, which bound the identical
+    /// loop the same way regardless of idle config.  A stalled drain is
+    /// treated as a closed connection (Ok(None)).
     async fn read_subneg_payload(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {
         let mut payload = Vec::with_capacity(32);
         let mut buf = [0u8; 1];
         loop {
-            if self.reader.read(&mut buf).await? == 0 {
-                return Ok(None);
+            match tokio::time::timeout(SB_DRAIN_TIMEOUT, self.reader.read(&mut buf)).await {
+                Err(_) => return Ok(None),
+                Ok(Ok(0)) => return Ok(None),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(e),
             }
             if buf[0] != IAC {
                 if payload.len() < 512 {
@@ -2084,8 +2095,11 @@ impl TelnetSession {
                 }
                 continue;
             }
-            if self.reader.read(&mut buf).await? == 0 {
-                return Ok(None);
+            match tokio::time::timeout(SB_DRAIN_TIMEOUT, self.reader.read(&mut buf)).await {
+                Err(_) => return Ok(None),
+                Ok(Ok(0)) => return Ok(None),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(e),
             }
             match buf[0] {
                 SE => return Ok(Some(payload)),

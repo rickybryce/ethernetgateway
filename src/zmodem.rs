@@ -897,6 +897,16 @@ where
     // `cfg.zmodem_max_retries` we surface an error rather than silently
     // truncating the batch.
     let mut inter_file_header_errors: u32 = 0;
+    // Consecutive well-formed control frames that make no forward progress
+    // (ZRQINIT/ZSINIT/ZFREECNT/ZSTDERR/unknown — everything that `continue`s
+    // without transferring a file).  The negotiation deadline and per-read
+    // timeout only bound *silence*; a peer streaming valid control frames
+    // resets those every read and could keep the session (and its
+    // max_sessions slot) alive forever.  A real ZFILE resets this to 0; the
+    // budget (2× the retry ceiling — generous for a legitimate startup burst
+    // of ZRQINIT/ZSINIT/ZFREECNT, finite for a flood) bounds the rest.
+    let progressless_budget = cfg.zmodem_max_retries.saturating_mul(2);
+    let mut progressless_frames: u32 = 0;
 
     loop {
         // Only the first file sees the 45 s negotiation deadline —
@@ -983,6 +993,17 @@ where
             }
         };
 
+        // Chatty-peer guard (M-2): count this frame against the
+        // progressless budget.  A ZFILE clears it below; any frame that only
+        // `continue`s the loop leaves it standing, so a flood is bounded.
+        progressless_frames = progressless_frames.saturating_add(1);
+        if progressless_frames > progressless_budget {
+            send_cancel(writer, is_tcp).await.ok();
+            return Err(
+                "ZMODEM: too many control frames without a ZFILE/ZFIN from sender".into(),
+            );
+        }
+
         match hdr.frame {
             ZRQINIT => {
                 // Stale init or sender still waiting — the timeout
@@ -993,6 +1014,8 @@ where
                 continue;
             }
             ZFILE => {
+                // Forward progress — clear the chatty-peer budget.
+                progressless_frames = 0;
                 let file_index = zfile_seen;
                 zfile_seen += 1;
                 let decision = receive_one_file(
@@ -1737,6 +1760,16 @@ pub(crate) async fn zmodem_send(
                 glog!("ZMODEM send: sent ZFILE + subpacket for '{}'", filename);
             }
 
+            // Bound stale-ZRINIT drains for this ZFILE attempt (M-2).  A
+            // couple of ZRINITs are expected (lrzsz queues several at
+            // startup); a peer that streams them forever would otherwise spin
+            // this inner loop indefinitely, since each read succeeds within
+            // frame_timeout and the ZRINIT arm just `continue`s without
+            // burning a retry.  Past the budget we fall back to the outer
+            // 'zfile loop (which retransmits ZFILE and *does* burn a retry),
+            // so the whole phase stays bounded by max_retries.
+            let mut zrinit_drains: u32 = 0;
+
             // Drain stale ZRINITs queued by the receiver (lrzsz emits
             // multiple at startup before processing our first ZFILE)
             // without retransmitting — every ZFILE we send produces a
@@ -1768,6 +1801,15 @@ pub(crate) async fn zmodem_send(
                         break 'zfile;
                     }
                     Ok(Ok(h)) if h.frame == ZRINIT => {
+                        zrinit_drains += 1;
+                        if zrinit_drains > max_retries {
+                            if verbose {
+                                glog!(
+                                    "ZMODEM send: too many stale ZRINITs, retransmitting ZFILE"
+                                );
+                            }
+                            continue 'zfile;
+                        }
                         if verbose {
                             glog!("ZMODEM send: draining stale ZRINIT after ZFILE");
                         }

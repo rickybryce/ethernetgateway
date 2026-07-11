@@ -3341,17 +3341,36 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
     // up to 255 s while the peer rings.
     let answer_wait =
         Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
-    match state.handle.block_on(request_peer_call(target, answer_wait)) {
-        Ok(caller_end) => bridge_duplex_online(state, caller_end),
-        Err(PeerCallOutcome::Busy) => {
+    // Race the ring against a shutdown/restart poll (M-5).  `request_peer_call`
+    // isn't itself abort-aware, so without this the caller's serial thread
+    // parks in `block_on` for up to `answer_wait` (≤ MAX_CONNECT_TIMEOUT)
+    // while the peer rings, delaying a config-restart or shutdown `join` by
+    // that long.  On abort the select drops the ring future, whose
+    // PeerSlotGuard reclaims the placed call; we report NO CARRIER to the
+    // caller (the dial was cut short).  Mirrors `modem_slave_announce_tick`.
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
+    let ring = state.handle.block_on(async move {
+        tokio::select! {
+            biased;
+            _ = wait_for_serial_abort(&sd, idx) => None,
+            r = request_peer_call(target, answer_wait) => Some(r),
+        }
+    });
+    match ring {
+        None => {
+            send_result(state, "NO CARRIER");
+        }
+        Some(Ok(caller_end)) => bridge_duplex_online(state, caller_end),
+        Some(Err(PeerCallOutcome::Busy)) => {
             send_result(state, "BUSY");
         }
         // NO ANSWER is an X3+ extended code; send_result maps it to the
         // right numeric/verbose form and it degrades to NO CARRIER at low X.
-        Err(PeerCallOutcome::NoAnswer) => {
+        Some(Err(PeerCallOutcome::NoAnswer)) => {
             send_result(state, "NO ANSWER");
         }
-        Err(_) => {
+        Some(Err(_)) => {
             send_result(state, "NO CARRIER");
         }
     }
