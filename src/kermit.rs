@@ -12424,7 +12424,7 @@ mod tests {
             rt.block_on(async {
                 let mut state = ReadState::default();
                 let mut c = std::io::Cursor::new(data);
-                for chkt in [b'1', b'2', b'3'] {
+                for chkt in *b"123" {
                     let _ = read_packet(&mut c, false, false, chkt, CR, false, &mut state, None).await;
                     // Cursor is consumed after the first call; don't expect later iterations to do anything meaningful.
                 }

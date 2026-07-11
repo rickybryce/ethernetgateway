@@ -319,7 +319,7 @@ fn apply_theme(ctx: &egui::Context) {
     vis.dark_mode = true;
     vis.override_text_color = Some(TEXT_PRIMARY);
     vis.selection.bg_fill = SELECTION;
-    vis.selection.stroke = Stroke::new(1.0, AMBER);
+    vis.selection.stroke = Stroke::new(1.0_f32, AMBER);
 
     vis.window_fill = BG_DARKEST;
     vis.panel_fill = BG_DARKEST;
@@ -328,30 +328,30 @@ fn apply_theme(ctx: &egui::Context) {
 
     // Non-interactive widgets (labels, frames)
     vis.widgets.noninteractive.bg_fill = BG_DARK;
-    vis.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    vis.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    vis.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    vis.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
 
     // Inactive widgets (buttons, checkboxes, text inputs at rest)
     vis.widgets.inactive.bg_fill = BG_MID;
-    vis.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_INPUT);
-    vis.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    vis.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_INPUT);
+    vis.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
 
     // Hovered widgets
     vis.widgets.hovered.bg_fill = BG_LIGHT;
-    vis.widgets.hovered.fg_stroke = Stroke::new(1.5, AMBER_BRIGHT);
-    vis.widgets.hovered.bg_stroke = Stroke::new(1.0, AMBER);
+    vis.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, AMBER_BRIGHT);
+    vis.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, AMBER);
 
     // Active (clicked) widgets
     vis.widgets.active.bg_fill = BG_LIGHT;
-    vis.widgets.active.fg_stroke = Stroke::new(2.0, AMBER_BRIGHT);
-    vis.widgets.active.bg_stroke = Stroke::new(1.0, AMBER_BRIGHT);
+    vis.widgets.active.fg_stroke = Stroke::new(2.0_f32, AMBER_BRIGHT);
+    vis.widgets.active.bg_stroke = Stroke::new(1.0_f32, AMBER_BRIGHT);
 
     // Open widgets (e.g. combo box when expanded)
     vis.widgets.open.bg_fill = BG_MID;
-    vis.widgets.open.fg_stroke = Stroke::new(1.0, AMBER);
-    vis.widgets.open.bg_stroke = Stroke::new(1.0, AMBER_DIM);
+    vis.widgets.open.fg_stroke = Stroke::new(1.0_f32, AMBER);
+    vis.widgets.open.bg_stroke = Stroke::new(1.0_f32, AMBER_DIM);
 
-    vis.window_stroke = Stroke::new(1.0, BORDER);
+    vis.window_stroke = Stroke::new(1.0_f32, BORDER);
 
     ctx.set_visuals(vis);
 }
@@ -2368,7 +2368,7 @@ impl eframe::App for App {
         // radius, shadow, and inner margin stay consistent.
         let popup_frame = egui::Frame::window(&ctx.global_style())
             .fill(POPUP_BG)
-            .stroke(Stroke::new(1.0, AMBER));
+            .stroke(Stroke::new(1.0_f32, AMBER));
 
         let mut server_open = self.server_popup_open;
         egui::Window::new(egui::RichText::new("Server — More").strong().color(AMBER_BRIGHT))
