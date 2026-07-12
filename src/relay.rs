@@ -128,10 +128,25 @@ where
         return;
     }
 
-    let mut tcp = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
-        Ok(s) => s,
-        Err(e) => {
+    // Bound the onward connect like the local modem's `dial_tcp` does: a
+    // relayed device sits at CONNECT (the slave reports success as soon as
+    // the relay hello arrives) while an SSH session-cap slot stays held, so
+    // an unbounded `connect()` to a down/firewalled host would pin both for
+    // the full OS SYN-retry window (~2 min on Linux).  Cap it at
+    // RELAY_PEER_ANSWER_WAIT and report NO CARRIER (drop the relay) on timeout.
+    let connect = tokio::net::TcpStream::connect((host.as_str(), port));
+    let mut tcp = match tokio::time::timeout(RELAY_PEER_ANSWER_WAIT, connect).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             glog!("Relay: onward dial to {}:{} failed: {}", host, port, e);
+            let _ = relay.shutdown().await;
+            return;
+        }
+        Err(_) => {
+            glog!(
+                "Relay: onward dial to {}:{} timed out after {}s",
+                host, port, RELAY_PEER_ANSWER_WAIT.as_secs()
+            );
             let _ = relay.shutdown().await;
             return;
         }

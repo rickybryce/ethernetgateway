@@ -154,7 +154,19 @@ fn main() {
                         glog!("\nShutdown signal received, stopping server...");
                         break;
                     }
-                    notify_rt.notified().await;
+                    // Bounded wait: `notify_waiters()` (used by every notifier)
+                    // stores NO permit, so a notify landing in the gap between
+                    // the load() above and this await would be missed — and
+                    // since notifiers set `shutdown` before notifying, we could
+                    // park here forever with shutdown already true, wedging the
+                    // whole teardown (the "stuck after Ctrl-C" failure the
+                    // surrounding paths guard against).  Re-checking every 200 ms
+                    // turns any missed wakeup into <=200 ms latency, never a hang.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        notify_rt.notified(),
+                    )
+                    .await;
                 }
 
                 // Broadcast the goodbye to every live async session (telnet,

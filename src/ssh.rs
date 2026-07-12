@@ -203,8 +203,18 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
         .to_openssh(LineEnding::LF)
         .map_err(|e| format!("key encoding failed: {}", e))?;
     if let Err(e) = atomic_write_private_key(SSH_HOST_KEY_FILE, pem.as_bytes()) {
+        // Deliberately serve anyway with this in-memory key rather than
+        // refusing to start (unlike the parse-failure path above, which
+        // aborts to preserve an *existing* identity): a first boot on a
+        // read-only / full working dir shouldn't take SSH down entirely.
+        // But the identity WON'T survive a restart — the file is still
+        // absent, so the next run generates a different key and clients
+        // get "REMOTE HOST IDENTIFICATION HAS CHANGED".  Say so loudly so
+        // the operator can fix the directory instead of chasing that later.
         glog!(
-            "SSH server: warning: could not save host key to {}: {}",
+            "SSH server: WARNING: could not save host key to {} ({}); serving with a \
+             temporary key that will NOT persist — clients will see the host key change \
+             on the next restart until the working directory is writable",
             SSH_HOST_KEY_FILE, e
         );
     } else {
