@@ -2217,7 +2217,7 @@ fn parse_one_at_subcommand(
             AtResult::Ok,
         ],
         "I7" => vec![
-            AtResult::Info("Product: ethernet-gateway (software emulator)".into()),
+            AtResult::Info("Product: ethernetgateway (software emulator)".into()),
             AtResult::Ok,
         ],
         "?" => vec![AtResult::Help],
