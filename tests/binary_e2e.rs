@@ -1,4 +1,4 @@
-//! Binary-level e2e: drives the actual `ethernet-gateway` binary as a
+//! Binary-level e2e: drives the actual `ethernetgateway` binary as a
 //! subprocess.  Writes a fresh config to a tmpdir, launches the
 //! binary, connects via TCP to the telnet port, navigates the menu
 //! to the web browser, fetches a page from a localhost HTTP server
@@ -82,14 +82,14 @@ fn test_binary_telnet_browser_e2e() {
     // 4. Launch the binary.  CARGO_BIN_EXE_<crate> is a compile-time
     // env var Cargo sets for integration tests; access it via env!()
     // (it isn't visible at runtime through std::env::var).
-    let binary = env!("CARGO_BIN_EXE_ethernet-gateway");
+    let binary = env!("CARGO_BIN_EXE_ethernetgateway");
 
     let mut child = Command::new(binary)
         .current_dir(&tmp)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to spawn ethernet-gateway");
+        .expect("failed to spawn ethernetgateway");
 
     // Always reap the child even on panic.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -1347,7 +1347,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
-name = "ethernet-gateway"
+name = "ethernetgateway"
 version = "0.6.4"
 dependencies = [
  "arboard",

@@ -1,12 +1,12 @@
 [package]
-name = "ethernet-gateway"
+name = "ethernetgateway"
 version = "0.6.4"
 edition = "2024"
 authors = ["Ricky Bryce"]
 license = "GPL-3.0-or-later"
 description = "Telnet/SSH gateway and Hayes AT modem emulator for retro terminals — PETSCII, ANSI, and ASCII. Bridges Commodore 64, CP/M, and similar machines to modern networks with XMODEM/XMODEM-1K/YMODEM/ZMODEM file transfer, a web browser, AI chat, weather, SSH and telnet gateways."
-repository = "https://github.com/rickybryce/ethernet-gateway"
-homepage = "https://github.com/rickybryce/ethernet-gateway"
+repository = "https://github.com/rickybryce/ethernetgateway"
+homepage = "https://github.com/rickybryce/ethernetgateway"
 readme = "README.md"
 keywords = ["telnet", "ssh", "zmodem", "xmodem", "retrocomputing"]
 categories = ["command-line-utilities", "network-programming", "emulators"]

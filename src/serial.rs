@@ -3105,7 +3105,7 @@ fn handle_dial(state: &mut ModemState, target: &str) {
         return;
     }
 
-    if lower == "ethernet-gateway" || lower == "ethernet gateway" {
+    if lower == "ethernet-gateway" || lower == "ethernetgateway" || lower == "ethernet gateway" {
         dial_ethernet_gateway(state);
     } else if matches!(lower.as_str(), "kermit" | "kermit-server" | "kermit server") {
         // Direct-to-Kermit-server entry.  Only honored when the operator
@@ -3169,6 +3169,7 @@ fn slave_resolve_relay_target(
     if (is_phone_number(target)
         && config::normalize_phone_number(target) == GATEWAY_PHONE_NUMBER)
         || lower == "ethernet-gateway"
+        || lower == "ethernetgateway"
         || lower == "ethernet gateway"
     {
         return Some(RelayTarget::Menu);
@@ -5946,6 +5947,9 @@ mod tests {
             "ATDT Ethernet-Gateway",
             "ATDT ethernet gateway",
             "ATDT ETHERNET GATEWAY",
+            "ATDT ethernetgateway",
+            "ATDT ETHERNETGATEWAY",
+            "ATDT EthernetGateway",
         ];
         for cmd in &variants {
             let mut echo = true;
@@ -6157,6 +6161,12 @@ mod tests {
         );
         assert_eq!(
             slave_resolve_relay_target("ethernet gateway", "ethernet gateway"),
+            Some(RelayTarget::Menu)
+        );
+        // The collapsed "ethernetgateway" alias (matches the project name)
+        // resolves to the menu too, case-insensitively.
+        assert_eq!(
+            slave_resolve_relay_target("ETHERNETGATEWAY", "ethernetgateway"),
             Some(RelayTarget::Menu)
         );
     }

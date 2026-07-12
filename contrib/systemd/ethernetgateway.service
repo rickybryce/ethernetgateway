@@ -1,20 +1,20 @@
-; systemd service unit for ethernet-gateway.
+; systemd service unit for ethernetgateway.
 ;
-; Copy to /etc/systemd/system/ethernet-gateway.service (or
+; Copy to /etc/systemd/system/ethernetgateway.service (or
 ; /usr/lib/systemd/system/ for distro packaging), edit User/Group and
 ; WorkingDirectory below, then:
 ;
 ;   sudo systemctl daemon-reload
-;   sudo systemctl enable --now ethernet-gateway.service
+;   sudo systemctl enable --now ethernetgateway.service
 ;
-; Check status:     systemctl status ethernet-gateway
-; Live logs:        journalctl -u ethernet-gateway -f
-; Graceful reload:  systemctl reload ethernet-gateway  (SIGHUP)
-; Stop:             systemctl stop ethernet-gateway
+; Check status:     systemctl status ethernetgateway
+; Live logs:        journalctl -u ethernetgateway -f
+; Graceful reload:  systemctl reload ethernetgateway  (SIGHUP)
+; Stop:             systemctl stop ethernetgateway
 
 [Unit]
 Description=Ethernet Gateway — telnet/SSH/Hayes gateway for retro terminals
-Documentation=https://github.com/rickybryce/ethernet-gateway
+Documentation=https://github.com/rickybryce/ethernetgateway
 After=network-online.target
 Wants=network-online.target
 
@@ -23,18 +23,18 @@ Type=simple
 
 ; ── Identity ──────────────────────────────────────────────
 ; Create a dedicated service user first:
-;   sudo useradd --system --home-dir /var/lib/ethernet-gateway \
-;                --shell /usr/sbin/nologin ethernet-gateway
+;   sudo useradd --system --home-dir /var/lib/ethernetgateway \
+;                --shell /usr/sbin/nologin ethernetgateway
 ; Then the directory and its contents belong to that user.
-User=ethernet-gateway
-Group=ethernet-gateway
+User=ethernetgateway
+Group=ethernetgateway
 
 ; ── Paths ─────────────────────────────────────────────────
 ; WorkingDirectory is where egateway.conf, gateway_hosts, and the SSH
 ; host/client keys will be created and maintained.  It should be owned
 ; by the service user with mode 0750 or tighter.
-WorkingDirectory=/var/lib/ethernet-gateway
-ExecStart=/usr/local/bin/ethernet-gateway
+WorkingDirectory=/var/lib/ethernetgateway
+ExecStart=/usr/local/bin/ethernetgateway
 
 ; Reload semantics: the binary handles SIGHUP as a config reload — it
 ; re-reads egateway.conf and restarts its listeners.  Active sessions are
@@ -79,7 +79,7 @@ UMask=0077
 ; Allow writing only to the working directory (which contains
 ; egateway.conf, the transfer dir, and the SSH keys).  Everything else
 ; is read-only.
-ReadWritePaths=/var/lib/ethernet-gateway
+ReadWritePaths=/var/lib/ethernetgateway
 
 ; Allow binding low ports (telnet 23 / SSH 22) if the operator chose
 ; those.  If you stick to the defaults (telnet 2323, SSH 2222) you can
