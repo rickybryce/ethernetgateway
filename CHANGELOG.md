@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **ethernet-gateway** are documented in this file.
+All notable changes to **ethernetgateway** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -1268,19 +1268,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reflected the scope (SSH, web browser, AI chat, weather, modem
   emulator, gateway proxies — only one of which is XMODEM).
   Functionality is unchanged; this is purely a naming refresh.
-- Cargo package renamed `xmodem-gateway` → `ethernet-gateway`.
+- Cargo package renamed `xmodem-gateway` → `ethernetgateway`.
 - GitHub repository moved to
-  [`rickybryce/ethernet-gateway`](https://github.com/rickybryce/ethernet-gateway).
+  [`rickybryce/ethernetgateway`](https://github.com/rickybryce/ethernetgateway).
 - Configuration file renamed `xmodem.conf` → `egateway.conf`.
 - SSH host key file renamed `xmodem_ssh_host_key` → `ethernet_ssh_host_key`.
 - Outbound SSH gateway client key renamed `xmodem_gateway_ssh_key` →
   `ethernet_gateway_ssh_key`.
 - AppImage renamed `XMODEM_Gateway-x86_64.AppImage` →
   `Ethernet_Gateway-x86_64.AppImage`.
-- systemd unit renamed `xmodem-gateway.service` → `ethernet-gateway.service`.
+- systemd unit renamed `xmodem-gateway.service` → `ethernetgateway.service`.
 - Telnet menu prompt path renamed `xmodem> ` → `ethernet> ` (and all
   sub-paths: `ethernet/xfer`, `ethernet/web`, `ethernet/config/...`).
-- Hayes dial shortcut: `ATDT xmodem-gateway` → `ATDT ethernet-gateway`
+- Hayes dial shortcut: `ATDT xmodem-gateway` → `ATDT ethernetgateway`
   (the `1001000` shortcut number is unchanged).
 - HTTP browser User-Agent: `XmodemGateway/1.0` → `EthernetGateway/1.0`.
 
@@ -1612,18 +1612,18 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[0.6.4]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.3...HEAD
-[0.6.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.3
-[0.6.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.2
-[0.6.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.1
-[0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
-[0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3
-[0.5.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.2
-[0.5.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.1
-[0.4.0]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.4.0
-[0.3.5]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.5
-[0.3.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.4
-[0.3.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.3
-[0.3.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.2
-[0.3.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.1
-[0.3.0]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.3.0
+[0.6.4]: https://github.com/rickybryce/ethernetgateway/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3
+[0.6.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.2
+[0.6.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.1
+[0.5.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.5.4
+[0.5.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.5.3
+[0.5.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.5.2
+[0.5.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.5.1
+[0.4.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.4.0
+[0.3.5]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.5
+[0.3.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.4
+[0.3.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.3
+[0.3.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.2
+[0.3.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.1
+[0.3.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.3.0

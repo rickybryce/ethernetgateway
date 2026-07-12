@@ -9,7 +9,7 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN="${GATEWAY_BIN:-/home/ricky/xmodem/target/debug/ethernet-gateway}"
+BIN="${GATEWAY_BIN:-/home/ricky/xmodem/target/debug/ethernetgateway}"
 MODE="${1:-modem}"
 WORK="$HERE/work"
 

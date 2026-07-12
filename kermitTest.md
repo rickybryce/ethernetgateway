@@ -18,7 +18,7 @@ generally**, not moving one file. XMODEM-works is a workaround, not the goal.
 ## Test rig
 
 - **Master gateway:** Raspberry Pi 5 at `192.168.1.178`, repo checkout at
-  `~/ethernet-gateway`, release build in `target/release/`, web `/logs` on
+  `~/ethernetgateway`, release build in `target/release/`, web `/logs` on
   `:8080` (verbose per-packet Kermit trace), config
   `target/release/egateway.conf`.
 - **Link:** SC126 wired by **direct serial cable** to the Pi's FTDI

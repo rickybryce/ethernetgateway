@@ -5,7 +5,7 @@ program speaks Punter, so the peer is **NovaTerm** running on an emulated C64
 (VICE), bridged to the gateway through **tcpser** (a virtual Hayes modem).
 
 ```
-  VICE x64sc                tcpser                     ethernet-gateway
+  VICE x64sc                tcpser                     ethernetgateway
   NovaTerm + SwiftLink  ──►  ip232 :25232  ──telnet──►  telnet :2323
   ACIA @ $DE00               (Hayes modem,              (headless, verbose,
                               dial 1 = gateway)          transfer_dir = run/transfer)

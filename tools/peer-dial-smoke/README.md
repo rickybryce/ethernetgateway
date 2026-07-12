@@ -8,8 +8,8 @@ unit tests can't reach (two live port threads talking to each other).
 
 ## Requirements
 - `socat`, `python3` + `pyserial` (`pip install pyserial`).
-- A built gateway binary. Default: `/home/ricky/xmodem/target/debug/ethernet-gateway`
-  (override with `GATEWAY_BIN=/path/to/ethernet-gateway`). Build with `cargo build`.
+- A built gateway binary. Default: `/home/ricky/xmodem/target/debug/ethernetgateway`
+  (override with `GATEWAY_BIN=/path/to/ethernetgateway`). Build with `cargo build`.
 
 ## Run
 

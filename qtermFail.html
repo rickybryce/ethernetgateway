@@ -138,7 +138,7 @@ build — see <a href="#conclusion">Conclusion</a>).</p>
 <section id="rig">
 <h2>Test rig</h2>
 <ul>
-    <li><strong>Gateway:</strong> Raspberry&nbsp;Pi&nbsp;5 at <code>192.168.1.178</code>, release build in <code>~/ethernet-gateway/target/release/</code>, verbose per-packet Kermit trace on the web <code>/logs</code> page (<code>:8080</code>).</li>
+    <li><strong>Gateway:</strong> Raspberry&nbsp;Pi&nbsp;5 at <code>192.168.1.178</code>, release build in <code>~/ethernetgateway/target/release/</code>, verbose per-packet Kermit trace on the web <code>/logs</code> page (<code>:8080</code>).</li>
     <li><strong>Client:</strong> QTerm 4.3e, binary <code>qtermh1.com</code>, on an <strong>SC126</strong> (Z80, CP/M / RomWBW). Source repo: <code>~/AltairRepos/qterm</code> (also <code>git.imzadi.de/acn/qterm</code>). Key files: <code>source/RECVK.Z</code> (receive state machine), <code>source/SENDK.Z</code> (send), <code>source/KUTIL.Z</code> (<code>rpack</code>/<code>spack</code>/checksums), <code>KERMIT.I</code>.</li>
     <li><strong>Link:</strong> direct serial cable, SC126 UART ↔ Pi FTDI (<code>/dev/ttyUSB1</code> = <code>serial_b</code>, modem-emulator mode, <strong>9600 8N1</strong>, no flow control). "Modem mode" only emulates Hayes AT so QTerm can "dial"; there is no real modem.</li>
     <li><strong>Wire tap:</strong> <code>socat -x -v</code> interposed between the gateway and the FTDI, logging both directions to <code>~/serialtap.log</code>. In captures below, <code class="d">&gt;</code> = gateway→SC126, <code class="d">&lt;</code> = SC126→gateway.</li>

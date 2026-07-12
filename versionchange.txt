@@ -15,7 +15,7 @@ Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.
 versionchange.txt       # the "Current version:" line in this file's header
 #
 # ── Documentation (match Cargo.toml by hand) ────────────────────
-README.md               # download/verify example artifact filenames (ethernet-gateway-vX.Y.Z-...)
+README.md               # download/verify example artifact filenames (ethernetgateway-vX.Y.Z-...)
 usermanual.html         # .version header, sha256 example, Kermit identity, ATI/ATI3 strings, footer
 #                         DO NOT bump the historical refs: "removed in v0.6.0", "prior to v0.6.0"
 usermanual.pdf          # regenerate from the updated HTML — same tool as before:
@@ -37,7 +37,7 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #                         "## [X.Y.Z] - Unreleased" heading. At release time:
 #                           1. Change "- Unreleased" to the release date: "## [X.Y.Z] - YYYY-MM-DD"
 #                           2. Repoint the link ref from compare/...HEAD to the tag:
-#                              [X.Y.Z]: https://github.com/rickybryce/ethernet-gateway/releases/tag/vX.Y.Z
+#                              [X.Y.Z]: https://github.com/rickybryce/ethernetgateway/releases/tag/vX.Y.Z
 #                           3. Keep the [Unreleased] line for the next cycle's work
 #                         Then tag vX.Y.Z and merge dev -> master to trigger the Release workflow.
 #

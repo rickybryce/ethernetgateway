@@ -397,7 +397,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernet-gateway-v0.6.4-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernetgateway-v0.6.4-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -446,7 +446,7 @@ cmake --version</code></pre>
 <pre><code>cargo build --release</code></pre>
 
 <p>
-The resulting binary is at <code>target/release/ethernet-gateway</code>. The
+The resulting binary is at <code>target/release/ethernetgateway</code>. The
 first full build pulls a couple of hundred crates and may take 3–8 minutes
 depending on your machine; subsequent incremental builds are quick.
 </p>
@@ -469,26 +469,26 @@ file-open/save dialogs), <code>arboard</code> (clipboard access),
 
 <p>
 A hardened unit file is bundled at
-<code>contrib/systemd/ethernet-gateway.service</code>. To install:
+<code>contrib/systemd/ethernetgateway.service</code>. To install:
 </p>
 
 <pre><code># Create a dedicated unprivileged service user
-sudo useradd --system --home-dir /var/lib/ethernet-gateway \
-             --shell /usr/sbin/nologin ethernet-gateway
-sudo install -d -m 0750 -o ethernet-gateway -g ethernet-gateway \
-             /var/lib/ethernet-gateway
+sudo useradd --system --home-dir /var/lib/ethernetgateway \
+             --shell /usr/sbin/nologin ethernetgateway
+sudo install -d -m 0750 -o ethernetgateway -g ethernetgateway \
+             /var/lib/ethernetgateway
 
 # Install the binary
-sudo install -m 0755 target/release/ethernet-gateway /usr/local/bin/
+sudo install -m 0755 target/release/ethernetgateway /usr/local/bin/
 
 # Install and enable the unit
-sudo install -m 0644 contrib/systemd/ethernet-gateway.service \
+sudo install -m 0644 contrib/systemd/ethernetgateway.service \
              /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ethernet-gateway.service
+sudo systemctl enable --now ethernetgateway.service
 
 # Watch the log
-journalctl -u ethernet-gateway -f</code></pre>
+journalctl -u ethernetgateway -f</code></pre>
 
 <p>
 The unit ships with defensive hardening: <code>NoNewPrivileges</code>,
@@ -497,7 +497,7 @@ The unit ships with defensive hardening: <code>NoNewPrivileges</code>,
 <code>SystemCallFilter=@system-service</code>, an empty capability bounding
 set, a 512 MiB memory cap, and <code>TasksMax=256</code>. The service user
 has no shell, no home directory, and write access only to
-<code>/var/lib/ethernet-gateway</code>.
+<code>/var/lib/ethernetgateway</code>.
 </p>
 
 <p>
@@ -507,7 +507,7 @@ the <code>CapabilityBoundingSet=CAP_NET_BIND_SERVICE</code> and matching
 </p>
 
 <p>
-<code>systemctl reload ethernet-gateway</code> sends SIGHUP, which the binary
+<code>systemctl reload ethernetgateway</code> sends SIGHUP, which the binary
 handles as a graceful stop. Restart the service to pick up config changes.
 </p>
 
@@ -1976,7 +1976,7 @@ The emulator routes dial strings over TCP. There is no real phone line — the
     <thead><tr><th>Command</th><th>Action</th></tr></thead>
     <tbody>
         <tr><td><code>ATDT host:port</code></td><td>Connect to a remote telnet server. <code>ATDT</code> and <code>ATDP</code> are equivalent (there is no audible difference over TCP).</td></tr>
-        <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut — dials this gateway's own main menu, so the serial device can use all gateway features (file transfer, browser, AI chat, etc.) without a network detour.</td></tr>
+        <tr><td><code>ATDT ethernetgateway</code></td><td>Built-in shortcut — dials this gateway's own main menu, so the serial device can use all gateway features (file transfer, browser, AI chat, etc.) without a network detour.</td></tr>
         <tr><td><code>ATDT KERMIT</code></td><td>Drop directly into Kermit server mode &mdash; no menu, no banner, indistinguishable on the wire from a real <code>kermit -j host</code> in <code>server</code> mode. Aliases: <code>ATDT kermit</code>, <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. Requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>; off by default because it bypasses the telnet menu's auth gate. Idle timeout still honors <code>kermit_idle_timeout</code>; on session end the modem emits <code>NO CARRIER</code>.</td></tr>
         <tr><td><code>ATDP host:port</code></td><td>Same as <code>ATDT</code> — pulse selector, ignored.</td></tr>
         <tr><td><code>ATDSn</code> (n = 0–3)</td><td>Dial stored number in slot <em>n</em>. Bare <code>ATDS</code> dials slot 0.</td></tr>
@@ -2010,7 +2010,7 @@ skips modifier processing for everything except the trailing <code>;</code>.
 
 <h3>9.2.1 Examples</h3>
 
-<pre><code>ATDT ethernet-gateway
+<pre><code>ATDT ethernetgateway
 CONNECT 9600
 <em>(local gateway main menu appears)</em>
 
@@ -2042,7 +2042,7 @@ across both ports — one file consulted by both modems — so a number you
 add is dialable from either Port A's or Port B's modem.  Edit it through
 either port's Modem Emulator menu (<em>Configuration &rarr; M &rarr; A or B
 &rarr; D</em>).  A built-in entry, <code>1001000</code>, always maps to
-the local gateway menu (equivalent to <code>ATDT ethernet-gateway</code>) and
+the local gateway menu (equivalent to <code>ATDT ethernetgateway</code>) and
 cannot be deleted.  Numbers are matched by digits only — dashes, spaces,
 and parentheses are ignored — so <code>555-1234</code> and <code>5551234</code>
 hit the same entry.
@@ -2053,7 +2053,7 @@ hit the same entry.
 <p>
 Peer-dial lets a modem port <strong>call another serial port directly</strong>
 and talk to the device attached to it &mdash; the gateway equivalent of dialing
-a friend's modem to swap files.  Where <code>ATDT ethernet-gateway</code> lands
+a friend's modem to swap files.  Where <code>ATDT ethernetgateway</code> lands
 on the gateway <em>menu</em>, peer-dial connects straight through to a specific
 port.  It is <strong>off by default</strong>; enable <code>allow_peer_dial</code>
 from <em>Configuration &rarr; M&nbsp;Serial&nbsp;Configuration &rarr;
@@ -2153,7 +2153,7 @@ are set).
         <tr><td><code>ATI4</code></td><td>Product description: <code>Hayes-compatible virtual modem over TCP</code></td></tr>
         <tr><td><code>ATI5</code></td><td>OEM / country code: <code>B00</code></td></tr>
         <tr><td><code>ATI6</code></td><td>Link diagnostics: <code>No link diagnostics available</code></td></tr>
-        <tr><td><code>ATI7</code></td><td>Product info: <code>Product: ethernet-gateway (software emulator)</code></td></tr>
+        <tr><td><code>ATI7</code></td><td>Product info: <code>Product: ethernetgateway (software emulator)</code></td></tr>
     </tbody>
 </table>
 
@@ -2222,7 +2222,7 @@ baud rates report code 1.
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
         <tr><td><code>AT+PETSCII=0</code> (<em>gateway default</em>)</td><td>PETSCII translation off — direct-TCP dials (<code>ATDT&nbsp;host:port</code>) are raw ASCII passthrough.</td></tr>
-        <tr><td><code>AT+PETSCII=1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Inbound punctuation that renders wrong on a C64 in lower/upper mode is normalized to plain ASCII: back-tick (the old &ldquo;left single quote&rdquo;, which shows as a thick underscore) and UTF-8 &ldquo;smart&rdquo; single quotes&nbsp;&rarr; <code>'</code>; smart double quotes&nbsp;&rarr; <code>"</code>; tilde and en/em dashes&nbsp;&rarr; <code>-</code>; the ellipsis&nbsp;&rarr; <code>...</code>; other high bytes the C64 can't display are dropped or shown as <code>?</code>. While editing the AT command line under <code>+PETSCII=1</code>, the C64 <span class="kbd">INST/DEL</span> key (PETSCII DEL, 0x14) works as backspace and echoes correctly. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. <strong>Text only — turn it off (<code>AT+PETSCII=0</code>) before running a file transfer over a direct-TCP dial: it rewrites bytes in both directions and will corrupt XMODEM/YMODEM/ZMODEM/Kermit/Punter binary data.</strong> Persists immediately (and is re-saved by <code>AT&amp;W</code>); also editable from the telnet, web, and GUI config surfaces.</td></tr>
+        <tr><td><code>AT+PETSCII=1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Inbound punctuation that renders wrong on a C64 in lower/upper mode is normalized to plain ASCII: back-tick (the old &ldquo;left single quote&rdquo;, which shows as a thick underscore) and UTF-8 &ldquo;smart&rdquo; single quotes&nbsp;&rarr; <code>'</code>; smart double quotes&nbsp;&rarr; <code>"</code>; tilde and en/em dashes&nbsp;&rarr; <code>-</code>; the ellipsis&nbsp;&rarr; <code>...</code>; other high bytes the C64 can't display are dropped or shown as <code>?</code>. While editing the AT command line under <code>+PETSCII=1</code>, the C64 <span class="kbd">INST/DEL</span> key (PETSCII DEL, 0x14) works as backspace and echoes correctly. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernetgateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. <strong>Text only — turn it off (<code>AT+PETSCII=0</code>) before running a file transfer over a direct-TCP dial: it rewrites bytes in both directions and will corrupt XMODEM/YMODEM/ZMODEM/Kermit/Punter binary data.</strong> Persists immediately (and is re-saved by <code>AT&amp;W</code>); also editable from the telnet, web, and GUI config surfaces.</td></tr>
     </tbody>
 </table>
 
@@ -2420,7 +2420,7 @@ first to choose which port should ring, then press <span class="kbd">I</span>.
 The modem sends <code>RING</code> to that port at standard US cadence
 (every 6 seconds).  After <code>S0</code> rings (default 5) the modem
 auto-answers and the serial device receives the Ethernet Gateway main
-menu, just as if it had dialled in with <code>ATDT ethernet-gateway</code>.
+menu, just as if it had dialled in with <code>ATDT ethernetgateway</code>.
 The serial device can also answer manually with <code>ATA</code> during
 ringing.  The two ports' ring slots are independent — Port A and Port B
 can ring simultaneously.
@@ -2982,11 +2982,11 @@ When a signal arrives:
 
 <h2>15.2 Under systemd</h2>
 
-<pre><code>sudo systemctl status ethernet-gateway   # current status
-journalctl -u ethernet-gateway -f        # live log
-sudo systemctl reload ethernet-gateway   # graceful stop (SIGHUP)
-sudo systemctl restart ethernet-gateway  # restart
-sudo systemctl stop ethernet-gateway     # stop (SIGTERM)</code></pre>
+<pre><code>sudo systemctl status ethernetgateway   # current status
+journalctl -u ethernetgateway -f        # live log
+sudo systemctl reload ethernetgateway   # graceful stop (SIGHUP)
+sudo systemctl restart ethernetgateway  # restart
+sudo systemctl stop ethernetgateway     # stop (SIGTERM)</code></pre>
 
 <p>
 The unit's <code>Restart=on-failure</code> policy respawns the process if it
@@ -3140,7 +3140,7 @@ needed. It is persisted to <code>egateway.conf</code> as
 The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable still forces the
 trace on regardless of the config flag &mdash; handy for headless or
 scripted runs where you want it active from the moment the process starts:
-<pre><code>EGATEWAY_GATEWAY_DEBUG=1 ./ethernet-gateway</code></pre>
+<pre><code>EGATEWAY_GATEWAY_DEBUG=1 ./ethernetgateway</code></pre>
 Under systemd, add <code>Environment=EGATEWAY_GATEWAY_DEBUG=1</code> to the
 unit. When set, it overrides the <code>gateway_debug</code> setting.
 </aside>
@@ -3349,7 +3349,7 @@ commands may be combined on a single <code>AT</code> line — see
         <tr><td><code>ATD <em>target</em></code></td><td>Dial <em>target</em>. Bare <code>D</code> (no T/P).</td></tr>
         <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial. Default for all TCP dials.</td></tr>
         <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial (identical to <code>ATDT</code> over TCP).</td></tr>
-        <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut: connect to this gateway's main menu.</td></tr>
+        <tr><td><code>ATDT ethernetgateway</code></td><td>Built-in shortcut: connect to this gateway's main menu.</td></tr>
         <tr><td><code>ATDT KERMIT</code></td><td>Drop into Kermit server mode (requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>). Aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>.</td></tr>
         <tr><td><code>ATDL</code></td><td>Redial last number.</td></tr>
         <tr><td><code>ATDS</code> / <code>ATDS0</code></td><td>Dial stored number in slot 0.</td></tr>

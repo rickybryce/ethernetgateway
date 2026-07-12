@@ -583,7 +583,7 @@
                 <div class="callout callout-info">
                     <strong>Where these apply:</strong> AT commands work on either serial
                     port while it is in modem mode, and on the
-                    <code>ATDT&nbsp;ethernet-gateway</code> loopback. Each port keeps its own
+                    <code>ATDT&nbsp;ethernetgateway</code> loopback. Each port keeps its own
                     independent AT / S-register state and its own <code>AT&amp;W</code>
                     profile (<code>serial_a_*</code> / <code>serial_b_*</code>). For the
                     hardware-setup and menu walkthrough, see the
@@ -630,7 +630,7 @@
                     <tr><td><code>ATI4</code></td><td><code>Hayes-compatible virtual modem over TCP</code></td></tr>
                     <tr><td><code>ATI5</code></td><td><code>B00</code> &mdash; OEM / country code</td></tr>
                     <tr><td><code>ATI6</code></td><td><code>No link diagnostics available</code></td></tr>
-                    <tr><td><code>ATI7</code></td><td><code>Product: ethernet-gateway (software emulator)</code></td></tr>
+                    <tr><td><code>ATI7</code></td><td><code>Product: ethernetgateway (software emulator)</code></td></tr>
                 </table>
             </div>
 
@@ -771,7 +771,7 @@
 
                 <div class="callout callout-info">
                     <strong>Notes.</strong> It applies <em>only</em> to direct-TCP dials &mdash;
-                    <code>ATDT ethernet-gateway</code> already detects PETSCII terminals through
+                    <code>ATDT ethernetgateway</code> already detects PETSCII terminals through
                     the telnet menu and renders accordingly. It is set-only
                     (<code>=0</code>/<code>=1</code>), persists immediately (and re-saves with
                     <code>AT&amp;W</code>), reloads on <code>ATZ</code>, resets to off on
@@ -796,7 +796,7 @@
                     <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial &mdash; open a TCP connection to <em>host:port</em>. The default for all TCP dials.</td></tr>
                     <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial &mdash; identical to <code>ATDT</code> over TCP (there's no audible difference).</td></tr>
                     <tr><td><code>ATD <em>host:port</em></code></td><td>Generic dial (no <code>T</code>/<code>P</code> selector).</td></tr>
-                    <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut &mdash; &ldquo;dial&rdquo; this gateway's own main menu, so the serial device gets file transfer, browser, AI chat, etc. with no network detour.</td></tr>
+                    <tr><td><code>ATDT ethernetgateway</code></td><td>Built-in shortcut &mdash; &ldquo;dial&rdquo; this gateway's own main menu, so the serial device gets file transfer, browser, AI chat, etc. with no network detour.</td></tr>
                     <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>). Requires <code>allow_atdt_kermit = true</code>; off by default. See the <a href="kermit.html">Kermit Reference</a>.</td></tr>
                     <tr><td><code>ATD <em>&lt;Port&gt;</em>@<em>&lt;IP&gt;</em></code></td><td>Peer-dial &mdash; call another serial port directly (e.g. <code>ATD B@192.168.1.50</code>) and bridge to the device on it: a modem port rings (answers per its own <code>S0</code>/<code>ATA</code>), a console port connects directly. Requires <code>allow_peer_dial = true</code>; off by default. Same-gateway, or (over the master/slave relay) a slave device to a port on its master. See <a href="index.html#peer-dial">Peer-Dial</a> and user manual &sect;9.2.3.</td></tr>
                     <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
@@ -953,7 +953,7 @@ ATDT bbs.example.com:23
 <span class="output-text">(you're online &mdash; the BBS appears)</span></code></pre>
 
                 <div class="cat">Reach this gateway's own menu</div>
-                <pre><code>ATDT ethernet-gateway
+                <pre><code>ATDT ethernetgateway
 <span class="output-text">CONNECT 9600</span>
 <span class="output-text">(the Ethernet Gateway main menu appears)</span></code></pre>
 

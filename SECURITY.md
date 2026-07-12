@@ -3,7 +3,7 @@
 ## Supported Versions
 
 Security fixes are applied to the latest released version of
-**ethernet-gateway**.  Older versions do not receive patches; please
+**ethernetgateway**.  Older versions do not receive patches; please
 upgrade before reporting.
 
 | Version | Supported |
@@ -19,10 +19,10 @@ Instead, choose one of:
 
 1. **GitHub Security Advisories (preferred).**  Open a private report
    at
-   [github.com/rickybryce/ethernet-gateway/security/advisories/new](https://github.com/rickybryce/ethernet-gateway/security/advisories/new).
+   [github.com/rickybryce/ethernetgateway/security/advisories/new](https://github.com/rickybryce/ethernetgateway/security/advisories/new).
    This keeps the details confidential until a fix is ready.
 2. **Email.**  Send a description to `rbryce@nevco.com` with the subject
-   line `ethernet-gateway security`.  If the issue is sensitive, you may
+   line `ethernetgateway security`.  If the issue is sensitive, you may
    encrypt the body with my public GPG key — the fingerprint is
    published in the signed release artifacts (see
    [README → Verifying Releases](README.md#verifying-releases)).
@@ -51,7 +51,7 @@ Please include:
 
 In scope:
 
-- The ethernet-gateway binary itself.
+- The ethernetgateway binary itself.
 - Protocol handling (telnet, SSH, XMODEM, Hayes AT emulator).
 - Configuration parsing and on-disk credential storage.
 - Build scripts and release artifacts.
@@ -60,7 +60,7 @@ Out of scope:
 
 - Vulnerabilities in upstream dependencies — please report those to the
   upstream project.  If the dependency's advisory warrants a patched
-  version of ethernet-gateway, file it here as "upgrade X to Y" and I'll
+  version of ethernetgateway, file it here as "upgrade X to Y" and I'll
   ship a release.
 - Attacks that require physical access to the server machine.
 - Social-engineering the operator into accepting a bad host key (the

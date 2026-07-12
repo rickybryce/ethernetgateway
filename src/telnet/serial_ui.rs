@@ -27,7 +27,7 @@ impl TelnetSession {
             self.send_line(&format!(
                 "     {} = {}",
                 self.cyan("1001000"),
-                self.amber("ethernet-gateway")
+                self.amber("ethernetgateway")
             ))
             .await?;
 
@@ -1429,7 +1429,7 @@ impl TelnetSession {
                 "  port is configured separately.",
                 "",
                 "  Dialing:",
-                "  ATDT ethernet-gateway",
+                "  ATDT ethernetgateway",
                 "    Connect to this gateway",
                 "  ATDT host:port",
                 "    Dial a remote telnet host",
@@ -1484,7 +1484,7 @@ impl TelnetSession {
                 "  with standard AT commands.",
                 "",
                 "  Dialing:",
-                "  ATDT ethernet-gateway",
+                "  ATDT ethernetgateway",
                 "    Connect to this gateway's menus",
                 "  ATDT host:port",
                 "    Dial a remote telnet host",

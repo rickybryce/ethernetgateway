@@ -6,8 +6,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
-BIN="${GATEWAY_BIN:-$REPO_ROOT/target/release/ethernet-gateway}"
-[ -x "$BIN" ] || BIN="$REPO_ROOT/target/debug/ethernet-gateway"
+BIN="${GATEWAY_BIN:-$REPO_ROOT/target/release/ethernetgateway}"
+[ -x "$BIN" ] || BIN="$REPO_ROOT/target/debug/ethernetgateway"
 if [ ! -x "$BIN" ]; then
     echo "Gateway binary not found." >&2
     echo "Build it:  (cd $REPO_ROOT && cargo build --release)" >&2

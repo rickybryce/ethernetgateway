@@ -351,9 +351,9 @@ impl TelnetSession {
         // descriptive User-Agent (HTTP 403); Open-Meteo accepts it too, so set
         // it on every weather call.
         const UA: &str = concat!(
-            "ethernet-gateway/",
+            "ethernetgateway/",
             env!("CARGO_PKG_VERSION"),
-            " (https://github.com/rickybryce/ethernet-gateway)"
+            " (https://github.com/rickybryce/ethernetgateway)"
         );
         let mut last = String::new();
         for _ in 0..2 {

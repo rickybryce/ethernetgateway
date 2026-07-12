@@ -25,7 +25,7 @@ stop and aux1 up.
 
 Run IMP8, then hit T for terminal mode on the Altairduino.
 
-Example: `ATDT :2323` — for gateway options: `ATDT ethernet-gateway`
+Example: `ATDT :2323` — for gateway options: `ATDT ethernetgateway`
 
 Note: For the Altairduino, I simply connected my USB to RS232 adapter to
 the 9 pin RS232 connector.
@@ -254,7 +254,7 @@ cmake --version
 cargo build --release
 ```
 
-The binary will be at `target/release/ethernet-gateway`.
+The binary will be at `target/release/ethernetgateway`.
 
 ## Verifying Releases
 
@@ -262,7 +262,7 @@ Pre-built binaries are published to the [GitHub Releases][releases] page
 for Linux (x86_64), macOS (aarch64), and Windows (x86_64). Every release
 ships with:
 
-- The binary archive (`ethernet-gateway-vX.Y.Z-<target>.tar.gz` or `.zip`).
+- The binary archive (`ethernetgateway-vX.Y.Z-<target>.tar.gz` or `.zip`).
 - A SHA-256 checksum (`<archive>.sha256`).
 - Optionally a detached GPG signature (`<archive>.asc`) — produced if the
   release signer has a GPG key configured.
@@ -270,13 +270,13 @@ ships with:
   `<archive>.pem`) bound to the publisher's GitHub identity. Produced on
   every release automatically; no key management required.
 
-[releases]: https://github.com/rickybryce/ethernet-gateway/releases
+[releases]: https://github.com/rickybryce/ethernetgateway/releases
 [sigstore]: https://www.sigstore.dev/
 
 ### Verifying the checksum
 
 ```sh
-sha256sum -c ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -284,8 +284,8 @@ sha256sum -c ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.asc \
-    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
+    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.asc \
+    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -295,11 +295,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sig \
-    --certificate-identity-regexp "https://github.com/rickybryce/ethernet-gateway/.*" \
+    --certificate ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate-identity-regexp "https://github.com/rickybryce/ethernetgateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    ethernet-gateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
+    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
@@ -326,7 +326,7 @@ reproducibility.
 ## Running
 
 ```sh
-./ethernet-gateway
+./ethernetgateway
 ```
 
 On first run, a default configuration file `egateway.conf` is created in the
@@ -347,27 +347,27 @@ ssh <ssh-user>@<server-ip> -p 2222
 ### Running as a systemd Service (Linux)
 
 A hardened systemd unit file is provided at
-[`contrib/systemd/ethernet-gateway.service`](contrib/systemd/ethernet-gateway.service).
+[`contrib/systemd/ethernetgateway.service`](contrib/systemd/ethernetgateway.service).
 To install:
 
 ```sh
 # Create a dedicated unprivileged user
-sudo useradd --system --home-dir /var/lib/ethernet-gateway \
-             --shell /usr/sbin/nologin ethernet-gateway
-sudo install -d -m 0750 -o ethernet-gateway -g ethernet-gateway \
-             /var/lib/ethernet-gateway
+sudo useradd --system --home-dir /var/lib/ethernetgateway \
+             --shell /usr/sbin/nologin ethernetgateway
+sudo install -d -m 0750 -o ethernetgateway -g ethernetgateway \
+             /var/lib/ethernetgateway
 
 # Install the binary
-sudo install -m 0755 target/release/ethernet-gateway /usr/local/bin/
+sudo install -m 0755 target/release/ethernetgateway /usr/local/bin/
 
 # Install and start the service
-sudo install -m 0644 contrib/systemd/ethernet-gateway.service \
+sudo install -m 0644 contrib/systemd/ethernetgateway.service \
              /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ethernet-gateway.service
+sudo systemctl enable --now ethernetgateway.service
 
 # Watch the log
-journalctl -u ethernet-gateway -f
+journalctl -u ethernetgateway -f
 ```
 
 The unit ships with defensive hardening enabled by default:
@@ -1108,7 +1108,7 @@ page and the GUI.
 Each serial port relays according to its own mode:
 
 - **Modem-mode port** — the slave runs the Hayes emulator locally; when the
-  device dials (e.g. `ATDT ethernet-gateway`, or a number in the slave's *local*
+  device dials (e.g. `ATDT ethernetgateway`, or a number in the slave's *local*
   dial map), the slave bridges the call to the master, which serves its menu or
   dials the resolved `host:port` onward (the slave's local phonebook resolves;
   the master dials). Onward-dial requires the master's `allow_peer_dial` to be
@@ -1298,7 +1298,7 @@ keys and restart the server.
 | `ATDL`  | Redial last number |
 | `ATDS` / `ATDS`*n* | Dial stored number from slot *n* (0–3; default 0) |
 | `AT&Z`*n*`=`*s* | Store phone number or host *s* in slot *n* (0–3) |
-| `ATDT ethernet-gateway` | Connect to this gateway's menus |
+| `ATDT ethernetgateway` | Connect to this gateway's menus |
 | `ATDT KERMIT` | Drop straight into Kermit server mode (aliases: `ATDT kermit`, `ATDT kermit-server`, `ATDT kermit server`). Requires `allow_atdt_kermit = true`; off by default because it bypasses the telnet auth gate. See the [Kermit Reference](http://ethernetgateway.com/kermit.html). |
 | `ATDT host:port` | Dial a remote telnet host |
 | `ATDP host:port` | Pulse dial (same as ATDT — no distinction for TCP) |
@@ -1433,7 +1433,7 @@ which port should ring, then press **I**.  The modem sends `RING`
 to that port at standard US phone cadence (every 6 seconds).  After
 S0 rings (default 5), the modem auto-answers and the serial device
 receives the Ethernet Gateway main menu, just as if it had dialed in
-with `ATDT ethernet-gateway`.  The serial device can also answer
+with `ATDT ethernetgateway`.  The serial device can also answer
 manually with `ATA` during ringing.  The two ports' ring slots are
 independent — Port A and Port B can be ringing simultaneously.
 
@@ -1441,7 +1441,7 @@ independent — Port A and Port B can be ringing simultaneously.
 
 Peer-dial lets a modem port **call another serial port directly** and talk to
 the device on it — the gateway equivalent of dialing a friend's modem to swap
-files. Where `ATDT ethernet-gateway` reaches the *menu*, peer-dial connects
+files. Where `ATDT ethernetgateway` reaches the *menu*, peer-dial connects
 straight through to a specific port. It is **off by default**; enable
 `allow_peer_dial` from **Configuration > M > P**, the web *Serial* config, or
 the GUI.
@@ -1515,7 +1515,7 @@ modem with `ATDT`, `ATDP`, or `ATD`.  The server looks up the number
 and connects to the mapped host instead.
 
 A built-in entry maps **1001000** to the local Ethernet Gateway menu (equivalent
-to `ATDT ethernet-gateway`). This entry cannot be deleted.
+to `ATDT ethernetgateway`). This entry cannot be deleted.
 
 Mappings are stored in `dialup.conf` (created automatically on first access
 with a default starter entry). Phone numbers are matched by digits only --
