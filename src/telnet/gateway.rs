@@ -1,11 +1,783 @@
-//! Outbound gateways: SSH proxy, telnet proxy, and serial gateway
-//! (local port + remote console picker + console bridge loop).
+//! Outbound gateways: SSH proxy, telnet proxy, and serial gateway,
+//! plus the shared gateway protocol plumbing (IAC-aware event reader,
+//! Q-method telnet option state machine, ANSI-strip output filter,
+//! russh client handler).
 //!
-//! The gateway protocol plumbing (GatewayTelnetIac, read_gateway_event,
-//! filter_gateway_output, GatewayHandler, ...) lives in `telnet/mod.rs`
-//! and is reached here via `use super::*`. Behaviour unchanged.
+//! Split out of `telnet/mod.rs`; behaviour unchanged.
 
 use super::*;
+
+/// Events surfaced by the outgoing Telnet Gateway's local-side reader.
+///
+/// Unlike [`read_byte_iac_filtered`] (which drops every IAC sequence
+/// silently), this reader surfaces `SB NAWS <w><h> IAC SE` as a structured
+/// resize event so the gateway can forward it to the remote server while
+/// a session is already live.  All other IAC framing — 2-byte commands,
+/// option negotiations, non-NAWS subnegotiations — is still consumed.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::telnet) enum GatewayInboundEvent {
+    /// A plain data byte from the local user.  `IAC IAC` is unescaped.
+    Data(u8),
+    /// The local client sent `IAC SB NAWS <cols16><rows16> IAC SE`.
+    NawsResize(u16, u16),
+    /// Connection closed.
+    Eof,
+}
+
+/// Read one event from the local user's side of a Telnet Gateway session.
+pub(in crate::telnet) async fn read_gateway_event(
+    reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+) -> std::io::Result<GatewayInboundEvent> {
+    let mut buf = [0u8; 1];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => return Ok(GatewayInboundEvent::Eof),
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+        let byte = buf[0];
+        if byte != IAC {
+            return Ok(GatewayInboundEvent::Data(byte));
+        }
+        // Read the command byte.
+        match reader.read(&mut buf).await {
+            Ok(0) => return Ok(GatewayInboundEvent::Eof),
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+        let cmd = buf[0];
+        match cmd {
+            IAC => return Ok(GatewayInboundEvent::Data(IAC)),
+            SB => {
+                // Read the option code.
+                match reader.read(&mut buf).await {
+                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+                let opt = buf[0];
+                // Read body until IAC SE, unescaping IAC IAC → single
+                // IAC.  Cap accumulated size so a malicious peer cannot
+                // drive memory unbounded by sending a giant SB without
+                // a terminating IAC SE; bytes past the cap are dropped
+                // but the loop still scans for IAC SE to stay in sync.
+                let mut body: Vec<u8> = Vec::new();
+                let mut in_iac = false;
+                loop {
+                    // Bound in-SB reads (slowloris guard); a stalled
+                    // subnegotiation is treated as a closed connection.
+                    match tokio::time::timeout(SB_DRAIN_TIMEOUT, reader.read(&mut buf)).await {
+                        Err(_) => return Ok(GatewayInboundEvent::Eof),
+                        Ok(Ok(0)) => return Ok(GatewayInboundEvent::Eof),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => return Err(e),
+                    }
+                    let b = buf[0];
+                    if in_iac {
+                        if b == SE {
+                            break;
+                        } else if b == IAC {
+                            if body.len() < MAX_SB_BODY_BYTES {
+                                body.push(IAC);
+                            }
+                            in_iac = false;
+                        } else {
+                            in_iac = false;
+                        }
+                    } else if b == IAC {
+                        in_iac = true;
+                    } else if body.len() < MAX_SB_BODY_BYTES {
+                        body.push(b);
+                    }
+                }
+                if opt == OPT_NAWS && body.len() == 4 {
+                    let w = u16::from_be_bytes([body[0], body[1]]);
+                    let h = u16::from_be_bytes([body[2], body[3]]);
+                    return Ok(GatewayInboundEvent::NawsResize(w, h));
+                }
+                // Non-NAWS subnegotiation: drop and keep reading.
+            }
+            WILL | WONT | DO | DONT => {
+                // Consume the option byte; drop the negotiation.
+                match reader.read(&mut buf).await {
+                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC, EL, GA)
+                // — already fully consumed.
+            }
+        }
+    }
+}
+
+// ─── SSH Gateway helpers ────────────────────────────────────
+
+/// True when gateway byte-tracing is enabled — either by the
+/// `gateway_debug` config flag (toggleable from the GUI, web console, and
+/// the in-session Serial Configuration menu) or forced on by the
+/// `EGATEWAY_GATEWAY_DEBUG` environment variable (any non-empty value).
+/// Gates the chatty per-byte diagnostics in the SSH and Telnet gateway
+/// proxy loops so they cost nothing when off.  `cfg_flag` is the caller's
+/// already-read `cfg.gateway_debug`, avoiding a second config lock.
+pub(in crate::telnet) fn gw_debug_enabled(cfg_flag: bool) -> bool {
+    cfg_flag || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
+}
+
+/// Maximum bytes the gateway-debug `dbg_in` line buffer will accumulate
+/// before being force-flushed.  Prevents a no-newline stream (a TUI editor,
+/// a binary paste, a remote program doing its own line editing) from growing
+/// the trace buffer without bound while gateway_debug is enabled.
+const GW_DBG_IN_CAP: usize = 4096;
+
+/// Format a byte slice as a compact hex + printable-ASCII dump for the
+/// gateway diagnostics log, e.g. `73 75 64 6f | "sudo"`.  Non-printable
+/// bytes render as `.` in the ASCII column.
+fn gw_hexdump(bytes: &[u8]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let ascii: String = bytes
+        .iter()
+        .map(|&b| if (0x20..=0x7E).contains(&b) { b as char } else { '.' })
+        .collect();
+    format!("{} | \"{}\"", hex.join(" "), ascii)
+}
+
+/// Filter SSH gateway output for non-ANSI terminals.
+///
+/// Strips all ANSI escape sequences (CSI, OSC, DCS, PM, APC, SOS) from the
+/// byte stream.  For PETSCII terminals, plain-text bytes are also case-swapped.
+/// `state` is the ANSI parser state carried across calls (start at 0):
+///   0=normal, 1=ESC seen, 2=CSI sequence, 3=string sequence, 4=ESC in string
+pub(in crate::telnet) fn filter_gateway_output(input: &[u8], state: &mut u8, is_petscii: bool, out: &mut Vec<u8>) {
+    for &b in input {
+        match *state {
+            0 => {
+                if b == 0x1B {
+                    *state = 1;
+                } else if is_petscii {
+                    match b {
+                        b'~' => {}  // tilde has no PETSCII equivalent
+                        0x08 | 0x7F => out.push(0x14),  // backspace/DEL → PETSCII DEL
+                        b'A'..=b'Z' => out.push(b + 32),
+                        b'a'..=b'z' => out.push(b - 32),
+                        _ => out.push(b),
+                    }
+                } else {
+                    out.push(b);
+                }
+            }
+            1 => {
+                *state = match b {
+                    b'[' => 2,                                   // CSI
+                    b']' | b'P' | b'^' | b'_' | b'X' => 3,      // OSC/DCS/PM/APC/SOS
+                    0x1B => 1,                                   // Another ESC
+                    _ => 0,                                      // 2-char sequence done
+                };
+            }
+            2 => {
+                // CSI: parameter/intermediate bytes stay in state 2.
+                // Final byte (0x40-0x7E) ends the sequence.
+                if (0x40..=0x7E).contains(&b) {
+                    *state = 0;
+                } else if b == 0x1B {
+                    *state = 1;
+                } else if b < 0x20 || b == 0x7F {
+                    *state = 0;
+                }
+            }
+            3 => {
+                // String sequence: consume until BEL or ESC
+                if b == 0x07 {
+                    *state = 0;
+                } else if b == 0x1B {
+                    *state = 4;
+                }
+            }
+            _ => {
+                // ESC inside string: '\' = ST (end), else resume string
+                *state = if b == b'\\' { 0 } else { 3 };
+            }
+        }
+    }
+}
+
+/// Per-option Q-method state — full RFC 1143 six-state variant.
+///
+/// Each option tracks two independent state machines: one for our side
+/// (what we've declared via WILL/WONT) and one for the peer's side (what
+/// they've declared via WILL/WONT).
+///
+/// The "Opposite" variants handle the race where we change our mind
+/// about an option while a prior request is still in flight.  Example:
+/// we send `WILL TTYPE` (entering WantYes), then before the peer's reply
+/// arrives we decide we no longer want TTYPE, so we send `WONT TTYPE`
+/// — we cannot simply go to WantNo because our WILL is still on the wire
+/// and the peer will eventually respond to it.  Instead we enter
+/// `WantYesOpposite`, meaning "we're still waiting for the WILL reply,
+/// but our current intent is Off."  When the peer finally replies, the
+/// state machine resolves cleanly.
+///
+/// See RFC 1143 §7 for the full transition table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::telnet) enum OptState {
+    /// Option is off and no negotiation is in flight.
+    No,
+    /// Option is on.
+    Yes,
+    /// We have asked to enable the option; awaiting peer's reply.
+    WantYes,
+    /// Same as WantYes, but since sending the request we've changed our
+    /// mind and now want the option off.  On the peer's reply we will
+    /// send the opposite verb.
+    WantYesOpposite,
+    /// We have asked to disable the option; awaiting peer's reply.
+    WantNo,
+    /// Same as WantNo, but since sending the request we've changed our
+    /// mind and now want the option on.  On the peer's reply we will
+    /// send the opposite verb.
+    WantNoOpposite,
+}
+
+/// Telnet-client IAC parser + Q-method state machine for the outgoing
+/// gateway.  Handles the remote→local direction: parses IAC, unescapes
+/// `IAC IAC` to a single data byte, consumes 2-byte commands, and
+/// performs option negotiation.
+///
+/// Negotiation policy:
+///
+/// - **ECHO** (RFC 857) — always cooperative: peer's `WILL ECHO` is
+///   accepted with `DO ECHO`.  Raw-TCP services never send WILL ECHO so
+///   this is always safe.
+/// - **TTYPE** (RFC 1091) and **NAWS** (RFC 1073) — cooperative only
+///   when `cooperate == true`.  Gated because cooperation implies
+///   proactive `WILL TTYPE` / `WILL NAWS` at connect, which raw-TCP
+///   services would see as garbage.
+/// - **Everything else** — refused: `WILL → DONT`, `DO → WONT`.
+///
+/// The parser never initiates a TTYPE/NAWS request from the peer side;
+/// we don't care about the server's own terminal type or window size.
+pub(in crate::telnet) struct GatewayTelnetIac {
+    pub(in crate::telnet) state: GatewayIacState,
+    /// Cooperate on TTYPE / NAWS (from the config toggle).
+    pub(in crate::telnet) cooperate: bool,
+    /// Terminal name reported in `SB TTYPE IS`.  Chosen to match the
+    /// local user's detected terminal type.
+    pub(in crate::telnet) terminal_name: String,
+    /// Width to report in `SB NAWS`.
+    pub(in crate::telnet) window_cols: u16,
+    /// Height to report in `SB NAWS`.
+    pub(in crate::telnet) window_rows: u16,
+    /// Per-option state: what we've said about our own side.
+    pub(in crate::telnet) us_state: Box<[OptState; 256]>,
+    /// Per-option state: what the peer has said about their side.
+    pub(in crate::telnet) him_state: Box<[OptState; 256]>,
+    /// Whether we've already sent a `DONT <opt>` refusal for this option.
+    /// Cleared when the peer finally sends `WONT <opt>` to ack the refusal.
+    /// Prevents a chattery peer from getting repeated DONTs for the same
+    /// unwanted WILL.
+    pub(in crate::telnet) sent_dont: Box<[bool; 256]>,
+    /// Whether we've already sent a `WONT <opt>` refusal.  Cleared when the
+    /// peer sends `DONT <opt>` to ack.
+    pub(in crate::telnet) sent_wont: Box<[bool; 256]>,
+    /// Subnegotiation buffer.  `sb_option` is set when we enter the SB
+    /// body (just after `IAC SB <opt>`); `sb_body` accumulates bytes
+    /// with `IAC IAC` already unescaped to single 0xFF.
+    pub(in crate::telnet) sb_option: u8,
+    pub(in crate::telnet) sb_body: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::telnet) enum GatewayIacState {
+    /// Either a plain data byte or the start of a new IAC sequence.
+    Normal,
+    /// Previous byte was IAC; waiting for the command byte.
+    SawIac,
+    /// Previous bytes were IAC + WILL/WONT/DO/DONT; waiting for the option.
+    SawVerb(u8),
+    /// Just saw `IAC SB`; the next byte is the option code.
+    SawSbOption,
+    /// Inside an SB subnegotiation body; scanning for IAC SE.
+    InSb,
+    /// Inside an SB body, just saw an IAC; next byte decides whether it was
+    /// IAC SE (end of SB) or IAC IAC (escaped data byte, stay in SB).
+    InSbIac,
+}
+
+impl GatewayTelnetIac {
+    /// Build a fresh parser.  Returns `(parser, initial_offers)` — any
+    /// bytes that must be written to the remote before we start reading,
+    /// to advertise our cooperative options.  Empty when `cooperate` is
+    /// off (reactive-only mode).
+    pub(in crate::telnet) fn new(
+        cooperate: bool,
+        terminal_name: String,
+        window_cols: u16,
+        window_rows: u16,
+    ) -> (Self, Vec<u8>) {
+        let mut parser = Self {
+            state: GatewayIacState::Normal,
+            cooperate,
+            terminal_name,
+            window_cols,
+            window_rows,
+            us_state: Box::new([OptState::No; 256]),
+            him_state: Box::new([OptState::No; 256]),
+            sent_dont: Box::new([false; 256]),
+            sent_wont: Box::new([false; 256]),
+            sb_option: 0,
+            sb_body: Vec::new(),
+        };
+        let mut initial = Vec::new();
+        if cooperate {
+            // Proactively offer WILL TTYPE and WILL NAWS; proactively
+            // request DO ECHO so we don't need to wait for the peer to
+            // offer echo (some BBSes wait for the client to ask first).
+            // Set the matching WantYes states so peer acks are recognised.
+            parser.us_state[OPT_TTYPE as usize] = OptState::WantYes;
+            parser.us_state[OPT_NAWS as usize] = OptState::WantYes;
+            parser.him_state[OPT_ECHO as usize] = OptState::WantYes;
+            initial.extend_from_slice(&[IAC, WILL, OPT_TTYPE]);
+            initial.extend_from_slice(&[IAC, WILL, OPT_NAWS]);
+            initial.extend_from_slice(&[IAC, DO, OPT_ECHO]);
+        }
+        (parser, initial)
+    }
+
+    /// True if we should answer the peer's `WILL <opt>` with `DO <opt>`.
+    pub(in crate::telnet) fn cooperate_with_his_will(&self, opt: u8) -> bool {
+        // ECHO from the server is always welcome — it means "I'll echo
+        // your input," which for a retro user is what makes typing
+        // visible.  Everything else (WILL TTYPE / WILL NAWS from the
+        // server is unusual) we decline.
+        opt == OPT_ECHO
+    }
+
+    /// True if we should answer the peer's `DO <opt>` with `WILL <opt>`.
+    pub(in crate::telnet) fn cooperate_with_his_do(&self, opt: u8) -> bool {
+        self.cooperate && (opt == OPT_TTYPE || opt == OPT_NAWS)
+    }
+
+    pub(in crate::telnet) fn feed(&mut self, byte: u8, data: &mut Vec<u8>, replies: &mut Vec<u8>) {
+        match self.state {
+            GatewayIacState::Normal => {
+                if byte == IAC {
+                    self.state = GatewayIacState::SawIac;
+                } else {
+                    data.push(byte);
+                }
+            }
+            GatewayIacState::SawIac => {
+                match byte {
+                    IAC => {
+                        data.push(IAC);
+                        self.state = GatewayIacState::Normal;
+                    }
+                    SB => {
+                        self.state = GatewayIacState::SawSbOption;
+                    }
+                    WILL | WONT | DO | DONT => {
+                        self.state = GatewayIacState::SawVerb(byte);
+                    }
+                    _ => {
+                        // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC,
+                        // EL, GA, SE-out-of-context) — consumed.
+                        self.state = GatewayIacState::Normal;
+                    }
+                }
+            }
+            GatewayIacState::SawVerb(verb) => {
+                let opt = byte;
+                match verb {
+                    WILL => self.handle_recv_will(opt, replies),
+                    WONT => self.handle_recv_wont(opt, replies),
+                    DO => self.handle_recv_do(opt, replies),
+                    DONT => self.handle_recv_dont(opt, replies),
+                    _ => {}
+                }
+                self.state = GatewayIacState::Normal;
+            }
+            GatewayIacState::SawSbOption => {
+                self.sb_option = byte;
+                self.sb_body.clear();
+                self.state = GatewayIacState::InSb;
+            }
+            GatewayIacState::InSb => {
+                if byte == IAC {
+                    self.state = GatewayIacState::InSbIac;
+                } else if self.sb_body.len() < MAX_SB_BODY_BYTES {
+                    self.sb_body.push(byte);
+                }
+                // Bytes beyond MAX_SB_BODY_BYTES are dropped; we stay in
+                // InSb so an eventual IAC SE still terminates the SB.
+            }
+            GatewayIacState::InSbIac => {
+                match byte {
+                    SE => {
+                        self.process_subneg(replies);
+                        self.state = GatewayIacState::Normal;
+                    }
+                    IAC => {
+                        // Escaped IAC inside SB — keep as single 0xFF
+                        // (subject to the body-size cap).
+                        if self.sb_body.len() < MAX_SB_BODY_BYTES {
+                            self.sb_body.push(IAC);
+                        }
+                        self.state = GatewayIacState::InSb;
+                    }
+                    _ => {
+                        // Malformed; resume scanning for IAC SE.
+                        self.state = GatewayIacState::InSb;
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Q-method handlers (his side) ─────────────────────
+
+    pub(in crate::telnet) fn handle_recv_will(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.him_state[idx] {
+            OptState::No => {
+                if self.cooperate_with_his_will(opt) {
+                    self.him_state[idx] = OptState::Yes;
+                    self.sent_dont[idx] = false; // contradicts any prior refusal
+                    replies.extend_from_slice(&[IAC, DO, opt]);
+                } else if !self.sent_dont[idx] {
+                    // Refuse, but only once per cycle.  Q-method keeps
+                    // him at No because we do not want it on.
+                    self.sent_dont[idx] = true;
+                    replies.extend_from_slice(&[IAC, DONT, opt]);
+                }
+            }
+            OptState::Yes => {
+                // Already on — spec says ignore.
+            }
+            OptState::WantYes => {
+                // Peer acks our DO.
+                self.him_state[idx] = OptState::Yes;
+            }
+            OptState::WantYesOpposite => {
+                // Peer acked our original DO, but we've since changed to
+                // wanting No; send DONT and enter WantNo.  Mark the
+                // refusal so a misbehaving peer that re-sends WILL from
+                // the subsequent WantNo state doesn't get a duplicate.
+                self.him_state[idx] = OptState::WantNo;
+                self.sent_dont[idx] = true;
+                replies.extend_from_slice(&[IAC, DONT, opt]);
+            }
+            OptState::WantNo => {
+                // Error: peer sent WILL in response to our DONT.  Log
+                // by dropping back to No and, if we haven't already,
+                // refuse again.
+                self.him_state[idx] = OptState::No;
+                if !self.sent_dont[idx] {
+                    self.sent_dont[idx] = true;
+                    replies.extend_from_slice(&[IAC, DONT, opt]);
+                }
+            }
+            OptState::WantNoOpposite => {
+                // Error but harmless: we wanted Yes again anyway.  The
+                // stale DONT we sent on the way in is now contradicted
+                // by our accepting Yes — clear the refusal flag.
+                self.him_state[idx] = OptState::Yes;
+                self.sent_dont[idx] = false;
+            }
+        }
+    }
+
+    pub(in crate::telnet) fn handle_recv_wont(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        // Peer is acking our refusal or withdrawing — reset refusal-sent
+        // so a future fresh cycle can issue a DONT again.
+        self.sent_dont[idx] = false;
+        match self.him_state[idx] {
+            OptState::No => {
+                // Already off — ignore.
+            }
+            OptState::Yes => {
+                self.him_state[idx] = OptState::No;
+                replies.extend_from_slice(&[IAC, DONT, opt]);
+            }
+            OptState::WantNo => {
+                self.him_state[idx] = OptState::No;
+            }
+            OptState::WantNoOpposite => {
+                // Peer confirmed our DONT, but we changed to WantYes;
+                // send a fresh DO.
+                self.him_state[idx] = OptState::WantYes;
+                self.sent_dont[idx] = false;
+                replies.extend_from_slice(&[IAC, DO, opt]);
+            }
+            OptState::WantYes => {
+                // Peer refused our DO.
+                self.him_state[idx] = OptState::No;
+            }
+            OptState::WantYesOpposite => {
+                // Peer refused our DO, but we already swung back to No,
+                // so we're exactly where we wanted.
+                self.him_state[idx] = OptState::No;
+            }
+        }
+    }
+
+    pub(in crate::telnet) fn handle_recv_do(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::No => {
+                if self.cooperate_with_his_do(opt) {
+                    self.us_state[idx] = OptState::Yes;
+                    self.sent_wont[idx] = false; // contradicts any prior refusal
+                    replies.extend_from_slice(&[IAC, WILL, opt]);
+                    if opt == OPT_NAWS {
+                        self.emit_naws_sb(replies);
+                    }
+                } else if !self.sent_wont[idx] {
+                    self.sent_wont[idx] = true;
+                    replies.extend_from_slice(&[IAC, WONT, opt]);
+                }
+            }
+            OptState::Yes => {
+                // Already on — ignore.
+            }
+            OptState::WantYes => {
+                self.us_state[idx] = OptState::Yes;
+                if opt == OPT_NAWS {
+                    self.emit_naws_sb(replies);
+                }
+            }
+            OptState::WantYesOpposite => {
+                // Peer acked our WILL but we want No; send WONT.  Mark
+                // the refusal so a misbehaving peer that re-sends DO
+                // from the subsequent WantNo state doesn't get a dup.
+                self.us_state[idx] = OptState::WantNo;
+                self.sent_wont[idx] = true;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::WantNo => {
+                // Error: peer DO after our WONT.  Bounce to No.
+                self.us_state[idx] = OptState::No;
+                if !self.sent_wont[idx] {
+                    self.sent_wont[idx] = true;
+                    replies.extend_from_slice(&[IAC, WONT, opt]);
+                }
+            }
+            OptState::WantNoOpposite => {
+                // Error but harmless — we wanted Yes.  The stale WONT
+                // we sent on the way in is contradicted by accepting
+                // Yes; clear the refusal flag.
+                self.us_state[idx] = OptState::Yes;
+                self.sent_wont[idx] = false;
+                if opt == OPT_NAWS {
+                    self.emit_naws_sb(replies);
+                }
+            }
+        }
+    }
+
+    pub(in crate::telnet) fn handle_recv_dont(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        self.sent_wont[idx] = false;
+        match self.us_state[idx] {
+            OptState::No => {
+                // Already off.
+            }
+            OptState::Yes => {
+                self.us_state[idx] = OptState::No;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::WantNo => {
+                self.us_state[idx] = OptState::No;
+            }
+            OptState::WantNoOpposite => {
+                // Peer confirmed DONT, but we changed to WantYes — send WILL.
+                self.us_state[idx] = OptState::WantYes;
+                self.sent_wont[idx] = false;
+                replies.extend_from_slice(&[IAC, WILL, opt]);
+            }
+            OptState::WantYes => {
+                // Peer refused our WILL.
+                self.us_state[idx] = OptState::No;
+            }
+            OptState::WantYesOpposite => {
+                // Peer refused our WILL, and we already swung back to No —
+                // exactly where we wanted.
+                self.us_state[idx] = OptState::No;
+            }
+        }
+    }
+
+    // ─── Active-change helpers (for mind-changes mid-flight) ──
+
+    /// Ask for our side of `opt` to be enabled (send `WILL`).  Advances
+    /// the Q-method state for `us_state[opt]` per RFC 1143 §7.
+    ///
+    /// Currently unused by `gateway_telnet` — we only enter `WantYes` via
+    /// the proactive offers in `new()` — but kept for symmetry and so
+    /// future active-change flows compile cleanly.
+    #[allow(dead_code)]
+    pub(in crate::telnet) fn request_local_enable(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::No => {
+                self.us_state[idx] = OptState::WantYes;
+                self.sent_wont[idx] = false; // contradicts any prior refusal
+                replies.extend_from_slice(&[IAC, WILL, opt]);
+            }
+            OptState::Yes => {} // already on
+            OptState::WantNo => {
+                // Changed mind mid-flight.
+                self.us_state[idx] = OptState::WantNoOpposite;
+            }
+            OptState::WantNoOpposite => {} // already queued to enable
+            OptState::WantYes => {}
+            OptState::WantYesOpposite => {
+                // Reverting to original intent.
+                self.us_state[idx] = OptState::WantYes;
+            }
+        }
+    }
+
+    /// Ask for our side of `opt` to be disabled (send `WONT`).
+    #[allow(dead_code)]
+    pub(in crate::telnet) fn request_local_disable(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::Yes => {
+                self.us_state[idx] = OptState::WantNo;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::No => {} // already off
+            OptState::WantYes => {
+                self.us_state[idx] = OptState::WantYesOpposite;
+            }
+            OptState::WantYesOpposite => {}
+            OptState::WantNo => {}
+            OptState::WantNoOpposite => {
+                self.us_state[idx] = OptState::WantNo;
+            }
+        }
+    }
+
+    // ─── Subnegotiation ───────────────────────────────────
+
+    pub(in crate::telnet) fn process_subneg(&mut self, replies: &mut Vec<u8>) {
+        if self.sb_option == OPT_TTYPE
+            && self.us_state[OPT_TTYPE as usize] == OptState::Yes
+            && self.sb_body.first().copied() == Some(TTYPE_SEND)
+        {
+            // Respond with our terminal name.  Any 0xFF in the name
+            // (shouldn't happen for our controlled values) would need
+            // IAC-doubling; we check explicitly.
+            let mut body = vec![IAC, SB, OPT_TTYPE, TTYPE_IS];
+            for &b in self.terminal_name.as_bytes() {
+                if b == IAC {
+                    body.push(IAC);
+                }
+                body.push(b);
+            }
+            body.extend_from_slice(&[IAC, SE]);
+            replies.extend_from_slice(&body);
+        }
+        // All other SB bodies are informational only — we silently drop.
+    }
+
+    /// Record an updated window size from the local user and, if NAWS is
+    /// currently enabled on our side, emit an `IAC SB NAWS <w><h> IAC SE`
+    /// update to the remote.  Called from the gateway loop when the user
+    /// resizes their terminal mid-session.
+    pub(in crate::telnet) fn send_naws_update(&mut self, cols: u16, rows: u16, replies: &mut Vec<u8>) {
+        self.window_cols = cols;
+        self.window_rows = rows;
+        if self.us_state[OPT_NAWS as usize] == OptState::Yes {
+            self.emit_naws_sb(replies);
+        }
+    }
+
+    pub(in crate::telnet) fn emit_naws_sb(&self, replies: &mut Vec<u8>) {
+        // `IAC SB NAWS <w16_BE> <h16_BE> IAC SE`, with any byte equal to
+        // IAC doubled per RFC 854.
+        let w = self.window_cols.to_be_bytes();
+        let h = self.window_rows.to_be_bytes();
+        let size_bytes = [w[0], w[1], h[0], h[1]];
+        let mut body = vec![IAC, SB, OPT_NAWS];
+        for &b in &size_bytes {
+            if b == IAC {
+                body.push(IAC);
+            }
+            body.push(b);
+        }
+        body.extend_from_slice(&[IAC, SE]);
+        replies.extend_from_slice(&body);
+    }
+}
+
+/// Default terminal name reported via `SB TTYPE IS`.  Chosen to be
+/// informative to modern BBSes and still truthful.
+pub(in crate::telnet) fn gateway_terminal_name(tt: TerminalType) -> &'static str {
+    match tt {
+        TerminalType::Petscii => "PETSCII",
+        TerminalType::Ansi => "ANSI",
+        TerminalType::Ascii => "DUMB",
+    }
+}
+
+/// Default window dimensions to report via `SB NAWS` when the local
+/// client hasn't supplied any via its own NAWS.
+fn gateway_default_window(tt: TerminalType) -> (u16, u16) {
+    match tt {
+        TerminalType::Petscii => (PETSCII_WIDTH as u16, 25),
+        TerminalType::Ansi | TerminalType::Ascii => (80, 24),
+    }
+}
+
+/// Normalize a client input byte for SSH gateway forwarding.
+///
+/// Telnet clients send CR+LF or CR+NUL for Enter; SSH expects bare CR.
+/// Returns `Some(byte)` if the byte should be forwarded, `None` to suppress.
+pub(in crate::telnet) fn normalize_gateway_input(b: u8, last_cr: &mut bool) -> Option<u8> {
+    if (b == b'\n' || b == 0x00) && *last_cr {
+        *last_cr = false;
+        return None;
+    }
+    *last_cr = b == b'\r';
+    Some(b)
+}
+
+/// SSH client handler for the gateway feature. Captures the server's host key
+/// so it can be verified against the known-hosts file after connection.
+struct GatewayHandler {
+    server_key: Arc<std::sync::Mutex<Option<russh::keys::PublicKey>>>,
+}
+
+impl russh::client::Handler for GatewayHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        if let Ok(mut key) = self.server_key.lock() {
+            *key = Some(server_public_key.clone());
+        }
+        Ok(true)
+    }
+}
+
+/// A Serial Gateway pick: either a local port (A/B) or a registered
+/// remote console port on a slave (§9 #12), keyed by the slave's IP and
+/// port label.
+pub(in crate::telnet) enum GatewayPick {
+    Local(crate::config::SerialPortId),
+    Remote { ip: IpAddr, label: String },
+}
+
+/// Max remote console ports shown in the Serial Gateway picker.  §9 #12
+/// allows "paging OR a cap"; a cap (like `SERVER_ADDR_DISPLAY_CAP`) keeps
+/// the picker inside the 22-row PETSCII budget without paging state.
+pub(in crate::telnet) const REMOTE_PORT_DISPLAY_CAP: usize = 6;
 
 impl TelnetSession {
     // ─── SSH GATEWAY ────────────────────────────────────────
