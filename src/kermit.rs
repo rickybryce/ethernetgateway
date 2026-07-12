@@ -173,6 +173,18 @@ const MAX_BATCH_FILES: usize = 1000;
 /// the first few to confirm the protocol baseline is working, go
 /// silent on success after that.  Failure paths log unconditionally.
 const D_PACKET_TRACE_LIMIT: u32 = 3;
+/// After the first `D_PACKET_TRACE_LIMIT` detailed traces, emit one
+/// periodic progress line every this-many D-packets at `verbose=true`.
+/// Without it a healthy multi-packet **receive** (upload) goes silent
+/// mid-transfer: the shared packet reader deliberately doesn't trace
+/// D-packets (they're logged here instead), and the ACKs we send aren't
+/// logged, so an operator watching `/logs` sees nothing between the 3rd
+/// packet and end-of-file.  (The send/download path stays lively because
+/// every inbound ACK is a non-data packet the reader traces.)  A sparse
+/// heartbeat gives upload troubleshooting the same "is it moving, and
+/// where did it stop" visibility without drowning the log on a large
+/// transfer.
+const D_PACKET_PROGRESS_INTERVAL: u32 = 100;
 
 /// Sender-side reservation for worst-case quoting blowup, expressed as
 /// a fraction `NUM / DEN` of the negotiated `MAXL` payload area.  We
@@ -4203,6 +4215,17 @@ pub(crate) async fn kermit_receive_with_init(
                         last.data.len() + raw.len(),
                         if session.streaming { " [stream, no ACK]" } else { "" }
                     );
+                } else if verbose && d_packets_received.is_multiple_of(D_PACKET_PROGRESS_INTERVAL) {
+                    // Periodic heartbeat past the initial detailed traces so a
+                    // long upload shows steady progress in `/logs` instead of
+                    // going silent between packet 3 and end-of-file.
+                    glog!(
+                        "Kermit recv: progress — {} D-packets, {}B received (file total {}B){}",
+                        d_packets_received,
+                        raw.len(),
+                        last.data.len() + raw.len(),
+                        if session.streaming { " [stream, no ACK]" } else { "" }
+                    );
                 }
                 last.data.extend_from_slice(&raw);
                 // Streaming: suppress per-D-packet ACK (spec §6).  The
@@ -4240,7 +4263,11 @@ pub(crate) async fn kermit_receive_with_init(
                     return Err("Kermit: Z-packet before F-packet".into());
                 }
                 if verbose {
-                    glog!("Kermit recv: Z-packet — file complete");
+                    glog!(
+                        "Kermit recv: Z-packet — file complete ({} D-packets, {}B)",
+                        d_packets_received,
+                        received.last().map(|f| f.data.len()).unwrap_or(0)
+                    );
                 }
                 send_ack(
                     writer,
