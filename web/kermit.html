@@ -528,20 +528,20 @@
                 <div class="section-title">Server Mode</div>
 
                 <p>
-                    Three entry paths drop a session into Kermit server mode:
+                    Four entry paths drop a session into Kermit server mode:
                 </p>
 
                 <ul>
                     <li><strong>Telnet / SSH menu</strong> &mdash; from the File Transfer menu press <code>K</code>. Honors authentication, the network gating allowlist, and the per-session sandbox.</li>
                     <li><strong>Standalone TCP listener</strong> &mdash; with <code>kermit_server_enabled&nbsp;=&nbsp;true</code>, the gateway binds a dedicated socket on <code>kermit_server_port</code> (default <code>2424</code>). Every accepted connection enters protocol mode immediately &mdash; no menu, no auth gate. Drive it with <code>kermit -j host:2424</code>.</li>
                     <li><strong>Serial ATDT KERMIT</strong> &mdash; with <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>, dialing <code>ATDT KERMIT</code> from the modem emulator hands the serial caller straight to the dispatcher. Aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>.</li>
+                    <li><strong>Serial port Kermit Server Mode</strong> &mdash; set a serial port's mode to <code>kermit</code> (<code>serial_a_mode</code> / <code>serial_b_mode&nbsp;=&nbsp;kermit</code>, or the GUI / web / telnet Mode picker). As soon as the port is enabled it runs the dispatcher permanently on the wire &mdash; the same as the ATDT&nbsp;KERMIT path, but always on rather than dialed, re-arming after every FINISH/BYE.</li>
                 </ul>
 
                 <p>
-                    The bottom two paths bypass <code>security_enabled</code> by design
+                    The bottom three paths bypass <code>security_enabled</code> by design
                     &mdash; they exist so vintage receivers that can't paint a menu still
-                    work. Both are off by default and have explicit GUI / telnet-menu
-                    warnings before they enable.
+                    work. All are off by default; enable them only on trusted lines.
                 </p>
 
                 <p>

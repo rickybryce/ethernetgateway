@@ -394,7 +394,8 @@ opens on startup. The GUI provides:
   with a device-path dropdown (auto-detected; refresh button to re-scan)
   and a baud field.  Each row's **More...** button opens that port's
   advanced popup, where you select the **Mode** (*Modem (AT Command)
-  Mode* or *Telnet-Serial Mode* — see Console Mode below), framing,
+  Mode*, *Telnet-Serial Mode*, or *Kermit Server Mode* — see Console
+  Mode and Kermit Server Mode below), framing,
   flow control, and the full Hayes AT-state surface.  The two popups
   are independent so you can compare settings side-by-side.
 - **"More..." popups** -- the Server, File Transfer, AI/Browser/Weather,
@@ -454,10 +455,10 @@ Most settings can be changed from within a telnet or SSH session using the
 - **G** Gateway Configuration -- outbound Telnet and SSH Gateway options
 - **M** Serial Configuration -- opens an A/B picker submenu listing both
   ports with their current status (Disabled / Modem mode / Console
-  mode).  Pick a port to enter that port's settings menu, where you
-  can toggle its mode (the per-port **T** item flips between Modem
-  Emulator and Serial Console), set its device, baud, framing, flow
-  control, AT-state, dialup mapping, and ring emulator.  The screen also
+  mode / Kermit server).  Pick a port to enter that port's settings menu,
+  where you can cycle its mode (the per-port **T** item cycles Modem
+  Emulator, Serial Console, and Kermit Server), set its device, baud,
+  framing, flow control, AT-state, dialup mapping, and ring emulator.  The screen also
   has two gateway-wide toggles: **D** (gateway debug trace) and **P**
   (peer-dial, `allow_peer_dial`).  Each port's settings are fully
   independent and persist under separate `serial_a_*` / `serial_b_*` keys
@@ -1228,7 +1229,7 @@ mode, device, baud, AT/S-register state, and stored phone-number
 slots — so you can run a Hayes modem on one port and a telnet-serial
 bridge on the other (or two modems, or two bridges) at the same time.
 
-Each port can run in one of two modes:
+Each port can run in one of three modes:
 
 - **Modem (AT Command) Mode** (default) — runs the Hayes emulator described
   below.
@@ -1236,21 +1237,30 @@ Each port can run in one of two modes:
   selects **G  Serial Gateway** from the main menu and picks this
   port, at which point the session is bridged directly to the wire.
   See **Console Mode** below.
+- **Kermit Server Mode** — runs a persistent Kermit server directly on
+  the wire.  As soon as the port is enabled it listens for Kermit
+  packets (no AT commands, no dialing, no menu), the same server
+  `ATDT KERMIT` reaches from the modem emulator, but always on and with
+  no AT layer.  A Kermit client connected to the wire can drive its
+  server commands (SEND, GET, DIR, FINISH, BYE); received files land in
+  the configured `transfer_dir`.  Auth and the telnet menu are bypassed
+  by design — enable it only on trusted serial lines, the same posture
+  as `allow_atdt_kermit` and the dedicated Kermit TCP listener.
 
 The mode is per-port: the **Mode** dropdown inside each port's GUI
-"More..." popup, and the per-port **T** (Toggle Modem/Console mode)
+"More..." popup, and the per-port **T** (Mode: Modem/Console/Kermit)
 item in the telnet **Configuration > M (Serial Configuration) >
-Port A or B** submenu, both switch a single port between the two
+Port A or B** submenu, both switch a single port between the three
 modes.  The setting persists under `serial_a_mode` / `serial_b_mode`
-in `egateway.conf`.
+in `egateway.conf` (values `modem`, `console`, `kermit`).
 
 ### Setting Up
 
 1. From the main menu, press **C** (Configuration)
 2. Press **M** (Serial Configuration) to open the A/B picker
 3. Press **A** or **B** to enter that port's settings menu
-4. Press **T** if needed to switch between **Modem** mode (default)
-   and **Console** mode for the port you're editing
+4. Press **T** if needed to cycle **Modem** mode (default), **Console**
+   mode, and **Kermit Server** mode for the port you're editing
 5. Press **E** to enable the port
 6. Press **S** to select a serial device (auto-detected)
 7. Configure baud rate, data bits, parity, stop bits, and flow control as needed
@@ -1584,18 +1594,20 @@ session becomes a transparent pipe to that port in both directions.
 **Switching modes (per port):**
 
 - **GUI:** open the chosen port's **More...** popup from the Serial
-  Port frame and set its **Mode** dropdown to **Telnet-Serial Mode**.
+  Port frame and set its **Mode** dropdown (**Modem (AT Command)
+  Mode**, **Telnet-Serial Mode**, or **Kermit Server Mode**).
   Save reconfigures only the changed port; the other port keeps
   running.
 - **Telnet/SSH:** **Configuration > M (Serial Configuration) >
-  A or B > T (Toggle Modem/Console mode)**.  The per-port menu's
-  banner flips between `MODEM EMULATOR` and `SERIAL CONSOLE`, and
-  the Dialup Mapping / Ring Emulator items hide in console mode.
+  A or B > T (Mode: Modem/Console/Kermit)**, which cycles the three
+  modes.  The per-port menu's banner rotates between `MODEM EMULATOR`,
+  `SERIAL CONSOLE`, and `KERMIT SERVER`, and the Dialup Mapping / Ring
+  Emulator items hide in the two non-modem modes.
   **T** is hidden from a session that arrived over the modem itself
-  (flipping its own port to console would tear down its connection
+  (flipping its own port's mode would tear down its connection
   before it could acknowledge).
-- **`egateway.conf`:** set `serial_a_mode = console` (or
-  `serial_b_mode = console`).  The change is hot-applied within one
+- **`egateway.conf`:** set `serial_a_mode = console` (or `= kermit`,
+  or `serial_b_mode = ...`).  The change is hot-applied within one
   manager-poll interval — no restart required.
 
 **Using the bridge:**

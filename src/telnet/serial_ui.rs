@@ -240,6 +240,8 @@ impl TelnetSession {
                     self.red("Disabled")
                 } else if port.mode == "console" {
                     self.green("Console mode")
+                } else if port.mode == "kermit" {
+                    self.green("Kermit server")
                 } else {
                     self.amber("Modem mode")
                 };
@@ -336,13 +338,14 @@ impl TelnetSession {
     pub(in crate::telnet) fn serial_config_help_lines() -> &'static [&'static str] {
         &[
             "  Each serial port has its own enabled",
-            "  flag, role (Modem Emulator or Serial",
-            "  Console), device path, baud rate, and",
-            "  AT/S-register state.",
+            "  flag, role (Modem Emulator, Serial",
+            "  Console, or Kermit Server), device",
+            "  path, baud rate, and AT/S-register",
+            "  state.",
             "",
             "  Pick A or B to configure that port.",
-            "  Inside, press T to toggle between",
-            "  Modem and Console mode for the port",
+            "  Inside, press T to cycle Modem ->",
+            "  Console -> Kermit mode for the port",
             "  you're editing.",
             "",
             "  Press D to toggle the gateway debug",
@@ -373,7 +376,14 @@ impl TelnetSession {
             let cfg = config::get_config();
             let port = cfg.port(id).clone();
             let console_mode = port.mode == "console";
-            let title = if console_mode {
+            let kermit_mode = port.mode == "kermit";
+            // Both console and Kermit-server modes are "raw wire" modes:
+            // neither runs the Hayes AT emulator, so both hide the modem-
+            // only surfaces (dialup mapping, ring, carrier, PETSCII xlate).
+            let raw_mode = port.mode != "modem";
+            let title = if kermit_mode {
+                format!("PORT {} - KERMIT SERVER", id.label())
+            } else if console_mode {
                 format!("PORT {} - SERIAL CONSOLE", id.label())
             } else {
                 format!("PORT {} - MODEM EMULATOR", id.label())
@@ -388,7 +398,9 @@ impl TelnetSession {
             } else {
                 self.red("Disabled")
             };
-            let mode_label = if console_mode {
+            let mode_label = if kermit_mode {
+                self.green("Kermit")
+            } else if console_mode {
                 self.green("Console")
             } else {
                 self.amber("Modem")
@@ -427,7 +439,7 @@ impl TelnetSession {
             // one of the 22-row PETSCII budget.  The Data value is stable-
             // width (X-Y-Z), so appending the carrier state here always fits
             // 40 columns.
-            if console_mode {
+            if raw_mode {
                 self.send_line(&format!("  Data:   {}", self.amber(&data_str)))
                     .await?;
             } else {
@@ -442,7 +454,7 @@ impl TelnetSession {
             // PETSCII xlate is a modem-emulator feature (direct-TCP dials
             // only), so it rides on the Flow line in modem mode rather
             // than spending a row of the 22-row PETSCII budget.
-            if console_mode {
+            if raw_mode {
                 self.send_line(&format!(
                     "  Flow:   {}",
                     self.amber(&port.flowcontrol)
@@ -457,7 +469,7 @@ impl TelnetSession {
                 ))
                 .await?;
             }
-            if port.enabled && !console_mode {
+            if port.enabled && !raw_mode {
                 self.send_line(&format!(
                     "  {}",
                     self.amber("ATD ETHERNET-GATEWAY")
@@ -480,7 +492,7 @@ impl TelnetSession {
             let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
             if !toggling_own_port {
                 self.send_line(&format!(
-                    "  {}  Toggle Modem/Console mode",
+                    "  {}  Mode: Modem/Console/Kermit",
                     self.cyan("T")
                 ))
                 .await?;
@@ -502,7 +514,7 @@ impl TelnetSession {
             .await?;
             // X (PETSCII xlate) shares this row in modem mode to keep the
             // menu within the 22-row PETSCII budget.
-            if console_mode {
+            if raw_mode {
                 self.send_line(&format!(
                     "  {}  Set flow control",
                     self.cyan("F")
@@ -517,8 +529,9 @@ impl TelnetSession {
                 .await?;
             }
             // Dialup mapping and ring emulator are modem-emulator
-            // features only — they don't apply to a raw console bridge.
-            if !console_mode {
+            // features only — they don't apply to a raw console bridge
+            // or the Kermit server.
+            if !raw_mode {
                 self.send_line(&format!(
                     "  {}  Dialup Mapping   {}  Carrier",
                     self.cyan("D"),
@@ -546,7 +559,9 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt_label = if console_mode {
+            let prompt_label = if kermit_mode {
+                format!("ethernet/kermit-{}", id.label().to_ascii_lowercase())
+            } else if console_mode {
                 format!("ethernet/console-{}", id.label().to_ascii_lowercase())
             } else {
                 format!("ethernet/modem-{}", id.label().to_ascii_lowercase())
@@ -589,7 +604,7 @@ impl TelnetSession {
                 "f" => {
                     self.modem_set_flow(id).await?;
                 }
-                "x" if !console_mode => {
+                "x" if !raw_mode => {
                     // Toggle PETSCII translation and persist immediately —
                     // it's a sticky per-port preference, the same field the
                     // AT+PETSCII command and the web/GUI surfaces write.
@@ -602,7 +617,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "c" if !console_mode => {
+                "c" if !raw_mode => {
                     // Toggle the drive-carrier (DCD proxy) opt-in and
                     // persist immediately — same per-port field the web and
                     // GUI surfaces write.  Takes effect on the next port
@@ -617,10 +632,10 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "d" if !console_mode => {
+                "d" if !raw_mode => {
                     self.dialup_mapping().await?;
                 }
-                "i" if !(console_mode
+                "i" if !(raw_mode
                     || self.is_serial && self.serial_port_id == Some(id)) =>
                 {
                     self.modem_ring_emulator(id).await?;
@@ -818,10 +833,11 @@ impl TelnetSession {
         }
 
         let original_cfg = config::get_config();
-        let new_mode = if original_cfg.port(id).mode == "console" {
-            "modem"
-        } else {
-            "console"
+        // Cycle Modem -> Console -> Kermit -> Modem.
+        let new_mode = match original_cfg.port(id).mode.as_str() {
+            "modem" => "console",
+            "console" => "kermit",
+            _ => "modem",
         };
         let v = new_mode.to_string();
         let key = config::serial_key(id, "mode");
@@ -1409,9 +1425,12 @@ impl TelnetSession {
         &mut self,
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
-        let console_mode = config::get_config().port(id).mode == "console";
-        if console_mode {
+        let mode = config::get_config().port(id).mode.clone();
+        if mode == "console" {
             return self.console_show_help().await;
+        }
+        if mode == "kermit" {
+            return self.kermit_mode_show_help().await;
         }
         let lines = Self::modem_help_lines(self.terminal_type == TerminalType::Petscii);
         self.show_help_page("MODEM EMULATOR HELP", lines).await
@@ -1589,9 +1608,9 @@ impl TelnetSession {
                 "  editors like vi keep working.",
                 "",
                 "  Switching modes:",
-                "  Press T in this menu to return",
-                "  to Modem Emulator mode.  Each",
-                "  port toggles independently.",
+                "  Press T to cycle Modem -> Console",
+                "  -> Kermit Server mode.  Each port",
+                "  cycles independently.",
             ]
         } else {
             &[
@@ -1618,8 +1637,79 @@ impl TelnetSession {
                 "  the wire so editors like vi keep working).",
                 "",
                 "  Switching modes:",
-                "  Press T in this menu to return to Modem",
-                "  Emulator mode.  Each port (A, B) toggles",
+                "  Press T to cycle Modem -> Console -> Kermit",
+                "  Server mode.  Each port (A, B) cycles",
+                "  independently.",
+            ]
+        }
+    }
+
+    pub(in crate::telnet) async fn kermit_mode_show_help(&mut self) -> Result<(), std::io::Error> {
+        let lines = Self::kermit_mode_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("KERMIT SERVER HELP", lines).await
+    }
+
+    /// Serial Kermit-server-mode help, split by terminal width.
+    /// Associated fn so a unit test asserts the REAL lines fit 40 cols.
+    pub(in crate::telnet) fn kermit_mode_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
+            &[
+                "  This menu configures the serial",
+                "  port as an always-on Kermit",
+                "  server.  As soon as the port is",
+                "  enabled it listens for Kermit",
+                "  packets - no AT commands, no",
+                "  dialing, no menu.",
+                "",
+                "  Point a Kermit client at the",
+                "  wire and use its server commands",
+                "  (SEND, GET, DIR, FINISH, BYE).",
+                "  Received files land in the",
+                "  gateway's transfer directory.",
+                "",
+                "  Settings on this menu:",
+                "  E  Open or close the device",
+                "  S  Pick the serial device path",
+                "  B  Match the baud rate of the",
+                "     attached hardware",
+                "  P  Data bits, parity, stop bits",
+                "  F  Flow control: none, software",
+                "     (XON/XOFF), or hardware",
+                "     (RTS/CTS)",
+                "",
+                "  Switching modes:",
+                "  Press T to cycle Modem -> Console",
+                "  -> Kermit Server mode.  Each port",
+                "  cycles independently.",
+            ]
+        } else {
+            &[
+                "  This menu configures this serial port as an",
+                "  always-on Kermit server.  As soon as the",
+                "  port is enabled it listens for Kermit",
+                "  packets - no AT commands, no dialing, no",
+                "  menu.  It is the same server ATDT KERMIT",
+                "  reaches, but always on.",
+                "",
+                "  Point a Kermit client at the wire and use",
+                "  its server commands (SEND, GET, DIR,",
+                "  FINISH, BYE).  Received files land in the",
+                "  gateway's transfer directory; auth and the",
+                "  telnet menu are bypassed by design.",
+                "",
+                "  Settings on this menu:",
+                "  E  Open or close the device file",
+                "  S  Pick the serial device (/dev/ttyUSB0,",
+                "     COM3, etc.)",
+                "  B  Match the baud rate of the attached",
+                "     hardware",
+                "  P  Data bits, parity, stop bits",
+                "  F  Flow control: none, software (XON/XOFF),",
+                "     or hardware (RTS/CTS)",
+                "",
+                "  Switching modes:",
+                "  Press T to cycle Modem -> Console -> Kermit",
+                "  Server mode.  Each port (A, B) cycles",
                 "  independently.",
             ]
         }

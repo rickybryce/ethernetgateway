@@ -193,6 +193,18 @@ where
     if let Some(target) = crate::serial::resolve_local_peer_target(&addr) {
         let cfg = crate::config::get_config();
         let tp = cfg.port(target);
+        // A Kermit-server port only ever serves on its own wire — it does
+        // not answer a peer-dial ring — so refuse fast instead of ringing
+        // a port that never picks up (mirrors connect_local_peer and the
+        // telnet Serial Gateway guard).
+        if tp.mode == "kermit" {
+            glog!(
+                "Relay: peer-dial to Port {} refused (Kermit-server port, not dialable)",
+                target.label()
+            );
+            let _ = relay.shutdown().await;
+            return;
+        }
         let bridge = if tp.mode == "console" {
             crate::serial::request_console_bridge(target).await.map_err(|e| e.to_string())
         } else {

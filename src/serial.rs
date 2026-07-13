@@ -555,14 +555,28 @@ pub fn check_console_bridge_eligible(
     }
     if port.mode != "console" {
         return Err(format!(
-            "Port {} is in modem mode, not console mode",
-            id.label()
+            "Port {} is in {} mode, not console mode",
+            id.label(),
+            port.mode
         ));
     }
     if port.port.is_empty() {
         return Err(format!("Port {} has no serial device configured", id.label()));
     }
     Ok(())
+}
+
+/// Whether `id` is eligible as a **peer-dial target** — a port that can
+/// be rung and bridged (`ATD <Port>@<IP>` or the Serial Gateway picker):
+/// peer-dial must be enabled and the port must be an enabled *modem*-mode
+/// port with a device.  A **console** port is a bridge target, not a
+/// dial target, and a **Kermit-server** port only ever serves (it never
+/// answers a ring), so neither is a peer-dial target.  Pure config
+/// predicate (like [`check_console_bridge_eligible`]); the caller adds
+/// session/topology context (own-arrival-port, slave-relayed-to-master).
+pub fn peer_dial_target_eligible(cfg: &config::Config, id: SerialPortId) -> bool {
+    let port = cfg.port(id);
+    cfg.allow_peer_dial && port.enabled && port.mode == "modem" && !port.port.is_empty()
 }
 
 /// Combined gate for `request_console_bridge`: eligibility first
@@ -769,6 +783,67 @@ fn serial_manager(
                 } else {
                     console_manager_tick(id, port, handle.clone(), shutdown.clone());
                 }
+            } else if port.mode == "kermit" {
+                // Kermit-server mode: keep the port open and run a
+                // persistent Kermit server directly on the wire, reopening
+                // it if the underlying device disappears — same reopen
+                // policy as modem mode, minus the AT layer and peer-dial
+                // announcer (a Kermit-mode port neither dials nor is
+                // dialed; it only ever serves).  Loops until a config-
+                // change restart or a server shutdown.
+                let mut reported_down = false;
+                while !shutdown.load(Ordering::SeqCst)
+                    && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+                {
+                    match open_serial_port(&port) {
+                        Ok(p) => {
+                            reported_down = false;
+                            glog!(
+                                "Serial Kermit server (Port {}): opened {} at {} baud",
+                                id.label(),
+                                port.port,
+                                port.baud
+                            );
+                            let lost = run_kermit_server_port(
+                                id,
+                                p,
+                                handle.clone(),
+                                shutdown.clone(),
+                            );
+                            if !lost {
+                                break; // clean end: shutdown or config restart
+                            }
+                            glog!(
+                                "Serial Kermit server (Port {}): {} closed; reopening when it returns",
+                                id.label(),
+                                port.port
+                            );
+                        }
+                        Err(e) => {
+                            if !reported_down {
+                                glog!(
+                                    "Serial Kermit server (Port {}): {} unavailable: {} — retrying until it returns",
+                                    id.label(),
+                                    port.port,
+                                    e
+                                );
+                                reported_down = true;
+                            }
+                        }
+                    }
+                    // Back off before the next (re)open attempt, staying
+                    // responsive to shutdown / restart.
+                    let backoff = Duration::from_millis(1000);
+                    let step = Duration::from_millis(100);
+                    let mut waited = Duration::ZERO;
+                    while waited < backoff
+                        && !shutdown.load(Ordering::SeqCst)
+                        && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+                    {
+                        std::thread::sleep(step);
+                        waited += step;
+                    }
+                }
             } else {
                 // Modem mode: keep the port open, reopening it if the
                 // underlying device disappears (e.g. a socat or USB-serial
@@ -939,7 +1014,7 @@ fn console_manager_tick(
             continue;
         }
 
-        run_console_bridge(id, port, local, handle.clone(), shutdown.clone());
+        run_console_bridge(id, port, local, handle.clone(), shutdown.clone(), "Serial console");
         glog!("Serial console (Port {}): bridge closed; port released", id.label());
     }
 }
@@ -1152,7 +1227,7 @@ fn console_slave_register_tick(
             ActivateOutcome::Activated => {
                 glog!("Serial console (Port {}): master attached; bridging", label);
                 crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
-                run_console_bridge(id, port, stream, handle.clone(), shutdown.clone());
+                run_console_bridge(id, port, stream, handle.clone(), shutdown.clone(), "Serial console");
                 glog!(
                     "Serial console (Port {}): bridge closed; re-registering",
                     label
@@ -1223,7 +1298,7 @@ fn modem_slave_announce_tick(
             || cfg.slave_master_host.is_empty()
             || !p.enabled
             || p.port.is_empty()
-            || p.mode == "console"
+            || p.mode != "modem"
         {
             return;
         }
@@ -1491,6 +1566,11 @@ fn run_console_bridge<S>(
     stream: S,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
+    // Subsystem label for this bridge's pump-loop log lines ("Serial
+    // console" for a Serial Gateway bridge, "Serial Kermit server" when
+    // driven by an always-on Kermit-mode port) so a disconnect/error
+    // isn't mislabeled.
+    subsystem: &str,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1560,7 +1640,7 @@ fn run_console_bridge<S>(
             // disconnect like the online-path readers do, instead of
             // re-polling forever at 100% CPU (M-6).
             Ok(0) => {
-                glog!("Serial console (Port {}): port closed (EOF)", id.label());
+                glog!("{} (Port {}): port closed (EOF)", subsystem, id.label());
                 break;
             }
             Ok(n) => {
@@ -1596,7 +1676,7 @@ fn run_console_bridge<S>(
                 if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
-                glog!("Serial console (Port {}): read error: {}", id.label(), e);
+                glog!("{} (Port {}): read error: {}", subsystem, id.label(), e);
                 break;
             }
         }
@@ -1607,7 +1687,7 @@ fn run_console_bridge<S>(
             match session_to_port_rx.try_recv() {
                 Ok(bytes) => {
                     if let Err(e) = port.write_all(&bytes) {
-                        glog!("Serial console (Port {}): write error: {}", id.label(), e);
+                        glog!("{} (Port {}): write error: {}", subsystem, id.label(), e);
                         break 'outer;
                     }
                 }
@@ -1631,6 +1711,166 @@ fn run_console_bridge<S>(
         tokio::time::timeout(Duration::from_millis(200), async_pump).await
     });
     abort.abort();
+}
+
+/// Commit one Kermit-server-received (uploaded) file to disk under
+/// `target_dir`, applying the same filename / subdir path-safety
+/// validation the telnet and TCP-listener Kermit server paths use
+/// (`validate_filename` + `is_safe_relative_subdir`).  This is the
+/// `on_file` disk-commit hook the serial Kermit-server paths pass to
+/// `kermit_server_with_outcome`: the receiver state machine only
+/// collects bytes in memory, so without a real hook here every upload
+/// would be silently discarded.  The serial paths have no terminal
+/// summary UI, so each file's outcome is logged instead.
+fn commit_kermit_upload(
+    id: SerialPortId,
+    target_dir: &std::path::Path,
+    rx: &crate::kermit::KermitReceive,
+) {
+    use crate::telnet::TelnetSession;
+    let label = id.label();
+    if TelnetSession::validate_filename(&rx.filename).is_err() {
+        glog!(
+            "Serial Kermit server (Port {}): rejected upload — unsafe filename {:?}",
+            label,
+            crate::aichat::sanitize_for_terminal(&rx.filename)
+        );
+        return;
+    }
+    // Defense-in-depth re-check: these serial paths bypass auth by
+    // design, so re-validate the subdir before joining even though
+    // kermit's own `is_safe_relative_subdir` already gated it.
+    if !crate::kermit::is_safe_relative_subdir(&rx.subdir) {
+        glog!(
+            "Serial Kermit server (Port {}): rejected upload {} — unsafe subdir",
+            label, rx.filename
+        );
+        return;
+    }
+    let dir = if rx.subdir.is_empty() {
+        target_dir.to_path_buf()
+    } else {
+        target_dir.join(&rx.subdir)
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        glog!(
+            "Serial Kermit server (Port {}): cannot create subdir {:?}: {}",
+            label, dir, e
+        );
+        return;
+    }
+    let meta = crate::xmodem::YmodemReceiveMeta {
+        size: rx.declared_size,
+        modtime: rx.modtime,
+        mode: rx.mode,
+    };
+    // Collision-safe: a name clash is renamed DOS/Kermit-style
+    // (abcdefgh.txt -> abcdefg0.txt), never silently dropped.
+    match TelnetSession::save_received_file_collision_safe(
+        &dir, &rx.filename, &rx.data, Some(&meta), rx.resumed,
+    ) {
+        Ok(saved_name) if saved_name == rx.filename => glog!(
+            "Serial Kermit server (Port {}): saved {} ({} bytes)",
+            label, saved_name, rx.data.len()
+        ),
+        Ok(saved_name) => glog!(
+            "Serial Kermit server (Port {}): saved {} as {} ({} bytes, name collision)",
+            label, rx.filename, saved_name, rx.data.len()
+        ),
+        Err(e) => glog!(
+            "Serial Kermit server (Port {}): could not save {}: {:?}",
+            label, rx.filename, e
+        ),
+    }
+}
+
+/// Run a persistent Kermit server directly on an already-open serial
+/// port.  Bridges the blocking wire to an async duplex (via
+/// [`run_console_bridge`]) and runs [`kermit::kermit_server_with_outcome`]
+/// on the async half — the same server entry point the `ATDT KERMIT`
+/// modem dial uses, but always-on and with no AT command layer.
+///
+/// The server re-arms after every completed exchange (Finish / BYE /
+/// idle timeout) so the wire stays a live Kermit server for as long as
+/// the port is open.  Files land in `transfer_dir`; auth and the telnet
+/// menu are bypassed by design (same posture as the dedicated Kermit
+/// TCP listener and `ATDT KERMIT`).
+///
+/// Returns `true` if the port hit an I/O error / closed (caller should
+/// reopen and retry), or `false` for a clean end — server shutdown or a
+/// config-change restart — matching [`serial_thread`]'s contract.
+fn run_kermit_server_port(
+    id: SerialPortId,
+    port: Box<dyn serialport::SerialPort>,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+    let idx = id.index();
+    let cfg = config::get_config();
+    let verbose = cfg.verbose;
+    let target_dir = std::path::PathBuf::from(&cfg.transfer_dir);
+    // Ensure the transfer directory exists up front; the per-file hook
+    // also creates any requested subdir under it.
+    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        glog!(
+            "Serial Kermit server (Port {}): cannot create transfer dir {:?}: {}",
+            id.label(), target_dir, e
+        );
+    }
+
+    let (async_stream, serial_stream) = tokio::io::duplex(65536);
+    let sd = shutdown.clone();
+    let kermit_task = handle.spawn(async move {
+        let (mut r, mut w) = tokio::io::split(async_stream);
+        loop {
+            if sd.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst) {
+                break;
+            }
+            // is_tcp = false: raw serial wire, no telnet IAC escaping.
+            // is_petscii = false: Kermit packets are protocol bytes,
+            // terminal type is irrelevant on a serial line.  The on_file
+            // hook commits each uploaded file to disk (the receiver state
+            // machine only buffers in memory — without this, uploads are
+            // silently dropped).
+            match crate::kermit::kermit_server_with_outcome(
+                &mut r, &mut w, false, false, verbose,
+                |rx| commit_kermit_upload(id, &target_dir, rx),
+            )
+            .await
+            {
+                // A clean session end (Finish / BYE / idle timeout) returns
+                // Ok; so does a peer EOF (the wire closing looks like a
+                // client that hung up).  Loop to re-serve the next client.
+                // On device disconnect the reader is already at EOF, so the
+                // next server call returns immediately — but when
+                // `run_console_bridge` (below) returns it drops the
+                // `serial_stream` it owns, EOFing this task's reader, and we
+                // then call `kermit_task.abort()`, cancelling this task at
+                // its next await before it can busy-loop.  The
+                // shutdown/restart check at the top of the loop is the
+                // in-band stop.
+                Ok(_) => {}
+                // A hard protocol/IO error (not a clean EOF): stop and let
+                // the manager decide whether to reopen.
+                Err(_) => break,
+            }
+        }
+        let _ = w.shutdown().await;
+    });
+
+    // Pump bytes between the blocking wire and the server's async half.
+    // Returns when the device closes / errors, or on restart / shutdown.
+    run_console_bridge(id, port, serial_stream, handle.clone(), shutdown.clone(), "Serial Kermit server");
+
+    // The bridge is done; dropping serial_stream inside run_console_bridge
+    // EOFs the server task's reader so its loop exits.  Abort as a
+    // backstop in case it's parked mid-await between sessions.
+    kermit_task.abort();
+
+    // If neither shutdown nor a per-port restart was requested, the bridge
+    // ended because the wire closed — signal the manager to reopen.
+    !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
 }
 
 // ─── Serial thread ─────────────────────────────────────────
@@ -3345,6 +3585,18 @@ fn connect_local_peer(state: &mut ModemState, target: SerialPortId) {
         send_result(state, "NO CARRIER");
         return;
     }
+    if tp.mode == "kermit" {
+        // A Kermit-server port only ever serves on its own wire — it
+        // doesn't answer a peer-dial ring, so a call to it can't be
+        // bridged.  Fail fast instead of waiting out the ring timeout.
+        glog!(
+            "Serial modem (Port {}): peer-dial target Port {} is a Kermit server (not dialable)",
+            state.port_id.label(),
+            target.label()
+        );
+        send_result(state, "NO CARRIER");
+        return;
+    }
     if tp.mode == "console" {
         bridge_local_console_peer(state, target);
     } else {
@@ -3631,7 +3883,13 @@ fn dial_kermit_server(state: &mut ModemState) {
     let (mut async_read, mut async_write) = tokio::io::split(async_stream);
 
     let shutdown = state.shutdown.clone();
-    let verbose = config::get_config().verbose;
+    let port_id = state.port_id;
+    let cfg = config::get_config();
+    let verbose = cfg.verbose;
+    let target_dir = std::path::PathBuf::from(&cfg.transfer_dir);
+    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        glog!("ATDT KERMIT: cannot create transfer dir {:?}: {}", target_dir, e);
+    }
 
     // Spawn kermit_server on the tokio runtime.  When it returns
     // (Finish/BYE/idle-timeout/E-packet) the duplex stream EOFs, which
@@ -3643,17 +3901,16 @@ fn dial_kermit_server(state: &mut ModemState) {
         // is_tcp = false: no telnet IAC escaping on a serial bridge.
         // is_petscii = false: serial sessions don't terminal-detect;
         // Kermit packets are protocol bytes, terminal type is irrelevant.
+        // The on_file hook commits each uploaded file to disk — the
+        // receiver only buffers in memory, so without it a `put` from the
+        // dialing client would be silently discarded.
         let result = crate::kermit::kermit_server_with_outcome(
             &mut async_read,
             &mut async_write,
             false,
             false,
             verbose,
-            |_| {
-                // No banner / summary on serial — match the
-                // transparent-server behavior.  Disk commits still
-                // happen inside kermit_server itself before returning.
-            },
+            |rx| commit_kermit_upload(port_id, &target_dir, rx),
         )
         .await;
         if let Err(e) = result {
@@ -5354,6 +5611,188 @@ mod tests {
         let cfg = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
         let err = check_console_bridge_eligible(&cfg, SerialPortId::A).unwrap_err();
         assert!(err.contains("modem mode"), "got {:?}", err);
+    }
+
+    /// `check_console_bridge_eligible` rejects a Kermit-server-mode port
+    /// (Serial Gateway only bridges console-mode ports) and names the
+    /// actual mode in the error rather than always saying "modem".
+    #[test]
+    fn test_console_bridge_eligible_rejects_kermit_mode() {
+        let cfg = cfg_with_serial(SerialPortId::A, true, "kermit", "/dev/ttyUSB0");
+        let err = check_console_bridge_eligible(&cfg, SerialPortId::A).unwrap_err();
+        assert!(err.contains("kermit mode"), "got {:?}", err);
+        assert!(err.contains("not console mode"), "got {:?}", err);
+    }
+
+    /// `commit_kermit_upload` (the on_file disk-commit hook for the
+    /// serial Kermit-server paths) actually writes a received file to
+    /// disk under `transfer_dir`.  Regression guard: the receiver only
+    /// buffers uploads in memory, so a no-op hook silently loses them.
+    #[test]
+    fn test_commit_kermit_upload_writes_file() {
+        let dir = std::env::temp_dir().join("xmodem_test_kermit_upload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rx = crate::kermit::KermitReceive {
+            filename: "hello.txt".to_string(),
+            data: b"kermit upload payload".to_vec(),
+            declared_size: Some(21),
+            modtime: None,
+            mode: None,
+            flavor: crate::kermit::KermitFlavor::Unknown(String::new()),
+            resumed: false,
+            subdir: String::new(),
+        };
+        commit_kermit_upload(SerialPortId::A, &dir, &rx);
+
+        let saved = std::fs::read(dir.join("hello.txt")).expect("file should be saved");
+        assert_eq!(saved, b"kermit upload payload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `commit_kermit_upload` rejects a path-traversal filename rather
+    /// than writing outside `transfer_dir`.
+    #[test]
+    fn test_commit_kermit_upload_rejects_unsafe_filename() {
+        let dir = std::env::temp_dir().join("xmodem_test_kermit_upload_unsafe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rx = crate::kermit::KermitReceive {
+            filename: "../escape.txt".to_string(),
+            data: b"should not be written".to_vec(),
+            declared_size: None,
+            modtime: None,
+            mode: None,
+            flavor: crate::kermit::KermitFlavor::Unknown(String::new()),
+            resumed: false,
+            subdir: String::new(),
+        };
+        commit_kermit_upload(SerialPortId::A, &dir, &rx);
+
+        // Nothing escaped the transfer dir.
+        assert!(!dir.parent().unwrap().join("escape.txt").exists());
+        assert!(!dir.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A re-upload of an existing name is renamed DOS/Kermit-style, not
+    /// dropped and not overwritten: the original survives and the second
+    /// upload lands under a numbered name.
+    #[test]
+    fn test_commit_kermit_upload_renames_on_collision() {
+        let dir = std::env::temp_dir().join("xmodem_test_kermit_upload_collision");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mk = |data: &[u8]| crate::kermit::KermitReceive {
+            filename: "dup.txt".to_string(),
+            data: data.to_vec(),
+            declared_size: None,
+            modtime: None,
+            mode: None,
+            flavor: crate::kermit::KermitFlavor::Unknown(String::new()),
+            resumed: false,
+            subdir: String::new(),
+        };
+        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"first"));
+        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"second"));
+        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"third"));
+
+        // Original untouched; the collisions land under dup0/dup1 (stem
+        // is under 8 chars, so the number is appended).
+        assert_eq!(std::fs::read(dir.join("dup.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(dir.join("dup0.txt")).unwrap(), b"second");
+        assert_eq!(std::fs::read(dir.join("dup1.txt")).unwrap(), b"third");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end wiring guard: a real Kermit client upload driven
+    /// through the same `kermit_server_with_outcome` + `commit_kermit_upload`
+    /// path the serial Kermit-server modes use must land the file on
+    /// disk.  This is the regression the earlier `|_| {}` no-op hook
+    /// silently failed — the direct-helper tests above pass even against
+    /// that bug, so this one exercises the server → on_file wiring.
+    #[tokio::test]
+    async fn test_kermit_server_upload_persists_via_on_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("xmodem_kermit_serial_upload_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_for_server = dir.clone();
+
+        let payload: Vec<u8> = b"kermit serial server upload payload".to_vec();
+        let payload_for_client = payload.clone();
+
+        let (server_side, client_side) = tokio::io::duplex(65536);
+        let (mut s_read, mut s_write) = tokio::io::split(server_side);
+        let (mut c_read, mut c_write) = tokio::io::split(client_side);
+
+        // Server: the exact hook the serial Kermit-server paths install.
+        let server = tokio::spawn(async move {
+            crate::kermit::kermit_server_with_outcome(
+                &mut s_read,
+                &mut s_write,
+                false,
+                false,
+                false,
+                |rx| commit_kermit_upload(SerialPortId::A, &dir_for_server, rx),
+            )
+            .await
+        });
+
+        // Client: push one file, then drop the writer so the server's
+        // dispatch read EOFs and it returns (after committing via on_file).
+        let client = async move {
+            let kfile = crate::kermit::KermitSendFile {
+                name: "uploaded.txt",
+                data: &payload_for_client,
+                modtime: None,
+                mode: None,
+            };
+            crate::kermit::kermit_send(&mut c_read, &mut c_write, &[kfile], false, false, false)
+                .await
+                .expect("client send should succeed");
+            drop(c_write);
+        };
+
+        // Bound the exchange so a wiring/protocol regression fails fast
+        // instead of hanging.
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            client.await;
+            server.await.unwrap().expect("server should end cleanly");
+        })
+        .await
+        .expect("kermit upload round-trip timed out");
+
+        let saved = std::fs::read(dir.join("uploaded.txt"))
+            .expect("uploaded file must be committed to disk");
+        assert_eq!(saved, payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Kermit-server (and a console) port is never a peer-dial target,
+    /// and peer-dial requires the opt-in + an enabled modem port with a
+    /// device.  Pins the picker/`ATD`-target eligibility so a future edit
+    /// can't regress kermit back into the "ring a port that never
+    /// answers" class of bug.
+    #[test]
+    fn test_peer_dial_target_eligible_matrix() {
+        let with = |enabled, mode, port, allow| {
+            let mut cfg = cfg_with_serial(SerialPortId::A, enabled, mode, port);
+            cfg.allow_peer_dial = allow;
+            cfg
+        };
+        // Only an enabled modem port with a device, peer-dial on, qualifies.
+        assert!(peer_dial_target_eligible(&with(true, "modem", "/dev/ttyUSB0", true), SerialPortId::A));
+        // Kermit and console ports are never peer-dial targets.
+        assert!(!peer_dial_target_eligible(&with(true, "kermit", "/dev/ttyUSB0", true), SerialPortId::A));
+        assert!(!peer_dial_target_eligible(&with(true, "console", "/dev/ttyUSB0", true), SerialPortId::A));
+        // Modem port still excluded when disabled, deviceless, or peer-dial off.
+        assert!(!peer_dial_target_eligible(&with(false, "modem", "/dev/ttyUSB0", true), SerialPortId::A));
+        assert!(!peer_dial_target_eligible(&with(true, "modem", "", true), SerialPortId::A));
+        assert!(!peer_dial_target_eligible(&with(true, "modem", "/dev/ttyUSB0", false), SerialPortId::A));
     }
 
     /// `check_console_bridge_eligible` rejects an unconfigured port.

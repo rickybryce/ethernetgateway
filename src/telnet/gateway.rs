@@ -1853,13 +1853,13 @@ impl TelnetSession {
                     && crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
                 // A modem-mode port is selectable when peer-dial is enabled:
                 // picking it rings the port (the device answers per its own
-                // AT rules), just like `ATD <Port>@<IP>`.
-                let peer_ok = cfg.allow_peer_dial
-                    && !own_port
+                // AT rules), just like `ATD <Port>@<IP>`.  A Kermit-server
+                // port only ever serves — it neither dials nor answers a
+                // ring — so it is never a peer-dial target (enforced by
+                // the pure `peer_dial_target_eligible` predicate).
+                let peer_ok = !own_port
                     && !relayed_to_master
-                    && port.enabled
-                    && port.mode != "console"
-                    && !port.port.is_empty();
+                    && crate::serial::peer_dial_target_eligible(&cfg, id);
                 let ok = console_ok || peer_ok;
                 any_eligible |= ok;
                 // Two-line per-port entry so the device path + baud
@@ -1875,6 +1875,9 @@ impl TelnetSession {
                     "-> master"
                 } else if !port.enabled {
                     "Disabled"
+                } else if port.mode == "kermit" {
+                    // Kermit server: serves on its own wire; not a target here.
+                    "Kermit server"
                 } else if port.mode != "console" {
                     // Modem port: selectable (rings) only when peer-dial is on.
                     if peer_ok { "Modem (rings)" } else { "Modem mode" }
@@ -1889,6 +1892,8 @@ impl TelnetSession {
                     self.dim(role)
                 } else if !port.enabled {
                     self.red(role)
+                } else if port.mode == "kermit" {
+                    self.dim(role)
                 } else if port.mode != "console" {
                     if peer_ok { self.green(role) } else { self.amber(role) }
                 } else if port.port.is_empty() {
@@ -2050,6 +2055,22 @@ impl TelnetSession {
         // rung (peer-dial) and answers per its own AT rules.  Re-validate
         // under the picked id — mode/eligibility might have changed since
         // the picker rendered (operator could have toggled it elsewhere).
+        // A Kermit-server port only ever serves on its own wire — it is
+        // neither a console bridge target nor dialable — so it can't be
+        // reached from here.  The picker already marks it ineligible, but
+        // it still returns dim picks for the caller to re-validate, so
+        // guard explicitly instead of falling into the modem-dial branch
+        // (which would ring a port that never answers → misleading "busy").
+        if port_cfg.mode == "kermit" {
+            self.show_error_lines(&[
+                "That port is a Kermit server.",
+                "",
+                "It serves on its own wire and",
+                "can't be bridged or dialed here.",
+            ])
+            .await?;
+            return Ok(());
+        }
         let is_console = port_cfg.mode == "console";
         if is_console {
             if let Err(e) = crate::serial::check_console_bridge_eligible(&cfg, id) {

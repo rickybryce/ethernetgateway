@@ -2301,6 +2301,14 @@ fn test_modem_console_menu_row_counts() {
         "modem-full menu is {} rows",
         modem_full_rows
     );
+
+    // Kermit-server mode reuses the console (raw-wire) layout — same
+    // E S B P F [+ T] menu, no ATD/Dialup/Ring/Carrier — so its row
+    // count is identical to console mode and safely under 22.
+    let kermit_own_rows = chrome + status_block + menu_console_own_port; // 17
+    let kermit_other_rows = chrome + status_block + menu_console_other_or_non_serial; // 18
+    assert!(kermit_own_rows <= 22, "kermit-own-port menu is {} rows", kermit_own_rows);
+    assert!(kermit_other_rows <= 22, "kermit-other-port menu is {} rows", kermit_other_rows);
 }
 
 /// The complete set of help-line tables at the given width — the single
@@ -2308,7 +2316,7 @@ fn test_modem_console_menu_row_counts() {
 /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
 /// new help screen is only width-checked once added below (bump the array
 /// length to match).  Single-width tables ignore `petscii` (they fit 40).
-fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 24] {
+fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 25] {
     [
         TelnetSession::main_help_lines(),
         TelnetSession::config_submenu_help_lines(petscii),
@@ -2327,6 +2335,7 @@ fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 24] {
         TelnetSession::dialup_help_lines(),
         TelnetSession::modem_help_lines(petscii),
         TelnetSession::console_help_lines(petscii),
+        TelnetSession::kermit_mode_help_lines(petscii),
         TelnetSession::browser_page_help_lines(petscii),
         TelnetSession::browser_menu_help_lines(),
         TelnetSession::bookmarks_help_lines(),
@@ -4915,6 +4924,78 @@ fn test_save_received_file_sync_no_replace_refuses_existing() {
         "existing bytes must not be touched when replace_existing=false",
     );
     let _ = std::fs::remove_file(&tmp);
+}
+
+/// `numbered_received_name` implements the DOS/CP-M-Kermit 8.3 collision
+/// scheme exactly as the user specified (and as kercpm3 does on a
+/// download collision): keep the base within 8 chars, appending the
+/// number when it fits and replacing trailing base chars when it
+/// doesn't; the extension is preserved.
+#[test]
+fn test_numbered_received_name_scheme() {
+    let n = |f: &str, i: u32| TelnetSession::numbered_received_name(f, i).unwrap();
+    // 8-char base: number replaces the trailing char(s) to stay at 8.
+    assert_eq!(n("abcdefgh.txt", 0), "abcdefg0.txt");
+    assert_eq!(n("abcdefgh.txt", 9), "abcdefg9.txt");
+    assert_eq!(n("abcdefgh.txt", 10), "abcdef10.txt");
+    assert_eq!(n("abcdefgh.txt", 99), "abcdef99.txt");
+    assert_eq!(n("abcdefgh.txt", 100), "abcde100.txt");
+    // Under-8 base: the number is simply appended.
+    assert_eq!(n("hi.txt", 0), "hi0.txt");
+    assert_eq!(n("hi.txt", 9), "hi9.txt");
+    assert_eq!(n("hi.txt", 10), "hi10.txt");
+    // 7-char base grows to 8 then replaces once the number needs 2 digits.
+    assert_eq!(n("abcdefg.txt", 0), "abcdefg0.txt");
+    assert_eq!(n("abcdefg.txt", 10), "abcdef10.txt");
+    // No extension: base is numbered, nothing appended after.
+    assert_eq!(n("README", 0), "README0");
+    assert_eq!(n("mydatafile", 0), "mydataf0"); // 10-char base capped to 8
+    // Number too large to fit the 8-char base → None (stop probing).
+    assert_eq!(TelnetSession::numbered_received_name("abcdefgh.txt", 100_000_000), None);
+}
+
+/// `save_received_file_collision_safe` renames instead of dropping:
+/// three uploads of the same name yield the original plus two numbered
+/// variants, all with their own contents; the original is never
+/// overwritten.
+#[test]
+fn test_save_collision_safe_renames_not_drops() {
+    let dir = std::env::temp_dir()
+        .join(format!("collision_safe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let a = TelnetSession::save_received_file_collision_safe(&dir, "file.txt", b"A", None, false).unwrap();
+    let b = TelnetSession::save_received_file_collision_safe(&dir, "file.txt", b"B", None, false).unwrap();
+    let c = TelnetSession::save_received_file_collision_safe(&dir, "file.txt", b"C", None, false).unwrap();
+    assert_eq!(a, "file.txt");
+    assert_eq!(b, "file0.txt");
+    assert_eq!(c, "file1.txt");
+    assert_eq!(std::fs::read(dir.join("file.txt")).unwrap(), b"A");
+    assert_eq!(std::fs::read(dir.join("file0.txt")).unwrap(), b"B");
+    assert_eq!(std::fs::read(dir.join("file1.txt")).unwrap(), b"C");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A resumed transfer must replace its own partial by exact name — the
+/// collision-safe saver never renames a resume.
+#[test]
+fn test_save_collision_safe_resume_keeps_name() {
+    let dir = std::env::temp_dir()
+        .join(format!("collision_resume_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("part.bin"), b"partial").unwrap();
+
+    let name = TelnetSession::save_received_file_collision_safe(
+        &dir, "part.bin", b"complete", None, /* resumed */ true,
+    )
+    .unwrap();
+    assert_eq!(name, "part.bin");
+    assert_eq!(std::fs::read(dir.join("part.bin")).unwrap(), b"complete");
+    // No numbered variant was created.
+    assert!(!dir.join("part0.bin").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Meta is applied iff supplied; otherwise the saved file keeps

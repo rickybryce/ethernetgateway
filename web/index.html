@@ -602,7 +602,7 @@
                         <h3>Connect &amp; Bridge</h3>
                         <ul>
                             <li>Telnet and encrypted <strong>SSH</strong> access, plus SSH/telnet proxying to remote servers</li>
-                            <li>Two independent serial ports &mdash; each a Hayes AT modem <em>or</em> a telnet-serial console bridge</li>
+                            <li>Two independent serial ports &mdash; each a Hayes AT modem, a telnet-serial console bridge, <em>or</em> an always-on Kermit server</li>
                             <li>Auto-adapts to <strong>PETSCII</strong> (Commodore 64), ANSI, and ASCII terminals</li>
                             <li>Built-in text-mode web browser, AI chat, and weather</li>
                         </ul>
@@ -1516,7 +1516,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 </p>
                 <table class="data-table">
                     <tr><th>Setting (per-port suffix)</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Mode (<code>mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator on this port; <code>console</code> = Telnet-Serial bridge for this port via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker</td></tr>
+                    <tr><td>Mode (<code>mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator on this port; <code>console</code> = Telnet-Serial bridge for this port via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker; <code>kermit</code> = always-on Kermit server on this port's wire</td></tr>
                     <tr><td>Serial port (<code>port</code>)</td><td><em>(none)</em></td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>)</td></tr>
                     <tr><td>Baud rate (<code>baud</code>)</td><td>9600</td><td>Serial line speed</td></tr>
                     <tr><td>Data bits (<code>databits</code>)</td><td>8</td><td>5, 6, 7, or 8</td></tr>
@@ -1715,28 +1715,31 @@ relay_transport = ssh</span></code></pre>
                     The gateway exposes <strong>Port&nbsp;A</strong> and
                     <strong>Port&nbsp;B</strong>, each fully independent — its own
                     enabled flag, mode, device, baud, AT/S-register state, and
-                    stored phone-number slots.  Each port runs in one of two modes:
+                    stored phone-number slots.  Each port runs in one of three modes:
                 </p>
                 <ul>
                     <li><strong>Modem (AT Command) Mode</strong> &mdash; the default. Accepts standard AT commands and "dials" TCP connections to remote hosts. See the AT command reference below.</li>
                     <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled on this port; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker on the main menu so a telnet/SSH user can talk directly to whatever's connected to that wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
+                    <li><strong>Kermit Server Mode</strong> &mdash; the Hayes emulator is disabled and the port runs a persistent Kermit server directly on the wire: as soon as it's enabled it listens for Kermit packets (no AT commands, no dialing, no menu), re-arming after every FINISH/BYE. The same server <code>ATDT KERMIT</code> reaches, but always on. See <a href="#kermit-server-mode">Kermit Server Mode</a> below.</li>
                 </ul>
                 <p class="dim-text">
                     The two ports mix and match freely: run a Hayes modem on
                     Port&nbsp;A and a console bridge on Port&nbsp;B, two modems,
-                    two bridges, or any combination.  Switch a port's mode from
+                    two bridges, a Kermit server, or any combination.  Switch a
+                    port's mode from
                     the <strong>Configuration &rarr; M (Serial Configuration) &rarr;
-                    A or B &rarr; T</strong> menu, from the GUI's <strong>Serial
+                    A or B &rarr; T</strong> menu (which cycles Modem &rarr;
+                    Console &rarr; Kermit), from the GUI's <strong>Serial
                     Port</strong> frame (open that port's <em>More&hellip;</em>
                     popup and use the Mode dropdown), or by setting
                     <code>serial_a_mode</code> / <code>serial_b_mode</code> to
-                    <code>modem</code> or <code>console</code> in
+                    <code>modem</code>, <code>console</code>, or <code>kermit</code> in
                     <code>egateway.conf</code>.  All three paths hot-switch the
                     affected port's manager thread within one poll interval —
                     no restart required, and the other port keeps running.
                     The per-port <strong>T</strong> menu entry is hidden from
                     sessions connected over a modem itself, since switching
-                    that port to console mode would tear down the caller's own
+                    that port's mode would tear down the caller's own
                     connection before they could acknowledge.
                 </p>
                 <div class="callout callout-warn">
@@ -1811,8 +1814,8 @@ relay_transport = ssh</span></code></pre>
                     <h3>Switching to Console Mode (per port)</h3>
                     <ol>
                         <li><strong>GUI:</strong> open the chosen port's <em>More&hellip;</em> popup from the <strong>Serial Port</strong> frame and change the <strong>Mode</strong> dropdown from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>.  Saving reconfigures only the changed port; the other port keeps running.</li>
-                        <li><strong>Telnet/SSH menu:</strong> from <strong>Configuration &rarr; M (Serial Configuration) &rarr; A or B</strong>, press <strong>T</strong> (<em>Toggle Modem/Console mode</em>) inside the per-port menu. The banner flips between <code>PORT A - MODEM EMULATOR</code> and <code>PORT A - SERIAL CONSOLE</code> (or B), and the Dialup Mapping / Ring Emulator items hide in console mode (they're modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping that port to console mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
-                        <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>serial_b_mode = console</code>) in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
+                        <li><strong>Telnet/SSH menu:</strong> from <strong>Configuration &rarr; M (Serial Configuration) &rarr; A or B</strong>, press <strong>T</strong> (<em>Mode: Modem/Console/Kermit</em>) inside the per-port menu to cycle the three modes. The banner rotates between <code>PORT A - MODEM EMULATOR</code>, <code>PORT A - SERIAL CONSOLE</code>, and <code>PORT A - KERMIT SERVER</code> (or B), and the Dialup Mapping / Ring Emulator items hide in the two non-modem modes (they're modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping that port's mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
+                        <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>= kermit</code>, or <code>serial_b_mode = &hellip;</code>) in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
                     </ol>
 
                     <h3>Using the Bridge</h3>
@@ -1826,6 +1829,15 @@ relay_transport = ssh</span></code></pre>
 
                 <div class="callout callout-info">
                     <strong>Single-user per port:</strong> only one telnet/SSH session at a time can hold each port, but Port&nbsp;A and Port&nbsp;B can each host their own concurrent bridge.  A second request to the same port gets <em>Another session is already using Port&nbsp;X</em> until the first session disconnects.  The Serial Gateway item is also hidden from sessions that came in over a serial port itself, and hidden when neither port is in console mode (so the menu doesn't dead-end at an empty picker).
+                </div>
+
+                <div class="cat" id="kermit-server-mode">Kermit Server Mode (Always-On)</div>
+                <p class="dim-text">
+                    When a port is set to <strong>Kermit Server Mode</strong>, its Hayes emulator is disabled and &mdash; as soon as the port is enabled &mdash; it runs a persistent Kermit server directly on the wire: no AT commands, no dialing, no menu.  It is functionally the same server the <code>ATDT KERMIT</code> serial dial reaches and the standalone Kermit TCP listener serves, but permanent instead of dialed.  Point a Kermit client on the attached hardware at the wire and drive its server commands (<code>SEND</code>, <code>GET</code>, <code>DIR</code>, <code>FINISH</code>, <code>BYE</code>); uploaded files land in the configured <code>transfer_dir</code> with the same path-safety validation as every other Kermit path.  A name that already exists is renamed DOS/CP-M-Kermit style (<code>abcdefgh.txt</code> &rarr; <code>abcdefg0.txt</code>, <code>hi.txt</code> &rarr; <code>hi0.txt</code>), never dropped or overwritten.  The server re-arms after every FINISH/BYE so the wire stays a live server, and reopens the device automatically if it disappears (the same reopen policy as modem mode).
+                </p>
+
+                <div class="callout callout-warn">
+                    <strong>Bypasses authentication by design.</strong> Like <code>allow_atdt_kermit</code> and the dedicated Kermit TCP listener, a Kermit-Server-mode port has no auth gate and no telnet menu &mdash; enable it only on trusted serial lines. A Kermit-Server-mode port only ever <em>serves</em>: it is not a Serial Gateway bridge target and is not dialable via peer-dial, so it does not appear as a selectable target in those pickers.
                 </div>
             </div>
 

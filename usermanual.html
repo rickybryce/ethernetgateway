@@ -282,6 +282,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
             <li><a href="#ch9-aslash">A/ Repeat-Last-Command</a></li>
             <li><a href="#ch9-chain">Chained Command Lines</a></li>
             <li><a href="#ch9-console">Console Mode (Telnet-Serial Bridge)</a></li>
+            <li><a href="#ch9-kermit">Kermit Server Mode (Always-On)</a></li>
             <li><a href="#ch9-relay">Master/Slave Serial Extender</a></li>
         </ol>
     </li>
@@ -772,7 +773,7 @@ contains:
 </p>
 
 <ul>
-    <li><strong>Mode</strong> — dropdown with <em>Modem (AT Command) Mode</em> or <em>Telnet-Serial Mode</em>.  Saving from this popup reconfigures only the changed port; the other port keeps running.</li>
+    <li><strong>Mode</strong> — dropdown with <em>Modem (AT Command) Mode</em>, <em>Telnet-Serial Mode</em>, or <em>Kermit Server Mode</em> (an always-on Kermit server on the wire — see §8.8).  Saving from this popup reconfigures only the changed port; the other port keeps running.</li>
     <li><strong>Bits / Par / Stop / Flow</strong> — data bits (5–8), parity (none/odd/even), stop bits (1/2), and flow control (none/hardware/software) for this port.</li>
     <li><strong>Echo (E1) / Verbose (V1) / Quiet (Q1)</strong> — saved <code>ATE</code>, <code>ATV</code>, <code>ATQ</code> toggles for this port.</li>
     <li><strong>Result level (X)</strong> — 0 to 4. See ch.&nbsp;9 for what each level emits.</li>
@@ -969,8 +970,8 @@ Changes are written to <code>egateway.conf</code> on confirm and apply
 immediately to running services where possible.
 </p>
 
-<pre><code>  Port A: &lt;Disabled / Modem mode / Console mode&gt;
-  Port B: &lt;Disabled / Modem mode / Console mode&gt;
+<pre><code>  Port A: &lt;Disabled / Modem mode / Console mode / Kermit server&gt;
+  Port B: &lt;Disabled / Modem mode / Console mode / Kermit server&gt;
 
   E  Security
   G  Gateway Configuration
@@ -988,7 +989,7 @@ immediately to running services where possible.
     <dt><span class="kbd">G</span> Gateway Configuration</dt>
     <dd>Outbound gateway settings — telnet negotiation flags, SSH-gateway auth mode, browser homepage, weather location, AI key.</dd>
     <dt><span class="kbd">M</span> Serial Configuration</dt>
-    <dd>Opens an A/B picker submenu listing both ports with their current status.  Pick a port to enter that port's settings menu, where you can toggle its mode (per-port <span class="kbd">T</span>: <em>Toggle Modem/Console mode</em>), set its device, baud, framing, flow control, AT-state, dialup mapping, and ring emulator.  Each port's settings are fully independent and persist under separate <code>serial_a_*</code> / <code>serial_b_*</code> keys.  The per-port <span class="kbd">T</span> item is hidden from sessions that arrived over a serial port (flipping that port to console would tear down the caller's own connection before it could confirm).</dd>
+    <dd>Opens an A/B picker submenu listing both ports with their current status.  Pick a port to enter that port's settings menu, where you can cycle its mode (per-port <span class="kbd">T</span>: <em>Mode: Modem/Console/Kermit</em>), set its device, baud, framing, flow control, AT-state, dialup mapping, and ring emulator.  Each port's settings are fully independent and persist under separate <code>serial_a_*</code> / <code>serial_b_*</code> keys (<code>serial_a_mode</code> / <code>serial_b_mode</code> = <code>modem</code>, <code>console</code>, or <code>kermit</code>).  The per-port <span class="kbd">T</span> item is hidden from sessions that arrived over a serial port (flipping that port would tear down the caller's own connection before it could confirm).</dd>
     <dt><span class="kbd">S</span> Server Configuration</dt>
     <dd>Listen ports and enable flags for telnet, SSH, the standalone Kermit server, and the configuration web UI; max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
     <dt><span class="kbd">F</span> File Transfer</dt>
@@ -1652,20 +1653,23 @@ the gnarly ones.
 <h3>Entering server mode</h3>
 
 <p>
-There are three entry paths into Kermit Server Mode:
+There are four entry paths into Kermit Server Mode:
 </p>
 
 <ul>
     <li><strong>Telnet / SSH menu</strong> &mdash; from the File Transfer menu press <span class="kbd">K</span>. Honors authentication, the network gating allowlist, and the per-session sandbox the same as any other gateway feature.</li>
     <li><strong>Standalone TCP listener</strong> &mdash; set <code>kermit_server_enabled&nbsp;=&nbsp;true</code> and the gateway binds <code>kermit_server_port</code> (default <code>2424</code>). Every accepted connection drops straight into protocol mode &mdash; no menu, no auth gate. Use it from C-Kermit with <code>kermit -j host:2424</code>.</li>
     <li><strong>Serial dial</strong> &mdash; with <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>, dialing <code>ATDT KERMIT</code> from the modem emulator hands the serial caller to the Kermit dispatcher directly. See section&nbsp;9.2.</li>
+    <li><strong>Serial port Kermit Server Mode</strong> &mdash; set a serial port's mode to <code>kermit</code> (<code>serial_a_mode</code> / <code>serial_b_mode&nbsp;=&nbsp;kermit</code>, or pick <em>Kermit Server Mode</em> in the GUI / web / telnet port settings). As soon as the port is enabled it runs a persistent Kermit server directly on the wire &mdash; no AT layer, no dialing, always on &mdash; re-arming after every FINISH/BYE and reopening the device if it disappears. Functionally the same as the serial-dial path above, but permanent rather than reached with <code>ATDT KERMIT</code>. See section&nbsp;9.</li>
 </ul>
 
 <p>
-The bottom two paths bypass <code>security_enabled</code> by design &mdash;
+The bottom three paths bypass <code>security_enabled</code> by design &mdash;
 they exist so vintage receivers that can't paint a menu still work.
-Both are off by default and have explicit GUI / telnet warnings before
-they enable.
+All three are off by default; the serial-dial and dedicated-listener
+paths have explicit GUI / telnet warnings before they enable, and
+serial port Kermit Server Mode should likewise only be enabled on
+trusted serial lines.
 </p>
 
 <p>
@@ -1689,7 +1693,7 @@ received files.
 <table>
     <thead><tr><th>Peer command</th><th>Wire packet</th><th>Effect</th></tr></thead>
     <tbody>
-        <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory).</td></tr>
+        <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory). A name that already exists is renamed, not overwritten or dropped &mdash; see the note below.</td></tr>
         <tr><td><code>get &lt;file&gt;</code></td><td>R, then we send</td><td>Download a file from the gateway to the peer.</td></tr>
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed.</td></tr>
@@ -1705,6 +1709,35 @@ received files.
         <tr><td><em>any other</em> <code>remote ...</code></td><td>G <em>letter</em></td><td>Refused with an explicit E-packet (per spec &sect;6) so the peer's UI surfaces a clean &ldquo;command not supported&rdquo; error instead of a phantom-success ACK.</td></tr>
     </tbody>
 </table>
+
+<aside class="note" id="ch8-upload-collision">
+<span class="label">Upload name collisions — renamed, never dropped</span>
+<p>
+When an uploaded file's name already exists in the target directory, the
+gateway <strong>renames</strong> the incoming file rather than dropping
+it or overwriting the original.  The new name follows the DOS / CP-M
+8.3 convention CP/M Kermit clients (e.g. kercpm3) use on a download
+collision: the base name (before the last dot) is kept within 8
+characters, appending the next free number when it fits and replacing
+the trailing base characters when it doesn't.  The extension is left
+untouched.
+</p>
+<pre><code>  abcdefgh.txt exists  -&gt;  abcdefg0.txt, abcdefg1.txt, ... abcdefg9.txt,
+                           then abcdef10.txt, abcdef11.txt, ...
+  hi.txt exists        -&gt;  hi0.txt, hi1.txt, ... (base is under 8 chars,
+                           so the number is simply appended)
+  README exists        -&gt;  README0  (a name with no extension is numbered
+                           the same way)</code></pre>
+<p>
+The original file is never overwritten, and the gateway keeps trying
+numbers until it finds a free name.  The one exception is a
+<strong>verified resume</strong> (<code>kermit_resume_partial</code>):
+that intentionally replaces its own partial file in place by exact name.
+This behavior is identical across all three Kermit-server entry paths
+&mdash; the telnet/SSH File Transfer menu, the standalone TCP listener,
+and serial Kermit Server Mode / <code>ATDT KERMIT</code> (&sect;9).
+</p>
+</aside>
 
 <h3>Capabilities advertised</h3>
 
@@ -1896,7 +1929,7 @@ frame:
     <li>Check the <em>Enabled</em> box for the port you want to bring up — Port A and Port B each have their own checkbox in the frame's header row.</li>
     <li>Pick a device from that port's dropdown.  If your port does not appear, plug in the adapter and click the refresh (&#8634;) button on Port A's row to re-scan both lists.</li>
     <li>Set the baud rate inline on the port's row.</li>
-    <li>Click that port's <em>More&#8230;</em> button to choose <em>Mode</em> (Modem vs. Telnet-Serial), data bits, parity, stop bits, flow control, and the full Hayes AT state.</li>
+    <li>Click that port's <em>More&#8230;</em> button to choose <em>Mode</em> (Modem, Telnet-Serial, or Kermit Server), data bits, parity, stop bits, flow control, and the full Hayes AT state.</li>
     <li>Click the <em>Save</em> button on the frame's header row.  Both ports' settings are persisted atomically and each manager reconfigures with the new values.</li>
 </ol>
 
@@ -2463,9 +2496,9 @@ want to drive it remotely.
 <aside class="tip">
 <span class="label">Switching modes (per port)</span>
 <ul>
-    <li><strong>GUI:</strong> open the chosen port's <em>More&#8230;</em> popup from the Serial Port frame and set its <em>Mode</em> dropdown from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>.  Saving reconfigures only the changed port; the other port keeps running.</li>
-    <li><strong>Telnet/SSH menu:</strong> from <em>Configuration &rarr; M (Serial Configuration) &rarr; A or B</em>, press <span class="kbd">T</span> (<em>Toggle Modem/Console mode</em>) inside the per-port menu.  The banner flips between <code>PORT A - MODEM EMULATOR</code> and <code>PORT A - SERIAL CONSOLE</code> (or B), and the Dialup Mapping / Ring Emulator items hide in console mode (they're modem-only features).  The <span class="kbd">T</span> entry is hidden from sessions connected over the modem itself, since flipping to console mode would tear down the caller's own connection before they could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
-    <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>serial_b_mode = console</code>) in <code>egateway.conf</code>.  The change is hot-applied within one manager-poll interval &mdash; no restart required.</li>
+    <li><strong>GUI:</strong> open the chosen port's <em>More&#8230;</em> popup from the Serial Port frame and set its <em>Mode</em> dropdown &mdash; <em>Modem (AT Command) Mode</em>, <em>Telnet-Serial Mode</em>, or <em>Kermit Server Mode</em>.  Saving reconfigures only the changed port; the other port keeps running.</li>
+    <li><strong>Telnet/SSH menu:</strong> from <em>Configuration &rarr; M (Serial Configuration) &rarr; A or B</em>, press <span class="kbd">T</span> (<em>Mode: Modem/Console/Kermit</em>) inside the per-port menu to cycle the three modes.  The banner rotates between <code>PORT A - MODEM EMULATOR</code>, <code>PORT A - SERIAL CONSOLE</code>, and <code>PORT A - KERMIT SERVER</code> (or B), and the Dialup Mapping / Ring Emulator items hide in the two non-modem modes (they're modem-only features).  The <span class="kbd">T</span> entry is hidden from sessions connected over the modem itself, since flipping the mode would tear down the caller's own connection before they could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
+    <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>= kermit</code>, or <code>serial_b_mode = &hellip;</code>) in <code>egateway.conf</code>.  The change is hot-applied within one manager-poll interval &mdash; no restart required.</li>
 </ul>
 </aside>
 
@@ -2498,6 +2531,32 @@ arrival port (that would loop your terminal to itself), so the picker
 marks only that one port ineligible.  When nothing is available the
 picker says so rather than the menu dead-ending.
 </aside>
+
+<h2 id="ch9-kermit">9.13a Kermit Server Mode (Always-On)</h2>
+
+<p>
+The third per-port mode turns a serial port into a permanent Kermit
+server on the wire.  When a port has <code>serial_<em>x</em>_mode =
+kermit</code>, its Hayes emulator is disabled and &mdash; as soon as the
+port is enabled &mdash; it listens for Kermit packets directly on the
+wire: no AT commands, no dialing, no menu.  It is functionally the same
+server the <code>ATDT KERMIT</code> serial dial reaches (§9.2) and the
+standalone TCP listener serves (§8.8), but permanent instead of dialed.
+</p>
+
+<ul>
+    <li>Point a Kermit client on the attached hardware at the wire and drive its server commands (<code>SEND</code>, <code>GET</code>, <code>DIR</code>, <code>FINISH</code>, <code>BYE</code>).  Uploaded files land in the configured <code>transfer_dir</code> with the same filename / path-safety validation as every other Kermit path.  An upload whose name already exists is <strong>renamed</strong>, never dropped or overwritten: the base name is numbered DOS/CP-M-Kermit style, kept within 8 characters (e.g. <code>abcdefgh.txt</code> &rarr; <code>abcdefg0.txt</code> &hellip; <code>abcdefg9.txt</code> &rarr; <code>abcdef10.txt</code>; a shorter name like <code>hi.txt</code> &rarr; <code>hi0.txt</code>).  A verified resume still replaces its own partial in place.</li>
+    <li>The server re-arms after every completed exchange (FINISH / BYE / idle) so the wire stays a live server for as long as the port is open, and it reopens the device automatically if it disappears (e.g. a USB-serial adapter or socat bridge that comes and goes) &mdash; the same reopen policy as modem mode.</li>
+    <li>Authentication and the telnet menu are bypassed by design, the same posture as <code>allow_atdt_kermit</code> and the dedicated Kermit TCP listener.  Enable it only on trusted serial lines.</li>
+    <li>A Kermit-Server-mode port only ever <em>serves</em>: it is not a Serial Gateway bridge target and is not dialable via peer-dial (§9.2.3), so it does not appear as a selectable target in those menus.</li>
+</ul>
+
+<p>
+Set it exactly like Console mode &mdash; the GUI / web <em>Mode</em>
+dropdown, the telnet per-port <span class="kbd">T</span> cycle, or
+<code>serial_<em>x</em>_mode = kermit</code> in <code>egateway.conf</code>
+(hot-applied within one manager-poll interval, no restart).
+</p>
 
 <h2 id="ch9-relay">9.14 Master/Slave Serial Extender</h2>
 

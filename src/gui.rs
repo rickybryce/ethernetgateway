@@ -1130,10 +1130,10 @@ impl App {
             ui.label("Mode:");
             egui::ComboBox::from_id_salt(format!("mode_{}", id.label()))
                 .width(220.0)
-                .selected_text(if self.cfg.port(id).mode == "console" {
-                    "Telnet-Serial Mode"
-                } else {
-                    "Modem (AT Command) Mode"
+                .selected_text(match self.cfg.port(id).mode.as_str() {
+                    "console" => "Telnet-Serial Mode",
+                    "kermit" => "Kermit Server Mode",
+                    _ => "Modem (AT Command) Mode",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -1145,6 +1145,11 @@ impl App {
                         &mut self.cfg.port_mut(id).mode,
                         "console".into(),
                         "Telnet-Serial Mode",
+                    );
+                    ui.selectable_value(
+                        &mut self.cfg.port_mut(id).mode,
+                        "kermit".into(),
+                        "Kermit Server Mode",
                     );
                 });
         });

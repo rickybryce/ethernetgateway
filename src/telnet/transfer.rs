@@ -317,6 +317,90 @@ impl TelnetSession {
         }
     }
 
+    /// Build the `n`-th DOS/CP-M-Kermit-style collision variant of
+    /// `filename`, keeping the base name (the part before the last dot)
+    /// within 8 characters the way CP/M Kermit clients (e.g. kercpm3) do
+    /// when a download would collide: append the number when it still
+    /// fits in 8, otherwise drop trailing base characters to make room.
+    ///
+    /// - `abcdefgh.txt` → `abcdefg0.txt` … `abcdefg9.txt` → `abcdef10.txt`
+    /// - `hi.txt`       → `hi0.txt` … `hi9.txt` → `hi10.txt`
+    /// - `README`       → `README0` (no extension is left untouched)
+    ///
+    /// Returns `None` once the number itself no longer fits the 8-char
+    /// cap (`n >= 10^8`) — the caller then stops probing.  Byte-slicing
+    /// the base is safe because `validate_filename` restricts names to
+    /// ASCII alphanumerics plus `.`, `-`, `_`, so every char is one byte.
+    pub(crate) fn numbered_received_name(filename: &str, n: u32) -> Option<String> {
+        const STEM_CAP: usize = 8;
+        let digits = n.to_string();
+        if digits.len() > STEM_CAP {
+            return None;
+        }
+        // Split on the LAST dot; a leading-dot or dotless name has no
+        // extension (leading-dot names are already rejected upstream).
+        let (stem, ext) = match filename.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s, Some(e)),
+            _ => (filename, None),
+        };
+        let new_stem = if stem.len() + digits.len() <= STEM_CAP {
+            format!("{}{}", stem, digits)
+        } else {
+            let keep = STEM_CAP - digits.len();
+            format!("{}{}", &stem[..keep], digits)
+        };
+        Some(match ext {
+            Some(e) => format!("{}.{}", new_stem, e),
+            None => new_stem,
+        })
+    }
+
+    /// Save a received file into `dir`, resolving a name collision the
+    /// DOS/Kermit way instead of dropping the upload: if `filename`
+    /// already exists, try numbered variants (`numbered_received_name`)
+    /// until one is free.  A resumed transfer replaces its own partial
+    /// by exact name and is never renamed.  Returns the filename that was
+    /// actually written (which may differ from `filename` on collision).
+    ///
+    /// `MAX_TRIES` bounds the probe so a pathological peer re-uploading
+    /// the same name can't spin us forever; it is far above any real
+    /// directory's same-name count, and exhausting it yields
+    /// `AlreadyExists` (the pre-existing skip behavior) as a last resort.
+    pub(crate) fn save_received_file_collision_safe(
+        dir: &std::path::Path,
+        filename: &str,
+        data: &[u8],
+        meta: Option<&crate::xmodem::YmodemReceiveMeta>,
+        resumed: bool,
+    ) -> Result<String, SaveError> {
+        const MAX_TRIES: u32 = 100_000;
+        if resumed {
+            // Resume replaces the partial it pre-loaded — exact name only.
+            return Self::save_received_file_sync(&dir.join(filename), data, meta, true)
+                .map(|()| filename.to_string());
+        }
+        // Original name first (the common, no-collision case).
+        match Self::save_received_file_sync(&dir.join(filename), data, meta, false) {
+            Ok(()) => return Ok(filename.to_string()),
+            Err(SaveError::AlreadyExists) => {}
+            Err(e) => return Err(e),
+        }
+        // Then numbered variants until one lands.  Each attempt uses
+        // `create_new` (inside save_received_file_sync), so the write
+        // that succeeds also atomically claims the name.
+        for n in 0..MAX_TRIES {
+            let Some(candidate) = Self::numbered_received_name(filename, n) else {
+                break;
+            };
+            match Self::save_received_file_sync(&dir.join(&candidate), data, meta, false) {
+                Ok(()) => return Ok(candidate),
+                Err(SaveError::AlreadyExists) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(SaveError::AlreadyExists)
+    }
+
     /// Apply YMODEM block-0 metadata to a freshly saved file.  Both
     /// modtime and mode are best-effort — failures are ignored because
     /// they don't affect data integrity.  Mode is masked to `0o777` so
@@ -1709,19 +1793,21 @@ impl TelnetSession {
                     } else {
                         target_dir.join(&rx.subdir)
                     };
-                    let filepath = dir.join(&rx.filename);
                     let meta = crate::xmodem::YmodemReceiveMeta {
                         size: rx.declared_size,
                         modtime: rx.modtime,
                         mode: rx.mode,
                     };
-                    match Self::save_received_file_sync(
-                        &filepath,
+                    // Collision-safe: a name clash is renamed DOS/Kermit-
+                    // style (abcdefgh.txt -> abcdefg0.txt), not dropped.
+                    match Self::save_received_file_collision_safe(
+                        &dir,
+                        &rx.filename,
                         &rx.data,
                         Some(&meta),
                         rx.resumed,
                     ) {
-                        Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
+                        Ok(saved_name) => saved.push((saved_name, rx.data.len())),
                         Err(SaveError::AlreadyExists) => {
                             skipped.push((rx.filename.clone(), "already exists"));
                         }

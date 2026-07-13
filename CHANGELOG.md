@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - Unreleased
 
 ### Added
+- **Serial ports gain a third mode: Kermit Server.** Alongside *Modem
+  (AT Command) Mode* and *Telnet-Serial Mode*, each serial port (A/B) can
+  now run as an always-on Kermit server: as soon as the port is enabled it
+  listens for Kermit packets directly on the wire — no AT commands, no
+  dialing, no menu. It is the same server `ATDT KERMIT` reaches from the
+  modem emulator, but always on and with no AT layer; received files land
+  in `transfer_dir`, and it re-arms after every FINISH/BYE so the wire stays
+  a live server. The port reopens automatically if the device disappears
+  (matching modem mode). Selectable from the GUI Mode dropdown, the web
+  config's per-port "More…" popup, and the telnet per-port **T** toggle
+  (which now cycles Modem → Console → Kermit). Persists as
+  `serial_a_mode` / `serial_b_mode = kermit`. Auth and the telnet menu are
+  bypassed by design — enable only on trusted serial lines (same posture as
+  `allow_atdt_kermit`).
 - **YMODEM receives multi-file batches (`sb file1 file2 …`).** The receiver
   previously ran the end-of-batch handshake right after the first file's EOT,
   so a batch sender lost every file after the first (and could hang waiting for
@@ -93,6 +107,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned bad data." (parse).
 
 ### Fixed
+- **Kermit server uploads no longer drop a file on a name collision.** When an
+  uploaded file's name already exists in `transfer_dir`, every Kermit-server
+  receive path (the telnet-menu server, the standalone TCP listener, and the
+  new serial Kermit Server Mode / `ATDT KERMIT`) now renames the incoming file
+  DOS/CP-M-Kermit style instead of skipping it — the base name is numbered
+  within 8 characters the way CP/M Kermit clients (e.g. kercpm3) do on a
+  download collision: `abcdefgh.txt` → `abcdefg0.txt` … `abcdefg9.txt` →
+  `abcdef10.txt`, and a shorter name such as `hi.txt` → `hi0.txt`. The original
+  file is never overwritten, and a verified resume still replaces its own
+  partial in place. (The pre-existing telnet-menu and TCP-listener paths
+  previously skipped such a collision with an "already exists" note.)
+- **`ATDT KERMIT` uploads now actually save to disk.** The serial Kermit-server
+  dial path passed a no-op file-commit hook to the server, but the Kermit
+  receiver only buffers uploaded files in memory and relies on that hook to
+  persist them — so a client `send`/`put` over `ATDT KERMIT` completed on the
+  wire but left nothing in `transfer_dir` (downloads/`get`, which read from
+  disk, were unaffected). Both the always-on serial Kermit Server Mode (new,
+  above) and the `ATDT KERMIT` dial now commit each received file with the same
+  filename / subdir path-safety validation as the telnet and TCP-listener
+  Kermit server paths.
 - **Kermit server GET is now case-insensitive.** A client requesting a file in
   a different case than it is stored on disk — CP/M clients such as kercpm3
   uppercase filenames — no longer fails "File not found" and burns a retry

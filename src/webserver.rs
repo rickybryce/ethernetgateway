@@ -1645,6 +1645,7 @@ fn render_more_popups(cfg: &Config) -> String {
 fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig) -> String {
     let mode_sel_modem = if port.mode == "modem" { "selected" } else { "" };
     let mode_sel_console = if port.mode == "console" { "selected" } else { "" };
+    let mode_sel_kermit = if port.mode == "kermit" { "selected" } else { "" };
     let parity_opts = ["none", "odd", "even"]
         .iter()
         .map(|p| format!(
@@ -1669,6 +1670,7 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
          <select name=\"{prefix}_mode\">\
          <option value=\"modem\" {ms_modem}>Modem (AT)</option>\
          <option value=\"console\" {ms_console}>Telnet-Serial</option>\
+         <option value=\"kermit\" {ms_kermit}>Kermit Server</option>\
          </select></div>\
          <div class=\"row\">{bits} {stop}\
          <span class=\"label\">Parity:</span><select name=\"{prefix}_parity\">{po}</select>\
@@ -1688,6 +1690,7 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
         label = label,
         ms_modem = mode_sel_modem,
         ms_console = mode_sel_console,
+        ms_kermit = mode_sel_kermit,
         bits = numfield(&format!("{}_databits", prefix), "Bits", port.databits),
         stop = numfield(&format!("{}_stopbits", prefix), "Stop", port.stopbits),
         po = parity_opts,

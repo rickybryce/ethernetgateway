@@ -1530,19 +1530,21 @@ pub fn start_kermit_server(
                                             skipped.push((rx.filename.clone(), "subdir create failed"));
                                             return;
                                         }
-                                        let filepath = dir.join(&rx.filename);
                                         let meta = crate::xmodem::YmodemReceiveMeta {
                                             size: rx.declared_size,
                                             modtime: rx.modtime,
                                             mode: rx.mode,
                                         };
-                                        match TelnetSession::save_received_file_sync(
-                                            &filepath,
+                                        // Collision-safe: a name clash is renamed
+                                        // DOS/Kermit-style, not dropped.
+                                        match TelnetSession::save_received_file_collision_safe(
+                                            &dir,
+                                            &rx.filename,
                                             &rx.data,
                                             Some(&meta),
                                             rx.resumed,
                                         ) {
-                                            Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
+                                            Ok(saved_name) => saved.push((saved_name, rx.data.len())),
                                             Err(SaveError::AlreadyExists) => {
                                                 skipped.push((rx.filename.clone(), "already exists"));
                                             }

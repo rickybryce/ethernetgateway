@@ -71,7 +71,9 @@ const DEFAULT_VERBOSE: bool = false;
 const DEFAULT_SERIAL_ENABLED: bool = false;
 /// Default serial console mode.  `"modem"` runs the Hayes AT emulator on the
 /// configured port; `"console"` keeps the port idle until a telnet/SSH user
-/// chooses Serial Gateway, which bridges their session to the port.
+/// chooses Serial Gateway, which bridges their session to the port; `"kermit"`
+/// runs a persistent Kermit server directly on the wire (as if the modem had
+/// been dialed with `ATDT KERMIT`, but always-on and with no AT layer).
 const DEFAULT_SERIAL_MODE: &str = "modem";
 const DEFAULT_SERIAL_PORT: &str = "";
 const DEFAULT_SERIAL_BAUD: u32 = 9600;
@@ -348,7 +350,8 @@ pub struct SerialPortConfig {
     /// Master enable for this port.  When false, the port's manager
     /// thread idles and no menu surface activates.
     pub enabled: bool,
-    /// `"modem"` (Hayes AT emulator) or `"console"` (telnet-serial bridge).
+    /// `"modem"` (Hayes AT emulator), `"console"` (telnet-serial bridge), or
+    /// `"kermit"` (always-on Kermit server on the wire).
     pub mode: String,
     /// Device path (e.g. `/dev/ttyUSB0`, `COM3`).  Empty = unconfigured.
     pub port: String,
@@ -1301,7 +1304,7 @@ fn read_serial_port_config(
             .unwrap_or(DEFAULT_SERIAL_ENABLED),
         mode: lookup("mode", "serial_mode")
             .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| matches!(v.as_str(), "modem" | "console"))
+            .filter(|v| matches!(v.as_str(), "modem" | "console" | "kermit"))
             .unwrap_or_else(|| DEFAULT_SERIAL_MODE.into()),
         port: lookup("port", "serial_port").unwrap_or_else(|| DEFAULT_SERIAL_PORT.into()),
         baud: lookup("baud", "serial_baud")
@@ -1777,13 +1780,15 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push_str("\
 # Serial ports.  The gateway exposes two physically independent ports —
 # Port A and Port B — each with its own enabled flag, role (modem
-# emulator or telnet-serial console), serial parameters, and persisted
-# AT/S-register state.
+# emulator, telnet-serial console, or Kermit server), serial parameters,
+# and persisted AT/S-register state.
 #
 # <port>_enabled = true activates that port.  <port>_mode selects its role:
 #   modem    — run the Hayes AT command emulator
 #   console  — expose the port via the telnet menu's Serial Gateway,
 #              bridging the telnet client directly to the wire.
+#   kermit   — run an always-on Kermit server directly on the wire
+#              (no AT layer; bypasses auth — trusted lines only).
 #
 # Legacy single-port configs (using bare `serial_*` keys) auto-migrate
 # into Port A on first read; this writer always emits the dual-port form.
@@ -1953,7 +1958,7 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
         "enabled" => port.enabled = value.eq_ignore_ascii_case("true"),
         "mode" => {
             let lower = value.trim().to_ascii_lowercase();
-            if matches!(lower.as_str(), "modem" | "console") {
+            if matches!(lower.as_str(), "modem" | "console" | "kermit") {
                 port.mode = lower;
             }
         }
@@ -3224,14 +3229,19 @@ mod tests {
         apply_config_key(&mut cfg, "serial_a_flowcontrol", "bogus");
         assert_eq!(cfg.serial_a.flowcontrol, "hardware");
 
-        // mode accepts "modem" / "console" (case-insensitive),
+        // mode accepts "modem" / "console" / "kermit" (case-insensitive),
         // anything else is ignored.
         apply_config_key(&mut cfg, "serial_a_mode", "console");
         assert_eq!(cfg.serial_a.mode, "console");
         apply_config_key(&mut cfg, "serial_a_mode", "MODEM");
         assert_eq!(cfg.serial_a.mode, "modem");
+        apply_config_key(&mut cfg, "serial_a_mode", "Kermit");
+        assert_eq!(cfg.serial_a.mode, "kermit");
         apply_config_key(&mut cfg, "serial_a_mode", "bogus");
-        assert_eq!(cfg.serial_a.mode, "modem");
+        assert_eq!(cfg.serial_a.mode, "kermit");
+        // Restore console for the subsequent dual-port assertions below.
+        apply_config_key(&mut cfg, "serial_a_mode", "console");
+        assert_eq!(cfg.serial_a.mode, "console");
         // Whitespace around the value is trimmed before validation.
         apply_config_key(&mut cfg, "serial_a_mode", "  Console  ");
         assert_eq!(cfg.serial_a.mode, "console");
@@ -3353,6 +3363,8 @@ mod tests {
             ("console", "console"),
             ("CONSOLE", "console"),
             ("  Modem  ", "modem"),
+            ("kermit", "kermit"),
+            ("KERMIT", "kermit"),
         ] {
             std::fs::write(&path, format!("serial_a_mode = {}", raw)).unwrap();
             let cfg = read_config_file(path.to_str().unwrap());
@@ -3383,8 +3395,8 @@ mod tests {
     }
 
     /// `serial_<port>_mode` round-trips through write→read correctly for
-    /// both values on both ports.  Guards against the writer dropping
-    /// the field for one of the two enum values, and against a future
+    /// every value on both ports.  Guards against the writer dropping
+    /// the field for one of the enum values, and against a future
     /// edit that accidentally loses the per-port symmetry.
     #[test]
     fn test_serial_mode_round_trip_both_values() {
@@ -3392,7 +3404,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("rt.conf");
 
-        for value in ["modem", "console"] {
+        for value in ["modem", "console", "kermit"] {
             let cfg = Config {
                 serial_a: SerialPortConfig {
                     mode: value.into(),
