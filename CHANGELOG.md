@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.4] - Unreleased
+## [0.6.4] - 2026-07-14
 
 ### Added
 - **Serial ports gain a third mode: Kermit Server.** Alongside *Modem
@@ -1681,7 +1681,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[0.6.4]: https://github.com/rickybryce/ethernetgateway/compare/v0.6.3...HEAD
+[0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
 [0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3
 [0.6.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.2
 [0.6.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.1
