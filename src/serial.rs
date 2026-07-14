@@ -34,16 +34,23 @@ use crate::logger::glog;
 // ─── Constants ─────────────────────────────────────────────
 
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);
-/// Read-poll interval for an active console / Kermit-server bridge
-/// (`run_console_bridge`).  Shorter than `SERIAL_READ_TIMEOUT` because
-/// that pump only drains its outbound channel *between* wire reads: at
-/// the 100 ms default, an outbound packet the session produces (notably
-/// a Kermit ACK on a stop-and-wait link) waits out a full idle read
-/// before hitting the wire, adding up to ~100 ms to every round-trip.
-/// 10 ms matches the outbound-poll cadence `online_mode_duplex` uses on
-/// the modem path, so Kermit Server Mode transfers at the same speed as
-/// a menu-launched server.  The idle cost is ~100 harmless timed-out
-/// reads/sec while a bridge is up.
+/// Wire read-poll interval for an active bridge — the two-thread
+/// `run_console_bridge` (Serial Gateway console) and the inline
+/// `run_kermit_bridge_inline` (Kermit Server Mode).  Shorter than
+/// `SERIAL_READ_TIMEOUT` because both pumps interleave the wire read with
+/// their outbound path: an idle read blocks for this whole interval
+/// before the pump can write a packet the session produced (notably a
+/// Kermit ACK on a stop-and-wait link), so at the 100 ms default every
+/// round-trip paid up to ~100 ms.  10 ms matches the outbound-poll
+/// cadence `online_mode_duplex` uses on the modem path.  The idle cost is
+/// ~100 harmless timed-out reads/sec while a bridge is up.
+///
+/// (For Kermit Server Mode, this interval bounds the poll but is no
+/// longer the round-trip floor: `run_kermit_bridge_inline` produces the
+/// reply in the same iteration it consumes the request, so the reply
+/// isn't gated by the *next* idle read the way the two-thread bridge's
+/// was — that structural change is what closed the remaining gap to the
+/// menu-launched / `ATDT KERMIT` server.)
 const BRIDGE_READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// Hard cap on the TCP-connect timeout to protect the dedicated serial
 /// thread from blocking arbitrarily long if the user raises S7.
