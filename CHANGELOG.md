@@ -76,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never pokes (e.g. C-Kermit) falls through a short bounded wait and gets an
   unprompted Send-Init as before. Wired into the telnet Kermit-settings menu
   (**G**), the web config page, and the GUI.
+- **Verbose Kermit receive-path logging.** With `verbose = true`, the Kermit
+  upload/receive path now emits periodic per-packet progress plus a
+  per-file summary (bytes, packets, block-check type), matching the diagnostic
+  style of the XMODEM/YMODEM/ZMODEM paths. Off by default.
 
 ### Changed
 - **Warning popups are now dark red (GUI and web).** Security/confirmation
@@ -158,6 +162,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2–3 down to the single, unavoidable initiating `NAK` that the Kermit
   receiver-driven start requires (uploads read 0 — there the client is the
   sender and never pokes). Documented in `usermanual.html` and `kermit.html`.
+- **Kermit sender no longer cascades retransmits on a duplicate `ACK`.** On a
+  serial download to a hardware CP/M client (kercpm3 / Kermit-80), the
+  receiver-driven start makes the gateway send its Send-Init twice, so the
+  client's first `ACK` arrives duplicated — and the sender treated that stale,
+  already-satisfied ACK by retransmitting the current packet, whose re-ACK
+  became the next stale ACK: a self-perpetuating cascade that showed as a burst
+  of dozens of "retries" before the transfer settled and ran clean. A
+  stale/duplicate ACK is now discarded without retransmitting (the sender keeps
+  reading for the ACK that advances the window); a retransmit still fires only
+  on a `NAK` for the current sequence or a read timeout.
+- **Kermit `remote dir` / `remote help` replies no longer staircase on CP/M
+  clients.** The server built those listings with bare-LF line endings;
+  C-Kermit on Unix masks this via the tty's `ONLCR`, but a hardware CP/M client
+  (Kermit-80) does no translation, so each line stepped down without returning
+  to column 0. Both bodies are now CRLF-encoded before transfer (existing CRLFs
+  left intact; `TYPE`'s verbatim file bytes are deliberately untouched).
 - **Web browser surfaces the real error when the AI chat API rejects a
   request.** The Groq client treated every non-2xx response as an opaque
   transport error (`http status: 401`) and discarded the JSON body, so its
