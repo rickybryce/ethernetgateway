@@ -107,15 +107,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned bad data." (parse).
 
 ### Fixed
-- **Serial Kermit Server Mode transfers at full speed.** The bridge that pumps
-  bytes between the wire and the Kermit server (`run_console_bridge`) only
-  drained its outbound queue *between* wire reads, and an idle read blocked for
-  the full 100 ms `SERIAL_READ_TIMEOUT` — so on a stop-and-wait link (typical of
-  vintage Kermit clients) every server ACK waited out that read, adding up to
-  ~100 ms per packet round-trip and making Kermit Server Mode far slower than
-  the same server launched from the File Transfer menu (which the modem
-  online-mode pump services with a 10 ms outbound poll). The bridge now polls
-  the wire on a 10 ms interval, matching the fast path.
+- **Serial Kermit Server Mode transfers at full speed.** Kermit Server Mode was
+  far slower than the same server launched from the File Transfer menu. The
+  bridge that pumps bytes between the wire and the Kermit server
+  (`run_console_bridge`) drained its outbound queue only *between* wire reads,
+  and Kermit is stop-and-wait — so while the gateway composed each reply the
+  wire sat idle and the bridge blocked out the full wire-read timeout before
+  writing that reply, adding a fixed delay to every gateway-originated packet
+  (each ACK when receiving, each DATA when sending — hence the slowdown in both
+  directions). The menu/`ATDT KERMIT` server never had this because its pump
+  produces and flushes the reply in the same iteration that consumed the
+  request. Server Mode now uses that same inline pump (`run_kermit_bridge_inline`,
+  modeled on the modem online-mode path) instead of the decoupled two-thread
+  bridge, so a reply leaves the wire the moment it's produced. (The interactive
+  Serial Gateway console still uses `run_console_bridge`, whose backpressure
+  design is intentional there.)
 - **Kermit server uploads no longer drop a file on a name collision.** When an
   uploaded file's name already exists in `transfer_dir`, every Kermit-server
   receive path (the telnet-menu server, the standalone TCP listener, and the
