@@ -1168,6 +1168,196 @@ mod tests {
         }
     }
 
+    // ─── Captured-wire replay: real CCGMS sender → our receiver ────────
+    //
+    // The receive path is locked deterministically by replaying a byte
+    // stream a *real* CCGMS sender emitted, mirroring the XMODEM/ZMODEM
+    // replay fixtures.  `tests/fixtures/punter_seq.bin` was produced once
+    // by `record_punter_fixture` (the `#[ignore]` recorder below, driven
+    // by the compiled `ccgms-send` reference) and is checked in, so this
+    // test runs in CI on every platform with no CCGMS binary needed.
+    //
+    // Why this catches what the in-process round-trips can't: a pure
+    // round-trip uses our sender AND our receiver, so a shared framing
+    // bug stays green on both sides.  Replaying bytes the genuine CCGMS
+    // C reference emitted exposes any divergence between our decoder and
+    // the wire Punter actually produces.  The live `ccgms_real_sender_
+    // interop` test above stays the ground-truth source; this fixture
+    // locks the RECEIVE path deterministically.  The SEND path is *not*
+    // fixture-able — Punter's lock-step stop-and-wait + retransmit
+    // desyncs a token replay — so it stays manual-only via the harness,
+    // same as XMODEM's send path.
+
+    /// The 300-byte SEQ payload the CCGMS reference sender emits
+    /// (`i*7+1`), matching `ccgms_real_sender_interop` and the harness's
+    /// `send` mode.  One definition so the recorder and the replay
+    /// assertion can't drift.
+    fn ccgms_expected_payload() -> Vec<u8> {
+        (0..300u32).map(|i| (i * 7 + 1) as u8).collect()
+    }
+
+    /// Drive `punter_receive` against a pre-recorded sender-side byte
+    /// stream.  The capture is prefilled into the receiver's reader and
+    /// the write half dropped so the receiver sees EOF after the last
+    /// byte; our outbound GOO/ACK/SYN/S-B responses are drained and
+    /// discarded, since the capture already holds every block the
+    /// original CCGMS sender produced.  This works despite Punter being
+    /// interactive: on a clean link the sender's emitted bytes are
+    /// position-deterministic, and `end_off_receiver` treats an
+    /// unanswered end-off (the EOF at the tail) as success, not failure.
+    async fn replay_punter_capture(
+        capture: &[u8],
+    ) -> Result<(Vec<u8>, PunterFileType), String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut inbound_writer, mut inbound_reader) =
+            tokio::io::duplex(capture.len() + 8192);
+        inbound_writer
+            .write_all(capture)
+            .await
+            .expect("prefill inbound");
+        drop(inbound_writer);
+
+        let (mut discard_reader, mut outbound_writer) =
+            tokio::io::duplex(64 * 1024);
+        let drain_task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match discard_reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        });
+
+        let result =
+            punter_receive(&mut inbound_reader, &mut outbound_writer, false, false, false)
+                .await;
+        drop(outbound_writer);
+        let _ = drain_task.await;
+        result
+    }
+
+    #[tokio::test]
+    async fn test_ccgms_replay_punter_seq() {
+        let capture = include_bytes!("../tests/fixtures/punter_seq.bin");
+        let expected = include_bytes!("../tests/fixtures/punter_seq.payload");
+        let (data, ft) = replay_punter_capture(capture)
+            .await
+            .expect("Punter capture replay failed");
+        assert_eq!(
+            data, expected,
+            "capture must decode to the CCGMS sender's payload"
+        );
+        assert_eq!(ft, PunterFileType::Seq, "captured type block must decode as SEQ");
+    }
+
+    /// Refresh the checked-in CCGMS Punter fixture.  Two-step opt-in
+    /// mirrors the XMODEM/ZMODEM recorders: `#[ignore]` keeps it off the
+    /// default pass, and a dedicated `PUNTER_RECORD_FIXTURES=1` flag keeps
+    /// it off bulk `--ignored` runs (which may set `CCGMS_SEND_BIN` for the
+    /// live `ccgms_real_sender_interop` test) where it would otherwise
+    /// silently rewrite the committed fixture.  Build the reference with the
+    /// interop harness (`~/claude/punter-ccgms-interop/`), then run:
+    ///
+    ///   PUNTER_RECORD_FIXTURES=1 \
+    ///     CCGMS_SEND_BIN=~/claude/punter-ccgms-interop/ccgms-send \
+    ///     cargo test --release record_punter_fixture -- \
+    ///       --ignored --exact --nocapture
+    ///
+    /// The capture is round-tripped through `replay_punter_capture`
+    /// before it's written, so a buggy recorder fails here rather than
+    /// committing a bad fixture.
+    #[tokio::test]
+    #[ignore]
+    async fn record_punter_fixture() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::process::Command;
+
+        if std::env::var("PUNTER_RECORD_FIXTURES").is_err() {
+            eprintln!(
+                "record_punter_fixture: skipped (set PUNTER_RECORD_FIXTURES=1 to refresh)"
+            );
+            return;
+        }
+
+        let bin = match std::env::var("CCGMS_SEND_BIN") {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!(
+                    "record_punter_fixture: skipped (set CCGMS_SEND_BIN to the compiled ccgms-send)"
+                );
+                return;
+            }
+        };
+
+        let mut child = Command::new(&bin)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn ccgms sender");
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+
+        // Tee the sender→us bytes while our real receiver drives the
+        // interactive handshake (GOO/ACK/SYN), so the capture is the
+        // exact wire a genuine CCGMS sender produced.
+        let (mut tee_write, mut tee_read) = tokio::io::duplex(1 << 20);
+        let tee_task = tokio::spawn(async move {
+            let mut captured: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 8192];
+            loop {
+                match from_child.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        captured.extend_from_slice(&buf[..n]);
+                        if tee_write.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            captured
+        });
+
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            punter_receive(&mut tee_read, &mut to_child, false, false, true),
+        )
+        .await;
+        let _ = child.wait().await;
+        let captured = tee_task.await.unwrap();
+
+        let expected = ccgms_expected_payload();
+        match recv {
+            Ok(Ok((data, ft))) => {
+                assert_eq!(data, expected, "recorder: live receive must match expected payload");
+                assert_eq!(ft, PunterFileType::Seq);
+            }
+            other => panic!("recorder: live punter_receive failed: {:?}", other),
+        }
+
+        // Validate the captured bytes replay cleanly BEFORE committing —
+        // a stray retransmit in the capture fails here, not in CI.
+        let (rdata, rft) = replay_punter_capture(&captured)
+            .await
+            .expect("recorder: captured wire failed to replay");
+        assert_eq!(rdata, expected, "recorder: replayed capture must match payload");
+        assert_eq!(rft, PunterFileType::Seq);
+
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let fixtures_dir = std::path::Path::new(&manifest_dir).join("tests/fixtures");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        std::fs::write(fixtures_dir.join("punter_seq.bin"), &captured).unwrap();
+        std::fs::write(fixtures_dir.join("punter_seq.payload"), &expected).unwrap();
+        println!(
+            "  recorded punter_seq.bin ({} wire bytes for {} payload bytes)",
+            captured.len(),
+            expected.len()
+        );
+    }
+
     // — Handshake code wire format —
 
     #[test]
