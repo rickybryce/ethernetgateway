@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.6.4 &mdash; Kermit Protocol Reference</title>
+    <title>Ethernet Gateway v0.7.0 &mdash; Kermit Protocol Reference</title>
     <meta name="description" content="Kermit file-transfer protocol reference for Ethernet Gateway: server-mode commands, client primitives, G subcommands, RESEND, locking shifts, and capability negotiation.">
     <style>
         :root {
@@ -435,7 +435,7 @@
             </div>
             <h1>Kermit Reference</h1>
             <p class="hdr-tagline">Ethernet Gateway &mdash; Protocol Commands</p>
-            <div class="hdr-version">v0.6.4</div>
+            <div class="hdr-version">v0.7.0</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Server Mode</span>
                 <span class="hdr-badge">Client Mode</span>
@@ -700,12 +700,12 @@
                             <td><code>remote kermit &lt;text&gt;</code></td>
                             <td>K</td>
                             <td>
-                                Ask the gateway to identify itself. Replies with <code>Ethernet Gateway Kermit 0.6.4</code> regardless of the text you supply, delivered via the same X+Z inverse-transfer pattern as <code>remote dir</code>.
+                                Ask the gateway to identify itself. Replies with <code>Ethernet Gateway Kermit 0.7.0</code> regardless of the text you supply, delivered via the same X+Z inverse-transfer pattern as <code>remote dir</code>.
                                 <p style="margin: 8px 0 0 0;"><strong>Argument is required.</strong> If you type <code>remote kermit</code> with <em>no</em> text after it, C-Kermit silently does nothing and never sends a packet — that's the client's behavior, not the server's. Type any non-empty argument to actually invoke the command. Conventional choices:</p>
                                 <pre style="margin-top: 6px;"><code><span class="output-text">C-Kermit&gt;</span> remote kermit version
-<span class="output-text">Ethernet Gateway Kermit 0.6.4</span>
+<span class="output-text">Ethernet Gateway Kermit 0.7.0</span>
 <span class="output-text">C-Kermit&gt;</span> remote kermit info
-<span class="output-text">Ethernet Gateway Kermit 0.6.4</span></code></pre>
+<span class="output-text">Ethernet Gateway Kermit 0.7.0</span></code></pre>
                                 <p style="margin: 8px 0 0 0; color: #888;">Wire shape note: this is a <em>top-level</em> K-packet (the user's command rides in the payload), not a G-K subcommand. C-Kermit builds the packet via <code>scmd('K', cmarg)</code>; G-K is reserved for <code>remote copy</code> in the spec. A separate <code>G K</code> path is preserved internally for our own client helpers but real Kermit clients never emit it.</p>
                             </td>
                         </tr>
@@ -1060,7 +1060,7 @@
                         <tr><td><code>C</code></td><td>CWD</td><td>ACK on success, E on failure</td><td>Field-encoded argument is a relative subdir. Special cases: empty argument resets to <code>transfer_dir</code> root; bare <code>..</code> pops one component (cdup, no-op at root). Other path-traversal forms (<code>foo/..</code>, leading dot, backslash, NUL) are refused. Targets that don't exist on disk are refused so typo'd cd fails fast.</td></tr>
                         <tr><td><code>D</code></td><td>Directory</td><td>ACK + X+ + Z</td><td>Returns one entry per line: <code>name &lt;TAB&gt; size|&lt;dir&gt;</code>, sorted, hidden files skipped. Paginated across multiple X-packets when needed.</td></tr>
                         <tr><td><code>$</code></td><td>SPACE</td><td>ACK + X + Z</td><td>Returns free-bytes count as a decimal string, or <code>unknown</code> on platforms without <code>statvfs</code>.</td></tr>
-                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.6.4</code>).</td></tr>
+                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.7.0</code>).</td></tr>
                         <tr><td><code>H</code> / <code>?</code></td><td>Help</td><td>ACK + X+ + Z</td><td>Returns the list of supported subcommands. Both <code>H</code> and <code>?</code> are accepted for compatibility.</td></tr>
                         <tr><td><code>E</code></td><td>Erase / Delete</td><td>ACK on success, E on failure</td><td>Field-encoded filename per spec §6.7. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call — no wildcard expansion.</td></tr>
                         <tr><td><code>R</code></td><td>Rename</td><td>ACK on success, E on failure</td><td>Two field-encoded names back-to-back: source then destination. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -1233,7 +1233,7 @@
 <span class="output-text">C-Kermit&gt;</span> set host 192.168.1.160:2323 /telnet
 <span class="output-text">C-Kermit&gt;</span> set file names literal
 <span class="output-text">C-Kermit&gt;</span> remote kermit version
-<span class="output-text">Ethernet Gateway Kermit 0.6.4</span>
+<span class="output-text">Ethernet Gateway Kermit 0.7.0</span>
 <span class="output-text">C-Kermit&gt;</span> remote dir
 <span class="output-text">alpha.bin    1024
 beta.bin     2048
@@ -1307,7 +1307,7 @@ docs         &lt;dir&gt;</span>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.6.4 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v0.7.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
             &mdash; <a href="index.html">Back to User Manual</a>
         </footer>

@@ -37,6 +37,18 @@ This should also work with the RC2014 / SC126, etc as well.
 
 Author: Ricky Bryce
 
+## Disclaimer
+
+This software is provided on an "as is" basis, without warranties of any kind,
+express or implied. Use at your own risk. The author is not responsible for any
+data loss, security breaches, or damages resulting from the use of this
+software. The user is solely responsible for securing their own network,
+credentials, and data. Telnet is an inherently insecure protocol -- do not use
+this software on untrusted networks.
+
+Portions of this project were developed with the assistance of AI tools
+including Claude Code.
+
 ## Warning
 
 **The telnet interface is intended for local/private network use only.** Telnet
@@ -276,7 +288,7 @@ ships with:
 ### Verifying the checksum
 
 ```sh
-sha256sum -c ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -284,8 +296,8 @@ sha256sum -c ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.asc \
-    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
+    ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.asc \
+    ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -295,11 +307,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.sig \
     --certificate-identity-regexp "https://github.com/rickybryce/ethernetgateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    ethernetgateway-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
+    ethernetgateway-v0.7.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
