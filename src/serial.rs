@@ -34,6 +34,17 @@ use crate::logger::glog;
 // ─── Constants ─────────────────────────────────────────────
 
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);
+/// Read-poll interval for an active console / Kermit-server bridge
+/// (`run_console_bridge`).  Shorter than `SERIAL_READ_TIMEOUT` because
+/// that pump only drains its outbound channel *between* wire reads: at
+/// the 100 ms default, an outbound packet the session produces (notably
+/// a Kermit ACK on a stop-and-wait link) waits out a full idle read
+/// before hitting the wire, adding up to ~100 ms to every round-trip.
+/// 10 ms matches the outbound-poll cadence `online_mode_duplex` uses on
+/// the modem path, so Kermit Server Mode transfers at the same speed as
+/// a menu-launched server.  The idle cost is ~100 harmless timed-out
+/// reads/sec while a bridge is up.
+const BRIDGE_READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// Hard cap on the TCP-connect timeout to protect the dedicated serial
 /// thread from blocking arbitrarily long if the user raises S7.
 const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1575,6 +1586,15 @@ fn run_console_bridge<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Poll the wire on a short timeout so an outbound packet the session
+    // produces (e.g. a Kermit ACK) is flushed within ~one poll interval
+    // rather than after a full idle read.  Without this the pump's
+    // read-then-drain loop adds up to SERIAL_READ_TIMEOUT (100 ms) of
+    // latency to every stop-and-wait round-trip — the reason a
+    // Kermit-server-mode transfer ran far slower than a menu-launched
+    // one (which online_mode_duplex pumps with a 10 ms outbound poll).
+    let _ = port.set_timeout(BRIDGE_READ_TIMEOUT);
 
     let (mut duplex_read, mut duplex_write) = tokio::io::split(stream);
     let (port_to_session_tx, mut port_to_session_rx) =
