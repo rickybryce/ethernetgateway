@@ -1806,7 +1806,7 @@ fn commit_kermit_upload(
 
 /// Run a persistent Kermit server directly on an already-open serial
 /// port.  Bridges the blocking wire to an async duplex (via
-/// [`run_console_bridge`]) and runs [`kermit::kermit_server_with_outcome`]
+/// [`run_kermit_bridge_inline`]) and runs [`kermit::kermit_server_with_outcome`]
 /// on the async half — the same server entry point the `ATDT KERMIT`
 /// modem dial uses, but always-on and with no AT command layer.
 ///
@@ -1881,16 +1881,122 @@ fn run_kermit_server_port(
 
     // Pump bytes between the blocking wire and the server's async half.
     // Returns when the device closes / errors, or on restart / shutdown.
-    run_console_bridge(id, port, serial_stream, handle.clone(), shutdown.clone(), "Serial Kermit server");
+    // Uses an inline single-thread pump (not the two-thread
+    // `run_console_bridge`) so a stop-and-wait Kermit reply is written to
+    // the wire in the same iteration it's produced, instead of waiting for
+    // the next idle `port.read` to time out — see `run_kermit_bridge_inline`.
+    run_kermit_bridge_inline(id, port, serial_stream, handle.clone(), shutdown.clone());
 
-    // The bridge is done; dropping serial_stream inside run_console_bridge
-    // EOFs the server task's reader so its loop exits.  Abort as a
-    // backstop in case it's parked mid-await between sessions.
+    // The bridge is done; dropping serial_stream inside the pump EOFs the
+    // server task's reader so its loop exits.  Abort as a backstop in case
+    // it's parked mid-await between sessions.
     kermit_task.abort();
 
     // If neither shutdown nor a per-port restart was requested, the bridge
     // ended because the wire closed — signal the manager to reopen.
     !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+}
+
+/// Inline (single-thread) pump for the always-on Kermit server path,
+/// used in place of [`run_console_bridge`] by [`run_kermit_server_port`].
+///
+/// Unlike `run_console_bridge`'s decoupled two-thread + bounded-channel
+/// design, this drives the wire and the server's async duplex from one
+/// loop on the serial thread: read the wire → write the inbound request
+/// to the duplex → poll the duplex for the server's reply → write+flush
+/// it to the wire, all in a single iteration.  It mirrors
+/// [`online_mode_duplex`] (the `ATDT KERMIT` modem path), and that
+/// structure is the whole point:
+///
+/// Kermit is stop-and-wait, so whenever the gateway is composing a reply
+/// the wire is idle.  With the two-thread bridge the serial thread only
+/// drains its outbound channel *after* a blocking `port.read` returns —
+/// and an idle read blocks the full `BRIDGE_READ_TIMEOUT` — so every
+/// gateway-originated packet (each ACK when receiving, each DATA when
+/// sending) waited ~10 ms on top of the round trip.  That was the
+/// residual reason Kermit *server mode* stayed slower than the AT-mode
+/// server even after `BRIDGE_READ_TIMEOUT` dropped to 10 ms.  Producing
+/// the reply in the same iteration that consumed the request removes
+/// that wait, which is why the AT-mode path was already fast.
+///
+/// `block_on` is safe here because the caller runs on a dedicated
+/// `std::thread` (see [`online_mode_duplex`]); the server task spawned by
+/// `run_kermit_server_port` keeps running on the runtime's worker threads
+/// while we block.
+fn run_kermit_bridge_inline<S>(
+    id: SerialPortId,
+    mut port: Box<dyn serialport::SerialPort>,
+    stream: S,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Match the modem path's outbound-poll cadence.
+    let _ = port.set_timeout(BRIDGE_READ_TIMEOUT);
+    let (mut duplex_read, mut duplex_write) = tokio::io::split(stream);
+    // 4096 matches online_mode_duplex and comfortably holds a full Kermit
+    // packet (short or long) in one read, so a reply is written+flushed in
+    // one shot rather than dribbling out across idle wire-read waits.
+    let mut wire_buf = [0u8; 4096];
+    let mut duplex_buf = [0u8; 4096];
+    let restart_flag = &SERIAL_RESTART[id.index()];
+    let subsystem = "Serial Kermit server";
+
+    while !shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
+        // Wire → server: forward a client packet to the server's reader.
+        match port.read(&mut wire_buf) {
+            // Idle reads time out (Err below); Ok(0) means the device closed.
+            Ok(0) => {
+                glog!("{} (Port {}): port closed (EOF)", subsystem, id.label());
+                break;
+            }
+            Ok(n) => {
+                let result = handle.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        duplex_write.write_all(&wire_buf[..n]),
+                    )
+                    .await
+                });
+                if !matches!(result, Ok(Ok(()))) {
+                    break; // server reader gone or a stalled write timed out
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => {
+                glog!("{} (Port {}): read error: {}", subsystem, id.label(), e);
+                break;
+            }
+        }
+
+        // Server → wire: poll for the reply with the same short timeout the
+        // modem path uses.  When the server has produced a packet the read
+        // returns immediately (well under the timeout); the timeout only
+        // bounds how long we park when idle, keeping the loop responsive to
+        // shutdown/restart.
+        let result = handle.block_on(async {
+            tokio::time::timeout(BRIDGE_READ_TIMEOUT, duplex_read.read(&mut duplex_buf)).await
+        });
+        match result {
+            Ok(Ok(0)) => break, // server closed its write half — session over
+            Ok(Ok(n)) => {
+                if let Err(e) = port.write_all(&duplex_buf[..n]) {
+                    glog!("{} (Port {}): write error: {}", subsystem, id.label(), e);
+                    break;
+                }
+                let _ = port.flush();
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {} // timeout: nothing from the server this tick
+        }
+    }
+    // Dropping duplex_write EOFs the server task's reader so its loop ends;
+    // run_kermit_server_port aborts the task as a backstop.
 }
 
 // ─── Serial thread ─────────────────────────────────────────
