@@ -499,12 +499,22 @@ pub fn start_serial(shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
         let h = handle.clone();
         let sd = shutdown.clone();
         let rs = restart.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name(format!("serial-modem-{}", id.label().to_ascii_lowercase()))
             .spawn(move || {
                 serial_manager(id, h, sd, rs);
             })
-            .expect("Failed to spawn serial modem thread");
+        {
+            // N5: a boot-time thread-spawn failure must not panic the whole
+            // process — that would take down telnet/SSH/web too.  Log it and
+            // carry on: the rest of the gateway (and the other serial port)
+            // still comes up; only this port is unavailable.
+            glog!(
+                "serial: failed to spawn manager thread for Port {} ({}); this port is disabled",
+                id.label(),
+                e
+            );
+        }
     }
 }
 

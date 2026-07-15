@@ -13,6 +13,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Serial: a boot-time thread-spawn failure no longer panics the whole
+  process (N5).** `start_serial` logs the failure and continues, so the rest
+  of the gateway (telnet/SSH/web and the other serial port) still comes up;
+  only the affected port is disabled.
+- **Telnet I/O: a truncated IAC sequence can no longer wedge a reader (N4).**
+  Bytes read *inside* an already-started IAC sequence (the command byte, and a
+  WILL/WONT/DO/DONT option byte) are now bounded by a 5 s timeout — matching
+  the existing SB-drain bound — so a peer that sends a lone `0xFF` and stalls
+  can't block `read_exact` forever. The first-byte wait is still caller-timed.
+- **ZMODEM send: the post-ZEOF ZRPOS recovery reuses the main data-send path
+  (Z6).** The recovery previously duplicated the ZDATA/subpacket loop inline
+  (a drift risk with weaker ACK handling); it now calls the same
+  `send_zdata_run` helper as the initial data phase.
+- **ZMODEM send: ZFILE now advertises binary conversion (Z3).** The ZFILE ZF0
+  byte carries `ZCBIN` instead of 0, so a text-defaulting receiver won't apply
+  newline translation to a binary payload.
+- **ZMODEM: slow-link timeouts are no longer capped by hardcoded literals
+  (Z5).** The between-files header wait now uses the configured
+  `zmodem_frame_timeout` (was a fixed 10 s), and the post-ZEOF ZRINIT wait
+  keeps its 15 s fsync floor but rises to a tuned-up `zmodem_frame_timeout`.
+- **XMODEM receive: the 8 MB file cap is enforced exactly (X2).** The size
+  check now runs before appending each block, so the buffer never exceeds
+  `MAX_FILE_SIZE` even transiently (previously a file could grow one block
+  past the limit before the top-of-loop check fired). Exactly 8 MB is still
+  accepted.
+- **Web browser: the DOM text-extraction dependency is pinned against silent
+  breakage (A2).** Title/form-text extraction parses html2text's debug DOM
+  rendering (html2text 0.14 exposes no Text-node walk); a canary test now
+  guards that format so a dependency bump fails loudly in CI instead of
+  silently returning empty titles/labels.
 - **XMODEM receive: auto-detect no longer stalls 60 s against a strict
   lock-step checksum-only sender (X1).** On the first block, when the session
   is in CRC mode but the sender emits a single 1-byte checksum trailer and then

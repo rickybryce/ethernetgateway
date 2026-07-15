@@ -95,6 +95,13 @@ const TESCCTL: u8 = 0x40;       // sender wants all control characters escaped
 #[allow(dead_code)]
 const TESC8: u8 = 0x80;         // sender wants the 8th-bit duals escaped too
 
+// ZFILE conversion option (ZF0 byte of the ZFILE header) — Forsberg §11.1.
+// We always transfer file contents verbatim, so we advertise ZCBIN
+// ("binary — no conversion").  Sending 0 (unspecified) let a text-defaulting
+// receiver apply CR/LF newline translation to a binary payload (Z3); ZCBIN
+// tells it explicitly not to.  ZF0 is header data byte 3 (see ZRINIT note).
+const ZCBIN: u8 = 0x01;         // binary transfer, no end-of-line conversion
+
 // Telnet IAC + raw I/O now live in `crate::tnio` (shared with xmodem
 // and kermit).
 
@@ -927,7 +934,10 @@ where
             tokio::time::Duration::from_secs(if deadline_active {
                 negotiation_retry_interval
             } else {
-                10
+                // Between files, wait a full frame_timeout for the next
+                // ZFILE/ZFIN (Z5 — this was a hardcoded 10 s that ignored a
+                // tuned-up slow-link `zmodem_frame_timeout`).
+                cfg.zmodem_frame_timeout
             }),
             read_header(reader, is_tcp, &mut state, verbose),
         )
@@ -1705,7 +1715,7 @@ fn parse_zfile_info(data: &[u8]) -> Result<ZfileInfo, String> {
 ///   ← ZRINIT (with capability bits)
 ///   → ZFILE + subpacket(filename \0 size \0, ZCRCW)
 ///   ← ZRPOS(0)
-///   → ZDATA(0) + subpackets of 1024 bytes each (ZCRCW, ACK-gated) until EOF
+///   → ZDATA(0) + subpackets of 1024 bytes each (ZCRCQ mid-frame + ACK-gated, ZCRCE on the last) until EOF
 ///   → ZEOF(length)
 ///   ← ZRINIT                 ← ready for next file or ZFIN
 ///   → ZFIN
@@ -1869,7 +1879,9 @@ pub(crate) async fn zmodem_send(
             }
             zfile_attempts += 1;
 
-            let mut frame = build_bin16_header_mode(ZFILE, [0, 0, 0, 0], esc);
+            // ZF0 (data[3]) = ZCBIN: advertise a binary transfer so a
+            // text-defaulting receiver won't newline-translate the payload (Z3).
+            let mut frame = build_bin16_header_mode(ZFILE, [0, 0, 0, ZCBIN], esc);
             frame.extend_from_slice(&build_subpacket_mode(&info, ZCRCW, esc));
             raw_write_bytes(writer, &frame, is_tcp).await?;
             if verbose {
@@ -1987,97 +1999,16 @@ pub(crate) async fn zmodem_send(
 
         // ─── Phase 3: ZDATA + subpackets ─────────────────────
         //
-        // For zero-length files there's no ZDATA to send — jump
-        // straight to ZEOF once ZRPOS is received.  Emitting an orphan
-        // ZDATA header with no subpacket desyncs the receiver.
-        let mut pos = start_pos;
-        let mut zdata_attempts: u32 = 0;
-        let mut subpackets_sent: u32 = 0;
-        'send_loop: loop {
-            if pos >= data.len() {
-                break;
-            }
-            if zdata_attempts >= max_retries {
-                send_cancel(writer, is_tcp).await.ok();
-                return Err("ZMODEM: too many retransmissions".into());
-            }
-            zdata_attempts += 1;
-
-            let hdr = build_bin16_header_mode(ZDATA, (pos as u32).to_le_bytes(), esc);
-            raw_write_bytes(writer, &hdr, is_tcp).await?;
-            if verbose {
-                glog!("ZMODEM send: sent ZDATA at offset {}", pos);
-            }
-
-            // Mid-frame subpackets use ZCRCQ (ACK required, frame stays
-            // open).  The final subpacket uses ZCRCE (frame closes, no
-            // ACK) so the peer goes back to reading headers where it
-            // will pick up our ZEOF.  Both are spec-compliant per §8.4.
-            while pos < data.len() {
-                let remaining = data.len() - pos;
-                let chunk_len = remaining.min(SUBPACKET_DATA_SIZE);
-                let chunk = &data[pos..pos + chunk_len];
-                let is_last = pos + chunk_len == data.len();
-                let end_marker = if is_last { ZCRCE } else { ZCRCQ };
-                let sub = build_subpacket_mode(chunk, end_marker, esc);
-                raw_write_bytes(writer, &sub, is_tcp).await?;
-                subpackets_sent += 1;
-                if verbose && (subpackets_sent <= 3 || zdata_attempts > 1) {
-                    glog!(
-                        "ZMODEM send: subpacket #{} ({} bytes, marker=0x{:02X}, pos={})",
-                        subpackets_sent,
-                        chunk_len,
-                        end_marker,
-                        pos + chunk_len
-                    );
-                }
-
-                if is_last {
-                    break;
-                }
-
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(frame_timeout),
-                    read_header(reader, is_tcp, &mut state, verbose),
-                )
-                .await
-                {
-                    Ok(Ok(h)) if h.frame == ZACK => {
-                        let ack_pos = h.position() as usize;
-                        if ack_pos == pos + chunk_len {
-                            // Progress — clear the consecutive-retransmit budget
-                            // (sz bounds consecutive errors, not cumulative).
-                            zdata_attempts = 0;
-                            pos += chunk_len;
-                            continue;
-                        }
-                        pos = ack_pos.min(data.len());
-                        continue 'send_loop;
-                    }
-                    Ok(Ok(h)) if h.frame == ZRPOS => {
-                        pos = (h.position() as usize).min(data.len());
-                        continue 'send_loop;
-                    }
-                    Ok(Ok(h)) if h.frame == ZABORT => {
-                        return Err("ZMODEM: receiver aborted".into());
-                    }
-                    Ok(Err(ref e)) if is_peer_cancel(e) => {
-                        if verbose {
-                            glog!("ZMODEM send: receiver cancelled during data transfer");
-                        }
-                        return Err(PEER_CANCEL_ERR.into());
-                    }
-                    Ok(Ok(h)) if h.frame == ZNAK => {
-                        continue 'send_loop;
-                    }
-                    _ => {
-                        continue 'send_loop;
-                    }
-                }
-            }
-
-            break;
-        }
+        // Transmit the file body from `start_pos` via the shared data-send
+        // helper (also used by the post-ZEOF ZRPOS recovery below, Z6).  For
+        // zero-length files (or start_pos already at EOF) it sends no ZDATA
+        // and returns immediately — jumping straight to ZEOF — since an
+        // orphan ZDATA header with no subpacket desyncs the receiver.
+        send_zdata_run(
+            reader, writer, &mut state, data, start_pos, is_tcp, esc,
+            frame_timeout, max_retries, verbose,
+        )
+        .await?;
 
         // ─── Phase 4: ZEOF → ZRINIT ──────────────────────────
         //
@@ -2085,9 +2016,12 @@ pub(crate) async fn zmodem_send(
         // per-frame timeout: the receiver may need to flush its file
         // to disk before sending ZRINIT, and on slow or
         // synchronously-fsync'd filesystems that flush can take
-        // several seconds.  Distinct from `frame_timeout` so a slow
-        // commit doesn't cascade into a per-frame timeout config bump.
-        const POST_ZEOF_ZRINIT_TIMEOUT_SECS: u64 = 15;
+        // several seconds.  The 15 s is a *floor* for that commit; on a
+        // slow link where the operator has raised `zmodem_frame_timeout`
+        // above 15 s we use that instead, so this literal can no longer
+        // cap a tuned-up timeout (Z5).
+        const POST_ZEOF_ZRINIT_FLOOR_SECS: u64 = 15;
+        let post_zeof_timeout = POST_ZEOF_ZRINIT_FLOOR_SECS.max(frame_timeout);
         let mut zeof_attempts: u32 = 0;
         loop {
             if zeof_attempts >= max_retries {
@@ -2098,42 +2032,24 @@ pub(crate) async fn zmodem_send(
             send_zeof(writer, is_tcp, data.len() as u32, verbose).await?;
 
             match tokio::time::timeout(
-                tokio::time::Duration::from_secs(POST_ZEOF_ZRINIT_TIMEOUT_SECS),
+                tokio::time::Duration::from_secs(post_zeof_timeout),
                 read_header(reader, is_tcp, &mut state, verbose),
             )
             .await
             {
                 Ok(Ok(h)) if h.frame == ZRINIT => break,
                 Ok(Ok(h)) if h.frame == ZRPOS => {
-                    // Data got lost — back up and retry from the
-                    // requested position.  Safe because ZMODEM
-                    // positions are absolute.
-                    let mut pos = (h.position() as usize).min(data.len());
-                    let hdr = build_bin16_header_mode(ZDATA, (pos as u32).to_le_bytes(), esc);
-                    raw_write_bytes(writer, &hdr, is_tcp).await?;
-                    while pos < data.len() {
-                        let chunk_len = (data.len() - pos).min(SUBPACKET_DATA_SIZE);
-                        let chunk = &data[pos..pos + chunk_len];
-                        let is_last = pos + chunk_len == data.len();
-                        let marker = if is_last { ZCRCE } else { ZCRCQ };
-                        let sub = build_subpacket_mode(chunk, marker, esc);
-                        raw_write_bytes(writer, &sub, is_tcp).await?;
-                        if is_last {
-                            break;
-                        }
-                        pos += chunk_len;
-                        if let Ok(Ok(hdr)) = tokio::time::timeout(
-                            tokio::time::Duration::from_secs(frame_timeout),
-                            read_header(reader, is_tcp, &mut state, verbose),
-                        )
-                        .await
-                        {
-                            if hdr.frame == ZACK {
-                                continue;
-                            }
-                        }
-                        break;
-                    }
+                    // Data got lost — resend from the requested (absolute)
+                    // position via the shared data-send helper, then loop to
+                    // resend ZEOF.  Reusing `send_zdata_run` (Z6) gives the
+                    // recovery the same ACK-gating and retry discipline as the
+                    // initial data phase instead of a divergent inline copy.
+                    let resume = (h.position() as usize).min(data.len());
+                    send_zdata_run(
+                        reader, writer, &mut state, data, resume, is_tcp, esc,
+                        frame_timeout, max_retries, verbose,
+                    )
+                    .await?;
                     continue;
                 }
                 Ok(Err(ref e)) if is_peer_cancel(e) => {
@@ -2250,6 +2166,115 @@ async fn send_zack(
     raw_write_bytes(writer, &frame, is_tcp).await?;
     if verbose {
         glog!("ZMODEM: sent ZACK({})", pos);
+    }
+    Ok(())
+}
+
+/// Transmit `data[start..]` as ZDATA + ACK-gated subpackets — ZCRCQ
+/// mid-frame (ACK required, frame stays open) and ZCRCE on the last
+/// (frame closes, no ACK, so the peer returns to reading headers and
+/// picks up our ZEOF).  Honors ZACK/ZRPOS repositioning and bounds
+/// consecutive retransmissions by `max_retries`.  Returns once the final
+/// subpacket has been written; the caller then sends ZEOF.
+///
+/// Shared by the initial data phase and the post-ZEOF ZRPOS recovery so
+/// the two transmit paths can't drift (Z6).
+#[allow(clippy::too_many_arguments)]
+async fn send_zdata_run(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    state: &mut ReadState,
+    data: &[u8],
+    start: usize,
+    is_tcp: bool,
+    esc: EscapeMode,
+    frame_timeout: u64,
+    max_retries: u32,
+    verbose: bool,
+) -> Result<(), String> {
+    let mut pos = start;
+    let mut zdata_attempts: u32 = 0;
+    let mut subpackets_sent: u32 = 0;
+    'send_loop: loop {
+        if pos >= data.len() {
+            break;
+        }
+        if zdata_attempts >= max_retries {
+            send_cancel(writer, is_tcp).await.ok();
+            return Err("ZMODEM: too many retransmissions".into());
+        }
+        zdata_attempts += 1;
+
+        let hdr = build_bin16_header_mode(ZDATA, (pos as u32).to_le_bytes(), esc);
+        raw_write_bytes(writer, &hdr, is_tcp).await?;
+        if verbose {
+            glog!("ZMODEM send: sent ZDATA at offset {}", pos);
+        }
+
+        while pos < data.len() {
+            let remaining = data.len() - pos;
+            let chunk_len = remaining.min(SUBPACKET_DATA_SIZE);
+            let chunk = &data[pos..pos + chunk_len];
+            let is_last = pos + chunk_len == data.len();
+            let end_marker = if is_last { ZCRCE } else { ZCRCQ };
+            let sub = build_subpacket_mode(chunk, end_marker, esc);
+            raw_write_bytes(writer, &sub, is_tcp).await?;
+            subpackets_sent += 1;
+            if verbose && (subpackets_sent <= 3 || zdata_attempts > 1) {
+                glog!(
+                    "ZMODEM send: subpacket #{} ({} bytes, marker=0x{:02X}, pos={})",
+                    subpackets_sent,
+                    chunk_len,
+                    end_marker,
+                    pos + chunk_len
+                );
+            }
+
+            if is_last {
+                break;
+            }
+
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(frame_timeout),
+                read_header(reader, is_tcp, state, verbose),
+            )
+            .await
+            {
+                Ok(Ok(h)) if h.frame == ZACK => {
+                    let ack_pos = h.position() as usize;
+                    if ack_pos == pos + chunk_len {
+                        // Progress — clear the consecutive-retransmit budget
+                        // (sz bounds consecutive errors, not cumulative).
+                        zdata_attempts = 0;
+                        pos += chunk_len;
+                        continue;
+                    }
+                    pos = ack_pos.min(data.len());
+                    continue 'send_loop;
+                }
+                Ok(Ok(h)) if h.frame == ZRPOS => {
+                    pos = (h.position() as usize).min(data.len());
+                    continue 'send_loop;
+                }
+                Ok(Ok(h)) if h.frame == ZABORT => {
+                    return Err("ZMODEM: receiver aborted".into());
+                }
+                Ok(Err(ref e)) if is_peer_cancel(e) => {
+                    if verbose {
+                        glog!("ZMODEM send: receiver cancelled during data transfer");
+                    }
+                    return Err(PEER_CANCEL_ERR.into());
+                }
+                Ok(Ok(h)) if h.frame == ZNAK => {
+                    continue 'send_loop;
+                }
+                _ => {
+                    continue 'send_loop;
+                }
+            }
+        }
+
+        break;
     }
     Ok(())
 }
@@ -4086,6 +4111,86 @@ mod tests {
         zmodem_send(&mut s_read, &mut s_write, &batch, false, false)
             .await
             .expect("sender should complete resume cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_sender_post_zeof_zrpos_recovery() {
+        // Z6: after ZEOF the receiver can reply ZRPOS ("data lost, resend
+        // from N") instead of ZRINIT.  The sender must resend the data (now
+        // via the shared `send_zdata_run` helper) and then re-send ZEOF,
+        // completing once ZRINIT arrives.  This is the recovery path that
+        // used to be a divergent inline copy of the main data loop — with no
+        // test — so it exercises the dedup directly.
+        //
+        // A 512-byte file is a single ZCRCE subpacket (no mid-frame ACK), so
+        // the script is: ZRINIT (negotiation) → ZRPOS(0) (accept) → [sender
+        // sends ZDATA+sub then ZEOF] → ZRPOS(0) (post-ZEOF recovery) →
+        // [sender resends data + ZEOF] → ZRINIT (accept) → ZFIN.
+        let data: Vec<u8> = (0..512).map(|i| (i & 0xFF) as u8).collect();
+        let (sender_half, mock_half) = tokio::io::duplex(8192);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
+        // Post-ZEOF: ask the sender to resend from 0 once, then accept.
+        m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
+        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while m_read.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        let batch: [(&str, &[u8]); 1] = [("recover.bin", &data)];
+        zmodem_send(&mut s_read, &mut s_write, &batch, false, false)
+            .await
+            .expect("sender should complete the post-ZEOF ZRPOS recovery cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_sender_zfile_advertises_zcbin() {
+        // Z3: the ZFILE header must set ZF0 = ZCBIN (binary, no conversion)
+        // so a text-defaulting receiver won't newline-translate a binary
+        // payload.  Read headers from a live send until the ZFILE and assert
+        // its ZF0.
+        let data = b"bin\x00\x0d\x0a\xffpayload".to_vec();
+        let (sender_half, mock_half) = tokio::io::duplex(8192);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        // Negotiation ZRINIT; after inspecting the ZFILE we ZSKIP + ZFIN so
+        // the sender winds down promptly.
+        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+
+        let send = tokio::spawn(async move {
+            let batch: [(&str, &[u8]); 1] = [("bin.dat", &data)];
+            let _ = zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await;
+        });
+
+        let mut st = ReadState::default();
+        let mut saw_zfile = false;
+        for _ in 0..8 {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    assert!(
+                        h.zf0() & ZCBIN != 0,
+                        "ZFILE ZF0 must advertise ZCBIN (got 0x{:02X})",
+                        h.zf0()
+                    );
+                    saw_zfile = true;
+                    break;
+                }
+                Ok(_) => continue, // ZRQINIT etc.
+                Err(e) => panic!("reading sender headers: {}", e),
+            }
+        }
+        assert!(saw_zfile, "sender never emitted a ZFILE header");
+        // Wind the sender down: skip the file, then close the batch.
+        m_write.write_all(&build_hex_header(ZSKIP, [0, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+        let _ = send.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

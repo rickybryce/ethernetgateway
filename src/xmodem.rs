@@ -443,14 +443,6 @@ pub(crate) async fn xmodem_receive_batch(
     // infinite NAK loop).
     let mut eot_naked = false;
     loop {
-        // Per-file cap.  In a YMODEM batch this aborts the whole session
-        // (CAN×3 + Err), discarding any earlier files too — an oversize file is
-        // treated as a hard error, not skip-and-continue.
-        if file_data.len() > MAX_FILE_SIZE {
-            raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
-            return Err("File exceeds 8 MB size limit".into());
-        }
-
         let byte = match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
             nvt_read_byte(reader, is_tcp, state),
@@ -503,6 +495,18 @@ pub(crate) async fn xmodem_receive_batch(
                 .await
                 {
                     Ok(Ok(data)) => {
+                        // Per-file cap, enforced BEFORE appending so the
+                        // buffer never exceeds MAX_FILE_SIZE even transiently
+                        // (X2 — the old top-of-loop `>` check let a file grow
+                        // one block past the limit first).  Exactly 8 MB is
+                        // still accepted; the block that would push it over is
+                        // refused.  In a YMODEM batch this aborts the whole
+                        // session (CAN×3 + Err), discarding earlier files too —
+                        // an oversize file is a hard error, not skip-and-carry.
+                        if file_data.len() + data.len() > MAX_FILE_SIZE {
+                            raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                            return Err("File exceeds 8 MB size limit".into());
+                        }
                         file_data.extend_from_slice(&data);
                         raw_write_byte(writer, ACK, is_tcp).await?;
                         error_count = 0;

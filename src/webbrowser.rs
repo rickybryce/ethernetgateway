@@ -776,6 +776,10 @@ fn extract_title_from_dom(dom: &RcDom) -> Option<String> {
     fn find_title(node: &Handle) -> Option<String> {
         if let Element { ref name, .. } = node.data
             && name.local.as_ref() == "title" {
+                // NB: parses html2text's *debug* DOM rendering for "Text:"
+                // lines — html2text 0.14 doesn't expose the Text node variant
+                // for a direct walk.  Pinned by test_dom_text_extraction_
+                // debug_format_canary + the test_extract_title_* set (A2).
                 let rendered = RcDom::node_as_dom_string(node);
                 let text: String = rendered
                     .lines()
@@ -813,6 +817,13 @@ fn get_attr(node: &Handle, attr_name: &str) -> Option<String> {
 }
 
 /// Extract text content from a node's subtree using RcDom's debug rendering.
+///
+/// This parses html2text's *debug* DOM output (`node_as_dom_string`) for
+/// `"Text:"` lines rather than walking Text nodes directly — html2text 0.14
+/// vendors `markup5ever_rcdom` privately and does not expose the `Text`
+/// variant, so there is no stable-API alternative.  The debug-format
+/// dependency is pinned by `test_dom_text_extraction_debug_format_canary`
+/// so a dependency bump can't silently break form-label/option extraction (A2).
 fn get_text_content(node: &Handle) -> String {
     let rendered = RcDom::node_as_dom_string(node);
     rendered
@@ -1654,6 +1665,30 @@ mod tests {
     fn test_extract_title_empty() {
         let html = b"<html><head><title>  </title></head></html>";
         assert_eq!(title_from_html(html), None);
+    }
+
+    /// A2 canary: `extract_title_from_dom` and `get_text_content` recover
+    /// text by parsing html2text's *debug* DOM rendering
+    /// (`RcDom::node_as_dom_string`) for `"Text:"` lines — a non-stable-API
+    /// dependency.  html2text 0.14 vendors `markup5ever_rcdom` as a private
+    /// module and re-exports only the `Element`/`Document`/`Comment` node
+    /// variants, not `Text`, so a direct text-node walk isn't possible; the
+    /// debug-string parse is the only available route.  This test (together
+    /// with the `test_extract_title_*` set) pins the format so a dependency
+    /// bump that changes it fails loudly here instead of silently returning
+    /// empty titles / form labels in production.
+    #[test]
+    fn test_dom_text_extraction_debug_format_canary() {
+        let cfg = config::rich();
+        let dom = cfg
+            .parse_html(&b"<html><body><p>Canary Text Contract</p></body></html>"[..])
+            .unwrap();
+        let text = get_text_content(&dom.document);
+        assert!(
+            text.contains("Canary Text Contract"),
+            "get_text_content lost its text — html2text debug-format drift? got {:?}",
+            text
+        );
     }
 
     #[test]

@@ -136,15 +136,20 @@ pub(crate) async fn raw_read_byte(
 ) -> Result<u8, String> {
     let mut buf = [0u8; 1];
     loop {
+        // First byte: no timeout — this is the normal "wait for the next
+        // data byte" and the caller owns the overall wait (block/negotiation
+        // timeout).  Only the bytes *inside* a committed IAC sequence are
+        // bounded below (N4).
         reader
             .read_exact(&mut buf)
             .await
             .map_err(|e| e.to_string())?;
         if is_tcp && buf[0] == IAC {
-            reader
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| e.to_string())?;
+            // We've committed to an IAC sequence — the command byte (and any
+            // option payload) must arrive promptly.  Without a bound, a peer
+            // that sends a lone 0xFF and then stalls wedges this read_exact
+            // forever (N4); mirror the 5 s bound the SB-drain already uses.
+            read_iac_continuation(reader, &mut buf).await?;
             if buf[0] == IAC {
                 return Ok(IAC);
             }
@@ -152,6 +157,29 @@ pub(crate) async fn raw_read_byte(
         } else {
             return Ok(buf[0]);
         }
+    }
+}
+
+/// Time allowed for a byte that is part of an already-started telnet IAC
+/// sequence.  The first data byte is deliberately NOT bounded here (the
+/// caller times the overall wait); this bounds only mid-sequence bytes so a
+/// half-sent IAC command can't block a `read_exact` indefinitely (N4).
+const IAC_SEQUENCE_TIMEOUT_SECS: u64 = 5;
+
+/// Read one continuation byte of an in-progress IAC sequence into `buf`,
+/// bounded by `IAC_SEQUENCE_TIMEOUT_SECS`.
+async fn read_iac_continuation(
+    reader: &mut (impl AsyncRead + Unpin),
+    buf: &mut [u8; 1],
+) -> Result<(), String> {
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(IAC_SEQUENCE_TIMEOUT_SECS),
+        reader.read_exact(buf),
+    )
+    .await
+    {
+        Err(_) => Err("Telnet IAC sequence timed out".into()),
+        Ok(r) => r.map(|_| ()).map_err(|e| e.to_string()),
     }
 }
 
@@ -191,10 +219,9 @@ pub(crate) async fn consume_telnet_command(
             }
         }
         WILL | WONT | DO_CMD | DONT => {
-            reader
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| e.to_string())?;
+            // Bounded like the SB drain (N4): the single option byte must
+            // arrive promptly so a `IAC WILL` + stall can't wedge us.
+            read_iac_continuation(reader, &mut buf).await?;
         }
         _ => {}
     }
@@ -241,6 +268,37 @@ pub(crate) async fn raw_write_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N4: once an IAC sequence has started, a peer that sends the lead
+    /// 0xFF (or IAC + command) and then stalls must not block the reader
+    /// forever — the mid-sequence read is bounded.  Paused clock so the
+    /// window elapses at once; the write half stays open so the missing
+    /// continuation byte *pends* (a real stall) rather than hitting EOF.
+    #[tokio::test(start_paused = true)]
+    async fn test_raw_read_byte_times_out_on_truncated_iac_command() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&[IAC]).await.unwrap(); // lead IAC, no command byte
+        let r = raw_read_byte(&mut reader, true).await;
+        assert!(
+            r.is_err(),
+            "a lone IAC followed by a stall must time out, not block forever"
+        );
+        drop(writer);
+    }
+
+    /// The truncated-IAC bound also covers a WILL/WONT/DO/DONT whose option
+    /// byte never arrives (drained via consume_telnet_command).
+    #[tokio::test(start_paused = true)]
+    async fn test_raw_read_byte_times_out_on_truncated_will() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&[IAC, WILL]).await.unwrap(); // no option byte follows
+        let r = raw_read_byte(&mut reader, true).await;
+        assert!(
+            r.is_err(),
+            "an IAC WILL with no option byte must time out, not block forever"
+        );
+        drop(writer);
+    }
 
     #[test]
     fn test_can_abort_state_machine() {
