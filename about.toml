@@ -13,6 +13,12 @@
 # wayland, ...) should all be included in the notices.
 accepted = [
     "GPL-3.0-or-later",
+    # `GPL-3.0` is intentionally retained here (unlike deny.toml, which
+    # dropped it): a dual-licensed dep offered as `GPL-3.0 OR MIT` (e.g.
+    # `unescaper`) is then attributed under GPL-3.0 in the notices — the
+    # natural choice inside this GPL-3.0-or-later work.  deny.toml only needs
+    # to *permit* the crate, which MIT already does, so the two configs
+    # legitimately differ.  Drop this line to attribute such deps under MIT.
     "GPL-3.0",
     "MIT",
     "MIT-0",

@@ -3748,7 +3748,12 @@ mod tests {
         });
 
         match recv.await.unwrap() {
-            Err(_) => {} // bounded cancel — correct
+            Err(e) => assert!(
+                // Pin the specific bounded-cancel error so the test can't pass
+                // via an EOF/other error if max_retries were raised elsewhere.
+                e.contains("ZFILE info-subpacket errors"),
+                "expected the bounded ZFILE-subpacket cancel, got: {e}"
+            ),
             Ok(_) => panic!("receiver must cancel on a permanently-corrupt ZFILE subpacket"),
         }
     }
@@ -4206,15 +4211,42 @@ mod tests {
         m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
         m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
 
-        tokio::spawn(async move {
+        // Capture ALL sender output so we can prove the recovery actually
+        // RE-SENDS the body — not merely that the frame handshake lines up.
+        // With the post-ZEOF ZRPOS arm the 2048-byte body is transmitted
+        // twice (initial + resend); if that arm were removed the sender would
+        // just resend ZEOF and the body would appear only once.  So total
+        // output must exceed two payloads' worth.  This makes the test a
+        // regression guard for the recovery, not just a smoke test.
+        let drain = tokio::spawn(async move {
+            let mut all = Vec::new();
             let mut buf = [0u8; 4096];
-            while m_read.read(&mut buf).await.unwrap_or(0) > 0 {}
+            loop {
+                match m_read.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.extend_from_slice(&buf[..n]),
+                }
+            }
+            all
         });
 
         let batch: [(&str, &[u8]); 1] = [("recover.bin", &data)];
         zmodem_send(&mut s_read, &mut s_write, &batch, false, false)
             .await
             .expect("sender should complete the post-ZEOF ZRPOS recovery cleanly");
+        // Close the sender halves so the drain sees EOF and returns.
+        drop(s_write);
+        drop(s_read);
+        drop(m_write);
+        let captured = drain.await.unwrap();
+        assert!(
+            captured.len() >= data.len() * 2,
+            "post-ZEOF ZRPOS recovery must re-send the whole body: captured {} bytes, \
+             expected >= {} (two transmissions of a {}-byte file)",
+            captured.len(),
+            data.len() * 2,
+            data.len()
+        );
     }
 
     #[tokio::test]

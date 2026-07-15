@@ -17,9 +17,9 @@
 confidence-threshold = 0.8
 
 # Permissive + weak-copyleft licenses that are compatible as *incoming*
-# dependencies of a GPL-3.0-or-later work, plus GPL-3.0 itself.  Every
-# entry here was observed in the current `cargo metadata` tree (see the
-# license audit) or is a compatible sibling we may plausibly pull in.
+# dependencies of a GPL-3.0-or-later work, plus our own GPL-3.0-or-later
+# crate.  Every entry here was observed in the current `cargo metadata` tree
+# (see the license audit) or is a compatible sibling we may plausibly pull in.
 #
 # Deliberately ABSENT (so they fail the gate): GPL-2.0-only, AGPL-3.0,
 # and any proprietary / unknown license.
