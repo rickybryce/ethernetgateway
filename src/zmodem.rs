@@ -2306,6 +2306,11 @@ async fn send_zfin(
     Ok(())
 }
 
+/// Per-byte grace window for draining the sender's "OO" over-and-out
+/// trailer.  Only ever hit when a peer omits OO; a conforming sender's two
+/// 'O' bytes are already on the wire right after our ZFIN reply.
+const OO_TRAILER_TIMEOUT_SECS: u64 = 3;
+
 /// Drain the sender's "OO" over-and-out trailer after we reply to a ZFIN
 /// (Forsberg §8.4).  On the receive path the sender is the ZFIN initiator:
 /// once it reads our ZFIN it emits two 'O' bytes and exits.  Left unread
@@ -2321,7 +2326,7 @@ async fn drain_oo_trailer(
     let mut drained = 0u8;
     for _ in 0..2 {
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(3),
+            tokio::time::Duration::from_secs(OO_TRAILER_TIMEOUT_SECS),
             nvt_read_byte(reader, is_tcp, state),
         )
         .await
@@ -3694,6 +3699,60 @@ mod tests {
         assert_eq!(files[0].data, body, "file body intact after retransmit");
     }
 
+    #[tokio::test]
+    async fn test_receiver_bounds_persistent_zfile_subpacket_corruption() {
+        // Z1 cancel path: if the ZFILE info subpacket is corrupt on EVERY
+        // retransmit, the receiver must bound its ZNAK/retry loop by
+        // `zmodem_max_retries` and eventually CANCEL + error — not loop
+        // forever.  Feed a permanently-corrupt ZFILE frame (valid framing,
+        // bad subpacket CRC) far more times than max_retries; the receive
+        // must return Err.  Mirrors the data-phase analog
+        // (test_receiver_bounds_persistent_subpacket_corruption).
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+
+        // Build one corrupt ZFILE frame (valid framing, broken subpacket CRC).
+        let mut info = Vec::new();
+        info.extend_from_slice(b"corrupt.txt\0");
+        info.extend_from_slice(b"4 0 0 0 0 4\0");
+        let mut corrupt_zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
+        let mut bad_sub = build_subpacket(&info, ZCRCW);
+        bad_sub[0] ^= 0x01;
+        corrupt_zfile.extend_from_slice(&bad_sub);
+
+        // Send it far more times than max_retries (default 10).  A drain task
+        // absorbs the receiver's ZNAKs; the buffer is large enough to hold the
+        // whole flood so the mock never blocks even if the receiver cancels
+        // early.
+        let flood = corrupt_zfile.repeat(20);
+        m_write.write_all(&flood).await.unwrap();
+        drop(m_write);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while m_read.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+
+        match recv.await.unwrap() {
+            Err(_) => {} // bounded cancel — correct
+            Ok(_) => panic!("receiver must cancel on a permanently-corrupt ZFILE subpacket"),
+        }
+    }
+
     // ─── Z2: sender OO over-and-out trailer is drained ───────
 
     #[tokio::test]
@@ -4119,22 +4178,31 @@ mod tests {
         // from N") instead of ZRINIT.  The sender must resend the data (now
         // via the shared `send_zdata_run` helper) and then re-send ZEOF,
         // completing once ZRINIT arrives.  This is the recovery path that
-        // used to be a divergent inline copy of the main data loop — with no
-        // test — so it exercises the dedup directly.
+        // used to be a divergent inline copy of the main data loop with
+        // weaker ACK handling — and had no test.
         //
-        // A 512-byte file is a single ZCRCE subpacket (no mid-frame ACK), so
-        // the script is: ZRINIT (negotiation) → ZRPOS(0) (accept) → [sender
-        // sends ZDATA+sub then ZEOF] → ZRPOS(0) (post-ZEOF recovery) →
-        // [sender resends data + ZEOF] → ZRINIT (accept) → ZFIN.
-        let data: Vec<u8> = (0..512).map(|i| (i & 0xFF) as u8).collect();
+        // Use a 2048-byte file so each data run is TWO subpackets: a mid-frame
+        // ZCRCQ (which is ACK-gated — the sender waits for ZACK(1024) before
+        // the final ZCRCE subpacket) plus the closing ZCRCE.  This exercises
+        // the ACK-gating through the recovery path, not just a lone ZCRCE.
+        //
+        // Script: ZRINIT (negotiation) → ZRPOS(0) (accept) → ZACK(1024) [gates
+        // initial sub #1] → [sender finishes data + ZEOF] → ZRPOS(0) (post-ZEOF
+        // recovery) → ZACK(1024) [gates recovery sub #1] → [sender finishes
+        // data + ZEOF] → ZRINIT (accept) → ZFIN.
+        let data: Vec<u8> = (0..2048).map(|i| (i & 0xFF) as u8).collect();
         let (sender_half, mock_half) = tokio::io::duplex(8192);
         let (mut s_read, mut s_write) = tokio::io::split(sender_half);
         let (mut m_read, mut m_write) = tokio::io::split(mock_half);
 
+        let ack_1024 = build_hex_header(ZACK, 1024u32.to_le_bytes());
         m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
         m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
-        // Post-ZEOF: ask the sender to resend from 0 once, then accept.
+        m_write.write_all(&ack_1024).await.unwrap(); // gates initial subpacket #1
+        // Post-ZEOF: ask the sender to resend from 0 once, ACK its resent
+        // mid-frame subpacket, then accept.
         m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
+        m_write.write_all(&ack_1024).await.unwrap(); // gates recovery subpacket #1
         m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
         m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
 

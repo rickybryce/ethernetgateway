@@ -24,9 +24,8 @@ confidence-threshold = 0.8
 # Deliberately ABSENT (so they fail the gate): GPL-2.0-only, AGPL-3.0,
 # and any proprietary / unknown license.
 allow = [
-    # Our own crate.
+    # Our own crate (GPL-3.0-or-later covers it; no bare GPL-3.0 in the tree).
     "GPL-3.0-or-later",
-    "GPL-3.0",
 
     # Ubiquitous permissive licenses.
     "MIT",
