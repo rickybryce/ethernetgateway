@@ -1,0 +1,79 @@
+# cargo-deny configuration — license policy gate.
+#
+# Purpose: keep the dependency tree compatible with this project's
+# GPL-3.0-or-later license.  The `[licenses].allow` list is an
+# allowlist: any crate whose SPDX license expression is NOT satisfied
+# by these licenses fails the check.  That automatically blocks the
+# GPL-3-incompatible cases — notably `GPL-2.0-only` (GPL v2 with no
+# "or later" clause) and the AGPL family — as well as any unknown /
+# unlicensed crate, without us having to enumerate the bad ones.
+#
+# Run locally with:  cargo deny check licenses
+# CI runs the same via the `licenses` job in .github/workflows/ci.yml.
+
+[licenses]
+# Confidence threshold for detecting a license from text (0.0-1.0).
+# 0.8 is the cargo-deny default and matches license text reliably.
+confidence-threshold = 0.8
+
+# Permissive + weak-copyleft licenses that are compatible as *incoming*
+# dependencies of a GPL-3.0-or-later work, plus GPL-3.0 itself.  Every
+# entry here was observed in the current `cargo metadata` tree (see the
+# license audit) or is a compatible sibling we may plausibly pull in.
+#
+# Deliberately ABSENT (so they fail the gate): GPL-2.0-only, AGPL-3.0,
+# and any proprietary / unknown license.
+allow = [
+    # Our own crate.
+    "GPL-3.0-or-later",
+    "GPL-3.0",
+
+    # Ubiquitous permissive licenses.
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+
+    # Data / font / misc permissive licenses present in the tree.
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+
+    # Weak (file-level) copyleft — MPL-2.0 is explicitly GPL-compatible
+    # (MPL 2.0 §3.3); LGPL appears only as an OR alternative alongside
+    # permissive terms.
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+]
+
+# No blanket exceptions needed today.  If a future crate carries a
+# copyleft-incompatible license only as an OR alternative that
+# cargo-deny can't auto-satisfy, add a narrow per-crate exception here
+# rather than widening `allow`.
+exceptions = []
+
+[bans]
+# License policy is the focus of this file; leave dependency-ban
+# defaults in place (cargo-audit already covers advisories in CI).
+multiple-versions = "allow"
+
+[advisories]
+# Advisory scanning is handled by the separate `audit` CI job
+# (rustsec/audit-check).  Keep cargo-deny scoped to licenses so the two
+# gates don't overlap or double-report.
+version = 2
+
+[sources]
+# Only allow crates from the default crates.io registry.
+unknown-registry = "deny"
+unknown-git = "deny"

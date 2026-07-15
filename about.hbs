@@ -1,0 +1,35 @@
+# Third-Party Notices
+
+Ethernet Gateway (`ethernetgateway`) is licensed under GPL-3.0-or-later.
+It builds on the open-source Rust crates listed below. This file reproduces
+their copyright notices and license texts as required by their respective
+licenses.
+
+**This file is generated** by [`cargo-about`](https://github.com/EmbarkStudios/cargo-about)
+from `about.toml` + `about.hbs`. Do not edit by hand — regenerate with:
+
+```sh
+cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+```
+
+{{#each overview}}
+- {{count}} crate(s) under **{{name}}** ({{id}})
+{{/each}}
+
+---
+
+{{#each licenses}}
+## {{name}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+---
+
+{{/each}}

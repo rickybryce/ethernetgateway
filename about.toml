@@ -1,0 +1,49 @@
+# cargo-about configuration — generates THIRD-PARTY-NOTICES.md.
+#
+# Regenerate after any dependency change with:
+#   cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+#
+# This satisfies the attribution obligation carried by the permissive
+# licenses (MIT / BSD / Apache-2.0 / ISC / Zlib / ...) in the
+# dependency tree: their copyright notices and license text must be
+# reproduced in the distribution.
+
+# Accept a license fulfilled on any target — we ship cross-platform
+# (Linux/macOS/Windows), so per-target dependencies (winapi, objc2,
+# wayland, ...) should all be included in the notices.
+accepted = [
+    "GPL-3.0-or-later",
+    "GPL-3.0",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+]
+
+# Include license info for all targets so the notices file is complete
+# regardless of which platform generated it.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+]
+
+# Our own crate is the workspace root; don't list it as a third party.
+workarounds = []

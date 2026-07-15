@@ -75,6 +75,21 @@ jobs:
       - run: cargo fmt --all -- --check
         continue-on-error: true  # advisory only; this repo doesn't enforce rustfmt style
 
+  licenses:
+    name: cargo deny (license policy)
+    runs-on: ubuntu-latest
+    # Enforces the GPL-3-compatible license allowlist in `deny.toml`.
+    # Fails the build if a dependency carries a copyleft-incompatible
+    # license (e.g. GPL-2.0-only, AGPL) or an unknown/unlicensed one,
+    # so an incompatible crate can never land silently.  Unlike the
+    # advisory `rustfmt`/`audit` jobs, this one GATES (no
+    # continue-on-error): a license regression is a real problem.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   audit:
     name: cargo audit (CVE scan)
     runs-on: ubuntu-latest
