@@ -1061,15 +1061,20 @@ where
                 continue;
             }
             ZFIN => {
-                // Sender announces end of batch.  Mirror the ZFIN and stop.
-                // Per Forsberg §8.4 the "OO" over-and-out trailer is sent by
-                // the ZFIN *initiator* (the sender) after it reads our ZFIN;
-                // the receiver replies ZFIN and then *reads* OO.  Emitting our
-                // own OO here was a role inversion (M-1) — harmless in
-                // practice (the peer has already sent its OO and exited, so
-                // the bytes are discarded) but a protocol deviation.  The
-                // send path emits OO correctly.
+                // Sender announces end of batch.  Reply ZFIN, then drain the
+                // sender's "OO" over-and-out trailer (Forsberg §8.4): after it
+                // reads our ZFIN the sender emits two 'O' bytes and exits.  We
+                // must consume them (Z2) — left in the stream they surface as
+                // spurious "OO" input in the terminal session that resumes
+                // after the transfer.  Best-effort with a short per-byte
+                // timeout: a peer that omits OO (or already exited) just times
+                // out harmlessly.  (Emitting our *own* OO here would be a role
+                // inversion — the send path is the OO initiator, §8.4.)
                 send_zfin(writer, is_tcp, verbose).await?;
+                let drained = drain_oo_trailer(reader, is_tcp, &mut state).await;
+                if verbose {
+                    glog!("ZMODEM recv: drained {} byte(s) of sender 'OO' trailer", drained);
+                }
                 break;
             }
             ZABORT => {
@@ -1297,8 +1302,97 @@ where
     let frame_timeout = cfg.zmodem_frame_timeout;
     let max_retries = cfg.zmodem_max_retries;
 
-    // Read ZFILE subpacket: filename \0 size [modtime [mode [...]]] \0
-    let sub = read_subpacket(reader, is_tcp, state, crc_kind, MAX_SUBPACKET_DATA, frame_timeout).await?;
+    // Read the ZFILE info subpacket (filename \0 size [modtime [mode [...]]] \0)
+    // with ZNAK/retry discipline (Z1).  A transient error here — CRC
+    // mismatch, truncation, or a stall — previously propagated via `?` and
+    // aborted the *entire* batch, even though the enclosing ZFILE header is
+    // itself retry-protected.  Per Forsberg §7 the receiver ZNAKs and the
+    // sender retransmits the whole ZFILE frame (header + subpacket); this
+    // mirrors the inter-file header-error recovery above.  Every anomaly
+    // (bad subpacket, garbled/late resent header, timeout, stray control
+    // frame) is bounded by one shared counter against `max_retries`, so a
+    // permanently broken link still cancels instead of looping forever.
+    let mut zfile_crc_kind = crc_kind;
+    let mut zfile_errors: u32 = 0;
+    let sub = 'read_zfile: loop {
+        match read_subpacket(reader, is_tcp, state, zfile_crc_kind, MAX_SUBPACKET_DATA, frame_timeout).await {
+            Ok(s) => break 'read_zfile s,
+            Err(e) => {
+                if is_peer_cancel(&e) {
+                    if verbose {
+                        glog!("ZMODEM recv: peer cancelled during ZFILE info-subpacket");
+                    }
+                    return Err(e);
+                }
+                zfile_errors = zfile_errors.saturating_add(1);
+                if zfile_errors > max_retries {
+                    send_cancel(writer, is_tcp).await.ok();
+                    return Err(format!(
+                        "ZMODEM: {} consecutive ZFILE info-subpacket errors, aborting",
+                        zfile_errors
+                    ));
+                }
+                if verbose {
+                    glog!("ZMODEM recv: ZFILE info-subpacket error ({}), sending ZNAK for retransmit", e);
+                }
+                send_znak(writer, is_tcp, verbose).await?;
+            }
+        }
+
+        // ZNAK sent: the sender retransmits the whole ZFILE frame.  Consume
+        // the resent header, then loop back to re-read its subpacket.
+        'await_retransmit: loop {
+            let h = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(frame_timeout),
+                read_header(reader, is_tcp, state, verbose),
+            )
+            .await
+            {
+                Ok(Ok(h)) => h,
+                Ok(Err(e)) if is_peer_cancel(&e) => return Err(e),
+                Ok(Err(_)) | Err(_) => {
+                    // Garbled/late header or timeout awaiting the retransmit.
+                    zfile_errors = zfile_errors.saturating_add(1);
+                    if zfile_errors > max_retries {
+                        send_cancel(writer, is_tcp).await.ok();
+                        return Err(format!(
+                            "ZMODEM: {} errors awaiting ZFILE retransmit, aborting",
+                            zfile_errors
+                        ));
+                    }
+                    if verbose {
+                        glog!("ZMODEM recv: bad/absent header awaiting ZFILE retransmit, re-NAK");
+                    }
+                    send_znak(writer, is_tcp, verbose).await?;
+                    continue 'await_retransmit;
+                }
+            };
+            match h.frame {
+                ZFILE => {
+                    zfile_crc_kind = h.crc_kind;
+                    continue 'read_zfile;
+                }
+                ZABORT => return Err("ZMODEM: sender aborted".into()),
+                other => {
+                    // Stray control frame (e.g. a duplicate ZRQINIT) — count
+                    // it so a chatty peer can't loop us forever, and keep
+                    // waiting for the retransmitted ZFILE.
+                    zfile_errors = zfile_errors.saturating_add(1);
+                    if zfile_errors > max_retries {
+                        send_cancel(writer, is_tcp).await.ok();
+                        return Err(format!(
+                            "ZMODEM: {} stray frames awaiting ZFILE retransmit, aborting",
+                            zfile_errors
+                        ));
+                    }
+                    if verbose {
+                        glog!("ZMODEM recv: ignoring frame 0x{:02X} awaiting ZFILE retransmit", other);
+                    }
+                    continue 'await_retransmit;
+                }
+            }
+        }
+    };
     let info = parse_zfile_info(&sub.data)?;
     let filename = info.filename;
     let expected_size = info.length;
@@ -2185,6 +2279,33 @@ async fn send_zfin(
         glog!("ZMODEM: sent ZFIN");
     }
     Ok(())
+}
+
+/// Drain the sender's "OO" over-and-out trailer after we reply to a ZFIN
+/// (Forsberg §8.4).  On the receive path the sender is the ZFIN initiator:
+/// once it reads our ZFIN it emits two 'O' bytes and exits.  Left unread
+/// they leak into the terminal session that resumes after the transfer
+/// (Z2).  Best-effort — reads up to two bytes, stopping early on a non-'O'
+/// byte, EOF, error, or a short per-byte timeout, and returns how many 'O's
+/// it consumed.  A peer that omits OO (or already exited) just times out.
+async fn drain_oo_trailer(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    state: &mut ReadState,
+) -> u8 {
+    let mut drained = 0u8;
+    for _ in 0..2 {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            nvt_read_byte(reader, is_tcp, state),
+        )
+        .await
+        {
+            Ok(Ok(b'O')) => drained += 1,
+            _ => break,
+        }
+    }
+    drained
 }
 
 /// Send a ZNAK hex header.  Per Forsberg §7 the receiver sends ZNAK to
@@ -3443,6 +3564,8 @@ mod tests {
             match read_header(&mut m_read, false, &mut st, false).await {
                 Ok(h) if h.frame == ZRINIT => {
                     m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+                    // Sender's "OO" trailer (§8.4) so the OO drain is instant.
+                    m_write.write_all(b"OO").await.unwrap();
                     break;
                 }
                 Ok(_) => continue,
@@ -3454,6 +3577,134 @@ mod tests {
         assert_eq!(files.len(), 1, "exactly one file after the ZSTDERR note");
         assert_eq!(files[0].filename, "after_stderr.txt");
         assert_eq!(files[0].data, body, "file body intact across ZSTDERR drain");
+    }
+
+    // ─── Z1: ZFILE info-subpacket NAK/retry recovery ─────────
+
+    #[tokio::test]
+    async fn test_receiver_znaks_and_recovers_bad_zfile_subpacket() {
+        // Z1: a corrupt ZFILE info subpacket must NOT kill the batch.  The
+        // receiver ZNAKs, the sender retransmits the whole ZFILE frame, and
+        // the transfer completes.  Regression for the old bare-`?` on the
+        // info-subpacket read, which aborted the entire session on a single
+        // bit-flip in the filename/size subpacket.
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (r_read, r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        let recv = tokio::spawn(async move {
+            let (mut r_read, mut r_write) = (r_read, r_write);
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await
+        });
+
+        let mut st = ReadState::default();
+        // Opening ZRINIT.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading opening ZRINIT: {}", e),
+            }
+        }
+
+        let body = b"body that survives a ZFILE retransmit";
+        let mut info = Vec::new();
+        info.extend_from_slice(b"recovered.txt\0");
+        info.extend_from_slice(format!("{} 0 0 0 0 {}", body.len(), body.len()).as_bytes());
+        info.push(0);
+
+        // First ZFILE: valid framing, corrupted subpacket CRC.  Flip one
+        // plain payload byte ('r'→'s', neither needs ZDLE escaping) so the
+        // CRC computed over the received data no longer matches.
+        let mut bad_zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
+        let mut bad_sub = build_subpacket(&info, ZCRCW);
+        bad_sub[0] ^= 0x01;
+        bad_zfile.extend_from_slice(&bad_sub);
+        m_write.write_all(&bad_zfile).await.unwrap();
+
+        // Receiver must ZNAK the bad subpacket (not abort).
+        match read_header(&mut m_read, false, &mut st, false).await {
+            Ok(h) if h.frame == ZNAK => {}
+            Ok(h) => panic!("expected ZNAK after bad ZFILE subpacket, got 0x{:02X}", h.frame),
+            Err(e) => panic!("waiting for ZNAK: {}", e),
+        }
+
+        // Retransmit the ZFILE frame intact.
+        let mut good_zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
+        good_zfile.extend_from_slice(&build_subpacket(&info, ZCRCW));
+        m_write.write_all(&good_zfile).await.unwrap();
+
+        // Normal completion: ZRPOS → ZDATA → ZEOF → ZFIN.
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRPOS => break,
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for ZRPOS: {}", e),
+            }
+        }
+        let mut data_frame = build_bin16_header(ZDATA, 0u32.to_le_bytes());
+        data_frame.extend_from_slice(&build_subpacket(body, ZCRCE));
+        m_write.write_all(&data_frame).await.unwrap();
+        m_write
+            .write_all(&build_hex_header(ZEOF, (body.len() as u32).to_le_bytes()))
+            .await
+            .unwrap();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRINIT => {
+                    m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+                    // A real sender emits "OO" after our ZFIN (§8.4); send it
+                    // so the receiver's OO drain completes at once.
+                    m_write.write_all(b"OO").await.unwrap();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("waiting for post-ZEOF ZRINIT: {}", e),
+            }
+        }
+
+        let files = recv.await.unwrap().expect("receive failed after ZFILE retransmit");
+        assert_eq!(files.len(), 1, "one file after ZFILE retransmit");
+        assert_eq!(files[0].filename, "recovered.txt");
+        assert_eq!(files[0].data, body, "file body intact after retransmit");
+    }
+
+    // ─── Z2: sender OO over-and-out trailer is drained ───────
+
+    #[tokio::test]
+    async fn test_drain_oo_trailer_consumes_two_o_bytes() {
+        // Z2: after our ZFIN the sender emits "OO" and exits (§8.4).  The
+        // drain consumes exactly those two 'O' bytes and leaves anything
+        // after them in the stream (so it can't over-read into a following
+        // session).  Regression for the OO bytes leaking into the terminal.
+        let (mut client, mut server) = tokio::io::duplex(64);
+        server.write_all(b"OOZ").await.unwrap();
+        let mut st = ReadState::default();
+        let n = drain_oo_trailer(&mut client, false, &mut st).await;
+        assert_eq!(n, 2, "both OO bytes drained");
+        // The sentinel 'Z' after OO must remain readable.
+        let mut buf = [0u8; 1];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], b'Z', "byte after OO left in the stream");
+    }
+
+    #[tokio::test]
+    async fn test_drain_oo_trailer_stops_on_non_o() {
+        // Bound + early-stop: the drain reads at most two bytes and counts
+        // only 'O's.  Feed "Oxy": it consumes 'O' (count 1) then the probe
+        // byte 'x' (non-'O' → stop), leaving 'y' untouched.  This proves it
+        // never reads past the second byte, so it can't swallow more than
+        // the trailer from a following session.  (Consuming the single probe
+        // byte is inherent — you must read a byte to learn it isn't 'O' —
+        // and harmless: a conforming sender emits exactly "OO", §8.4.)
+        let (mut client, mut server) = tokio::io::duplex(64);
+        server.write_all(b"Oxy").await.unwrap();
+        let mut st = ReadState::default();
+        let n = drain_oo_trailer(&mut client, false, &mut st).await;
+        assert_eq!(n, 1, "one 'O' counted, stopped at the non-'O' probe byte");
+        let mut buf = [0u8; 1];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], b'y', "drain read at most two bytes; 'y' left intact");
     }
 
     #[tokio::test]
@@ -3535,6 +3786,8 @@ mod tests {
         // "no files received" error, which is fine — we only assert
         // that it answered the query.
         m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
+        // Sender's "OO" trailer (§8.4) so the receiver's OO drain is instant.
+        m_write.write_all(b"OO").await.unwrap();
         let _ = recv.await.unwrap();
     }
 

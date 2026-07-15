@@ -44,6 +44,17 @@ const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
 const MAX_BATCH_FILES: usize = 1000;
 /// Time allowed for the full 131-byte block body (after SOH) to arrive.
 const BLOCK_BODY_TIMEOUT_SECS: u64 = 60;
+/// Auto-detect (first block only) grace window for the SECOND CRC trailer
+/// byte.  A genuine CRC sender writes the low byte back-to-back with the
+/// high byte, so it always arrives well within this window.  A strict
+/// lock-step checksum-only sender (vintage Christensen 1977 / CP/M MODEM7 /
+/// C64 BBS uploader that ignored our 'C') instead emits ONE trailer byte and
+/// waits for our ACK/NAK — an unconditional second read would then block for
+/// the full `BLOCK_BODY_TIMEOUT_SECS` (X1).  When the low byte does not
+/// arrive in this window we conclude there is no second trailer byte and fall
+/// back to 1-byte-checksum validation.  Kept generous enough that inter-byte
+/// jitter on a real CRC trailer can never be mistaken for its absence.
+const AUTO_DETECT_TRAILER_TIMEOUT_SECS: u64 = 3;
 
 /// Classification of the block read between YMODEM batch files (after an EOT).
 enum InterFileBlock0 {
@@ -878,7 +889,11 @@ async fn receive_block_body(
     enum AutoDetect {
         None,
         LockToCrc,
-        LockToChecksum { pushback: u8 },
+        // `pushback` is `Some` for a *streaming* checksum sender (the byte
+        // read past the 1-byte checksum trailer is the next block's leading
+        // byte and must be restored) and `None` for a *lock-step* checksum
+        // sender that sent only the single trailer byte (nothing to restore).
+        LockToChecksum { pushback: Option<u8> },
     }
     let mut detected = AutoDetect::None;
 
@@ -910,33 +925,72 @@ async fn receive_block_body(
         }
         TransferMode::Crc16 => {
             let crc_hi = nvt_read_byte(reader, is_tcp, state).await?;
-            let crc_lo = nvt_read_byte(reader, is_tcp, state).await?;
-            let recv_crc = ((crc_hi as u16) << 8) | crc_lo as u16;
-            let calc_crc = crc16_xmodem(&data);
-            if verbose { glog!("XMODEM recv block: CRC recv=0x{:04X} calc=0x{:04X}", recv_crc, calc_crc); }
-            if recv_crc == calc_crc {
-                true
-            } else if auto_detect {
-                // Mismatch on the first block — sender may be in
-                // checksum mode (vintage Christensen 1977 / CP/M
-                // MODEM7 / C64 BBS uploaders that don't speak CRC
-                // and ignored our 'C' until we NAK'd).  Validate
-                // crc_hi as a 1-byte checksum on the payload.  If
-                // it matches, crc_lo was actually the next byte on
-                // the wire (next block's SOH or EOT) — push it back
-                // for the next read.  Defer the lock + pushback
-                // commit until we're sure the rest of the block is
-                // acceptable.
-                let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
-                if crc_hi == calc_checksum {
-                    if verbose { glog!("XMODEM recv block: auto-detect would lock to Checksum (sum=0x{:02X}, would push back trailer byte 0x{:02X})", calc_checksum, crc_lo); }
-                    detected = AutoDetect::LockToChecksum { pushback: crc_lo };
-                    true
-                } else {
-                    false
+            // Read the CRC low byte.  On the first block (auto-detect) a
+            // strict lock-step checksum-only sender emits just ONE trailer
+            // byte and then waits for our ACK/NAK, so an unconditional second
+            // read would stall until the 60 s block-body timeout (X1).  Gate
+            // it behind a short grace window: a real CRC sender's low byte
+            // follows the high byte back-to-back and is already here, so the
+            // timeout never fires for it; if nothing arrives we treat the
+            // block as having no second trailer byte.  After the first block
+            // the mode is locked, so we block unconditionally (a slow link
+            // must never be mistaken for a missing byte).
+            let crc_lo = if auto_detect {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(AUTO_DETECT_TRAILER_TIMEOUT_SECS),
+                    nvt_read_byte(reader, is_tcp, state),
+                )
+                .await
+                {
+                    Ok(b) => Some(b?),
+                    Err(_) => None,
                 }
             } else {
-                false
+                Some(nvt_read_byte(reader, is_tcp, state).await?)
+            };
+            let calc_crc = crc16_xmodem(&data);
+            match crc_lo {
+                Some(crc_lo) => {
+                    let recv_crc = ((crc_hi as u16) << 8) | crc_lo as u16;
+                    if verbose { glog!("XMODEM recv block: CRC recv=0x{:04X} calc=0x{:04X}", recv_crc, calc_crc); }
+                    if recv_crc == calc_crc {
+                        true
+                    } else if auto_detect {
+                        // Two trailer bytes arrived but CRC failed — sender
+                        // may be a *streaming* checksum peer (Christensen 1977
+                        // / CP/M MODEM7 / C64 BBS uploader that ignored our
+                        // 'C' until we NAK'd).  Validate crc_hi as a 1-byte
+                        // checksum; if it matches, crc_lo was actually the
+                        // next block's leading byte (SOH/EOT) — push it back.
+                        // Defer the lock + pushback until the block passes the
+                        // remaining checks.
+                        let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                        if crc_hi == calc_checksum {
+                            if verbose { glog!("XMODEM recv block: auto-detect would lock to Checksum (sum=0x{:02X}, would push back trailer byte 0x{:02X})", calc_checksum, crc_lo); }
+                            detected = AutoDetect::LockToChecksum { pushback: Some(crc_lo) };
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                None => {
+                    // Auto-detect only: no second trailer byte within the
+                    // grace window — a *lock-step* checksum-only sender that
+                    // sent just the single checksum byte and is now waiting
+                    // for our ACK/NAK.  Validate crc_hi as the whole 1-byte
+                    // checksum; there is no byte to push back.
+                    let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                    if verbose { glog!("XMODEM recv block: auto-detect saw one trailer byte (checksum recv=0x{:02X} calc=0x{:02X})", crc_hi, calc_checksum); }
+                    if crc_hi == calc_checksum {
+                        detected = AutoDetect::LockToChecksum { pushback: None };
+                        true
+                    } else {
+                        false
+                    }
+                }
             }
         }
     };
@@ -973,9 +1027,16 @@ async fn receive_block_body(
             *mode = TransferMode::Crc16;
         }
         AutoDetect::LockToChecksum { pushback } => {
-            if verbose { glog!("XMODEM recv block: locking session to Checksum, pushing back 0x{:02X}", pushback); }
             *mode = TransferMode::Checksum;
-            state.pushback = Some(pushback);
+            match pushback {
+                Some(b) => {
+                    if verbose { glog!("XMODEM recv block: locking session to Checksum, pushing back 0x{:02X}", b); }
+                    state.pushback = Some(b);
+                }
+                None => {
+                    if verbose { glog!("XMODEM recv block: locking session to Checksum (lone trailer byte, nothing to push back)"); }
+                }
+            }
         }
     }
 
@@ -2507,6 +2568,60 @@ mod tests {
         assert_eq!(state.pushback, Some(next_block_soh),
             "the byte read past the 1-byte checksum trailer must be pushed back");
         assert_eq!(expected, 2);
+    }
+
+    /// X1: mode = CRC (auto-detect) but the sender is a *strict lock-step*
+    /// checksum-only peer — it sends the 128-byte block plus ONE checksum
+    /// trailer byte and then waits for our ACK/NAK.  Unlike the streaming
+    /// case above there is no next-block byte behind the checksum, so the
+    /// CRC low-byte read must not block: after a short grace window the
+    /// receiver falls back to 1-byte-checksum validation, accepts the block,
+    /// and locks to checksum with nothing pushed back — instead of stalling
+    /// for the full 60 s block-body timeout.
+    ///
+    /// The sender's silence is modeled with a duplex whose write half stays
+    /// open so the missing low byte *pends* (exactly as against a waiting
+    /// lock-step peer); a `Cursor` would hit EOF and never exercise the
+    /// timeout path.  The paused clock makes the grace window elapse at once.
+    #[tokio::test(start_paused = true)]
+    async fn test_receive_block_body_auto_detect_lockstep_checksum_only() {
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE).map(|i| (i * 13) as u8).collect();
+        let checksum = payload.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+
+        let (mut reader, mut writer) = tokio::io::duplex(1024);
+        // Data block + exactly ONE trailer byte (the checksum), then silence.
+        writer.write_all(&payload).await.unwrap();
+        writer.write_all(&[checksum]).await.unwrap();
+        // `writer` is intentionally kept alive below so the absent CRC low
+        // byte pends (a lock-step sender awaiting our ACK) rather than EOFing.
+
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Crc16;
+
+        let result = receive_block_body(
+            &mut reader,
+            1,
+            !1u8,
+            &mut expected,
+            &mut mode,
+            false, // is_tcp
+            false, // verbose
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            true, // auto_detect
+        )
+        .await
+        .expect("lock-step checksum block must validate via the timeout fallback");
+
+        assert_eq!(result, payload, "payload recovered from the checksum-only block");
+        assert!(matches!(mode, TransferMode::Checksum),
+            "session must lock to checksum after the lone-trailer fallback");
+        assert!(state.pushback.is_none(),
+            "no second trailer byte, so nothing may be pushed back");
+        assert_eq!(expected, 2, "expected block advanced after acceptance");
+
+        drop(writer); // release the deliberately kept-alive write half
     }
 
     /// Auto-detect must NOT commit its mode flip / pushback if the

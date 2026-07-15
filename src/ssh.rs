@@ -610,6 +610,18 @@ impl russh::server::Handler for SshHandler {
             glog!("SSH: auth from {} rejected (locked out)", ip);
             return Ok(russh::server::Auth::reject());
         }
+        // Refuse auth outright if the *configured* username or password is
+        // empty (N2).  SSH deliberately ignores `security_enabled` and has no
+        // unauthenticated mode, so a blanked credential must not become an
+        // accept-anything server: `constant_time_eq(b"", b"")` is `true`, so
+        // without this an operator who clears the password would turn the SSH
+        // port (bound `0.0.0.0`) into an open shell bridge.  Checked before
+        // the comparison so an empty stored secret can never match a supplied
+        // empty one.
+        if self.username.is_empty() || self.password.is_empty() {
+            glog!("SSH: auth rejected — configured SSH username/password is empty");
+            return Ok(russh::server::Auth::reject());
+        }
         // Constant-time comparison to prevent timing attacks.
         let user_ok =
             telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
@@ -1237,6 +1249,65 @@ mod tests {
         drop(h2);
         drop(h1);
         assert_eq!(session_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// N2: an empty configured username or password must reject ALL auth
+    /// (including an empty supplied credential) rather than turn the SSH
+    /// port into an open shell.  `constant_time_eq(b"", b"")` is `true`, so
+    /// without the `is_empty()` guard a blanked password would accept any
+    /// login that also sent an empty password.
+    #[tokio::test]
+    async fn test_auth_password_rejects_empty_configured_credentials() {
+        use russh::server::{Auth, Handler};
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let make = |user: &str, pass: &str| SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: session_count.clone(),
+            max_sessions: 2,
+            username: user.into(),
+            password: pass.into(),
+            peer_addr: Some("10.0.0.2".parse().unwrap()),
+            duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            counted: false,
+        };
+
+        // Empty configured password: reject a matching-empty password (the
+        // exact open-server case) and claim no slot.
+        {
+            let mut h = make("admin", "");
+            assert!(matches!(
+                h.auth_password("admin", "").await.unwrap(),
+                Auth::Reject { .. }
+            ));
+            assert!(!h.counted);
+        }
+        // Empty configured username: same refusal.
+        {
+            let mut h = make("", "secret");
+            assert!(matches!(
+                h.auth_password("", "secret").await.unwrap(),
+                Auth::Reject { .. }
+            ));
+            assert!(!h.counted);
+        }
+        // Both empty: still rejected.
+        {
+            let mut h = make("", "");
+            assert!(matches!(
+                h.auth_password("", "").await.unwrap(),
+                Auth::Reject { .. }
+            ));
+        }
+        assert_eq!(
+            session_count.load(Ordering::SeqCst),
+            0,
+            "no empty-credential path may claim a session slot"
+        );
     }
 
     /// A locked-out IP is rejected even with correct credentials, and the

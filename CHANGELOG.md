@@ -12,6 +12,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both `README.md` and the user manual (`usermanual.html`), including a note
   that portions of the project were developed with the assistance of AI tools.
 
+### Fixed
+- **XMODEM receive: auto-detect no longer stalls 60 s against a strict
+  lock-step checksum-only sender (X1).** On the first block, when the session
+  is in CRC mode but the sender emits a single 1-byte checksum trailer and then
+  waits for our ACK/NAK (vintage Christensen 1977 / CP/M MODEM7 / C64 BBS
+  uploaders that ignore our `C`), the CRC low-byte read is now gated behind a
+  short grace window: if no second trailer byte arrives, the receiver falls
+  back to 1-byte-checksum validation and locks to checksum mode instead of
+  blocking until the full block-body timeout. A genuine CRC sender's low byte
+  arrives back-to-back and is unaffected; after the first block the mode is
+  locked and the read blocks unconditionally.
+- **ZMODEM receive: a corrupt ZFILE info subpacket no longer aborts the whole
+  batch (Z1).** The filename/size subpacket is now read with the same
+  ZNAK/retry discipline as the data phase — per Forsberg §7 the receiver ZNAKs
+  and the sender retransmits the ZFILE frame — so a single bit-flip or
+  truncation in the metadata is recovered instead of killing the transfer.
+  Bounded by `zmodem_max_retries`, so a permanently broken link still cancels.
+- **ZMODEM receive: the sender's "OO" over-and-out trailer is now drained
+  (Z2).** After replying to ZFIN the receiver consumes the two `O` bytes the
+  sender emits per §8.4; previously they leaked into the terminal session that
+  resumed after the transfer as spurious `OO` input. Best-effort with a short
+  timeout — a peer that omits OO is unaffected.
+- **SSH: reject auth when the configured username or password is empty (N2).**
+  Because `constant_time_eq(b"", b"")` is `true` and SSH has no
+  unauthenticated mode, an operator who blanked the password would otherwise
+  turn the SSH port into an open shell bridge. Auth is now refused outright
+  when either stored credential is empty.
+
 ## [0.6.4] - 2026-07-14
 
 ### Added
