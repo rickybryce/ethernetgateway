@@ -597,6 +597,14 @@ pub(crate) struct TelnetSession {
     restart: Arc<AtomicBool>,
     current_menu: Menu,
     terminal_type: TerminalType,
+    /// Whether colorized output is emitted.  Kept separate from
+    /// `terminal_type` so declining color does not discard the terminal's
+    /// encoding/layout: a PETSCII (C64) caller who answers "no color" stays
+    /// PETSCII — 40 columns, case-swapped, ANSI-stripped on gateways — and
+    /// merely gets plain text instead of PETSCII color codes.  Set from the
+    /// color prompt in `detect_terminal_type`; the color helpers
+    /// (`green`/`red`/…) return the text unchanged when this is false.
+    color_enabled: bool,
     erase_char: u8,
     lockouts: LockoutMap,
     peer_addr: Option<IpAddr>,
@@ -695,6 +703,7 @@ impl TelnetSession {
             restart,
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ascii,
+            color_enabled: true,
             erase_char: 0x7F,
             lockouts,
             peer_addr: None,
@@ -751,6 +760,7 @@ impl TelnetSession {
             restart,
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ansi,
+            color_enabled: true,
             erase_char: 0x7F,
             lockouts,
             peer_addr,
@@ -823,6 +833,7 @@ impl TelnetSession {
             restart,
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ascii,
+            color_enabled: true,
             erase_char: 0x7F,
             lockouts,
             peer_addr,
@@ -1394,6 +1405,7 @@ pub fn start_server(
                                     restart: rs,
                                     current_menu: Menu::Main,
                                     terminal_type: TerminalType::Ansi,
+                                    color_enabled: true,
                                     erase_char: 0x7F,
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),

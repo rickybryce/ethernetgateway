@@ -422,6 +422,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         restart: Arc::new(AtomicBool::new(false)),
         current_menu: Menu::Main,
         terminal_type,
+        color_enabled: true,
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
@@ -473,6 +474,7 @@ fn make_test_session_with_peer(
         restart: Arc::new(AtomicBool::new(false)),
         current_menu: Menu::Main,
         terminal_type,
+        color_enabled: true,
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
@@ -5554,4 +5556,43 @@ fn test_cpm_looks_binary() {
     assert!(TelnetSession::looks_binary(&[0x01, 0x02, 0x03, 0x04, 0x05, b'a']));
     // High-bit bytes (PETSCII / Latin-1) are not treated as control.
     assert!(!TelnetSession::looks_binary(&[0xC1; 32]));
+}
+
+// ─── Color independent of terminal encoding (C64 no-color fix) ──
+
+/// Declining color must not downgrade a PETSCII terminal to ASCII: the
+/// terminal type (hence 40-column layout + case-swap) is preserved and the
+/// color helpers simply return plain text.  Regression for the C64 bug where
+/// "no color" collapsed PETSCII to 80-column ASCII.
+#[test]
+fn test_color_disabled_keeps_encoding_returns_plain() {
+    let mut s = make_test_session(TerminalType::Petscii);
+    // Default (color on): PETSCII color codes wrap the text.
+    assert_ne!(s.green("HI"), "HI");
+    assert!(s.green("HI").contains("HI"));
+
+    // Color off: plain text, but still PETSCII.
+    s.color_enabled = false;
+    for got in [
+        s.green("HI"), s.red("HI"), s.cyan("HI"), s.yellow("HI"),
+        s.amber("HI"), s.dim("HI"), s.blue("HI"), s.white("HI"),
+    ] {
+        assert_eq!(got, "HI", "color-disabled helper must return plain text");
+    }
+    assert_eq!(
+        s.terminal_type,
+        TerminalType::Petscii,
+        "declining color must not change the terminal encoding"
+    );
+    // The 40-column PETSCII separator is unaffected by the color choice.
+    assert_eq!(s.separator().len(), PETSCII_WIDTH - 1);
+}
+
+/// ANSI with color enabled still emits ANSI escapes; ASCII is always plain.
+#[test]
+fn test_color_enabled_matrix() {
+    let ansi = make_test_session(TerminalType::Ansi);
+    assert!(ansi.green("X").contains('\x1b'), "ANSI + color → escape codes");
+    let ascii = make_test_session(TerminalType::Ascii);
+    assert_eq!(ascii.green("X"), "X", "ASCII is always plain even with color on");
 }

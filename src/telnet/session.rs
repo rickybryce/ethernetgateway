@@ -206,13 +206,21 @@ impl TelnetSession {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         self.drain_input().await;
 
+        // Color is tracked independently of the terminal encoding, so
+        // declining it never discards the layout.  Previously "no color"
+        // was implemented by forcing TerminalType::Ascii, which dropped a
+        // C64 caller out of PETSCII (40 columns, case-swap, gateway ANSI-
+        // strip) into 80-column ASCII — visibly wrong on real hardware.
+        self.color_enabled = accepted;
         if accepted {
+            // A dumb/unknown (ASCII) terminal that opts into color has no
+            // color encoding of its own, so treat it as ANSI.  PETSCII and
+            // ANSI keep their detected type.
             if self.terminal_type == TerminalType::Ascii {
                 self.terminal_type = TerminalType::Ansi;
-                self.send_raw(b"ANSI color enabled.\r\n").await?;
             }
-        } else if self.terminal_type != TerminalType::Ascii {
-            self.terminal_type = TerminalType::Ascii;
+            self.send_raw(b"Color enabled.\r\n").await?;
+        } else {
             self.send_raw(b"Color disabled.\r\n").await?;
         }
 

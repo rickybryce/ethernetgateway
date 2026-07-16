@@ -43,6 +43,9 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) fn green(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_GREEN, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_GREEN, text),
@@ -50,6 +53,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn red(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_RED, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_RED, text),
@@ -57,6 +63,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn cyan(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_CYAN, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_CYAN, text),
@@ -64,6 +73,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn yellow(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_YELLOW, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_YELLOW, text),
@@ -71,6 +83,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn amber(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_AMBER, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_YELLOW, text),
@@ -78,6 +93,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn dim(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_DIM, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_LIGHT_GRAY, text),
@@ -85,6 +103,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn blue(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_BLUE, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_LIGHT_BLUE, text),
@@ -92,6 +113,9 @@ impl TelnetSession {
         }
     }
     pub(in crate::telnet) fn white(&self, text: &str) -> String {
+        if !self.color_enabled {
+            return text.to_string();
+        }
         match self.terminal_type {
             TerminalType::Ansi => format!("{}{}{}", ANSI_WHITE, text, ANSI_RESET),
             TerminalType::Petscii => Self::petscii_color(PETSCII_WHITE, text),

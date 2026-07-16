@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **PETSCII: declining color no longer drops a Commodore terminal to ASCII.**
+  Color was tracked implicitly by the terminal type, so answering "N" to the
+  color prompt forced `TerminalType::Ascii` — which also discarded PETSCII's
+  40-column, case-swapped, ANSI-stripped layout, leaving a C64 caller in an
+  80-column ASCII view. Color is now a separate `color_enabled` flag: declining
+  color keeps the detected terminal type (PETSCII stays PETSCII) and simply
+  emits plain text. Also makes the SSH/telnet gateway's PETSCII handling correct
+  for a no-color C64.
 - **Serial: a serial-manager thread can no longer panic on a dropped runtime
   across a config restart (round-7 review).** The detached serial threads
   `block_on` the tokio runtime, but a SIGHUP restart dropped the runtime
