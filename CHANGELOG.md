@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Web browser: a hostile page can no longer soft-DoS the render thread with
+  form-label lookups (round-6 F1).** Each form field with an `id` but no
+  placeholder/aria-label/title triggered a full recursive walk of the form
+  subtree looking for `<label for="id">` — O(fields × subtree), so a page of
+  tens of thousands of bare `<input id=…>` (under the 1 MB body cap) cost
+  quadratic CPU on a shared `spawn_blocking` thread with no render time budget.
+  Labels are now collected in a single O(subtree) pass into an id→label map;
+  per-field lookup is O(1).
+- **Weather: a malformed forecast timestamp no longer panics the fetch
+  (round-6).** The MET.no forecast parse sliced the first 10 bytes of the
+  `time` field guarded by byte length only; a timestamp with a multibyte char
+  in the first 10 bytes would panic on a mid-character boundary. It now uses a
+  char-boundary-safe accessor and skips a malformed entry. (Was contained to a
+  single weather fetch by `spawn_blocking`, never a process crash.)
 - **Serial: dialing a console-mode port relayed to the master no longer wedges
   the caller's serial thread (round-5 review).** On a slave gateway with
   `allow_peer_dial` on, `ATD <ConsolePort>@<local-ip>` reached a local console

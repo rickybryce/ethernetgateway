@@ -852,7 +852,11 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
 
             let mut fields = Vec::new();
             let mut submit_label = None;
-            extract_form_fields(node, &mut fields, &mut submit_label, node);
+            // Build the id→label map once for the whole form (O(subtree)),
+            // then per-field lookup is O(1) — see get_field_label (F1).
+            let mut labels = std::collections::HashMap::new();
+            collect_field_labels(node, &mut labels);
+            extract_form_fields(node, &mut fields, &mut submit_label, &labels);
 
             let label = submit_label.unwrap_or_else(|| {
                 format!("Form {}", forms.len() + 1)
@@ -868,39 +872,44 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
 
 /// Try to find a human-readable label for a form field, checking (in order):
 /// placeholder, aria-label, title, associated <label> element, then field name.
-fn get_field_label(node: &Handle, field_name: &str, form_root: &Handle) -> String {
+///
+/// `labels` is a pre-built `id → label-text` map for the whole form (see
+/// [`collect_field_labels`]).  It replaces a per-field recursive subtree scan
+/// for `<label for="id">`: that was O(fields × subtree), so a hostile page of
+/// tens of thousands of bare `<input id=…>` (still under `MAX_BODY_SIZE`) cost
+/// quadratic CPU on a shared render thread with no time budget — a soft-DoS
+/// (round-6 F1).  The one-pass map makes the whole form O(subtree).
+fn get_field_label(
+    node: &Handle,
+    field_name: &str,
+    labels: &std::collections::HashMap<String, String>,
+) -> String {
     get_attr(node, "placeholder")
         .or_else(|| get_attr(node, "aria-label"))
         .or_else(|| get_attr(node, "title"))
-        .or_else(|| {
-            // Look for <label for="id"> in the form
-            let id = get_attr(node, "id")?;
-            find_label_for_id(form_root, &id)
-        })
+        .or_else(|| get_attr(node, "id").and_then(|id| labels.get(&id).cloned()))
         .unwrap_or_else(|| field_name.to_string())
 }
 
-/// Search the DOM subtree for a `<label for="target_id">` and return its text.
-fn find_label_for_id(node: &Handle, target_id: &str) -> Option<String> {
+/// Walk a form subtree ONCE, mapping each `<label for="id">`'s id to its text.
+/// First occurrence wins (matching the old depth-first-first search).  Built
+/// once per form so per-field label lookup is O(1) (round-6 F1).
+fn collect_field_labels(node: &Handle, labels: &mut std::collections::HashMap<String, String>) {
     if let Element { ref name, .. } = node.data
         && name.local.as_ref() == "label"
         && let Some(for_attr) = get_attr(node, "for")
-        && for_attr == target_id
     {
         let text = get_text_content(node);
         if !text.is_empty() {
-            return Some(text);
+            labels.entry(for_attr).or_insert(text);
         }
     }
     for child in node.children.borrow().iter() {
-        if let Some(label) = find_label_for_id(child, target_id) {
-            return Some(label);
-        }
+        collect_field_labels(child, labels);
     }
-    None
 }
 
-fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label: &mut Option<String>, form_root: &Handle) {
+fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label: &mut Option<String>, labels: &std::collections::HashMap<String, String>) {
     if let Element { ref name, .. } = node.data {
         let tag = name.local.as_ref();
         match tag {
@@ -927,7 +936,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
                     }
                     "checkbox" => {
                         if !field_name.is_empty() {
-                            let label = get_field_label(node, &field_name, form_root);
+                            let label = get_field_label(node, &field_name, labels);
                             let val = if value.is_empty() { "on".to_string() } else { value };
                             let checked = get_attr(node, "checked").is_some();
                             fields.push(FormField::Checkbox { name: field_name, value: val, checked, label });
@@ -944,7 +953,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
                     "image" | "button" | "reset" | "file" => {} // skip
                     _ => {
                         if !field_name.is_empty() {
-                            let label = get_field_label(node, &field_name, form_root);
+                            let label = get_field_label(node, &field_name, labels);
                             fields.push(FormField::Text {
                                 name: field_name, value, label, input_type,
                             });
@@ -956,7 +965,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
                 let field_name = get_attr(node, "name").unwrap_or_default();
                 if !field_name.is_empty() {
                     let value = get_text_content(node);
-                    let label = get_field_label(node, &field_name, form_root);
+                    let label = get_field_label(node, &field_name, labels);
                     fields.push(FormField::TextArea { name: field_name, value, label });
                 }
             }
@@ -966,7 +975,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
                     let mut options = Vec::new();
                     let mut selected = 0;
                     extract_select_options(node, &mut options, &mut selected);
-                    let label = get_field_label(node, &field_name, form_root);
+                    let label = get_field_label(node, &field_name, labels);
                     fields.push(FormField::Select { name: field_name, options, selected, label });
                 }
             }
@@ -987,7 +996,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
             && name.local.as_ref() == "form" {
                 continue;
             }
-        extract_form_fields(child, fields, submit_label, form_root);
+        extract_form_fields(child, fields, submit_label, labels);
     }
 }
 
@@ -1689,6 +1698,45 @@ mod tests {
             "get_text_content lost its text — html2text debug-format drift? got {:?}",
             text
         );
+    }
+
+    /// F1 (behavior-preserving): the one-pass id→label map must still resolve
+    /// a field's label from a matching `<label for="id">`, exactly as the old
+    /// per-field subtree walk did.
+    #[test]
+    fn test_form_field_label_from_for_attribute() {
+        let cfg = config::rich();
+        let dom = cfg
+            .parse_html(
+                &b"<html><body><form><label for=\"q\">Search Terms</label>\
+                   <input id=\"q\" name=\"query\" type=\"text\"></form></body></html>"[..],
+            )
+            .unwrap();
+        let forms = extract_forms_from_dom(&dom);
+        assert_eq!(forms.len(), 1);
+        let label = forms[0].fields.iter().find_map(|f| match f {
+            FormField::Text { name, label, .. } if name == "query" => Some(label.clone()),
+            _ => None,
+        });
+        assert_eq!(label.as_deref(), Some("Search Terms"));
+    }
+
+    /// F1: a field with no matching `<label for>` (and no placeholder/aria/
+    /// title) falls back to the field name — unchanged by the refactor.
+    #[test]
+    fn test_form_field_label_falls_back_to_name() {
+        let cfg = config::rich();
+        let dom = cfg
+            .parse_html(
+                &b"<html><body><form><input id=\"q\" name=\"query\" type=\"text\"></form></body></html>"[..],
+            )
+            .unwrap();
+        let forms = extract_forms_from_dom(&dom);
+        let label = forms[0].fields.iter().find_map(|f| match f {
+            FormField::Text { name, label, .. } if name == "query" => Some(label.clone()),
+            _ => None,
+        });
+        assert_eq!(label.as_deref(), Some("query"));
     }
 
     #[test]

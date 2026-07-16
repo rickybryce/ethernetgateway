@@ -538,11 +538,18 @@ impl TelnetSession {
         let mut days: std::collections::BTreeMap<String, (f64, f64, Option<String>)> =
             std::collections::BTreeMap::new();
         for entry in series {
-            let time = match entry.get("time").and_then(|v| v.as_str()) {
-                Some(t) if t.len() >= 10 => t,
-                _ => continue,
+            // First 10 chars are the ISO date (YYYY-MM-DD).  `get(..10)` is
+            // length- AND char-boundary-safe, so a malformed timestamp with a
+            // multibyte char in the first 10 bytes is skipped rather than
+            // panicking on a mid-char byte slice.
+            let Some(date) = entry
+                .get("time")
+                .and_then(|v| v.as_str())
+                .and_then(|t| t.get(..10))
+                .map(|d| d.to_string())
+            else {
+                continue;
             };
-            let date = time[..10].to_string();
             let Some(data) = entry.get("data") else { continue };
             let Some(t) = data
                 .get("instant")
