@@ -56,6 +56,11 @@ impl TelnetSession {
             self.cyan("K")
         ))
         .await?;
+        self.send_line(&format!(
+            "  {}  CP/M shell",
+            self.cyan("S")
+        ))
+        .await?;
         let iac_status = if self.xmodem_iac {
             self.green("ON")
         } else {
@@ -130,6 +135,9 @@ impl TelnetSession {
                     }
                 }
             }
+            "s" => {
+                self.cpm_shell().await?;
+            }
             "i" => {
                 self.xmodem_iac = !self.xmodem_iac;
             }
@@ -142,7 +150,7 @@ impl TelnetSession {
             }
             "r" => {} // Refresh — just re-render
             _ => {
-                self.show_error("Press U, D, X, C, M, K, I, R, Q, or H.")
+                self.show_error("Press U, D, X, C, M, K, S, I, R, Q, or H.")
                     .await?;
             }
         }

@@ -2316,7 +2316,7 @@ fn test_modem_console_menu_row_counts() {
 /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
 /// new help screen is only width-checked once added below (bump the array
 /// length to match).  Single-width tables ignore `petscii` (they fit 40).
-fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 25] {
+fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 26] {
     [
         TelnetSession::main_help_lines(),
         TelnetSession::config_submenu_help_lines(petscii),
@@ -2343,6 +2343,7 @@ fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 25] {
         TelnetSession::gateway_config_help_lines(petscii),
         TelnetSession::serial_config_help_lines(),
         TelnetSession::master_slave_help_lines(petscii),
+        TelnetSession::cpm_help_lines(),
     ]
 }
 
@@ -5357,4 +5358,200 @@ fn test_session_slot_guard_releases_on_armed_drop() {
         1,
         "a defused guard must not release again"
     );
+}
+
+// ─── CP/M shell (kernel.rs) ──────────────────────────
+
+use super::kernel::CpmCmd;
+
+// ---- Wildcard glob matcher ----
+
+#[test]
+fn test_cpm_glob_star_matches_everything() {
+    assert!(TelnetSession::cpm_glob_match("*", "anything.dat"));
+    assert!(TelnetSession::cpm_glob_match("*", ""));
+    assert!(TelnetSession::cpm_glob_match("*.*", "a.b"));
+    assert!(!TelnetSession::cpm_glob_match("*.*", "noext"));
+}
+
+#[test]
+fn test_cpm_glob_extension_and_case() {
+    assert!(TelnetSession::cpm_glob_match("*.txt", "readme.txt"));
+    // Case-insensitive both directions.
+    assert!(TelnetSession::cpm_glob_match("*.TXT", "readme.txt"));
+    assert!(TelnetSession::cpm_glob_match("*.txt", "README.TXT"));
+    assert!(!TelnetSession::cpm_glob_match("*.txt", "readme.md"));
+}
+
+#[test]
+fn test_cpm_glob_question_is_exactly_one() {
+    assert!(TelnetSession::cpm_glob_match("foo?.dat", "foo1.dat"));
+    assert!(!TelnetSession::cpm_glob_match("foo?.dat", "foo12.dat"));
+    assert!(!TelnetSession::cpm_glob_match("foo?.dat", "foo.dat"));
+}
+
+#[test]
+fn test_cpm_glob_backtracking_and_literals() {
+    assert!(TelnetSession::cpm_glob_match("a*b", "ab"));
+    assert!(TelnetSession::cpm_glob_match("a*b", "aXXXb"));
+    assert!(!TelnetSession::cpm_glob_match("a*b", "axc"));
+    assert!(TelnetSession::cpm_glob_match("*a*b", "zzabzzb"));
+    assert!(TelnetSession::cpm_glob_match("abc", "abc"));
+    assert!(!TelnetSession::cpm_glob_match("abc", "abcd"));
+    assert!(TelnetSession::cpm_glob_match("", ""));
+    assert!(!TelnetSession::cpm_glob_match("", "x"));
+}
+
+// ---- Command parser ----
+
+#[test]
+fn test_cpm_parse_listing_and_aliases() {
+    assert_eq!(TelnetSession::cpm_parse("dir"), CpmCmd::Dir(None));
+    assert_eq!(TelnetSession::cpm_parse("DIR *.txt"), CpmCmd::Dir(Some("*.txt".into())));
+    assert_eq!(TelnetSession::cpm_parse("ls"), CpmCmd::Dir(None));
+    // Case-insensitive verb, trimmed operands, collapsed whitespace.
+    assert_eq!(TelnetSession::cpm_parse("  DiR   sub/  "), CpmCmd::Dir(Some("sub/".into())));
+}
+
+#[test]
+fn test_cpm_parse_empty_and_unknown() {
+    assert_eq!(TelnetSession::cpm_parse(""), CpmCmd::Empty);
+    assert_eq!(TelnetSession::cpm_parse("   "), CpmCmd::Empty);
+    assert_eq!(
+        TelnetSession::cpm_parse("frobnicate x"),
+        CpmCmd::Unknown("frobnicate".into())
+    );
+}
+
+#[test]
+fn test_cpm_parse_needs_arg() {
+    assert!(matches!(TelnetSession::cpm_parse("type"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("dump"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("era"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("mkdir"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("copy onlyone"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("ren"), CpmCmd::NeedsArg(_)));
+}
+
+#[test]
+fn test_cpm_parse_ren_both_forms() {
+    // CP/M form: NEW=OLD.
+    assert_eq!(
+        TelnetSession::cpm_parse("ren new.txt=old.txt"),
+        CpmCmd::Ren { new: "new.txt".into(), old: "old.txt".into() }
+    );
+    // DOS space form: OLD then NEW.
+    assert_eq!(
+        TelnetSession::cpm_parse("ren old.txt new.txt"),
+        CpmCmd::Ren { new: "new.txt".into(), old: "old.txt".into() }
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("rename a=b"),
+        CpmCmd::Ren { new: "a".into(), old: "b".into() }
+    );
+}
+
+#[test]
+fn test_cpm_parse_copy_move_dest_first() {
+    // Destination is the first operand (CP/M PIP order).
+    assert_eq!(
+        TelnetSession::cpm_parse("copy sub/ file.txt"),
+        CpmCmd::Copy { dst: "sub/".into(), src: "file.txt".into() }
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("pip dst.dat=src.dat"),
+        CpmCmd::Copy { dst: "dst.dat".into(), src: "src.dat".into() }
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("cp a b"),
+        CpmCmd::Copy { dst: "a".into(), src: "b".into() }
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("move /done/ old.dat"),
+        CpmCmd::Move { dst: "/done/".into(), src: "old.dat".into() }
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("mv a b"),
+        CpmCmd::Move { dst: "a".into(), src: "b".into() }
+    );
+}
+
+#[test]
+fn test_cpm_parse_directory_and_misc_verbs() {
+    assert_eq!(TelnetSession::cpm_parse("md games"), CpmCmd::Mkdir("games".into()));
+    assert_eq!(TelnetSession::cpm_parse("mkdir games"), CpmCmd::Mkdir("games".into()));
+    assert_eq!(TelnetSession::cpm_parse("rd games"), CpmCmd::Rmdir("games".into()));
+    assert_eq!(TelnetSession::cpm_parse("rmdir games"), CpmCmd::Rmdir("games".into()));
+    assert_eq!(TelnetSession::cpm_parse("cd"), CpmCmd::Cd(None));
+    assert_eq!(TelnetSession::cpm_parse("cd .."), CpmCmd::Cd(Some("..".into())));
+    assert_eq!(TelnetSession::cpm_parse("chdir sub"), CpmCmd::Cd(Some("sub".into())));
+    assert_eq!(TelnetSession::cpm_parse("pwd"), CpmCmd::Pwd);
+    assert_eq!(TelnetSession::cpm_parse("stat"), CpmCmd::Stat(None));
+    assert_eq!(TelnetSession::cpm_parse("stat f.dat"), CpmCmd::Stat(Some("f.dat".into())));
+    assert_eq!(TelnetSession::cpm_parse("help"), CpmCmd::Help(None));
+    assert_eq!(TelnetSession::cpm_parse("?"), CpmCmd::Help(None));
+    assert_eq!(TelnetSession::cpm_parse("user 3"), CpmCmd::User);
+    for q in ["exit", "bye", "quit", "QUIT"] {
+        assert_eq!(TelnetSession::cpm_parse(q), CpmCmd::Exit);
+    }
+}
+
+// ---- Jail path normalizer ----
+
+#[test]
+fn test_cpm_normalize_relative_and_absolute() {
+    assert_eq!(
+        TelnetSession::cpm_normalize("", "a/b").unwrap(),
+        vec!["a".to_string(), "b".to_string()]
+    );
+    assert_eq!(
+        TelnetSession::cpm_normalize("games", "save.dat").unwrap(),
+        vec!["games".to_string(), "save.dat".to_string()]
+    );
+    // Leading slash resolves from the drive root, ignoring the cwd.
+    assert_eq!(
+        TelnetSession::cpm_normalize("games/roms", "/top.txt").unwrap(),
+        vec!["top.txt".to_string()]
+    );
+    // "." is skipped; a trailing slash drops the empty component.
+    assert_eq!(
+        TelnetSession::cpm_normalize("a", "./b/").unwrap(),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn test_cpm_normalize_parent_within_jail() {
+    assert_eq!(
+        TelnetSession::cpm_normalize("games/roms", "../x").unwrap(),
+        vec!["games".to_string(), "x".to_string()]
+    );
+    assert_eq!(TelnetSession::cpm_normalize("a", "..").unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn test_cpm_normalize_rejects_escape_and_bad_names() {
+    // Climbing above the root is refused — the jail can't be escaped.
+    assert!(TelnetSession::cpm_normalize("", "../etc").is_err());
+    assert!(TelnetSession::cpm_normalize("a", "../../x").is_err());
+    // Illegal characters / leading dot / embedded ".." are rejected by the
+    // reused validate_filename gate.
+    assert!(TelnetSession::cpm_normalize("", "a;b").is_err());
+    assert!(TelnetSession::cpm_normalize("", ".hidden").is_err());
+    assert!(TelnetSession::cpm_normalize("", "a..b").is_err());
+    assert!(TelnetSession::cpm_normalize("", "sp ace").is_err());
+}
+
+// ---- Binary guard ----
+
+#[test]
+fn test_cpm_looks_binary() {
+    assert!(!TelnetSession::looks_binary(b""));
+    assert!(!TelnetSession::looks_binary(b"plain ascii text\r\nwith\ttabs\n"));
+    // A NUL byte is an immediate reject.
+    assert!(TelnetSession::looks_binary(b"text\0more"));
+    // A run of C0 control bytes trips the ratio.
+    assert!(TelnetSession::looks_binary(&[0x01, 0x02, 0x03, 0x04, 0x05, b'a']));
+    // High-bit bytes (PETSCII / Latin-1) are not treated as control.
+    assert!(!TelnetSession::looks_binary(&[0xC1; 32]));
 }

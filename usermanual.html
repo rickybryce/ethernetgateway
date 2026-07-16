@@ -282,6 +282,7 @@ including Claude Code.
             <li><a href="#ch8-tuning">Protocol Timeout Tunables</a></li>
             <li><a href="#ch8-kermit">Kermit — Server &amp; Client Mode</a></li>
             <li><a href="#ch8-punter">Punter (C1) — Commodore</a></li>
+            <li><a href="#ch8-cpm">CP/M Shell (drive A:)</a></li>
         </ol>
     </li>
     <li><span class="num">9.</span> <a href="#ch9">Serial / Hayes AT Modem Emulation</a>
@@ -369,6 +370,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 
 <ul>
     <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with autostart), Kermit (incl. standalone server mode), and Punter C1 (Commodore 64/128), with auto-detection on upload and a selection prompt on download.</li>
+    <li><strong>CP/M shell</strong> — a CP/M-flavored <code>A&gt;</code> file-manager prompt over telnet/SSH (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, &hellip;), operating on the transfer directory as drive A: (no Z80 emulation; chapter 8.10).</li>
     <li><strong>Hayes AT modem emulator</strong> — two physically independent serial ports (Port A and Port B), each with its own enabled flag, mode, baud, AT/S-register state (S0–S26), and stored phone-number slots, plus the <code>+++</code> escape.</li>
     <li><strong>Telnet-serial console bridge</strong> — either port can be flipped to <em>console mode</em> per-port, so a telnet/SSH user can drive a microcontroller or RS-232 device directly through the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu (chapter 9.13).  Both ports can host bridges concurrently.</li>
     <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
@@ -1343,7 +1345,9 @@ From the main menu press <span class="kbd">F</span>:
   D  Download         (send file to your terminal)
   X  Delete           (remove a file from the transfer dir)
   C  Change directory (subdirectory within transfer_dir)
+  M  Make directory    (create a subdirectory)
   K  Kermit server mode (idle and wait for client commands)
+  S  CP/M shell        (A&gt; file-manager prompt — see §8.10)
   I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
 
 <h2 id="ch8-upload">8.3 Uploads — Protocol Selection &amp; Auto-Detection</h2>
@@ -1893,6 +1897,134 @@ transfer on the Commodore. (To shorten the wait, lower
 <code>punter_block_timeout</code>.) The gateway clears any stray bytes the
 aborted transfer left in the line before each new Punter transfer, so a clean
 restart resyncs reliably.
+</aside>
+
+<h2 id="ch8-cpm">8.10 CP/M Shell (drive A:)</h2>
+
+<p>
+The CP/M shell gives a logged-in telnet or SSH user a familiar
+<code>A&gt;</code> command prompt for managing the files in the transfer
+directory. It is a <strong>CP/M-flavored file manager written entirely in
+Rust</strong> &mdash; there is <em>no</em> Z80 CPU emulation and it does
+<em>not</em> run <code>.COM</code> programs; it simply presents the
+configured <code>transfer_dir</code> as drive <strong>A:</strong> and lets
+you list, view, copy, rename, move, erase, and organise files the way you
+would at a real CP/M console. It works identically over telnet and SSH.
+</p>
+
+<p>
+Open it from the <strong>File Transfer</strong> menu with
+<span class="kbd">S</span> (&ldquo;CP/M shell&rdquo;). Type
+<code>HELP</code> for the command list and <code>EXIT</code> (or press
+<span class="kbd">ESC</span>) to return to the File Transfer menu &mdash;
+leaving the shell does <em>not</em> disconnect your session. The prompt
+shows where you are: <code>A&gt;</code> at the drive root, and
+<code>A:SUB&gt;</code> when you have changed into a subdirectory.
+</p>
+
+<h3>Command set</h3>
+
+<table>
+    <thead><tr><th>Command</th><th>Aliases</th><th>Action</th></tr></thead>
+    <tbody>
+        <tr><td><code>DIR [pattern]</code></td><td><code>LS</code></td><td>List the current directory (or a wildcard / path match). Directories show as <code>&lt;DIR&gt;</code>, files with their size.</td></tr>
+        <tr><td><code>TYPE file</code></td><td>&mdash;</td><td>Display a <em>text</em> file a screenful at a time (see pagination below). Binary files are refused.</td></tr>
+        <tr><td><code>DUMP file</code></td><td>&mdash;</td><td>Hex + ASCII dump, 16 bytes per row, paginated.</td></tr>
+        <tr><td><code>ERA file</code></td><td><code>DEL</code>, <code>RM</code></td><td>Erase a file, or every file matching a wildcard (mass erase asks <code>(Y/N)</code> first). Refuses directories.</td></tr>
+        <tr><td><code>REN new=old</code></td><td><code>RENAME</code></td><td>Rename a file <em>within one directory</em> (also accepts <code>REN old new</code>). Refuses to overwrite an existing name. Cross-directory relocation is <code>MOVE</code>.</td></tr>
+        <tr><td><code>COPY dst src</code></td><td><code>PIP dst=src</code>, <code>CP</code></td><td>Copy a file; either operand may be path-qualified. Never overwrites an existing destination. A wildcard source copies each match into a directory destination.</td></tr>
+        <tr><td><code>MOVE dst src</code></td><td><code>MV</code></td><td>Relocate a file across directories. Never overwrites an existing destination. (An invented verb &mdash; stock CP/M has no move.)</td></tr>
+        <tr><td><code>MKDIR name</code></td><td><code>MD</code></td><td>Create a subdirectory.</td></tr>
+        <tr><td><code>RMDIR name</code></td><td><code>RD</code></td><td>Remove an <em>empty</em> subdirectory (refuses a non-empty directory, the current directory, and the drive root).</td></tr>
+        <tr><td><code>CD [path]</code></td><td><code>CHDIR</code></td><td>Change directory. <code>CD</code> or <code>CD /</code> returns to the root, <code>CD ..</code> goes up one level, <code>CD name</code> descends.</td></tr>
+        <tr><td><code>PWD</code></td><td>&mdash;</td><td>Print the current drive-A path.</td></tr>
+        <tr><td><code>STAT [file]</code></td><td>&mdash;</td><td>With no argument, summarise the directory (file count, bytes used, disk-space indicator); with a file, show its size and 128-byte record count.</td></tr>
+        <tr><td><code>HELP</code></td><td><code>?</code></td><td>Show the command reference.</td></tr>
+        <tr><td><code>EXIT</code></td><td><code>BYE</code>, <code>QUIT</code>, <span class="kbd">ESC</span></td><td>Return to the File Transfer menu.</td></tr>
+    </tbody>
+</table>
+
+<p>
+Commands and filenames are case-insensitive. An unrecognised command is
+echoed back with a <code>?</code>, exactly as the CP/M console command
+processor does (e.g. <code>FOO?</code>).
+</p>
+
+<h3>Path syntax</h3>
+
+<p>
+Stock CP/M filenames carry no directory, so the shell extends them with a
+Unix-style path syntax using <code>/</code> as the separator (matching how
+the gateway stores the transfer working directory). This is what lets
+<code>COPY</code>, <code>MOVE</code>, and <code>CD</code> work
+<em>between</em> directories &mdash; something the base CP/M command set
+cannot express:
+</p>
+
+<table>
+    <thead><tr><th>Operand</th><th>Resolves to</th></tr></thead>
+    <tbody>
+        <tr><td><code>FILE.TXT</code></td><td>a file in the current directory</td></tr>
+        <tr><td><code>SUB/FILE.TXT</code></td><td>a file in / into subdirectory <code>SUB</code></td></tr>
+        <tr><td><code>/FILE.TXT</code></td><td>a file at the drive-A root</td></tr>
+        <tr><td><code>../FILE.TXT</code></td><td>a file in the parent directory</td></tr>
+        <tr><td><code>SUB/</code></td><td>a directory target &mdash; &ldquo;into <code>SUB</code>, keeping the source name&rdquo;</td></tr>
+    </tbody>
+</table>
+
+<p>
+<code>COPY</code> and <code>MOVE</code> take the <strong>destination
+first</strong> (the CP/M <code>PIP dest=source</code> order), so
+<code>COPY&nbsp;SUB/&nbsp;FILE.TXT</code> copies <code>FILE.TXT</code> into
+<code>SUB</code>, and <code>MOVE&nbsp;/DONE/&nbsp;OLD.DAT</code> moves
+<code>OLD.DAT</code> to the <code>DONE</code> directory at the root.
+</p>
+
+<h3>Wildcards</h3>
+
+<p>
+<code>DIR</code>, <code>ERA</code>, and the <code>COPY</code> source accept
+the CP/M / DOS wildcards <code>*</code> (any run of characters) and
+<code>?</code> (exactly one character), matched case-insensitively against
+the whole filename &mdash; e.g. <code>DIR&nbsp;*.TXT</code>,
+<code>ERA&nbsp;*.BAK</code>, <code>COPY&nbsp;BACKUP/&nbsp;*.DAT</code>. A
+wildcard <code>ERA</code> confirms before deleting.
+</p>
+
+<h3>Pagination</h3>
+
+<p>
+<code>TYPE</code>, <code>DUMP</code>, and <code>DIR</code> page their output
+one screenful at a time. At each <code>--More--</code> prompt, press
+<span class="kbd">SPACE</span> for the next page,
+<span class="kbd">RETURN</span> to advance a single line, or
+<span class="kbd">Q</span> (or <span class="kbd">ESC</span>) to stop.
+</p>
+
+<aside class="note">
+<span class="label">Jailed to the transfer directory</span>
+Every command is confined to the transfer directory and its
+subdirectories; nothing above the drive-A root can ever be reached. Path
+operands are validated and canonicalised, and any attempt to climb out
+(<code>../../..</code>, an absolute host path, or a symlink pointing
+outside) is refused with <code>Access denied.</code> Filenames follow the
+same rules as the rest of the file-transfer subsystem &mdash; up to 64
+characters of letters, digits, dots, hyphens, and underscores. Uploaded
+files are shown with uppercased names for CP/M authenticity, but their real
+(mixed-case) names are preserved on disk, so the shell and the File Transfer
+menu always see the same files.
+</aside>
+
+<aside class="note">
+<span class="label">Text-file guard</span>
+<code>TYPE</code> refuses to display a binary file (one containing NUL bytes
+or a high proportion of control characters) so it can&rsquo;t spray
+terminal-hostile bytes at a vintage screen &mdash; download such files with
+a transfer protocol instead. The <code>TYPE</code> and <code>DUMP</code>
+viewers cap the files they will read at <strong>1&nbsp;MB</strong> (paging a
+larger file over a retro link isn&rsquo;t useful &mdash; transfer it instead);
+<code>DUMP</code> shows 8 bytes per row on a 40-column PETSCII screen and 16
+on wider terminals.
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->

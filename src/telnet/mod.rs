@@ -51,6 +51,7 @@ mod serial_ui;
 mod web;
 mod aichat_ui;
 mod weather;
+mod kernel;
 // Weather free helpers/types are referenced only from tests; re-export under
 // cfg(test) so the non-test build doesn't see an unused re-export.
 #[cfg(test)]
@@ -1019,6 +1020,7 @@ impl TelnetSession {
             "  M  Make a new subdirectory",
             "  K  Kermit server mode (idle for",
             "     remote get/send/dir/finish)",
+            "  S  CP/M file shell (drive A:)",
             "  I  Toggle IAC escaping on/off",
             "  R  Refresh the screen",
             "  Q  Back to the main menu",
