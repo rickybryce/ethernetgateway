@@ -29,7 +29,7 @@ const MAX_REDIRECTS: usize = 10;
 /// depth limit, so an adversarial page of deeply-nested tags (e.g. tens of
 /// thousands of unclosed `<div>`s, well under `MAX_BODY_SIZE`) builds a very
 /// deep tree.  Our own title/form extractors (`extract_title_from_dom`,
-/// `extract_forms_from_dom`, and the `find_label_for_id` / `extract_form_fields`
+/// `extract_forms_from_dom`, and the `collect_field_labels` / `extract_form_fields`
 /// helpers) recurse over `node.children`, so on such a tree they overflow the
 /// modest `spawn_blocking` thread stack and abort the *entire* gateway process
 /// (SIGABRT), not just the one request.  (html2text's own render pass and its
