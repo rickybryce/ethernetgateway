@@ -909,19 +909,34 @@ async fn receive_block_body(
             if recv_checksum == calc_checksum {
                 true
             } else if auto_detect {
-                // Mismatch on the first block — sender may still be
-                // in CRC mode despite our checksum NAK.  Read one
-                // more byte and try CRC validation; if that matches,
-                // lock the session into CRC mode.
-                let crc_lo = nvt_read_byte(reader, is_tcp, state).await?;
-                let recv_crc = ((recv_checksum as u16) << 8) | crc_lo as u16;
-                let calc_crc = crc16_xmodem(&data);
-                if recv_crc == calc_crc {
-                    if verbose { glog!("XMODEM recv block: auto-detect would lock to CRC16 (CRC=0x{:04X})", calc_crc); }
-                    detected = AutoDetect::LockToCrc;
-                    true
-                } else {
-                    false
+                // Mismatch on the first block — the sender may actually be
+                // in CRC mode despite our checksum NAK.  Read one more byte
+                // and try CRC validation; if it matches, lock to CRC mode.
+                // Gate that read behind the same short grace window as the
+                // CRC-mode branch (X1): a lock-step *checksum* sender that
+                // sent one (mismatching) trailer byte and is now waiting for
+                // our ACK/NAK sends nothing more, so without the bound this
+                // stalls until the 60 s block-body timeout instead of NAKing
+                // promptly.  On timeout there is no second byte → reject (NAK).
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(AUTO_DETECT_TRAILER_TIMEOUT_SECS),
+                    nvt_read_byte(reader, is_tcp, state),
+                )
+                .await
+                {
+                    Ok(b) => {
+                        let crc_lo = b?;
+                        let recv_crc = ((recv_checksum as u16) << 8) | crc_lo as u16;
+                        let calc_crc = crc16_xmodem(&data);
+                        if recv_crc == calc_crc {
+                            if verbose { glog!("XMODEM recv block: auto-detect would lock to CRC16 (CRC=0x{:04X})", calc_crc); }
+                            detected = AutoDetect::LockToCrc;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(_) => false,
                 }
             } else {
                 false
@@ -2626,6 +2641,50 @@ mod tests {
         assert_eq!(expected, 2, "expected block advanced after acceptance");
 
         drop(writer); // release the deliberately kept-alive write half
+    }
+
+    /// X1 symmetry: the CHECKSUM-mode auto-detect branch must also gate its
+    /// CRC-probe read behind the grace window.  Receiver in Checksum mode,
+    /// first block's checksum MISMATCHES, and the sender is lock-step (sent
+    /// one trailer byte, now waiting for ACK/NAK).  The extra CRC-probe read
+    /// must time out and the block be rejected (→ NAK) instead of stalling
+    /// for the full 60 s block-body timeout.  Without the fix the unbounded
+    /// read has no timer and this test would hang under the paused clock.
+    #[tokio::test(start_paused = true)]
+    async fn test_receive_block_body_checksum_mode_lockstep_bad_block_no_stall() {
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE).map(|i| (i * 7) as u8).collect();
+        let good_sum = payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        let bad_sum = good_sum ^ 0xFF; // guaranteed mismatch
+
+        let (mut reader, mut writer) = tokio::io::duplex(1024);
+        writer.write_all(&payload).await.unwrap();
+        writer.write_all(&[bad_sum]).await.unwrap();
+        // writer kept alive: the (absent) CRC-probe second byte pends.
+
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Checksum;
+
+        let err = receive_block_body(
+            &mut reader,
+            1,
+            !1u8,
+            &mut expected,
+            &mut mode,
+            false, // is_tcp
+            false, // verbose
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            true, // auto_detect
+        )
+        .await
+        .expect_err("a mismatching lock-step checksum block must be rejected, not stall");
+        assert!(err.contains("Checksum/CRC"), "expected checksum/CRC rejection, got: {err}");
+        assert!(matches!(mode, TransferMode::Checksum), "mode must not flip on rejection");
+        assert!(state.pushback.is_none(), "no byte may be pushed back on rejection");
+        assert_eq!(expected, 1, "expected block must not advance on rejection");
+
+        drop(writer);
     }
 
     /// Auto-detect must NOT commit its mode flip / pushback if the

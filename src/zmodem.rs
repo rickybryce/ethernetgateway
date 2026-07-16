@@ -1277,7 +1277,11 @@ async fn nak_or_abort(
     verbose: bool,
 ) -> Result<(), String> {
     *errors += 1;
-    if *errors >= max_retries {
+    // Bound with `>` (not `>=`) so this tolerates `max_retries` consecutive
+    // errors, matching the sibling counters (`zfile_errors`, xmodem's
+    // `error_count`) and this helper's "bounded by max_retries" contract —
+    // the old `>=` aborted one retry early.
+    if *errors > max_retries {
         send_cancel(writer, is_tcp).await.ok();
         return Err(format!(
             "ZMODEM: too many errors during receive ({})",

@@ -62,7 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back to 1-byte-checksum validation and locks to checksum mode instead of
   blocking until the full block-body timeout. A genuine CRC sender's low byte
   arrives back-to-back and is unaffected; after the first block the mode is
-  locked and the read blocks unconditionally.
+  locked and the read blocks unconditionally. The symmetric checksum-mode
+  auto-detect branch (the extra CRC-probe read on a first-block checksum
+  mismatch) is gated the same way, so a lock-step checksum sender with a
+  corrupt first block is NAKed promptly rather than after 60 s.
+- **ZMODEM receive: the data-phase retry counter is bounded consistently.**
+  `nak_or_abort` now tolerates `max_retries` consecutive errors (`>`), matching
+  the ZFILE-subpacket and XMODEM counters and its own "bounded by max_retries"
+  contract, instead of aborting one retry early (`>=`).
 - **ZMODEM receive: a corrupt ZFILE info subpacket no longer aborts the whole
   batch (Z1).** The filename/size subpacket is now read with the same
   ZNAK/retry discipline as the data phase — per Forsberg §7 the receiver ZNAKs
