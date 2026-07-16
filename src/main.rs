@@ -113,7 +113,7 @@ fn main() {
                 .build()
                 .expect("Failed to create tokio runtime");
 
-            runtime.block_on(async move {
+            let serial_handles = runtime.block_on(async move {
                 let session_writers: telnet::SessionWriters =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
                 // One shared lockout map across telnet + SSH so an
@@ -136,7 +136,7 @@ fn main() {
                     session_writers.clone(),
                     lockouts.clone(),
                 );
-                serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
+                let serial_handles = serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
                 telnet::start_kermit_server(
                     shutdown_rt.clone(),
                     notify_rt.clone(),
@@ -180,9 +180,34 @@ fn main() {
 
                 // Give sessions a moment to receive the shutdown message
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                // Hand the serial-manager thread handles back to this (server)
+                // thread so we can join them BEFORE the runtime is dropped
+                // below — see the bounded-join note there.
+                serial_handles
             });
 
             glog!("Server stopped.");
+
+            // Join the detached serial-manager threads (bounded) BEFORE
+            // dropping the runtime.  They `block_on` this runtime's handle, so
+            // one still running when the runtime is dropped would panic on its
+            // next `block_on` (e.g. an in-flight dial across a SIGHUP restart).
+            // Their blocking work is abort-aware (100 ms read timeouts; the
+            // dial connect is raced against the shutdown/restart flag), so they
+            // exit within ~100 ms of shutdown; wait up to 3 s, then give up on
+            // any straggler (leaving it detached — the prior behavior) rather
+            // than wedging teardown.
+            let serial_join_deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(3);
+            for h in serial_handles {
+                while !h.is_finished() && std::time::Instant::now() < serial_join_deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if h.is_finished() {
+                    let _ = h.join();
+                }
+            }
 
             // Cap runtime teardown at 2s so a stuck spawn_blocking task
             // (sync serialport read, slow filesystem flush, peer that

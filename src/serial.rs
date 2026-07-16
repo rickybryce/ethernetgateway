@@ -492,30 +492,44 @@ struct ModemState {
 /// the port (or stops if the port has been disabled).  The two threads
 /// are independent — restarts and bridge sessions on one port never
 /// disturb the other.
-pub fn start_serial(shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
+/// Returns the spawned manager threads' `JoinHandle`s so the caller can join
+/// them (bounded) BEFORE dropping the tokio runtime on shutdown/restart — the
+/// threads `block_on` this runtime's handle, so a thread still running when the
+/// runtime is dropped would panic on its next `block_on`.  Their blocking work
+/// is abort-aware (reads time out in 100 ms; the dial connect is raced against
+/// `wait_for_serial_abort`), so they exit within ~100 ms of the shutdown flag.
+pub fn start_serial(
+    shutdown: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+) -> Vec<std::thread::JoinHandle<()>> {
     let handle = tokio::runtime::Handle::current();
 
+    let mut handles = Vec::new();
     for id in SERIAL_PORT_IDS {
         let h = handle.clone();
         let sd = shutdown.clone();
         let rs = restart.clone();
-        if let Err(e) = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name(format!("serial-modem-{}", id.label().to_ascii_lowercase()))
             .spawn(move || {
                 serial_manager(id, h, sd, rs);
             })
         {
-            // N5: a boot-time thread-spawn failure must not panic the whole
-            // process — that would take down telnet/SSH/web too.  Log it and
-            // carry on: the rest of the gateway (and the other serial port)
-            // still comes up; only this port is unavailable.
-            glog!(
-                "serial: failed to spawn manager thread for Port {} ({}); this port is disabled",
-                id.label(),
-                e
-            );
+            Ok(jh) => handles.push(jh),
+            Err(e) => {
+                // N5: a boot-time thread-spawn failure must not panic the whole
+                // process — that would take down telnet/SSH/web too.  Log it and
+                // carry on: the rest of the gateway (and the other serial port)
+                // still comes up; only this port is unavailable.
+                glog!(
+                    "serial: failed to spawn manager thread for Port {} ({}); this port is disabled",
+                    id.label(),
+                    e
+                );
+            }
         }
     }
+    handles
 }
 
 /// Signal one port's manager thread to restart with the current config.
@@ -4191,22 +4205,53 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     }
 
     // Try each resolved address in turn; the first to connect wins.
-    let mut connected = None;
+    let mut connected: Option<std::net::TcpStream> = None;
     let mut last_err: Option<std::io::Error> = None;
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
     for addr in &addrs {
-        // The per-address timeout is capped, but a name resolving to several
-        // dead records would otherwise block the serial thread for
-        // addr_count × that — during which the thread can't see a server
-        // shutdown or a per-port config restart.  Bail between attempts so
-        // those stay responsive.
-        if state.shutdown.load(Ordering::SeqCst)
-            || SERIAL_RESTART[state.port_id.index()].load(Ordering::SeqCst)
-        {
-            send_result(state, "NO CARRIER");
-            return;
-        }
-        match std::net::TcpStream::connect_timeout(addr, s7_timeout) {
-            Ok(s) => {
+        // Connect asynchronously, RACED against a shutdown/restart poll, on
+        // the serial thread's runtime handle.  The blocking
+        // `connect_timeout` this replaces was blind to shutdown for the whole
+        // S7 window (up to 60 s per address): if a config-restart dropped the
+        // runtime during that window, this (detached) thread's next
+        // `block_on` would panic on the dropped runtime.  `wait_for_serial_
+        // abort` resolves within 100 ms of either flag, so the dial aborts
+        // promptly and the thread exits cleanly — which lets `main` join it
+        // BEFORE dropping the runtime (the airtight half of the fix).  The
+        // socket is handed to the synchronous online phase as a blocking std
+        // stream, so nothing downstream changes.
+        let addr = *addr;
+        let outcome: Option<std::io::Result<std::net::TcpStream>> =
+            state.handle.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_serial_abort(&sd, idx) => None,
+                    r = tokio::time::timeout(
+                        s7_timeout,
+                        tokio::net::TcpStream::connect(addr),
+                    ) => Some(match r {
+                        // Deregister from the reactor and restore blocking mode
+                        // (tokio sockets are non-blocking) for online_mode_tcp.
+                        Ok(Ok(tcp)) => match tcp.into_std() {
+                            Ok(s) => s.set_nonblocking(false).map(|_| s),
+                            Err(e) => Err(e),
+                        },
+                        Ok(Err(e)) => Err(e),
+                        Err(_elapsed) => Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "connect timed out",
+                        )),
+                    }),
+                }
+            });
+        match outcome {
+            None => {
+                // Shutdown/restart aborted the dial mid-connect.
+                send_result(state, "NO CARRIER");
+                return;
+            }
+            Some(Ok(s)) => {
                 if escape_trace_enabled() {
                     glog!(
                         "Serial modem (Port {}): dial {} connected via {}",
@@ -4216,7 +4261,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
                 connected = Some(s);
                 break;
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 if escape_trace_enabled() {
                     glog!(
                         "Serial modem (Port {}): dial {} — connect to {} failed: {}",

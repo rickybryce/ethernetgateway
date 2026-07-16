@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Serial: a serial-manager thread can no longer panic on a dropped runtime
+  across a config restart (round-7 review).** The detached serial threads
+  `block_on` the tokio runtime, but a SIGHUP restart dropped the runtime
+  without joining them; a thread stuck in the synchronous `connect_timeout`
+  (an in-flight ATDT/peer dial to an unresponsive host, up to 60 s) would then
+  panic on its next `block_on`. The dial now connects asynchronously, raced
+  against the shutdown/restart flag (aborting within ~100 ms instead of being
+  blind for the whole carrier wait), and `main` bounded-joins the serial
+  threads before dropping the runtime. Self-healing before; airtight now.
 - **Web browser: a hostile page can no longer soft-DoS the render thread with
   form-label lookups (round-6 F1).** Each form field with an `id` but no
   placeholder/aria-label/title triggered a full recursive walk of the form
