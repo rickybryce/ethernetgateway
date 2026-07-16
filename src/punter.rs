@@ -453,6 +453,12 @@ async fn accept_code(
         let byte = match tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await
         {
             Ok(Ok(b)) => b,
+            // A mid-IAC-sequence timeout from tnio (N4) is a transient stall in
+            // a handshake window, not a fatal error — treat it as "no code this
+            // round" and let the caller re-probe, matching `read_block`'s
+            // recoverable handling instead of aborting the whole transfer here
+            // (P3).  Other read errors (EOF, real I/O) still abort.
+            Ok(Err(e)) if e.contains("IAC sequence timed out") => return Ok(None),
             Ok(Err(e)) => return Err(e),
             Err(_) => return Ok(None),
         };
@@ -565,6 +571,14 @@ async fn receive_phase(
     // that keeps shipping corrupt bodies can't loop forever.  Reset each
     // time we accept a good block.
     let mut bad_rounds: u32 = 0;
+    // Block index of the last accepted non-final block, for premature-
+    // retransmit dedup (P1/P2).  Punter is stop-and-wait, and the checksum-
+    // protected NUMPOS index is the sequence number that tells a fresh block
+    // from a re-sent one whose index did not advance.
+    let mut last_index: Option<u16> = None;
+    // Consecutive dropped-duplicate rounds.  Bounded because a dropped
+    // duplicate does not grow `out`, so the MAX_FILE_SIZE backstop can't fire.
+    let mut dup_rounds: u32 = 0;
 
     loop {
         // rc1: send GOO/BAD, then wait for the sender's ACK.  Re-send the
@@ -608,14 +622,52 @@ async fn receive_phase(
         let blk = read_block(reader, writer, is_tcp, state, next_size, t, verbose).await?;
 
         if checksum_ok(&blk) {
+            let final_block = is_final_block(&blk);
+            let block_index = u16::from_le_bytes([blk[NUMPOS], blk[NUMPOS + 1]]);
             let payload_len = blk.len().saturating_sub(DATAPOS);
+
+            // Premature-retransmit dedup (P1/P2): a delayed in-flight block can
+            // race our short-cadence S/B resend, making the sender re-send the
+            // block we just accepted — its NUMPOS index does NOT advance.
+            // Without this the interior block's payload is appended twice and
+            // `punter_receive` returns a silently one-block-too-long file.  The
+            // final block (index high byte 0xFF) is exempt: we return on it
+            // immediately below, so it can never double-append.
+            if !final_block && payload_len > 0 && last_index == Some(block_index) {
+                // Drop the duplicate's payload but keep handshaking for the
+                // next block.  Bound consecutive dups (reusing the bad-round
+                // cap): with the append skipped there is no MAX_FILE_SIZE
+                // backstop, so a peer stuck re-sending one block must still be
+                // given up on rather than looping forever.
+                dup_rounds = dup_rounds.saturating_add(1);
+                if dup_rounds > t.max_bad_rounds {
+                    return Err(format!(
+                        "Punter receive: {} repeated duplicate blocks, giving up",
+                        dup_rounds
+                    ));
+                }
+                if verbose {
+                    glog!(
+                        "PUNTER recv: dropping duplicate block (index {} did not advance)",
+                        block_index
+                    );
+                }
+                next_size = blk[SIZEPOS];
+                signal = Code::Goo;
+                bad_rounds = 0;
+                continue;
+            }
+            dup_rounds = 0;
+
             if payload_len > 0 {
                 out.extend_from_slice(&blk[DATAPOS..]);
                 if out.len() > MAX_FILE_SIZE {
                     return Err(format!("Punter receive: file exceeds {} bytes", MAX_FILE_SIZE));
                 }
             }
-            let final_block = is_final_block(&blk);
+            if !final_block {
+                last_index = Some(block_index);
+            }
             next_size = blk[SIZEPOS];
             signal = Code::Goo;
             bad_rounds = 0;
@@ -2278,8 +2330,8 @@ mod reference_interop {
 
     async fn ref_send(s: &mut TcpStream, data: &[u8], ftype: u8, fault: Option<Fault>) {
         // Faults only apply to the data phase, not the single type block.
-        ref_send_phase(s, &build_type_blocks(ftype), true, None).await;
-        ref_send_phase(s, &build_data_blocks(data), false, fault).await;
+        ref_send_phase(s, &build_type_blocks(ftype), true, None, None).await;
+        ref_send_phase(s, &build_data_blocks(data), false, fault, None).await;
     }
 
     async fn ref_send_phase(
@@ -2287,10 +2339,17 @@ mod reference_interop {
         blocks: &[Vec<u8>],
         spec: bool,
         fault: Option<Fault>,
+        // Premature-retransmit injection: when the receiver GOOs to advance
+        // PAST the block at this array position, re-send that same block once
+        // (index unchanged) instead of advancing — modelling a delayed
+        // in-flight block that races the receiver's S/B resend and arrives as
+        // an apparent "next" block.  Exercises the receiver's index dedup.
+        dup_once_at: Option<usize>,
     ) {
         let mut idx = 0usize;
         let mut started = false;
         let mut faults_done = 0u32;
+        let mut dup_done = false;
         loop {
             if spec && !started {
                 put(s, GOO).await;
@@ -2310,7 +2369,11 @@ mod reference_interop {
                         put(s, SB).await;
                         return;
                     }
-                    idx += 1;
+                    if dup_once_at == Some(idx) && !dup_done {
+                        dup_done = true; // re-send block[idx] once, no advance
+                    } else {
+                        idx += 1;
+                    }
                 }
                 started = true;
             } else {
@@ -2402,6 +2465,51 @@ mod reference_interop {
             assert_eq!(got, expect, "payload mismatch (gateway receiving)");
             assert_eq!(got_ft, ft, "file type mismatch (gateway receiving)");
         }
+    }
+
+    /// P1/P2 regression: a premature-retransmit duplicate — the sender re-sends
+    /// an interior data block whose NUMPOS index does NOT advance (modelling a
+    /// delayed in-flight block that races the receiver's S/B resend and arrives
+    /// as an apparent "next" block) — must NOT be appended twice.  The receiver
+    /// dedups on the checksum-protected index and returns the correct file.
+    /// Without the dedup the duplicated block's payload appears twice and the
+    /// file is one block too long.
+    #[tokio::test]
+    async fn gateway_dedups_premature_retransmit_duplicate() {
+        // Three full MAX_PAYLOAD-byte data blocks so the duplicated interior
+        // block and its successor are the SAME size — framing stays aligned,
+        // so the duplicate passes the checksum and (without dedup) would be
+        // appended as if it were the next block.
+        let data: Vec<u8> = (0..(super::MAX_PAYLOAD * 3)).map(|i| (i * 7 + 3) as u8).collect();
+        let expect = data.clone();
+        let ftype = PunterFileType::Prg;
+        let ftype_byte = ftype.to_byte();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let gateway = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = sock.into_split();
+            punter_receive(&mut rd, &mut wr, false, false, false).await
+        });
+        let reference = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.unwrap();
+            // Type phase clean; data phase re-sends the block at array position
+            // 1 once (position 0 is the header block, so position 1 is the
+            // first full data block; its successor at position 2 is the same
+            // size, so the duplicate frames cleanly).
+            ref_send_phase(&mut sock, &build_type_blocks(ftype_byte), true, None, None).await;
+            ref_send_phase(&mut sock, &build_data_blocks(&data), false, None, Some(1)).await;
+        });
+
+        reference.await.unwrap();
+        let (got, got_ft) = with_timeout(gateway)
+            .await
+            .unwrap()
+            .expect("gateway receive failed");
+        assert_eq!(got, expect, "premature-retransmit duplicate must not double-append");
+        assert_eq!(got_ft, ftype, "file type mismatch");
     }
 
     #[tokio::test]

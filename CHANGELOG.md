@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Punter receive: a premature-retransmit duplicate no longer corrupts the
+  file (P1/P2).** On a slow/jittery link a data block whose first byte was
+  delayed past the byte-wait could trigger an early `S/B` resend; the delayed
+  block and a re-sent copy would both arrive, and the receiver — which ignored
+  the block index for sequencing — appended the interior block **twice**,
+  returning a silently one-block-too-long file. The receiver now dedups on the
+  checksum-protected `NUMPOS` block index (dropping a block whose index did not
+  advance), bounded so a peer stuck re-sending one block still gives up. Verified
+  against the live CCGMS reference (both directions) — the dedup never triggers
+  on conforming traffic.
+- **Punter: a mid-IAC-sequence timeout in a handshake window is now recoverable
+  (P3).** `accept_code` treats the `tnio` IAC-timeout (N4) as a soft "no code
+  this round" re-probe — matching `read_block` — instead of aborting the whole
+  transfer; other read errors still abort.
 - **Serial: a boot-time thread-spawn failure no longer panics the whole
   process (N5).** `start_serial` logs the failure and continues, so the rest
   of the gateway (telnet/SSH/web and the other serial port) still comes up;
