@@ -3699,6 +3699,13 @@ pub(crate) async fn kermit_receive_with_init(
     // When non-None, the next loop iteration consumes this packet
     // (drained from `out_of_order`) instead of reading from the wire.
     let mut next_drained: Option<Packet> = None;
+    // Selective-repeat NAK de-dup (K1): the seq we have already NAKed for the
+    // current gap.  A lost front-of-window packet makes every subsequent
+    // future packet reveal the same gap; we NAK it once (prompt retransmit)
+    // and only ACK the futures thereafter, so the windowed sender isn't hit
+    // with window-1 duplicate NAKs it would count as separate retries.
+    // Re-armed to None whenever `expected_seq` advances.
+    let mut last_nak_seq: Option<u8> = None;
     let window = session.window.max(1);
 
     loop {
@@ -3782,14 +3789,22 @@ pub(crate) async fn kermit_receive_with_init(
             // so the sender knows what to retransmit.
             if window > 1 && dist_forward > 0 && dist_forward < window {
                 use std::collections::hash_map::Entry;
-                match out_of_order.entry(pkt.seq) {
+                // Selective repeat (spec §5.5): ACK this correctly-received
+                // future packet by its OWN seq so the sender removes it from
+                // its window and stops resending it.  The old code NAKed
+                // `expected_seq` for *every* buffered future — up to window-1
+                // duplicate NAKs for a single lost packet — which the windowed
+                // sender counted as separate retries and could drive to
+                // `kermit_max_retries`, aborting a recoverable transfer (K1).
+                let pkt_seq = pkt.seq;
+                match out_of_order.entry(pkt_seq) {
                     Entry::Vacant(slot) => {
                         if verbose {
                             glog!(
-                                "Kermit recv: buffered future seq={} (expected {}) → NAK {}",
-                                pkt.seq,
+                                "Kermit recv: buffered future seq={} (expected {}) → ACK {}",
+                                pkt_seq,
                                 expected_seq,
-                                expected_seq
+                                pkt_seq
                             );
                         }
                         slot.insert(pkt);
@@ -3797,16 +3812,16 @@ pub(crate) async fn kermit_receive_with_init(
                     Entry::Occupied(_) => {
                         if verbose {
                             glog!(
-                                "Kermit recv: duplicate future seq={} already buffered → NAK {}",
-                                pkt.seq,
+                                "Kermit recv: duplicate future seq={} already buffered → re-ACK {}",
+                                pkt_seq,
                                 expected_seq
                             );
                         }
                     }
                 }
-                send_nak(
+                send_ack(
                     writer,
-                    expected_seq,
+                    pkt_seq,
                     session.chkt,
                     session.npad,
                     session.padc,
@@ -3814,6 +3829,22 @@ pub(crate) async fn kermit_receive_with_init(
                     is_tcp,
                 )
                 .await?;
+                // NAK the missing seq exactly ONCE per gap so the sender
+                // retransmits it promptly; subsequent futures for the same gap
+                // only ACK (no NAK) — that is what removes the retry storm.
+                if last_nak_seq != Some(expected_seq) {
+                    send_nak(
+                        writer,
+                        expected_seq,
+                        session.chkt,
+                        session.npad,
+                        session.padc,
+                        session.eol,
+                        is_tcp,
+                    )
+                    .await?;
+                    last_nak_seq = Some(expected_seq);
+                }
                 continue;
             }
 
@@ -4341,6 +4372,9 @@ pub(crate) async fn kermit_receive_with_init(
         }
 
         expected_seq = (expected_seq + 1) & 0x3F;
+        // The gap (if any) is closed for this seq — re-arm the selective-repeat
+        // NAK so a future loss at the new `expected_seq` is NAKed once (K1).
+        last_nak_seq = None;
 
         // Drain in-order packets buffered ahead of us by the windowed
         // receive path.  Each iteration consumes one buffered packet
@@ -11203,6 +11237,34 @@ mod tests {
         let payload: Vec<u8> = (0..2048).map(|i| (i % 200 + 30) as u8).collect();
         let received = round_trip_lossy(
             vec![("lossy.bin".into(), payload.clone())],
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].data, payload);
+    }
+
+    #[tokio::test]
+    async fn test_round_trip_window_lossy_recovers_window_gt_retries() {
+        // Exercises the K1 selective-repeat path: a dropped front-of-window
+        // D-packet with a window (8) LARGER than the retry cap (5).  The
+        // receiver ACKs each buffered future by its own seq and NAKs the gap
+        // once (spec §5.5), so the sender recovers without a NAK storm.
+        //
+        // NOTE: this is a no-regression guard for that config, not a
+        // discriminating pre/post-fix test.  The old NAK-per-future code also
+        // recovered over this loopback — the harness delivers the whole
+        // dropped-and-retransmitted window in FIFO order, so the sender's
+        // per-seq retry never actually raced the recovery to abort.  The K1
+        // abort needs real-network reordering (NAKs outpacing the retransmit),
+        // which the in-memory pipe can't reproduce; the fix stands on being
+        // the spec-compliant selective-repeat behavior + not regressing this
+        // config or the live C-Kermit sliding-window interop.
+        let payload: Vec<u8> = (0..2048).map(|i| (i % 200 + 30) as u8).collect();
+        let received = round_trip_lossy_with_overrides(
+            &[("kermit_window_size", "8"), ("kermit_max_retries", "5")],
+            vec![("k1.bin".into(), payload.clone())],
             2,
         )
         .await

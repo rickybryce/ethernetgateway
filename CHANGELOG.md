@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Kermit receive: windowed receiver now ACKs buffered out-of-order packets
+  (selective repeat, spec §5.5) (K1).** Previously it buffered a correctly-
+  received future packet but only NAKed the missing `expected_seq` — once per
+  future — never ACKing the good packet; the windowed sender counted each
+  duplicate NAK as a retry and re-sent packets it didn't need to. The receiver
+  now ACKs each future by its own seq and NAKs the gap once, matching the spec
+  and removing the redundant retransmissions (and the retry-budget pressure a
+  reordering link could put on a large window). Live C-Kermit 10.0 sliding-
+  window interop unchanged.
 - **Punter receive: a premature-retransmit duplicate no longer corrupts the
   file (P1/P2).** On a slow/jittery link a data block whose first byte was
   delayed past the byte-wait could trigger an early `S/B` resend; the delayed
