@@ -5,8 +5,8 @@
 //! file-management commands (DIR, TYPE, ERA, REN, COPY, MOVE, MKDIR,
 //! RMDIR, CD, PWD, STAT, DUMP, HELP).  Everything is implemented purely
 //! in Rust over the host filesystem; there is **no** Z80 / BDOS / BIOS
-//! emulation and **no** `.COM` execution (that is "flavor B", deferred —
-//! see `kernelplan.md` §13).
+//! emulation and **no** `.COM` execution (that is "flavor B", deferred to a
+//! later effort — a real CP/M 2.2 emulator that runs `.COM` software).
 //!
 //! ## Jailing
 //! Every command resolves names under `transfer_dir` and can never touch
@@ -613,7 +613,8 @@ impl TelnetSession {
 
     /// `TYPE file` — display a text file, paginated.  Refuses binary files
     /// (NUL bytes or a high proportion of control bytes) so a C64 isn't fed
-    /// terminal-hostile garbage, and is bounded by the 8 MB transfer cap.
+    /// terminal-hostile garbage, and is bounded by the `CPM_VIEW_MAX`
+    /// (1 MiB) viewer cap.
     async fn cpm_type(&mut self, file: &str) -> Result<(), std::io::Error> {
         if Self::cpm_has_wildcard(file) {
             return self.cpm_err("TYPE takes one file (no wildcards).").await;
@@ -928,6 +929,9 @@ impl TelnetSession {
             Err(e) => return self.cpm_err(e).await,
         };
         let dst = self.transfer_path().join(new);
+        // Courtesy pre-check; not atomic (see MOVE) — `rename(2)` would replace
+        // an existing target, but a concurrent racer is out of scope under the
+        // trusted-user/LAN model.
         if dst.exists() {
             return self.cpm_err("Target name already exists.").await;
         }
@@ -970,7 +974,11 @@ impl TelnetSession {
             }
             let mut copied = 0u64;
             for (name, _) in &matches {
-                let Ok(data) = tokio::fs::read(src_dir.join(name)).await else {
+                // Cap each read at the 8 MB transfer size, exactly like the
+                // single-file COPY path — never slurp an over-cap file whole.
+                let Ok(data) =
+                    Self::cpm_read_capped(&src_dir.join(name), Self::MAX_FILE_SIZE).await
+                else {
                     continue;
                 };
                 if Self::save_received_file_sync(&dst_dir.join(name), &data, None, false).is_ok() {
@@ -1035,6 +1043,12 @@ impl TelnetSession {
         if dst_path == src_path {
             return self.cpm_err("Source and destination are the same.").await;
         }
+        // The `exists()` check is a courtesy guard, not an atomic gate: POSIX
+        // `rename(2)` replaces its destination and std has no
+        // `RENAME_NOREPLACE`, so a second session racing this same user could
+        // create `dst_path` in the window before the rename.  Accepted under
+        // the trusted-user/LAN concurrency model (the transfer menu shares the
+        // same model); the copy-fallback below is atomically clobber-safe.
         if dst_path.exists() {
             return self.cpm_err("Destination exists.").await;
         }

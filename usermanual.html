@@ -1933,7 +1933,7 @@ shows where you are: <code>A&gt;</code> at the drive root, and
     <tbody>
         <tr><td><code>DIR [pattern]</code></td><td><code>LS</code></td><td>List the current directory (or a wildcard / path match). Directories show as <code>&lt;DIR&gt;</code>, files with their size.</td></tr>
         <tr><td><code>TYPE file</code></td><td>&mdash;</td><td>Display a <em>text</em> file a screenful at a time (see pagination below). Binary files are refused.</td></tr>
-        <tr><td><code>DUMP file</code></td><td>&mdash;</td><td>Hex + ASCII dump, 16 bytes per row, paginated.</td></tr>
+        <tr><td><code>DUMP file</code></td><td>&mdash;</td><td>Hex + ASCII dump, paginated (8 bytes/row on a 40-column PETSCII screen, 16 on wider terminals).</td></tr>
         <tr><td><code>ERA file</code></td><td><code>DEL</code>, <code>RM</code></td><td>Erase a file, or every file matching a wildcard (mass erase asks <code>(Y/N)</code> first). Refuses directories.</td></tr>
         <tr><td><code>REN new=old</code></td><td><code>RENAME</code></td><td>Rename a file <em>within one directory</em> (also accepts <code>REN old new</code>). Refuses to overwrite an existing name. Cross-directory relocation is <code>MOVE</code>.</td></tr>
         <tr><td><code>COPY dst src</code></td><td><code>PIP dst=src</code>, <code>CP</code></td><td>Copy a file; either operand may be path-qualified. Never overwrites an existing destination. A wildcard source copies each match into a directory destination.</td></tr>
