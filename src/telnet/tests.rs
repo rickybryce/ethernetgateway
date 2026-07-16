@@ -5596,3 +5596,37 @@ fn test_color_enabled_matrix() {
     let ascii = make_test_session(TerminalType::Ascii);
     assert_eq!(ascii.green("X"), "X", "ASCII is always plain even with color on");
 }
+
+/// The CP/M shell resolves path components case-insensitively (CP/M
+/// semantics; DIR shows names uppercased and PETSCII swaps case), returning
+/// the real on-disk name.  Regression for "CD Z80ASM can't find z80asm".
+#[test]
+fn test_cpm_real_components_case_insensitive() {
+    let tmp = std::env::temp_dir().join(format!("cpmci_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("z80asm").join("SUB")).unwrap();
+    std::fs::write(tmp.join("Hello.TXT"), b"x").unwrap();
+
+    // A differently-cased query resolves to a real, existing entry.
+    let d = TelnetSession::cpm_real_components(&tmp, &["Z80ASM".to_string()])
+        .expect("dir resolves case-insensitively");
+    assert!(tmp.join(&d[0]).is_dir());
+    let f = TelnetSession::cpm_real_components(&tmp, &["hello.txt".to_string()])
+        .expect("file resolves case-insensitively");
+    assert!(tmp.join(&f[0]).is_file());
+    // Nested case-insensitive resolution walks each level.
+    let n = TelnetSession::cpm_real_components(
+        &tmp,
+        &["Z80ASM".to_string(), "sub".to_string()],
+    )
+    .expect("nested resolves");
+    assert!(tmp.join(&n[0]).join(&n[1]).is_dir());
+    // An absent name never resolves (even a case-insensitive FS can't invent it).
+    assert!(TelnetSession::cpm_real_components(&tmp, &["nope".to_string()]).is_none());
+    // On a case-SENSITIVE fs the real on-disk case is returned; only assert
+    // that where the host is actually case-sensitive (skips macOS/Windows CI).
+    if !tmp.join("Z80ASM").exists() {
+        assert_eq!(d, vec!["z80asm".to_string()]);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **CP/M shell: name resolution is now case-insensitive.** `DIR` shows names
+  uppercased, so a directory stored on disk as `z80asm` displayed as `Z80ASM`
+  and `CD Z80ASM` then failed "No such directory." (only the lowercase form
+  worked) — and PETSCII terminals swap case on the wire, compounding it.
+  `CD`/`TYPE`/`DUMP`/`ERA`/`STAT`/`REN`/`COPY`/`MOVE` source operands now match
+  an existing name case-insensitively (exact case wins, else the first
+  case-insensitive hit) and resolve to the real on-disk name; newly created
+  names keep the case as typed. Still fully jailed to the transfer directory.
+- **CP/M shell: the `A>` prompt after HELP now appears on its own line.** The
+  help pager's "Press any key" was dismissed with the cursor mid-line, so the
+  returning prompt was glued to it (`Press any key.A>`); the pager now advances
+  to a fresh line before returning (harmless for the menu callers, which
+  redraw).
 - **PETSCII: declining color no longer drops a Commodore terminal to ASCII.**
   Color was tracked implicitly by the terminal type, so answering "N" to the
   color prompt forced `TerminalType::Ascii` — which also discarded PETSCII's

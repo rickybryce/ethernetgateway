@@ -1949,9 +1949,14 @@ shows where you are: <code>A&gt;</code> at the drive root, and
 </table>
 
 <p>
-Commands and filenames are case-insensitive. An unrecognised command is
-echoed back with a <code>?</code>, exactly as the CP/M console command
-processor does (e.g. <code>FOO?</code>).
+Commands and filenames are case-insensitive: because <code>DIR</code> shows
+names uppercased, <code>CD&nbsp;Z80ASM</code>, <code>CD&nbsp;z80asm</code>, and
+a directory stored on disk as <code>z80asm</code> all refer to the same
+directory (an exact-case match wins, otherwise the first case-insensitive
+match is used). Names you <em>create</em> (<code>MKDIR</code>, a
+<code>COPY</code>/<code>MOVE</code> destination) are kept in the case you
+type. An unrecognised command is echoed back with a <code>?</code>, exactly
+as the CP/M console command processor does (e.g. <code>FOO?</code>).
 </p>
 
 <h3>Path syntax</h3>

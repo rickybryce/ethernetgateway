@@ -30,6 +30,12 @@
 //!   uploads with names up to 64 chars; forcing 8.3 would hide or mangle
 //!   them.  Host names are kept verbatim on disk and shown uppercased in DIR
 //!   for CP/M feel; wildcards match case-insensitively against the real name.
+//! - **Case-insensitive name resolution.**  CP/M is case-insensitive, DIR
+//!   shows names uppercased (so the user can't tell the host case), and
+//!   PETSCII terminals swap case on the wire — so `CD`/`TYPE`/`ERA`/… match
+//!   an existing name case-insensitively (exact case wins, else the first
+//!   case-insensitive hit), resolving to the real on-disk name.  Newly
+//!   *created* names (MKDIR, COPY/MOVE destinations) keep the case as typed.
 //! - **Prompt** shows the cwd (`A:SUB>`) when in a subdirectory, where stock
 //!   CP/M only ever shows `A>`.
 
@@ -343,15 +349,59 @@ impl TelnetSession {
         }
     }
 
+    /// Walk a normalized component list under `base`, matching each
+    /// component against the real directory entries — an exact-case match
+    /// wins, otherwise the first case-insensitive match is used — and return
+    /// the list of **real on-disk names**.  Returns `None` if any component
+    /// has no match.
+    ///
+    /// This is what makes the shell case-insensitive like real CP/M: `DIR`
+    /// shows names uppercased (so the user can't tell the host case), and
+    /// PETSCII terminals swap case on the wire, so `CD Z80ASM`, `CD z80asm`,
+    /// and a real `z80asm` on disk must all resolve to the same directory.
+    /// It only ever descends into genuine children of `base` (never `..`),
+    /// so it cannot escape the jail — the caller still canonicalizes the
+    /// result and re-checks the `transfer_dir` prefix.
+    pub(in crate::telnet) fn cpm_real_components(
+        base: &std::path::Path,
+        comps: &[String],
+    ) -> Option<Vec<String>> {
+        let mut cur = base.to_path_buf();
+        let mut real = Vec::with_capacity(comps.len());
+        for comp in comps {
+            let name = if cur.join(comp).exists() {
+                comp.clone()
+            } else {
+                let mut hit = None;
+                if let Ok(rd) = std::fs::read_dir(&cur) {
+                    for entry in rd.flatten() {
+                        if let Some(n) = entry.file_name().to_str()
+                            && n.eq_ignore_ascii_case(comp)
+                        {
+                            hit = Some(n.to_string());
+                            break;
+                        }
+                    }
+                }
+                hit?
+            };
+            cur = cur.join(&name);
+            real.push(name);
+        }
+        Some(real)
+    }
+
     /// Resolve a directory operand to a canonicalized absolute path that is
-    /// verified to exist inside the jail.  Used by CD and as the parent
-    /// resolver for file operands.
+    /// verified to exist inside the jail.  Component matching is
+    /// case-insensitive (see `cpm_real_components`).  Used by CD and as the
+    /// parent resolver for file operands.
     fn cpm_dir_abs(&self, dir_operand: &str) -> Result<PathBuf, &'static str> {
         let comps = Self::cpm_normalize(&self.transfer_subdir, dir_operand)?;
         let cfg = config::get_config();
         let base = std::fs::canonicalize(&cfg.transfer_dir).map_err(|_| "Access denied.")?;
+        let real = Self::cpm_real_components(&base, &comps).ok_or("No such directory.")?;
         let mut abs = base.clone();
-        for c in &comps {
+        for c in &real {
             abs.push(c);
         }
         let canon = std::fs::canonicalize(&abs).map_err(|_| "No such directory.")?;
@@ -366,7 +416,9 @@ impl TelnetSession {
 
     /// Resolve a file operand that must already exist, to a canonicalized
     /// absolute path verified inside the jail and confirmed to be a regular
-    /// file.  Symlink-safe (the full path is canonicalized).
+    /// file.  The directory portion and the filename are both matched
+    /// case-insensitively (CP/M semantics); the full path is canonicalized,
+    /// so a symlink leaf pointing outside the jail is still rejected.
     fn cpm_existing_file(&self, operand: &str) -> Result<PathBuf, &'static str> {
         let (dir_part, leaf) = Self::cpm_split_leaf(operand);
         if leaf.is_empty() {
@@ -374,7 +426,11 @@ impl TelnetSession {
         }
         Self::validate_filename(leaf)?;
         let dir = self.cpm_dir_abs(dir_part)?;
-        let path = dir.join(leaf);
+        // Match the filename case-insensitively within the resolved dir.
+        let leaf_owned = leaf.to_string();
+        let real = Self::cpm_real_components(&dir, std::slice::from_ref(&leaf_owned))
+            .ok_or("File not found.")?;
+        let path = dir.join(&real[0]);
         let cfg = config::get_config();
         let base = std::fs::canonicalize(&cfg.transfer_dir).map_err(|_| "Access denied.")?;
         let canon = std::fs::canonicalize(&path).map_err(|_| "File not found.")?;
@@ -534,7 +590,19 @@ impl TelnetSession {
             Ok(c) => c,
             Err(e) => return self.cpm_err(e).await,
         };
-        let new_subdir = comps.join("/");
+        // Resolve case-insensitively to the real on-disk names (CP/M is
+        // case-insensitive and DIR shows names uppercased, so the user can't
+        // rely on the host case), and store the real relative path so
+        // transfer_path() and the prompt stay consistent with disk.
+        let cfg = config::get_config();
+        let base = match std::fs::canonicalize(&cfg.transfer_dir) {
+            Ok(b) => b,
+            Err(_) => return self.cpm_err("No such directory.").await,
+        };
+        let Some(real) = Self::cpm_real_components(&base, &comps) else {
+            return self.cpm_err("No such directory.").await;
+        };
+        let new_subdir = real.join("/");
         // Apply, then verify on disk (existence + symlink jail).  Revert on
         // failure so a bad CD never leaves us in a phantom directory.
         let prev = std::mem::replace(&mut self.transfer_subdir, new_subdir);
