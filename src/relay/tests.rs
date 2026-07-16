@@ -21,7 +21,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
     claim_remote_peer, parse_relay_command, parse_remote_peer_addr, register_remote_port,
-    run_master_relay_dial, run_master_relay_session, ParsedRelay, RelayConnectError, RelayTarget,
+    run_master_relay_dial, run_master_relay_session, split_dial_host_port, ParsedRelay,
+    RelayConnectError, RelayTarget,
     RELAY_ACTIVATE_BYTE,
 };
 
@@ -324,7 +325,7 @@ fn test_relay_command_round_trip() {
         })
     );
 
-    // An IPv6-ish host:port still splits on the LAST colon.
+    // IPv4 host:port round-trips.
     let cmd = RelayTarget::Dial {
         host: "10.0.0.5".into(),
         port: 23,
@@ -334,6 +335,26 @@ fn test_relay_command_round_trip() {
         parse_relay_command(&cmd).unwrap().dial,
         Some(("10.0.0.5".into(), 23))
     );
+
+    // IPv6 literal (F1): the slave emits the bracketed wire form and the
+    // master parses it back to the bare literal that `connect` accepts —
+    // brackets never leak into the host.
+    let cmd = RelayTarget::Dial {
+        host: "2001:db8::1".into(),
+        port: 6400,
+    }
+    .exec_command("B");
+    assert_eq!(cmd, "serial-relay B dial [2001:db8::1]:6400");
+    assert_eq!(
+        parse_relay_command(&cmd).unwrap().dial,
+        Some(("2001:db8::1".into(), 6400))
+    );
+
+    // An unbracketed IPv6 literal is ambiguous and rejected (must bracket it).
+    assert_eq!(split_dial_host_port("2001:db8::1:6400"), None);
+    assert_eq!(split_dial_host_port("[::1]:6400"), Some(("::1".into(), 6400)));
+    assert_eq!(split_dial_host_port("1.2.3.4:23"), Some(("1.2.3.4".into(), 23)));
+    assert_eq!(split_dial_host_port("1.2.3.4:0"), None);
 }
 
 /// The master refuses anything that isn't a well-formed relay command —

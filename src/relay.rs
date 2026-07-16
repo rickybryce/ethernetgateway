@@ -271,7 +271,13 @@ impl RelayTarget {
         match self {
             RelayTarget::Menu => format!("serial-relay {} menu", port_label),
             RelayTarget::Dial { host, port } => {
-                format!("serial-relay {} dial {}:{}", port_label, host, port)
+                // Bracket an IPv6 literal so the master's `split_dial_host_port`
+                // can tell host from port (F1); IPv4/hostnames pass through bare.
+                if host.contains(':') {
+                    format!("serial-relay {} dial [{}]:{}", port_label, host, port)
+                } else {
+                    format!("serial-relay {} dial {}:{}", port_label, host, port)
+                }
             }
             RelayTarget::Peer { addr } => {
                 format!("serial-relay {} peer {}", port_label, addr)
@@ -301,6 +307,38 @@ pub struct ParsedRelay {
 ///   `serial-relay <port> menu`
 ///   `serial-relay <port> dial <host>:<port>`
 ///   `serial-relay <port> peer <Port>@<host>`
+/// Split a dial target into `(host, port)`, accepting both `host:port` and
+/// the bracketed IPv6 form `[2001:db8::1]:6400`, and returning the host as a
+/// *bare* literal (brackets stripped) that `TcpStream::connect((host, port))`
+/// accepts.  An unbracketed IPv6 literal is rejected as ambiguous — callers
+/// must bracket it — as is a missing/zero/invalid port.  Used by both the
+/// slave-side resolve and the master-side parse so the two halves agree on
+/// IPv6 handling (F1 — the onward-dial path previously used a bare
+/// `rsplit_once(':')` that left brackets on the host and broke `connect`).
+pub fn split_dial_host_port(s: &str) -> Option<(String, u16)> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('[') {
+        // Bracketed IPv6: [host]:port
+        let (host, after) = rest.split_once(']')?;
+        let port: u16 = after.strip_prefix(':')?.parse().ok()?;
+        if port == 0 {
+            return None;
+        }
+        return Some((host.to_string(), port));
+    }
+    let (host, port_str) = s.rsplit_once(':')?;
+    // A leftover ':' in the host means an unbracketed IPv6 literal — ambiguous
+    // (can't tell host from port), so require the bracketed form instead.
+    if host.contains(':') {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some((host.to_string(), port))
+}
+
 pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
     let mut toks = command.split_whitespace();
     if toks.next()? != "serial-relay" {
@@ -312,12 +350,7 @@ pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
     match toks.next().unwrap_or("menu") {
         "menu" => {}
         "dial" => {
-            let (h, p) = toks.next()?.rsplit_once(':')?;
-            let port: u16 = p.parse().ok()?;
-            if port == 0 {
-                return None;
-            }
-            dial = Some((h.to_string(), port));
+            dial = Some(split_dial_host_port(toks.next()?)?);
         }
         "peer" => {
             let addr = toks.next()?;

@@ -1220,6 +1220,42 @@ async fn send_rejection_message(
 }
 
 /// Start the telnet server accept loop.
+/// RAII backstop that releases a telnet session's `max_sessions` slot and
+/// removes its writer from the broadcast list even if `session.run()`
+/// panics (F3).  The normal path does the graceful async cleanup and then
+/// calls `defuse()`; only a panic-unwind leaves the guard armed, in which
+/// case Drop reclaims the slot (sync) and best-effort removes the writer.
+/// Without this, a future reachable panic in a session would silently leak a
+/// session slot and grow `session_writers` unbounded.
+struct SessionSlotGuard {
+    count: Arc<AtomicUsize>,
+    writers: SessionWriters,
+    writer: SharedWriter,
+    armed: bool,
+}
+
+impl SessionSlotGuard {
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionSlotGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return; // normal path already released under the async lock
+        }
+        self.count.fetch_sub(1, Ordering::SeqCst);
+        // Best-effort writer removal — `try_lock` avoids awaiting/blocking in
+        // Drop.  If contended (rare, and only on a panic unwind), the dead
+        // writer is left for the broadcast path to skip (writes to a closed
+        // half just error out).
+        if let Ok(mut ws) = self.writers.try_lock() {
+            ws.retain(|w| !Arc::ptr_eq(w, &self.writer));
+        }
+    }
+}
+
 pub fn start_server(
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
@@ -1339,6 +1375,16 @@ pub fn start_server(
                                 let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(write_half);
                                 let writer_arc: SharedWriter = Arc::new(tokio::sync::Mutex::new(writer_box));
                                 sw.lock().await.push(writer_arc.clone());
+                                // Arm the panic-unwind backstop (F3) now that
+                                // the slot is claimed and the writer is
+                                // registered; `defuse()` below disables it once
+                                // the normal cleanup has run.
+                                let mut slot_guard = SessionSlotGuard {
+                                    count: sc.clone(),
+                                    writers: sw.clone(),
+                                    writer: writer_arc.clone(),
+                                    armed: true,
+                                };
                                 let mut session = TelnetSession {
                                     reader: Box::new(read_half),
                                     writer: writer_arc.clone(),
@@ -1394,6 +1440,7 @@ pub fn start_server(
                                 }
                                 sw.lock().await.retain(|w| !Arc::ptr_eq(w, &writer_arc));
                                 sc.fetch_sub(1, Ordering::SeqCst);
+                                slot_guard.defuse(); // normal cleanup done
                                 glog!("Telnet: {} disconnected", addr);
                             });
                         }

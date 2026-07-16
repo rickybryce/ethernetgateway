@@ -607,6 +607,18 @@ pub fn peer_dial_target_eligible(cfg: &config::Config, id: SerialPortId) -> bool
     cfg.allow_peer_dial && port.enabled && port.mode == "modem" && !port.port.is_empty()
 }
 
+/// Whether `id` is a **console** port that, on a *slave*, is dedicated to the
+/// master — it runs the master-registration loop
+/// (`console_slave_register_tick`), not the local console bridge, so nothing
+/// services a `request_console_bridge` for it.  Dialing such a port locally
+/// (`ATD <Port>@<ip>` or the Serial Gateway picker) would wedge the caller on
+/// a bridge oneshot that never resolves (§9 #13), so both call sites must
+/// exclude it.  Pure config predicate; mirrors the picker's `relayed_to_master`.
+pub fn console_relayed_to_master(cfg: &config::Config, id: SerialPortId) -> bool {
+    let port = cfg.port(id);
+    cfg.gateway_role == "slave" && port.enabled && port.mode == "console" && !port.port.is_empty()
+}
+
 /// Combined gate for `request_console_bridge`: eligibility first
 /// (so a misconfigured port produces a specific error), then the
 /// "another session" check.  Pure function — exercised by tests
@@ -3567,11 +3579,12 @@ fn slave_resolve_relay_target(
     } else {
         target.to_string()
     };
-    let (host, port) = if let Some((h, p)) = resolved.rsplit_once(':') {
-        match p.parse::<u16>() {
-            Ok(port) if port > 0 => (h.to_string(), port),
-            _ => return None,
-        }
+    // A target with a ':' must be a well-formed host:port (or bracketed
+    // [ipv6]:port — F1); a bare host defaults to the telnet port.  Using the
+    // shared splitter keeps the slave's resolve and the master's parse in
+    // agreement on IPv6 bracketing.
+    let (host, port) = if resolved.contains(':') {
+        crate::relay::split_dial_host_port(&resolved)?
     } else {
         (resolved, 23u16)
     };
@@ -3741,6 +3754,21 @@ fn connect_local_peer(state: &mut ModemState, target: SerialPortId) {
         return;
     }
     if tp.mode == "console" {
+        // On a slave, a console port is dedicated to the master — it runs the
+        // registration loop (`console_slave_register_tick`), not the local
+        // console bridge — so nothing services a `request_console_bridge`, and
+        // dialing it would wedge this serial thread forever on the oneshot
+        // (§9 #13).  Fail fast via the same predicate the Serial Gateway
+        // picker uses to exclude it.
+        if console_relayed_to_master(&cfg, target) {
+            glog!(
+                "Serial modem (Port {}): peer-dial target Port {} is a console relayed to the master (not locally dialable)",
+                state.port_id.label(),
+                target.label()
+            );
+            send_result(state, "NO CARRIER");
+            return;
+        }
         bridge_local_console_peer(state, target);
     } else {
         bridge_local_modem_peer(state, target);
@@ -3822,9 +3850,26 @@ fn bridge_duplex_online(state: &mut ModemState, bridge: tokio::io::DuplexStream)
 /// target's console manager pumps its UART against the far end; we pump the
 /// caller's UART against this end, so the devices are transparently joined.
 fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
-    let bridge = match state.handle.block_on(request_console_bridge(target)) {
-        Ok(d) => d,
-        Err(e) => {
+    // Race the bridge request against a shutdown/restart poll (M-5), like
+    // `bridge_local_modem_peer`.  `request_console_bridge` awaits a oneshot
+    // with no timeout, so without this a target whose manager never services
+    // the request (e.g. it changed mode, or a future misconfiguration) would
+    // pin this serial thread in `block_on` and defeat config-restart/shutdown.
+    // Cancelling the request is safe — its `ConsoleSlotGuard` reclaims the
+    // slot on drop.  The slave-console wedge is already prevented up-front in
+    // `connect_local_peer`; this bounds every other path.
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
+    let outcome = state.handle.block_on(async move {
+        tokio::select! {
+            biased;
+            _ = wait_for_serial_abort(&sd, idx) => None,
+            r = request_console_bridge(target) => Some(r),
+        }
+    });
+    let bridge = match outcome {
+        Some(Ok(d)) => d,
+        Some(Err(e)) => {
             // Target busy, wrong mode, or no device — looks like a failed
             // call to the caller; detail is in the log.
             glog!(
@@ -3833,6 +3878,11 @@ fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
                 target.label(),
                 e
             );
+            send_result(state, "NO CARRIER");
+            return;
+        }
+        None => {
+            // Shutdown/restart cut the dial short.
             send_result(state, "NO CARRIER");
             return;
         }
@@ -5936,6 +5986,29 @@ mod tests {
         assert!(!peer_dial_target_eligible(&with(false, "modem", "/dev/ttyUSB0", true), SerialPortId::A));
         assert!(!peer_dial_target_eligible(&with(true, "modem", "", true), SerialPortId::A));
         assert!(!peer_dial_target_eligible(&with(true, "modem", "/dev/ttyUSB0", false), SerialPortId::A));
+    }
+
+    /// A console port on a slave is dedicated to the master and must be
+    /// excluded from local dialing (round-5 HIGH: dialing it wedged the
+    /// caller's serial thread on a bridge nothing services).
+    #[test]
+    fn test_console_relayed_to_master_matrix() {
+        let with = |role: &str, enabled, mode, port| {
+            let mut cfg = cfg_with_serial(SerialPortId::A, enabled, mode, port);
+            cfg.gateway_role = role.into();
+            cfg
+        };
+        // Slave + enabled console + device → relayed to master (not dialable).
+        assert!(console_relayed_to_master(&with("slave", true, "console", "/dev/ttyUSB0"), SerialPortId::A));
+        // Master / standalone role → a locally dialable console bridge.
+        assert!(!console_relayed_to_master(&with("master", true, "console", "/dev/ttyUSB0"), SerialPortId::A));
+        assert!(!console_relayed_to_master(&with("", true, "console", "/dev/ttyUSB0"), SerialPortId::A));
+        // Non-console modes are never a relayed console, even on a slave.
+        assert!(!console_relayed_to_master(&with("slave", true, "modem", "/dev/ttyUSB0"), SerialPortId::A));
+        assert!(!console_relayed_to_master(&with("slave", true, "kermit", "/dev/ttyUSB0"), SerialPortId::A));
+        // Disabled or deviceless console → not relayed.
+        assert!(!console_relayed_to_master(&with("slave", false, "console", "/dev/ttyUSB0"), SerialPortId::A));
+        assert!(!console_relayed_to_master(&with("slave", true, "console", ""), SerialPortId::A));
     }
 
     /// `check_console_bridge_eligible` rejects an unconfigured port.

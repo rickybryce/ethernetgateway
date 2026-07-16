@@ -23,6 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Serial: dialing a console-mode port relayed to the master no longer wedges
+  the caller's serial thread (round-5 review).** On a slave gateway with
+  `allow_peer_dial` on, `ATD <ConsolePort>@<local-ip>` reached a local console
+  bridge that nothing services (the console port runs the master-registration
+  loop, not the local bridge), so the caller's thread blocked forever on the
+  bridge oneshot — unrecoverable short of a full restart. `connect_local_peer`
+  now fails that dial fast with NO CARRIER (mirroring the Serial Gateway
+  picker's exclusion), and the console-bridge request is additionally raced
+  against a shutdown/restart poll so no path can pin the thread.
+- **Relay: IPv6 onward-dial targets are handled correctly (F1).** The onward-
+  dial path split/rebuilt `host:port` with a bare `rsplit_once(':')`, leaving
+  brackets on an IPv6 host so `connect` failed. A shared `split_dial_host_port`
+  now parses `[2001:db8::1]:6400` into a bare literal, the slave brackets IPv6
+  on the wire, and both halves agree (unbracketed IPv6 is rejected as
+  ambiguous). IPv4/hostname dialing is unchanged.
+- **Telnet: a session-slot / broadcast-writer leak on a panicking session is
+  now prevented (F3).** Slot release and writer de-registration ran only after
+  `session.run()` returned, so a future reachable panic would leak a
+  `max_sessions` slot and grow the broadcast list unbounded. A RAII backstop
+  (`SessionSlotGuard`) now reclaims both on unwind; the normal path defuses it
+  after the graceful async cleanup. (No panic is reachable today — this is
+  defensive hardening consistent with the SSH/relay Drop guards.)
 - **Kermit receive: windowed receiver now ACKs buffered out-of-order packets
   (selective repeat, spec §5.5) (K1).** Previously it buffered a correctly-
   received future packet but only NAKed the missing `expected_seq` — once per

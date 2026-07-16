@@ -5313,3 +5313,48 @@ fn test_weather_unit_formatting_and_labels() {
     assert_eq!(WeatherUnits::Imperial.wind_label(), "mph");
     assert_eq!(WeatherUnits::Metric.wind_label(), "km/h");
 }
+
+/// F3: the session-slot RAII backstop reclaims the `max_sessions` slot on a
+/// panic-unwind (armed drop) and is a no-op once the normal path has defused
+/// it (so no double-release).  Guards against a future reachable panic in a
+/// session silently leaking a slot.
+#[test]
+fn test_session_slot_guard_releases_on_armed_drop() {
+    let count = Arc::new(AtomicUsize::new(1));
+    let writers: SessionWriters = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(
+        Box::new(Vec::<u8>::new()) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ));
+
+    // Armed guard dropped without defuse (the panic-unwind path) → released.
+    {
+        let _g = SessionSlotGuard {
+            count: count.clone(),
+            writers: writers.clone(),
+            writer: writer.clone(),
+            armed: true,
+        };
+    }
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "an armed guard must release the slot on drop"
+    );
+
+    // Defused guard (normal path already released) → no double-release.
+    count.store(1, Ordering::SeqCst);
+    {
+        let mut g = SessionSlotGuard {
+            count: count.clone(),
+            writers,
+            writer,
+            armed: true,
+        };
+        g.defuse();
+    }
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "a defused guard must not release again"
+    );
+}
