@@ -669,12 +669,13 @@
                     </ol>
                 </div>
 
-                <div class="cat">Step 4 &mdash; End of file, then end of batch</div>
+                <div class="cat">Step 4 &mdash; End of file, then the next file or end of batch</div>
                 <div class="instructions">
-                    <h3>EOT and the closing block 0</h3>
+                    <h3>EOT, then another block 0 &mdash; or the empty one</h3>
                     <ol>
                         <li>The sender transmits <code>EOT</code> (0x04); the gateway answers with <code>ACK</code>.</li>
-                        <li>The gateway then sends one more <code>C</code> and reads the <strong>end-of-batch block 0</strong> &mdash; a block 0 whose filename is empty &mdash; which signals &ldquo;no more files.&rdquo; The gateway <code>ACK</code>s it and the session ends.</li>
+                        <li>The gateway sends one more <code>C</code> and reads the next block 0. If its filename is <strong>non-empty</strong>, it is the <strong>next file in the batch</strong> &mdash; the gateway loops back to Step 2 and receives it too, saving each file to <code>transfer_dir</code> under its own name. A real multi-file send (<code>sb file1 file2 &hellip;</code>) is received in full, not just the first file.</li>
+                        <li>When the block 0's filename is <strong>empty</strong>, it is the <strong>end-of-batch block 0</strong> &mdash; &ldquo;no more files.&rdquo; The gateway <code>ACK</code>s it and the session ends.</li>
                     </ol>
                 </div>
 

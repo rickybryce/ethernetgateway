@@ -803,6 +803,7 @@
                     <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial the stored number in slot <em>n</em> (0&ndash;3; bare <code>ATDS</code> = slot 0).</td></tr>
                     <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or <code>host:port</code> string <em>s</em> in slot <em>n</em> (0&ndash;3). Hostname case is preserved. Persisted with <code>AT&amp;W</code>.</td></tr>
                 </table>
+                <p class="dim-text">An IPv6 literal target must be <strong>bracketed</strong> &mdash; <code>ATDT [2001:db8::1]:6400</code> &mdash; so the host and port stay unambiguous; a bare, unbracketed IPv6 address is rejected. IPv4 addresses and hostnames dial as <code>host:port</code> unchanged, and a target with no <code>:port</code> defaults to port 23.</p>
 
                 <div class="cat">Dial-string modifiers</div>
                 <p class="dim-text">Honoured only when the dial string looks like a phone number (digits + formatting). A hostname such as <code>pine.example.com</code> is dialled verbatim &mdash; modifiers are not stripped from it (except a trailing <code>;</code>).</p>
