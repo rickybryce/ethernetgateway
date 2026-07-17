@@ -1,7 +1,8 @@
 # Ethernet Gateway
 
-A telnet-based XMODEM/YMODEM/ZMODEM/Kermit/Punter file transfer server, SSH
-gateway, Hayes-compatible modem emulator on **two physically
+A telnet-based XMODEM/YMODEM/ZMODEM/Kermit/Punter file transfer server with a
+CP/M-inspired **Gateway Shell** (an `A>` file manager over the transfer
+directory), SSH gateway, Hayes-compatible modem emulator on **two physically
 independent serial ports** (each with optional telnet-serial console
 bridge) for serial-attached retro hardware, text-mode web browser, and
 AI chat client written in Rust. Supports PETSCII (Commodore 64), ANSI,

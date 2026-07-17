@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
+- **Gateway Shell: `DIR SUB` now lists the subdirectory's contents** (like
+  `DIR SUB/`) instead of just showing the `<DIR>` entry — a wildcard-free
+  operand that names an existing directory is listed, matching the DOS/Unix
+  expectation. `DIR name`, `DIR *.pat`, and `DIR file` are unchanged.
 - **Gateway Shell: name resolution is now case-insensitive.** `DIR` shows names
   uppercased, so a directory stored on disk as `z80asm` displayed as `Z80ASM`
   and `CD Z80ASM` then failed "No such directory." (only the lowercase form

@@ -533,6 +533,16 @@ impl TelnetSession {
         // Resolve the directory to list + the name pattern to match.
         let (dir_operand, name_pat) = match pattern {
             None => (String::new(), "*".to_string()),
+            // A wildcard-free operand that names an existing directory lists
+            // that directory's contents, so `DIR SUB` behaves like `DIR SUB/`
+            // (the DOS/Unix expectation).  Otherwise the last path component
+            // is treated as a name/glob pattern to match within its parent.
+            // The guard's `cpm_dir_abs(p)` is resolved again in the body below
+            // (`dir_operand == p`); the extra resolve is intentional — DIR is
+            // not a hot path and a match guard can't bind the resolved value.
+            Some(p) if !Self::cpm_has_wildcard(p) && self.cpm_dir_abs(p).is_ok() => {
+                (p.to_string(), "*".to_string())
+            }
             Some(p) => {
                 let (dir_part, leaf) = Self::cpm_split_leaf(p);
                 let leaf = if leaf.is_empty() { "*" } else { leaf };

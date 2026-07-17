@@ -1932,7 +1932,7 @@ shows where you are: <code>A&gt;</code> at the drive root, and
 <table>
     <thead><tr><th>Command</th><th>Aliases</th><th>Action</th></tr></thead>
     <tbody>
-        <tr><td><code>DIR [pattern]</code></td><td><code>LS</code></td><td>List the current directory (or a wildcard / path match). Directories show as <code>&lt;DIR&gt;</code>, files with their size.</td></tr>
+        <tr><td><code>DIR [pattern]</code></td><td><code>LS</code></td><td>List the current directory, or a wildcard / path match. Naming a subdirectory lists its contents (<code>DIR&nbsp;SUB</code> is the same as <code>DIR&nbsp;SUB/</code>). Directories show as <code>&lt;DIR&gt;</code>, files with their size.</td></tr>
         <tr><td><code>TYPE file</code></td><td>&mdash;</td><td>Display a <em>text</em> file a screenful at a time (see pagination below). Binary files are refused.</td></tr>
         <tr><td><code>DUMP file</code></td><td>&mdash;</td><td>Hex + ASCII dump, paginated (8 bytes/row on a 40-column PETSCII screen, 16 on wider terminals).</td></tr>
         <tr><td><code>ERA file</code></td><td><code>DEL</code>, <code>RM</code></td><td>Erase a file, or every file matching a wildcard (mass erase asks <code>(Y/N)</code> first). Refuses directories.</td></tr>
@@ -2031,7 +2031,7 @@ menu always see the same files.
 or a high proportion of control characters) so it can&rsquo;t spray
 terminal-hostile bytes at a vintage screen &mdash; download such files with
 a transfer protocol instead. The <code>TYPE</code> and <code>DUMP</code>
-viewers cap the files they will read at <strong>1&nbsp;MB</strong> (paging a
+viewers cap the files they will read at <strong>1&nbsp;MiB</strong> (paging a
 larger file over a retro link isn&rsquo;t useful &mdash; transfer it instead);
 <code>DUMP</code> shows 8 bytes per row on a 40-column PETSCII screen and 16
 on wider terminals.
