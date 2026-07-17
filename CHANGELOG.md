@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - Unreleased
 
 ### Added
-- **CP/M shell — a CP/M-flavored file manager over telnet/SSH.** A new
-  `S  CP/M shell` item on the File Transfer menu opens an `A>` command prompt
+- **Gateway Shell — a CP/M-inspired file manager over telnet/SSH.** A new
+  `S  Gateway Shell` item on the File Transfer menu opens an `A>` command prompt
   that presents the transfer directory as drive A: (flavor A: pure Rust, **no**
   Z80/`.COM` emulation). Resident commands `DIR`/`LS`, `TYPE`, `DUMP`, `ERA`
   (`DEL`/`RM`), `REN`, `COPY` (`PIP`/`CP`), `MOVE` (`MV`), `MKDIR` (`MD`),
@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that portions of the project were developed with the assistance of AI tools.
 
 ### Fixed
-- **CP/M shell: name resolution is now case-insensitive.** `DIR` shows names
+- **Gateway Shell: name resolution is now case-insensitive.** `DIR` shows names
   uppercased, so a directory stored on disk as `z80asm` displayed as `Z80ASM`
   and `CD Z80ASM` then failed "No such directory." (only the lowercase form
   worked) — and PETSCII terminals swap case on the wire, compounding it.
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an existing name case-insensitively (exact case wins, else the first
   case-insensitive hit) and resolve to the real on-disk name; newly created
   names keep the case as typed. Still fully jailed to the transfer directory.
-- **CP/M shell: the `A>` prompt after HELP now appears on its own line.** The
+- **Gateway Shell: the `A>` prompt after HELP now appears on its own line.** The
   help pager's "Press any key" was dismissed with the cursor mid-line, so the
   returning prompt was glued to it (`Press any key.A>`); the pager now advances
   to a fresh line before returning (harmless for the menu callers, which

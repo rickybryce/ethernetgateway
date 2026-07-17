@@ -282,7 +282,7 @@ including Claude Code.
             <li><a href="#ch8-tuning">Protocol Timeout Tunables</a></li>
             <li><a href="#ch8-kermit">Kermit — Server &amp; Client Mode</a></li>
             <li><a href="#ch8-punter">Punter (C1) — Commodore</a></li>
-            <li><a href="#ch8-cpm">CP/M Shell (drive A:)</a></li>
+            <li><a href="#ch8-shell">Gateway Shell (drive A:)</a></li>
         </ol>
     </li>
     <li><span class="num">9.</span> <a href="#ch9">Serial / Hayes AT Modem Emulation</a>
@@ -370,7 +370,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 
 <ul>
     <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with autostart), Kermit (incl. standalone server mode), and Punter C1 (Commodore 64/128), with auto-detection on upload and a selection prompt on download.</li>
-    <li><strong>CP/M shell</strong> — a CP/M-flavored <code>A&gt;</code> file-manager prompt over telnet/SSH (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, &hellip;), operating on the transfer directory as drive A: (no Z80 emulation; chapter 8.10).</li>
+    <li><strong>Gateway Shell</strong> — a CP/M-inspired <code>A&gt;</code> file-manager prompt over telnet/SSH (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, &hellip;), operating on the transfer directory as drive A: (no Z80 emulation; chapter 8.10).</li>
     <li><strong>Hayes AT modem emulator</strong> — two physically independent serial ports (Port A and Port B), each with its own enabled flag, mode, baud, AT/S-register state (S0–S26), and stored phone-number slots, plus the <code>+++</code> escape.</li>
     <li><strong>Telnet-serial console bridge</strong> — either port can be flipped to <em>console mode</em> per-port, so a telnet/SSH user can drive a microcontroller or RS-232 device directly through the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu (chapter 9.13).  Both ports can host bridges concurrently.</li>
     <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
@@ -1351,7 +1351,7 @@ From the main menu press <span class="kbd">F</span>:
   C  Change directory (subdirectory within transfer_dir)
   M  Make directory    (create a subdirectory)
   K  Kermit server mode (idle and wait for client commands)
-  S  CP/M shell        (A&gt; file-manager prompt — see §8.10)
+  S  Gateway Shell     (A&gt; file-manager prompt — see §8.10)
   I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
 
 <h2 id="ch8-upload">8.3 Uploads — Protocol Selection &amp; Auto-Detection</h2>
@@ -1903,22 +1903,23 @@ aborted transfer left in the line before each new Punter transfer, so a clean
 restart resyncs reliably.
 </aside>
 
-<h2 id="ch8-cpm">8.10 CP/M Shell (drive A:)</h2>
+<h2 id="ch8-shell">8.10 Gateway Shell (drive A:)</h2>
 
 <p>
-The CP/M shell gives a logged-in telnet or SSH user a familiar
+The Gateway Shell gives a logged-in telnet or SSH user a familiar
 <code>A&gt;</code> command prompt for managing the files in the transfer
-directory. It is a <strong>CP/M-flavored file manager written entirely in
-Rust</strong> &mdash; there is <em>no</em> Z80 CPU emulation and it does
-<em>not</em> run <code>.COM</code> programs; it simply presents the
-configured <code>transfer_dir</code> as drive <strong>A:</strong> and lets
-you list, view, copy, rename, move, erase, and organise files the way you
-would at a real CP/M console. It works identically over telnet and SSH.
+directory. It is a <strong>CP/M-inspired file manager written entirely in
+Rust</strong> &mdash; the command style and <code>A&gt;</code> prompt are
+modelled on CP/M, but it is not a CP/M-compatible shell: there is <em>no</em>
+Z80 CPU emulation and it does <em>not</em> run <code>.COM</code> programs. It
+simply presents the configured <code>transfer_dir</code> as drive
+<strong>A:</strong> and lets you list, view, copy, rename, move, erase, and
+organise files. It works identically over telnet and SSH.
 </p>
 
 <p>
 Open it from the <strong>File Transfer</strong> menu with
-<span class="kbd">S</span> (&ldquo;CP/M shell&rdquo;). Type
+<span class="kbd">S</span> (&ldquo;Gateway Shell&rdquo;). Type
 <code>HELP</code> for the command list and <code>EXIT</code> (or press
 <span class="kbd">ESC</span>) to return to the File Transfer menu &mdash;
 leaving the shell does <em>not</em> disconnect your session. The prompt

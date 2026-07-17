@@ -1,4 +1,7 @@
-//! CP/M-flavored command shell (flavor A — no CPU emulation).
+//! Gateway Shell — a CP/M-inspired file-management shell (flavor A, no CPU
+//! emulation).  ("CP/M-inspired" describes the command style + `A>` prompt;
+//! it is deliberately *not* a CP/M-compatible shell, hence the neutral
+//! user-facing name.  Internal identifiers keep the `cpm_` codename.)
 //!
 //! Presents the configured `transfer_dir` as drive **A:** and gives a
 //! logged-in telnet/SSH user a CP/M CCP-style `A>` prompt with resident
@@ -51,7 +54,7 @@ use std::path::PathBuf;
 /// files are still transferable — just download them instead of viewing.
 const CPM_VIEW_MAX: usize = 1024 * 1024;
 
-/// A parsed CP/M shell command.  Operands are owned so the parser is a
+/// A parsed Gateway Shell command.  Operands are owned so the parser is a
 /// pure `&str -> CpmCmd` function with no borrow of the input line.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::telnet) enum CpmCmd {
@@ -98,7 +101,7 @@ pub(in crate::telnet) enum CpmCmd {
 impl TelnetSession {
     // ─── Entry point / REPL ──────────────────────────────────
 
-    /// Run the CP/M shell as a blocking sub-loop, exactly like
+    /// Run the Gateway Shell as a blocking sub-loop, exactly like
     /// `weather()` / `ai_chat()`.  Returns to the File Transfer menu on
     /// `EXIT`/ESC; a disconnect surfaces as `Ok(())` here and is detected
     /// by the caller's next write (same model as the other sub-loops).
@@ -112,7 +115,7 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("CP/M SHELL  (drive A:)")))
+        self.send_line(&format!("  {}", self.yellow("GATEWAY SHELL  (drive A:)")))
             .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
@@ -1161,11 +1164,11 @@ impl TelnetSession {
     /// `HELP` — paged command reference (fit-tested for 40 cols).  A topic
     /// operand is currently ignored; the whole reference is shown.
     async fn cpm_help(&mut self, _topic: Option<&str>) -> Result<(), std::io::Error> {
-        self.show_help_page("CP/M SHELL HELP", Self::cpm_help_lines())
+        self.show_help_page("GATEWAY SHELL HELP", Self::cpm_help_lines())
             .await
     }
 
-    /// Static help text for the CP/M shell.  Kept ≤ 40 cols so it fits a
+    /// Static help text for the Gateway Shell.  Kept ≤ 40 cols so it fits a
     /// PETSCII screen; registered in the aggregate help-fit test.
     pub(in crate::telnet) fn cpm_help_lines() -> &'static [&'static str] {
         &[

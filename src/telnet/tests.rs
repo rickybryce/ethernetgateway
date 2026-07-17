@@ -5362,7 +5362,7 @@ fn test_session_slot_guard_releases_on_armed_drop() {
     );
 }
 
-// ─── CP/M shell (kernel.rs) ──────────────────────────
+// ─── Gateway Shell (kernel.rs) ───────────────────────
 
 use super::kernel::CpmCmd;
 
@@ -5597,7 +5597,7 @@ fn test_color_enabled_matrix() {
     assert_eq!(ascii.green("X"), "X", "ASCII is always plain even with color on");
 }
 
-/// The CP/M shell resolves path components case-insensitively (CP/M
+/// The Gateway Shell resolves path components case-insensitively (CP/M
 /// semantics; DIR shows names uppercased and PETSCII swaps case), returning
 /// the real on-disk name.  Regression for "CD Z80ASM can't find z80asm".
 #[test]

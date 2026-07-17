@@ -57,7 +57,7 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  CP/M shell",
+            "  {}  Gateway Shell",
             self.cyan("S")
         ))
         .await?;

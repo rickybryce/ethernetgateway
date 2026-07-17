@@ -1153,7 +1153,7 @@ impl TelnetSession {
         }
         // The last "Press any key" prompt was dismissed with the cursor still
         // on that line; advance to a fresh line so whatever renders next (a
-        // menu that clears the screen, or the CP/M shell's bare `A>` prompt)
+        // menu that clears the screen, or the Gateway Shell's bare `A>` prompt)
         // doesn't appear glued to the end of the prompt text.
         self.send_line("").await?;
         Ok(())

@@ -1031,7 +1031,7 @@ impl TelnetSession {
             "  M  Make a new subdirectory",
             "  K  Kermit server mode (idle for",
             "     remote get/send/dir/finish)",
-            "  S  CP/M file shell (drive A:)",
+            "  S  Gateway Shell (drive A:)",
             "  I  Toggle IAC escaping on/off",
             "  R  Refresh the screen",
             "  Q  Back to the main menu",
