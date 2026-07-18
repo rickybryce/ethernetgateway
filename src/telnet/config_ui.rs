@@ -385,7 +385,9 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press A, B, W, U, V, G, D, R, H, or Q.").await?;
+                    // Generic hint: this menu now has too many keys (incl. the
+                    // CP/M-emulator toggle E) to list within the 40-col budget.
+                    self.show_error("Press a letter from the menu.").await?;
                 }
             }
         }

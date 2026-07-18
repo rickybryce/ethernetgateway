@@ -241,6 +241,204 @@ impl Cpm {
     }
 }
 
+/// Place a 32-byte directory entry into the guest's 128-byte DMA record for
+/// a search result; the rest is filled with the CP/M "empty entry" marker
+/// (0xE5) so a scanner sees only slot 0 (directory code 0) as valid.
+fn write_dir_record(cpm: &mut Cpm, dma: u16, entry: &[u8; 32]) {
+    let mut record = [0xE5u8; 128];
+    record[..32].copy_from_slice(entry);
+    cpm.write_block(dma, &record);
+}
+
+/// Service the "disk system" BDOS calls that need only guest memory + the
+/// filesystem (drive select, DMA, and the FCB file operations) — i.e. every
+/// BDOS call that performs **no** console/session I/O.  Returns
+/// `Some(return_code)` when `func` is one of these, or `None` for a
+/// console-group call the async driver must handle itself.
+///
+/// Keeping this glue in the core (rather than inline in the telnet driver)
+/// gives it a single implementation that is unit-testable without a live
+/// session, and lets both the driver and the end-to-end roundtrip test
+/// exercise the *same* code.
+pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> {
+    // Read the FCB at DE, run `op` on it, and (if `op` returns a code)
+    // persist the possibly-updated position fields back to guest memory.
+    fn with_fcb(
+        cpm: &mut Cpm,
+        op: impl FnOnce(&mut Cpm, &mut Fcb) -> u8,
+    ) -> u8 {
+        let de = cpm.reg16(Reg16::DE);
+        let mut raw = cpm.read_block(de, FCB_SIZE);
+        let mut fcb = Fcb::from_bytes(&raw);
+        let code = op(cpm, &mut fcb);
+        fcb.store_position(&mut raw);
+        cpm.write_block(de, &raw);
+        code
+    }
+
+    match func {
+        13 => {
+            // Reset disk system: default drive A:, DMA 0x0080.
+            fs.select(0);
+            fs.set_dma(fs::DEFAULT_DMA);
+            Some(0)
+        }
+        14 => {
+            // Select disk: E = drive (0 = A:).
+            let e = cpm.reg8(Reg8::E);
+            fs.select(e);
+            Some(0)
+        }
+        15 => Some(with_fcb(cpm, |_cpm, fcb| {
+            if fs.open_existing(fcb).is_some() {
+                fcb.ex = 0;
+                fcb.s2 = 0;
+                fcb.cr = 0;
+                fcb.rc = 0;
+                0x00
+            } else {
+                0xFF
+            }
+        })),
+        16 => Some(0), // close: write-through, nothing to flush
+        17 => {
+            let de = cpm.reg16(Reg16::DE);
+            let raw = cpm.read_block(de, FCB_SIZE);
+            let fcb = Fcb::from_bytes(&raw);
+            match fs.search_first(&fcb) {
+                Some(entry) => {
+                    write_dir_record(cpm, fs.dma(), &entry);
+                    Some(0)
+                }
+                None => Some(0xFF),
+            }
+        }
+        18 => match fs.search_next() {
+            Some(entry) => {
+                write_dir_record(cpm, fs.dma(), &entry);
+                Some(0)
+            }
+            None => Some(0xFF),
+        },
+        19 => {
+            let de = cpm.reg16(Reg16::DE);
+            let raw = cpm.read_block(de, FCB_SIZE);
+            let fcb = Fcb::from_bytes(&raw);
+            Some(if fs.delete(&fcb) > 0 { 0x00 } else { 0xFF })
+        }
+        20 => Some(with_fcb(cpm, |cpm, fcb| {
+            let rec = fcb.seq_record();
+            match fs.read_record(fcb, rec) {
+                Ok(Some(buf)) => {
+                    cpm.write_block(fs.dma(), &buf);
+                    fcb.advance_record();
+                    0x00
+                }
+                Ok(None) | Err(_) => 0x01, // EOF / error
+            }
+        })),
+        21 => Some(with_fcb(cpm, |cpm, fcb| {
+            let rec = fcb.seq_record();
+            let dma = cpm.read_block(fs.dma(), 128);
+            let mut data = [0u8; 128];
+            data.copy_from_slice(&dma);
+            match fs.write_record(fcb, rec, &data) {
+                Ok(()) => {
+                    fcb.advance_record();
+                    0x00
+                }
+                Err(_) => 0xFF,
+            }
+        })),
+        22 => Some(with_fcb(cpm, |_cpm, fcb| {
+            if fs.make(fcb).is_some() {
+                fcb.ex = 0;
+                fcb.s2 = 0;
+                fcb.cr = 0;
+                fcb.rc = 0;
+                0x00
+            } else {
+                0xFF
+            }
+        })),
+        23 => {
+            let de = cpm.reg16(Reg16::DE);
+            let raw = cpm.read_block(de, FCB_SIZE);
+            let old = Fcb::from_bytes(&raw);
+            // New name in the FCB's second half: byte 16 drive, 17..25 name,
+            // 25..28 ext.
+            let mut new_name = [b' '; 8];
+            let mut new_ext = [b' '; 3];
+            for (slot, &src) in new_name.iter_mut().zip(&raw[17..25]) {
+                *slot = src & 0x7F;
+            }
+            for (slot, &src) in new_ext.iter_mut().zip(&raw[25..28]) {
+                *slot = src & 0x7F;
+            }
+            Some(if fs.rename(&old, &new_name, &new_ext) {
+                0x00
+            } else {
+                0xFF
+            })
+        }
+        25 => Some(fs.current_drive()), // current disk
+        26 => {
+            let de = cpm.reg16(Reg16::DE);
+            fs.set_dma(de);
+            Some(0)
+        }
+        33 => Some(with_fcb(cpm, |cpm, fcb| {
+            let rr = fcb.random_record();
+            match fs.read_record(fcb, rr) {
+                Ok(Some(buf)) => {
+                    cpm.write_block(fs.dma(), &buf);
+                    fcb.set_seq_record(rr);
+                    0x00
+                }
+                Ok(None) | Err(_) => 0x01,
+            }
+        })),
+        34 => Some(with_fcb(cpm, |cpm, fcb| {
+            let rr = fcb.random_record();
+            let dma = cpm.read_block(fs.dma(), 128);
+            let mut data = [0u8; 128];
+            data.copy_from_slice(&dma);
+            match fs.write_record(fcb, rr, &data) {
+                Ok(()) => {
+                    fcb.set_seq_record(rr);
+                    0x00
+                }
+                Err(_) => 0xFF,
+            }
+        })),
+        35 => {
+            // Compute file size -> set R0..R2 to the record count.
+            let de = cpm.reg16(Reg16::DE);
+            let mut raw = cpm.read_block(de, FCB_SIZE);
+            let fcb = Fcb::from_bytes(&raw);
+            let recs = fs.file_size_records(&fcb).unwrap_or(0);
+            raw[33] = recs as u8;
+            raw[34] = (recs >> 8) as u8;
+            raw[35] = (recs >> 16) as u8;
+            cpm.write_block(de, &raw);
+            Some(0)
+        }
+        36 => {
+            // Set random record from the current sequential position.
+            let de = cpm.reg16(Reg16::DE);
+            let mut raw = cpm.read_block(de, FCB_SIZE);
+            let fcb = Fcb::from_bytes(&raw);
+            let rr = fcb.seq_record();
+            raw[33] = rr as u8;
+            raw[34] = (rr >> 8) as u8;
+            raw[35] = (rr >> 16) as u8;
+            cpm.write_block(de, &raw);
+            Some(0)
+        }
+        _ => None, // console-group / unknown: handled by the caller
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,76 +602,18 @@ mod tests {
         let abort = AtomicBool::new(false);
         let mut out = Vec::new();
         while let Stop::Bdos(func) = cpm.run(100_000, &abort) {
-            match func {
-                    9 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        out.extend(cpm.read_dollar_string(de, 4096));
-                        cpm.bdos_return(0);
-                    }
-                    15 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        let mut raw = cpm.read_block(de, FCB_SIZE);
-                        let mut f = Fcb::from_bytes(&raw);
-                        let code = if fs.open_existing(&f).is_some() {
-                            f.ex = 0;
-                            f.s2 = 0;
-                            f.cr = 0;
-                            f.rc = 0;
-                            f.store_position(&mut raw);
-                            cpm.write_block(de, &raw);
-                            0
-                        } else {
-                            0xFF
-                        };
-                        cpm.bdos_return(code);
-                    }
-                    16 => cpm.bdos_return(0),
-                    20 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        let mut raw = cpm.read_block(de, FCB_SIZE);
-                        let mut f = Fcb::from_bytes(&raw);
-                        let rec = f.seq_record();
-                        let code = match fs.read_record(&f, rec).unwrap() {
-                            Some(buf) => {
-                                cpm.write_block(fs.dma(), &buf);
-                                f.advance_record();
-                                f.store_position(&mut raw);
-                                cpm.write_block(de, &raw);
-                                0
-                            }
-                            None => 1,
-                        };
-                        cpm.bdos_return(code);
-                    }
-                    21 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        let mut raw = cpm.read_block(de, FCB_SIZE);
-                        let mut f = Fcb::from_bytes(&raw);
-                        let rec = f.seq_record();
-                        let dma = cpm.read_block(fs.dma(), 128);
-                        let mut data = [0u8; 128];
-                        data.copy_from_slice(&dma);
-                        fs.write_record(&f, rec, &data).unwrap();
-                        f.advance_record();
-                        f.store_position(&mut raw);
-                        cpm.write_block(de, &raw);
-                        cpm.bdos_return(0);
-                    }
-                    22 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        let mut raw = cpm.read_block(de, FCB_SIZE);
-                        let f = Fcb::from_bytes(&raw);
-                        assert!(fs.make(&f).is_some());
-                        f.store_position(&mut raw);
-                        cpm.write_block(de, &raw);
-                        cpm.bdos_return(0);
-                    }
-                    26 => {
-                        let de = cpm.reg16(iz80::Reg16::DE);
-                        fs.set_dma(de);
-                        cpm.bdos_return(0);
-                    }
-                    _ => cpm.bdos_return(0),
+            if func == 9 {
+                // Console print-string (BDOS 9) is a console-group call the
+                // driver would handle; service it inline here to capture it.
+                let de = cpm.reg16(Reg16::DE);
+                out.extend(cpm.read_dollar_string(de, 4096));
+                cpm.bdos_return(0);
+            } else if let Some(code) = service_disk_bdos(&mut cpm, &mut fs, func) {
+                // Exercise the REAL shared disk-BDOS dispatch (make/write/
+                // close/open/read + set-DMA), the same code the driver runs.
+                cpm.bdos_return(code);
+            } else {
+                cpm.bdos_return(0);
             }
         }
 

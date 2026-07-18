@@ -195,7 +195,14 @@ impl TelnetSession {
             self.send_line("  No file").await?;
             return Ok(());
         }
-        for chunk in names.chunks(4) {
+        // Three 8.3 columns fit a 40-col PETSCII screen (3×12 + 2 gaps +
+        // 2 indent = 40); four fit an 80-col ANSI/ASCII terminal.
+        let cols = if self.terminal_type == TerminalType::Petscii {
+            3
+        } else {
+            4
+        };
+        for chunk in names.chunks(cols) {
             let row: Vec<String> = chunk.iter().map(|n| format!("{:<12}", n)).collect();
             self.send_line(&format!("  {}", row.join(" ").trim_end()))
                 .await?;
@@ -283,6 +290,20 @@ impl TelnetSession {
         let mut last_esc = false;
 
         loop {
+            // Runaway guard, checked every batch regardless of why run()
+            // returned.  A BDOS-frequent loop (e.g. polling console status,
+            // `LD C,11 / CALL 5 / JR Z`) returns Stop::Bdos each batch and
+            // never reaches Stop::BudgetExhausted, so the ceiling must be
+            // enforced here, not only in that arm.
+            if cpm.instructions() >= CPM_MAX_INSTRUCTIONS {
+                self.send_line("").await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.red("[aborted: instruction budget]")
+                ))
+                .await?;
+                return Ok(true);
+            }
             match cpm.run(CPM_RUN_BATCH, &abort) {
                 Stop::Bdos(func) => {
                     match func {
@@ -346,237 +367,26 @@ impl TelnetSession {
                         }
                         11 => cpm.bdos_return(0), // console status: none ready
                         12 => cpm.bdos_return(0x22), // version: CP/M 2.2
-                        13 => {
-                            // Reset disk system: default drive A:, DMA 0x0080.
-                            fs.select(0);
-                            fs.set_dma(0x0080);
-                            cpm.bdos_return(0);
-                        }
-                        14 => {
-                            // Select disk: E = drive (0 = A:).
-                            let e = cpm.arg_e();
-                            fs.select(e);
-                            cpm.bdos_return(0);
-                        }
-                        15 => {
-                            // Open file.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let code = if fs.open_existing(&fcb).is_some() {
-                                fcb.ex = 0;
-                                fcb.s2 = 0;
-                                fcb.cr = 0;
-                                fcb.rc = 0;
-                                fcb.store_position(&mut raw);
-                                cpm.write_block(de, &raw);
-                                0x00
-                            } else {
-                                0xFF
-                            };
+                        _ => {
+                            // Disk-system / FCB file BDOS calls (drive
+                            // select, DMA, open/read/write/search/delete/
+                            // rename/size) need no session I/O, so the core
+                            // services them directly.  Truly-unknown funcs
+                            // return 0.
+                            let code = crate::cpm::service_disk_bdos(&mut cpm, fs, func)
+                                .unwrap_or(0);
                             cpm.bdos_return(code);
                         }
-                        16 => cpm.bdos_return(0), // close: write-through, nothing to flush
-                        17 => {
-                            // Search for first matching directory entry.
-                            let de = cpm.arg_de();
-                            let raw = cpm.read_block(de, FCB_SIZE);
-                            let fcb = Fcb::from_bytes(&raw);
-                            let code = match fs.search_first(&fcb) {
-                                Some(entry) => {
-                                    Self::cpmemu_write_dir_entry(&mut cpm, fs.dma(), &entry);
-                                    0x00 // entry lives in directory slot 0
-                                }
-                                None => 0xFF,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        18 => {
-                            // Search for the next matching directory entry.
-                            let code = match fs.search_next() {
-                                Some(entry) => {
-                                    Self::cpmemu_write_dir_entry(&mut cpm, fs.dma(), &entry);
-                                    0x00
-                                }
-                                None => 0xFF,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        19 => {
-                            // Delete matching file(s).
-                            let de = cpm.arg_de();
-                            let raw = cpm.read_block(de, FCB_SIZE);
-                            let fcb = Fcb::from_bytes(&raw);
-                            let n = fs.delete(&fcb);
-                            cpm.bdos_return(if n > 0 { 0x00 } else { 0xFF });
-                        }
-                        23 => {
-                            // Rename: old name in the FCB, new name in its
-                            // second half (byte 16 = drive, 17..25 = name,
-                            // 25..28 = ext).
-                            let de = cpm.arg_de();
-                            let raw = cpm.read_block(de, FCB_SIZE);
-                            let old = Fcb::from_bytes(&raw);
-                            let mut new_name = [b' '; 8];
-                            let mut new_ext = [b' '; 3];
-                            for (slot, &src) in new_name.iter_mut().zip(&raw[17..25]) {
-                                *slot = src & 0x7F;
-                            }
-                            for (slot, &src) in new_ext.iter_mut().zip(&raw[25..28]) {
-                                *slot = src & 0x7F;
-                            }
-                            let code = if fs.rename(&old, &new_name, &new_ext) {
-                                0x00
-                            } else {
-                                0xFF
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        33 => {
-                            // Read random: record number is in R0..R2.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let rr = fcb.random_record();
-                            let code = match fs.read_record(&fcb, rr) {
-                                Ok(Some(buf)) => {
-                                    cpm.write_block(fs.dma(), &buf);
-                                    fcb.set_seq_record(rr);
-                                    fcb.store_position(&mut raw);
-                                    cpm.write_block(de, &raw);
-                                    0x00
-                                }
-                                Ok(None) => 0x01, // reading unwritten data
-                                Err(_) => 0x01,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        34 => {
-                            // Write random: record number is in R0..R2.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let rr = fcb.random_record();
-                            let dma = cpm.read_block(fs.dma(), 128);
-                            let mut data = [0u8; 128];
-                            data.copy_from_slice(&dma);
-                            let code = match fs.write_record(&fcb, rr, &data) {
-                                Ok(()) => {
-                                    fcb.set_seq_record(rr);
-                                    fcb.store_position(&mut raw);
-                                    cpm.write_block(de, &raw);
-                                    0x00
-                                }
-                                Err(_) => 0xFF,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        35 => {
-                            // Compute file size -> set R0..R2 to record count.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let fcb = Fcb::from_bytes(&raw);
-                            let recs = fs.file_size_records(&fcb).unwrap_or(0);
-                            raw[33] = recs as u8;
-                            raw[34] = (recs >> 8) as u8;
-                            raw[35] = (recs >> 16) as u8;
-                            cpm.write_block(de, &raw);
-                            cpm.bdos_return(0);
-                        }
-                        36 => {
-                            // Set random record from the current sequential
-                            // position (R0..R2 <- seq record).
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let fcb = Fcb::from_bytes(&raw);
-                            let rr = fcb.seq_record();
-                            raw[33] = rr as u8;
-                            raw[34] = (rr >> 8) as u8;
-                            raw[35] = (rr >> 16) as u8;
-                            cpm.write_block(de, &raw);
-                            cpm.bdos_return(0);
-                        }
-                        20 => {
-                            // Read next sequential record into the DMA buffer.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let rec = fcb.seq_record();
-                            let code = match fs.read_record(&fcb, rec) {
-                                Ok(Some(buf)) => {
-                                    cpm.write_block(fs.dma(), &buf);
-                                    fcb.advance_record();
-                                    fcb.store_position(&mut raw);
-                                    cpm.write_block(de, &raw);
-                                    0x00
-                                }
-                                Ok(None) => 0x01, // EOF
-                                Err(_) => 0x01,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        21 => {
-                            // Write next sequential record from the DMA buffer.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let rec = fcb.seq_record();
-                            let dma = cpm.read_block(fs.dma(), 128);
-                            let mut data = [0u8; 128];
-                            data.copy_from_slice(&dma);
-                            let code = match fs.write_record(&fcb, rec, &data) {
-                                Ok(()) => {
-                                    fcb.advance_record();
-                                    fcb.store_position(&mut raw);
-                                    cpm.write_block(de, &raw);
-                                    0x00
-                                }
-                                Err(_) => 0xFF,
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        22 => {
-                            // Make (create) file.
-                            let de = cpm.arg_de();
-                            let mut raw = cpm.read_block(de, FCB_SIZE);
-                            let mut fcb = Fcb::from_bytes(&raw);
-                            let code = if fs.make(&fcb).is_some() {
-                                fcb.ex = 0;
-                                fcb.s2 = 0;
-                                fcb.cr = 0;
-                                fcb.rc = 0;
-                                fcb.store_position(&mut raw);
-                                cpm.write_block(de, &raw);
-                                0x00
-                            } else {
-                                0xFF
-                            };
-                            cpm.bdos_return(code);
-                        }
-                        25 => cpm.bdos_return(fs.current_drive()), // current disk
-                        26 => {
-                            // Set DMA transfer address.
-                            let de = cpm.arg_de();
-                            fs.set_dma(de);
-                            cpm.bdos_return(0);
-                        }
-                        _ => cpm.bdos_return(0), // unimplemented (B3b/B3d): no-op
                     }
                 }
                 Stop::WarmBoot | Stop::Aborted => return Ok(true),
-                Stop::BudgetExhausted => {
-                    if cpm.instructions() >= CPM_MAX_INSTRUCTIONS {
-                        self.send_line("").await?;
-                        self.send_line(&format!(
-                            "  {}",
-                            self.red("[aborted: instruction budget]")
-                        ))
-                        .await?;
-                        return Ok(true);
-                    }
-                    tokio::task::yield_now().await;
-                }
+                Stop::BudgetExhausted => {}
             }
+            // Cooperative yield every batch so a BDOS-frequent loop whose
+            // handlers never .await (console status/version/set-DMA/etc.)
+            // can't pin the tokio worker.  Interactive handlers already
+            // await; this makes the non-awaiting ones cooperative too.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -630,16 +440,6 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("[broke out to A>]")))
             .await
-    }
-
-    /// Place a 32-byte directory entry into the guest's 128-byte DMA
-    /// record for a search result: the rest of the record is filled with
-    /// the CP/M "empty entry" marker (0xE5) so a scanner sees only slot 0
-    /// (directory code 0) as valid.
-    fn cpmemu_write_dir_entry(cpm: &mut Cpm, dma: u16, entry: &[u8; 32]) {
-        let mut record = [0xE5u8; 128];
-        record[..32].copy_from_slice(entry);
-        cpm.write_block(dma, &record);
     }
 
     /// Built-in demo: print a banner via BDOS 9, then warm-boot.

@@ -19,6 +19,13 @@ pub const NUM_DRIVES: u8 = 8;
 /// buffer at 0x0080 (the second half of the zero page).
 pub const DEFAULT_DMA: u16 = 0x0080;
 
+/// Maximum size of a single emulated file (8 MB, matching the gateway's
+/// file-transfer cap).  Bounds a guest that writes a huge/high random
+/// record number (up to the 24-bit ~2 GB range) so a `.COM` can't spray a
+/// multi-gigabyte sparse file to exhaust the host disk.  This is also the
+/// real CP/M 2.2 per-file ceiling, so it doesn't constrain legitimate use.
+pub const MAX_CPM_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// A synthetic 32-byte CP/M directory entry (one extent of one file).
 pub type DirEntry = [u8; 32];
 
@@ -111,14 +118,29 @@ impl CpmFs {
     /// separators) so the join cannot traverse out of the drive directory.
     fn resolve_name(&self, drive0: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<PathBuf> {
         let filename = format_8_3(name, ext);
+        // Primary defense: a concrete 8.3 name carries no separators or
+        // "..", so joining it onto a fixed single-letter drive directory
+        // cannot traverse out of the container.
         split_8_3(&filename)?;
         let path = self.drive_dir(drive0).join(&filename);
-        // Belt-and-suspenders: the resolved path must stay under base.
-        if Self::is_within(&self.base, &path) {
-            Some(path)
-        } else {
-            None
+        if !Self::is_within(&self.base, &path) {
+            return None;
         }
+        // Belt-and-suspenders symlink defense (mirrors transfer.rs
+        // `verify_transfer_path`): when the base and the target's real path
+        // both canonicalize, the resolved real path must still live under
+        // the real base — so a symlink planted inside CPM/<drive>/ can't
+        // point a file operation outside the jail.  When a path can't be
+        // canonicalized (e.g. the target doesn't exist yet, as for
+        // make/create), the lexical guarantee above still holds.
+        if let Ok(canon_base) = std::fs::canonicalize(&self.base) {
+            if let Ok(canon_target) = std::fs::canonicalize(&path) {
+                if !canon_target.starts_with(&canon_base) {
+                    return None;
+                }
+            }
+        }
+        Some(path)
     }
 
     /// True if `path` is lexically within `base` (neither may contain a
@@ -319,6 +341,15 @@ impl CpmFs {
     /// end zero-fills the gap, matching CP/M's record model.
     pub fn write_record(&self, fcb: &Fcb, record: u32, data: &[u8; 128]) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
+        let offset = record as u64 * 128;
+        // Bound the file size so a guest can't seek to a huge random record
+        // (up to ~2 GB) and exhaust the host disk.
+        if offset + 128 > MAX_CPM_FILE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "record beyond max CP/M file size",
+            ));
+        }
         let path = match self.resolve(fcb) {
             Some(p) => p,
             None => {
@@ -329,7 +360,7 @@ impl CpmFs {
             }
         };
         let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
-        f.seek(SeekFrom::Start(record as u64 * 128))?;
+        f.seek(SeekFrom::Start(offset))?;
         f.write_all(data)?;
         Ok(())
     }
@@ -575,6 +606,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_rejects_symlink_escape() {
+        let base = temp_base("symlink");
+        // A file outside the jail.
+        let outside = base
+            .parent()
+            .unwrap()
+            .join("xmodem_cpm_secret_outside.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        // Plant a symlink with a valid 8.3 name inside drive A: pointing out.
+        let link = base.join("A").join("ESCAPE.TXT");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let fs = CpmFs::new(base.clone());
+        let fcb = fcb_named(1, "ESCAPE", "TXT");
+        // The canonicalized target is outside base -> refused.
+        assert!(fs.resolve(&fcb).is_none());
+        assert!(fs.open_existing(&fcb).is_none());
+        assert!(fs.read_record(&fcb, 0).is_err());
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn test_rename() {
         let base = temp_base("rename");
@@ -604,6 +658,25 @@ mod tests {
         assert_eq!(fs.file_size_records(&fcb_named(1, "A", "DAT")), Some(2));
         assert_eq!(fs.file_size_records(&fcb_named(1, "B", "DAT")), Some(1));
         assert_eq!(fs.file_size_records(&fcb_named(1, "C", "DAT")), Some(0));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_write_record_rejects_beyond_size_cap() {
+        let base = temp_base("sizecap");
+        let fs = CpmFs::new(base.clone());
+        let fcb = fcb_named(1, "BIG", "DAT");
+        assert!(fs.make(&fcb).is_some());
+        let data = [0u8; 128];
+        // A record just under the cap is fine.
+        let last_ok = (MAX_CPM_FILE_BYTES / 128 - 1) as u32;
+        assert!(fs.write_record(&fcb, last_ok, &data).is_ok());
+        // A record past the cap (near the 24-bit random-record range) is
+        // rejected before any 2 GB sparse file can be created.
+        assert!(fs.write_record(&fcb, 0x00FF_FFFF, &data).is_err());
+        // The file never grew past the cap.
+        let len = std::fs::metadata(base.join("A").join("BIG.DAT")).unwrap().len();
+        assert!(len <= MAX_CPM_FILE_BYTES, "file grew to {len}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

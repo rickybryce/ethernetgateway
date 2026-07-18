@@ -1039,8 +1039,8 @@ fn test_all_error_messages_fit_petscii() {
         "No other mappings defined.",
         // Configuration
         "Press E, F, G, M, O, R, S, T, H, or Q.",
-        // Other settings
-        "Press A, B, W, V, G, R, H, or Q.",
+        // Other settings (uses the generic hint — too many keys to list)
+        "Press a letter from the menu.",
         // Security
         // Post unified-credentials merge: S (Set SSH user) and
         // W (Set SSH pass) menu keys went away.
