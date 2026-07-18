@@ -1981,6 +1981,14 @@ shows where you are: <code>A&gt;</code> at the drive root, and
 </table>
 
 <p>
+CP/M&rsquo;s <code>USER</code> command (which selects one of the 0&ndash;15 file
+&ldquo;user areas&rdquo;) is <strong>recognised but not supported</strong> &mdash;
+the shell presents the transfer directory as a single flat area, so typing
+<code>USER</code> replies with a short notice rather than the <code>?</code>
+unknown-command error. It is the only recognised verb not in the table above.
+</p>
+
+<p>
 Commands and filenames are case-insensitive: because <code>DIR</code> shows
 names uppercased, <code>CD&nbsp;Z80ASM</code>, <code>CD&nbsp;z80asm</code>, and
 a directory stored on disk as <code>z80asm</code> all refer to the same
