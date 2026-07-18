@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - Unreleased
 
 ### Added
+- **CP/M emulator (Flavor B) — scaffold only.** A new default-off config key
+  `cpm_emu_enabled` (wired into the telnet, web, and GUI config UIs) gates a
+  `K  CP/M System` main-menu item. This is the first, no-risk step of a real
+  CP/M 2.2 Z80 emulator (see `kernelplan.md` §13): enabling the key and
+  choosing `K` currently opens a placeholder screen that announces the feature
+  and returns — no emulator runs yet. It is completely separate from the
+  Gateway Shell (Flavor A). The item is hidden and the key rejected while the
+  toggle is off.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the

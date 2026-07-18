@@ -1082,6 +1082,7 @@ fn test_all_menu_items_fit_petscii() {
         "  C  Configuration",
         "  F  File Transfer",
         "  G  Serial Gateway",
+        "  K  CP/M System",
         "  R  Troubleshooting",
         "  S  SSH Gateway",
         "  T  Telnet Gateway",
@@ -1115,6 +1116,7 @@ fn test_all_menu_items_fit_petscii() {
         "  U  Cycle weather units",
         "  V  Toggle verbose transfer logging",
         "  G  Toggle GUI on startup",
+        "  E  Toggle CP/M emulator",
         // Security menu (post unified-credentials merge — the
         // Telnet/SSH user+pass items collapsed into a single
         // username/password pair shared across both protocols
@@ -1206,25 +1208,32 @@ fn test_all_menu_items_fit_petscii() {
     }
 }
 
-/// Main menu screen: header(3) + blank + 10 items + blank + help = 16 rows.
+/// Main menu screen: header(3) + blank + 10 items + blank + help = 16 rows;
+/// the optional CP/M `K` item (shown only when `cpm_emu_enabled`) makes it 17.
 #[test]
 fn test_main_menu_row_count() {
-    // sep, title, sep, blank, A, B, C, F, G, R, S, T, W, X, blank, H=Help = 16
-    let rows = 16;
+    // sep, title, sep, blank, A, B, C, F, G, [K], R, S, T, W, X, blank, H = 17 max
+    let rows = 17;
     assert!(rows <= 22, "main menu is {} rows, exceeds 22", rows);
 }
 
-/// Main menu items must be exactly A, B, C, F, G, R, S, T, W, X (10 items).
+/// Main menu base items are A, B, C, F, G, R, S, T, W, X (10); the CP/M
+/// emulator adds an optional 11th item `K`, gated on `cpm_emu_enabled`.
 #[test]
 fn test_main_menu_item_count() {
     let items = ["A", "B", "C", "F", "G", "R", "S", "T", "W", "X"];
-    assert_eq!(items.len(), 10, "main menu should have exactly 10 items");
+    assert_eq!(items.len(), 10, "main menu should have 10 base items");
+    // With the CP/M emulator enabled, `K` is the optional 11th item.
+    let items_with_cpm = ["A", "B", "C", "F", "G", "K", "R", "S", "T", "W", "X"];
+    assert_eq!(items_with_cpm.len(), 11, "with CP/M enabled there are 11 items");
 }
 
-/// Error hint must list exactly the valid main menu keys.
+/// Error hint must list exactly the valid main menu keys.  A second variant
+/// (with `K`) is shown when the CP/M emulator is enabled; both must fit.
 #[test]
 fn test_main_menu_error_hint() {
     let hint = "Press A-C, F, G, R, S, T, W, X, or H.";
+    let hint_cpm = "Press A-C, F, G, K, R, S, T, W, X, or H.";
     // Must not mention removed keys (D, E, M)
     assert!(!hint.contains(" D,"), "error hint must not mention D");
     assert!(!hint.contains(" E,"), "error hint must not mention E");
@@ -1234,12 +1243,15 @@ fn test_main_menu_error_hint() {
     for key in ["A", "C", "F", "G", "R", "S", "T", "W", "X", "H"] {
         assert!(hint.contains(key), "error hint must mention {}", key);
     }
+    // The CP/M variant additionally lists K.
+    assert!(hint_cpm.contains(" K,"), "CP/M error hint must mention K");
     assert!(hint.len() <= PETSCII_WIDTH, "error hint exceeds PETSCII width");
+    assert!(hint_cpm.len() <= PETSCII_WIDTH, "CP/M error hint exceeds PETSCII width");
 }
 
-/// Main help screen content has 17 lines (the dual-port refactor
-/// stretched the G entry to 3 lines so it can mention the A/B
-/// picker and the per-port console-mode requirement).  The
+/// Main help screen content has 19 lines (the dual-port refactor
+/// stretched the G entry to 3 lines; the CP/M `K` entry adds 2 more).
+/// The
 /// `show_help_page` paginator handles overflow gracefully, so the
 /// total still fits the 22-row PETSCII budget for everything
 /// except the bottom prompt — which lands on its own page if
@@ -1248,8 +1260,8 @@ fn test_main_menu_error_hint() {
 fn test_main_help_content_line_count() {
     assert_eq!(
         TelnetSession::main_help_lines().len(),
-        17,
-        "main help should have exactly 17 content lines"
+        19,
+        "main help should have exactly 19 content lines"
     );
 }
 
@@ -1539,12 +1551,12 @@ fn test_security_help_screen_row_count() {
 }
 
 /// Other settings menu row count:
-/// header(3) + blank + 6 values + blank + 8 items + blank + Q/H + prompt = 22
-/// (units fold into the Weather value line, so no extra value row; the
-/// new `U` "Cycle weather units" action is the 8th item.)
+/// header(3) + blank + 5 values + blank + 9 items + blank + Q/H + prompt = 22
+/// (Verbose+GUI and Gateway-debug+CP/M each share a value row, folding 7
+/// statuses into 5 lines; the new `E` "Toggle CP/M emulator" is the 9th item.)
 #[test]
 fn test_other_settings_menu_row_count() {
-    let rows = 3 + 1 + 6 + 1 + 8 + 1 + 1 + 1; // 22
+    let rows = 3 + 1 + 5 + 1 + 9 + 1 + 1 + 1; // 22
     assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
 }
 
@@ -1587,11 +1599,11 @@ fn test_punter_settings_menu_row_count() {
     assert!(rows <= 22, "punter settings menu is {} rows, exceeds 22", rows);
 }
 
-/// Other settings help screen (PETSCII): header(3) + blank + 13 content +
-/// blank + "Press any key" = 19 rows.
+/// Other settings help screen (PETSCII): header(3) + blank + 15 content +
+/// blank + "Press any key" = 21 rows (the CP/M `E` entry adds 2 lines).
 #[test]
 fn test_other_help_screen_row_count() {
-    let rows = 3 + 1 + 13 + 1 + 1; // 19
+    let rows = 3 + 1 + 15 + 1 + 1; // 21
     assert!(rows <= 22, "other help screen is {} rows, exceeds 22", rows);
 }
 

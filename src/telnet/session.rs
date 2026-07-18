@@ -680,6 +680,16 @@ impl TelnetSession {
             self.cyan("G")
         ))
         .await?;
+        // CP/M emulator (Flavor B) — gated behind `cpm_emu_enabled`
+        // (default-off, runs arbitrary Z80 code).  Hidden when disabled;
+        // the `k` handler and the error hint are gated the same way.
+        if config::get_config().cpm_emu_enabled {
+            self.send_line(&format!(
+                "  {}  CP/M System",
+                self.cyan("K")
+            ))
+            .await?;
+        }
         self.send_line(&format!(
             "  {}  Troubleshooting",
             self.cyan("R")
@@ -748,6 +758,11 @@ impl TelnetSession {
             "g" => {
                 self.gateway_serial().await?;
             }
+            // Gated: when `cpm_emu_enabled` is off, `k` falls through to the
+            // generic error arm (item hidden, key rejected).
+            "k" if config::get_config().cpm_emu_enabled => {
+                self.cpm_emulator().await?;
+            }
             "s" => {
                 self.gateway_ssh().await?;
             }
@@ -759,7 +774,14 @@ impl TelnetSession {
                 return Ok(false);
             }
             _ => {
-                self.show_error("Press A-C, F, G, R, S, T, W, X, or H.").await?;
+                // The valid-key hint gains `K` only when the CP/M emulator
+                // item is enabled (both variants fit the 40-col budget).
+                let hint = if config::get_config().cpm_emu_enabled {
+                    "Press A-C, F, G, K, R, S, T, W, X, or H."
+                } else {
+                    "Press A-C, F, G, R, S, T, W, X, or H."
+                };
+                self.show_error(hint).await?;
             }
         }
         Ok(true)

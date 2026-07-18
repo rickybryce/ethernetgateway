@@ -880,6 +880,7 @@ fn collect_form_updates(
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
         "security_enabled", "disable_ip_safety", "enable_console", "verbose",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
+        "cpm_emu_enabled",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
@@ -1388,11 +1389,17 @@ fn frame_general(cfg: &Config) -> String {
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{v}</div>\
          <div class=\"row\">{d}<span class=\"hspace\"></span>{g}</div>\
+         <div class=\"row\">{k}</div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         v = checkbox("verbose", "Verbose Transfer Logging", cfg.verbose),
         d = checkbox("gateway_debug", "Gateway Debug Trace", cfg.gateway_debug),
         g = checkbox("enable_console", "Show GUI on Startup", cfg.enable_console),
+        k = checkbox(
+            "cpm_emu_enabled",
+            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
+            cfg.cpm_emu_enabled,
+        ),
     )
 }
 

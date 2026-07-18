@@ -242,6 +242,11 @@ const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// whether login is required (M-9; the page renders secrets).
 const DEFAULT_WEB_ENABLED: bool = false;
 const DEFAULT_WEB_PORT: u16 = 8080;
+/// CP/M emulator (Flavor B) — a real CP/M 2.2 Z80 environment reachable from
+/// the main menu.  Default-off (matches the cautious posture of every other
+/// feature): once built out it runs arbitrary user-supplied `.COM` software in
+/// an emulated Z80, sandboxed to a `CPM/` directory under `transfer_dir`.
+const DEFAULT_CPM_EMU_ENABLED: bool = false;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -606,6 +611,11 @@ pub struct Config {
     /// Port for the configuration web server.  Only consulted when
     /// `web_enabled` is true.
     pub web_port: u16,
+    /// Enable the CP/M emulator (Flavor B) main-menu item.  Default-off: it
+    /// runs arbitrary user-supplied Z80 `.COM` software in an emulated CP/M
+    /// 2.2 environment, sandboxed to a `CPM/` directory under `transfer_dir`.
+    /// When false the main-menu item is hidden and the `K` key is rejected.
+    pub cpm_emu_enabled: bool,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
     /// on first read.
@@ -709,6 +719,7 @@ impl Default for Config {
             punter_hangup_on_failure: DEFAULT_PUNTER_HANGUP_ON_FAILURE,
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
+            cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
@@ -1187,6 +1198,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_WEB_PORT),
+        cpm_emu_enabled: map
+            .get("cpm_emu_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_CPM_EMU_ENABLED),
         serial_a: read_serial_port_config(&map, "serial_a", true),
         serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
@@ -1778,6 +1793,17 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
+# CP/M emulator (Flavor B).  When enabled, the main menu offers a 'CP/M
+# System' item that runs a real CP/M 2.2 environment in an emulated Z80,
+# executing arbitrary user-supplied .COM software sandboxed to a CPM/
+# directory under transfer_dir.  Default-off (it runs arbitrary code); when
+# off the menu item is hidden and the key is rejected.
+# cpm_emu_enabled: enable the CP/M emulator main-menu item.
+");
+    write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
+    content.push('\n');
+
+    content.push_str("\
 # Serial ports.  The gateway exposes two physically independent ports —
 # Port A and Port B — each with its own enabled flag, role (modem
 # emulator, telnet-serial console, or Kermit server), serial parameters,
@@ -2245,6 +2271,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             cfg.punter_hangup_on_failure = value.eq_ignore_ascii_case("true");
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
+        "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
         "web_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.web_port = v;
@@ -2825,6 +2852,7 @@ mod tests {
             punter_hangup_on_failure: true,
             web_enabled: true,
             web_port: 9090,
+            cpm_emu_enabled: true,
             serial_a: SerialPortConfig {
                 enabled: true,
                 mode: "console".into(),
@@ -3103,6 +3131,7 @@ mod tests {
             "punter_hangup_on_failure",
             "web_enabled",
             "web_port",
+            "cpm_emu_enabled",
             "serial_a_enabled",
             "serial_a_mode",
             "serial_a_port",
@@ -3674,6 +3703,18 @@ mod tests {
         // Zero ignored (port must be ≥ 1).
         apply_config_key(&mut cfg, "web_port", "0");
         assert_eq!(cfg.web_port, 9090);
+    }
+
+    #[test]
+    fn test_apply_config_key_cpm_emu_enabled() {
+        let mut cfg = Config::default();
+        // Default-off (runs arbitrary Z80 code).
+        assert!(!cfg.cpm_emu_enabled);
+
+        apply_config_key(&mut cfg, "cpm_emu_enabled", "true");
+        assert!(cfg.cpm_emu_enabled);
+        apply_config_key(&mut cfg, "cpm_emu_enabled", "false");
+        assert!(!cfg.cpm_emu_enabled);
     }
 
     #[test]

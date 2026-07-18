@@ -2334,6 +2334,12 @@ impl eframe::App for App {
                                     ui.add_space(40.0);
                                     ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
                                 });
+                                // CP/M emulator (Flavor B) main-menu item.
+                                // Default-off; runs arbitrary Z80 code.
+                                ui.checkbox(
+                                    &mut self.cfg.cpm_emu_enabled,
+                                    "CP/M Emulator (runs arbitrary Z80 code)",
+                                );
                             });
                         },
                     );

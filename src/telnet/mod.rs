@@ -52,6 +52,7 @@ mod web;
 mod aichat_ui;
 mod weather;
 mod kernel;
+mod cpm_emu;
 // Weather free helpers/types are referenced only from tests; re-export under
 // cfg(test) so the non-test build doesn't see an unused re-export.
 #[cfg(test)]
@@ -922,6 +923,8 @@ impl TelnetSession {
             "  G  Serial Gateway: pick Port A or B",
             "     and bridge to its wire (when",
             "     that port is in console mode)",
+            "  K  CP/M System: run real CP/M .COM",
+            "     software (off by default)",
             "  R  Troubleshooting: diagnose",
             "     terminal input issues",
             "  S  SSH Gateway: connect to a",

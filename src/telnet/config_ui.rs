@@ -198,29 +198,40 @@ impl TelnetSession {
             ))
             .await?;
 
+            // Verbose + GUI share one status row, and Gateway-debug + CP/M
+            // share the next, so the added CP/M emulator status keeps this
+            // menu inside the 22-row PETSCII budget.
             let verbose_status = if cfg.verbose {
                 self.green("ON")
             } else {
                 self.dim("off")
             };
-            self.send_line(&format!("  Verbose log: {}", verbose_status))
-                .await?;
-
             let gui_status = if cfg.enable_console {
                 self.green("ON")
             } else {
                 self.dim("off")
             };
-            self.send_line(&format!("  GUI startup: {}", gui_status))
-                .await?;
+            self.send_line(&format!(
+                "  Verbose: {}   GUI: {}",
+                verbose_status, gui_status
+            ))
+            .await?;
 
             let gw_dbg_status = if cfg.gateway_debug {
                 self.green("ON")
             } else {
                 self.dim("off")
             };
-            self.send_line(&format!("  Gateway dbg: {}", gw_dbg_status))
-                .await?;
+            let cpm_status = if cfg.cpm_emu_enabled {
+                self.green("ON")
+            } else {
+                self.dim("off")
+            };
+            self.send_line(&format!(
+                "  Gw dbg: {}   CP/M: {}",
+                gw_dbg_status, cpm_status
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -256,6 +267,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle gateway debug trace",
                 self.cyan("D")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle CP/M emulator",
+                self.cyan("E")
             ))
             .await?;
             self.send_line(&format!(
@@ -346,6 +362,17 @@ impl TelnetSession {
                     let v = (!cfg.gateway_debug).to_string();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("gateway_debug", &v);
+                    })
+                    .await
+                    .ok();
+                }
+                "e" => {
+                    // Toggle the CP/M emulator (Flavor B) main-menu item.
+                    // Default-off; runs arbitrary Z80 code once built out.
+                    // Takes effect for new menu renders — no restart needed.
+                    let v = (!cfg.cpm_emu_enabled).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_emu_enabled", &v);
                     })
                     .await
                     .ok();
@@ -443,6 +470,8 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
                 "  D  Toggle gateway debug trace",
+                "  E  Toggle CP/M emulator menu",
+                "     item (off by default)",
                 "  R  Restart the server",
             ]
         } else {
@@ -457,6 +486,8 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
                 "  D  Toggle gateway debug trace",
+                "  E  Toggle CP/M emulator menu item (off",
+                "     by default; runs arbitrary Z80 code)",
                 "  R  Restart the server",
             ]
         }
