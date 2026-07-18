@@ -226,7 +226,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <div class="cover">
     <div class="title">Ethernet Gateway</div>
     <div class="subtitle">User Manual</div>
-    <div class="version">Version 0.7.0</div>
+    <div class="version">Version 1.0.0</div>
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
@@ -414,7 +414,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernetgateway-v0.7.0-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernetgateway-v1.0.0-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -1720,7 +1720,7 @@ received files.
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed. The optional second &sect;6.7 field (a per-directory password) is <strong>accepted and ignored</strong> &mdash; see the note below.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
-        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.7.0</code>).</td></tr>
+        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 1.0.0</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
         <tr><td><code>remote delete &lt;file&gt;</code> / <code>remote era</code></td><td>G E</td><td>Delete a file in the current effective directory. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call &mdash; no wildcard expansion.</td></tr>
         <tr><td><code>remote rename &lt;old&gt; &lt;new&gt;</code></td><td>G R</td><td>Rename a file in place. Both names field-encoded per spec &sect;6.7. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -1964,6 +1964,7 @@ shows where you are: <code>A&gt;</code> at the drive root, and
     <thead><tr><th>Command</th><th>Aliases</th><th>Action</th></tr></thead>
     <tbody>
         <tr><td><code>DIR [pattern]</code></td><td><code>LS</code></td><td>List the current directory, or a wildcard / path match. Naming a subdirectory lists its contents (<code>DIR&nbsp;SUB</code> is the same as <code>DIR&nbsp;SUB/</code>). Directories show as <code>&lt;DIR&gt;</code>, files with their size.</td></tr>
+        <tr><td><code>FIND pattern</code></td><td><code>WHERE</code></td><td>Recursively search <em>all</em> of drive A: (not just the current directory) for files whose name matches the wildcard, printing each hit's full A: path. Matches files only; the walk is bounded (scan + result caps) and never follows symlinks, so it stays inside the transfer-directory jail.</td></tr>
         <tr><td><code>TYPE file</code></td><td>&mdash;</td><td>Display a <em>text</em> file a screenful at a time (see pagination below). Binary files are refused.</td></tr>
         <tr><td><code>DUMP file</code></td><td>&mdash;</td><td>Hex + ASCII dump, paginated (8 bytes/row on a 40-column PETSCII screen, 16 on wider terminals).</td></tr>
         <tr><td><code>ERA file</code></td><td><code>DEL</code>, <code>RM</code></td><td>Erase a file, or every file matching a wildcard (mass erase asks <code>(Y/N)</code> first). Refuses directories.</td></tr>
@@ -1975,6 +1976,8 @@ shows where you are: <code>A&gt;</code> at the drive root, and
         <tr><td><code>CD [path]</code></td><td><code>CHDIR</code></td><td>Change directory. <code>CD</code> or <code>CD /</code> returns to the root, <code>CD ..</code> goes up one level, <code>CD name</code> descends.</td></tr>
         <tr><td><code>PWD</code></td><td>&mdash;</td><td>Print the current drive-A path.</td></tr>
         <tr><td><code>STAT [file]</code></td><td>&mdash;</td><td>With no argument, summarise the directory (file count, bytes used, disk-space indicator); with a file, show its size and 128-byte record count.</td></tr>
+        <tr><td><code>CLS</code></td><td><code>CLEAR</code></td><td>Clear the screen.</td></tr>
+        <tr><td><code>VER</code></td><td><code>VERSION</code></td><td>Show the shell identity and gateway version (e.g. <code>Ethernet Gateway Shell 1.0.0</code>).</td></tr>
         <tr><td><code>HELP</code></td><td><code>?</code></td><td>Show the command reference.</td></tr>
         <tr><td><code>EXIT</code></td><td><code>BYE</code>, <code>QUIT</code>, <span class="kbd">ESC</span></td><td>Return to the File Transfer menu.</td></tr>
     </tbody>
@@ -2027,6 +2030,12 @@ first</strong> (the CP/M <code>PIP dest=source</code> order), so
 <code>COPY&nbsp;SUB/&nbsp;FILE.TXT</code> copies <code>FILE.TXT</code> into
 <code>SUB</code>, and <code>MOVE&nbsp;/DONE/&nbsp;OLD.DAT</code> moves
 <code>OLD.DAT</code> to the <code>DONE</code> directory at the root.
+Because this order is the reverse of what most users expect today, the
+shell shows two reminder examples when you enter it, and a failing
+<code>COPY</code>&nbsp;/&nbsp;<code>MOVE</code> (for instance
+<code>File&nbsp;not&nbsp;found.</code> after the operands were reversed)
+echoes the correct form &mdash;
+<code>e.g.&nbsp;COPY&nbsp;dst&nbsp;src&nbsp;(dest&nbsp;first)</code>.
 </p>
 
 <h3>Wildcards</h3>
@@ -2374,10 +2383,10 @@ are set).
 <table>
     <thead><tr><th>Command</th><th>Response</th></tr></thead>
     <tbody>
-        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v0.7.0</code></td></tr>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v1.0.0</code></td></tr>
         <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
         <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
-        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v0.7.0 (Hayes-compatible)</code></td></tr>
+        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v1.0.0 (Hayes-compatible)</code></td></tr>
         <tr><td><code>ATI4</code></td><td>Product description: <code>Hayes-compatible virtual modem over TCP</code></td></tr>
         <tr><td><code>ATI5</code></td><td>OEM / country code: <code>B00</code></td></tr>
         <tr><td><code>ATI6</code></td><td>Link diagnostics: <code>No link diagnostics available</code></td></tr>
@@ -3671,7 +3680,7 @@ including Claude Code.
 <hr>
 
 <p class="small" style="margin-top: 1.5em; text-align: center;">
-Ethernet Gateway v0.7.0 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Ethernet Gateway v1.0.0 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
 Licensed under GPL-3.0-or-later.
 </p>
 

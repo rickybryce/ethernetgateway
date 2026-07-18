@@ -5,6 +5,34 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - Unreleased
+
+### Added
+- **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
+  `VER` / `VERSION` prints the shell identity and gateway version; and
+  `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the
+  current directory) for files whose name matches a wildcard, printing each
+  hit's A: path. The `FIND` walk is bounded (scan and result caps) and never
+  follows symlinks, so it stays inside the transfer-directory jail.
+
+### Changed
+- **Gateway Shell now surfaces the CP/M "destination first" operand order.**
+  `COPY` and `MOVE` take the destination *before* the source (`COPY dst src`) —
+  the reverse of the order most users expect today. The shell now prints two
+  reminder examples on entry, and a failing `COPY`/`MOVE` (e.g. "File not
+  found." after the operands were swapped) echoes the correct form
+  (`e.g. COPY dst src (dest first)`) so the mistake is self-correcting.
+
+### Fixed
+- **Kermit server no longer retains every uploaded file in memory for the
+  whole session.** The server-mode dispatch loop now frees each received
+  file's payload as soon as the `on_file` hook has committed it to disk, so a
+  long-lived session on the always-on serial or standalone-TCP Kermit server
+  (both reachable without authentication) can't accumulate every upload's full
+  contents in memory across an unbounded number of transfers. Filenames and
+  metadata are still returned for the post-session summary; no behavior change
+  for callers (all committing already went through `on_file`).
+
 ## [0.7.0] - 2026-07-17
 
 ### Added
@@ -1887,6 +1915,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
+[1.0.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
 [0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3
