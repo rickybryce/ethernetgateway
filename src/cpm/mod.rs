@@ -28,8 +28,12 @@
 //!   driver regains control to check the flag / yield even if the guest
 //!   never performs console I/O (an infinite `JP $` loop).
 
+mod fcb;
+mod fs;
 mod machine;
 
+pub use fcb::{Fcb, FCB_SIZE};
+pub use fs::CpmFs;
 pub use machine::CpmMachine;
 
 use iz80::{Cpu, Machine, Reg8, Reg16};
@@ -176,6 +180,28 @@ impl Cpm {
     /// `DE`.
     pub fn arg_de(&mut self) -> u16 {
         self.reg16(Reg16::DE)
+    }
+
+    /// Read `len` bytes of guest memory starting at `address` (wrapping the
+    /// 16-bit address space), e.g. a 36-byte FCB or a 128-byte DMA record.
+    pub fn read_block(&mut self, address: u16, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut a = address;
+        for _ in 0..len {
+            out.push(self.mem.peek(a));
+            a = a.wrapping_add(1);
+        }
+        out
+    }
+
+    /// Write a block of bytes to guest memory starting at `address`
+    /// (wrapping the 16-bit address space).
+    pub fn write_block(&mut self, address: u16, data: &[u8]) {
+        let mut a = address;
+        for &b in data {
+            self.mem.poke(a, b);
+            a = a.wrapping_add(1);
+        }
     }
 
     /// Collect a `$`-terminated BDOS "print string" (function 9) starting
@@ -330,6 +356,132 @@ mod tests {
             got.push(cpm.mem.peek(de + 2 + i));
         }
         assert_eq!(got, b"OVE");
+    }
+
+    /// End-to-end: a Z80 program MAKEs a file, WRITEs a record from the
+    /// DMA buffer, CLOSEs, re-OPENs, READs the record back into a different
+    /// DMA buffer, and prints it — driven through the real BDOS file calls
+    /// against a temp `CPM/` drive.  Exercises the FCB↔memory↔host-file glue
+    /// (read_block/write_block/store_position/seq_record) the driver relies
+    /// on.
+    #[test]
+    fn test_program_file_io_roundtrip() {
+        let base = std::env::temp_dir().join("xmodem_cpm_prog_io");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        // FCB for A:IO.TXT at 0x005C (the CP/M default FCB address).
+        let mut fcb = [0u8; FCB_SIZE];
+        fcb[1..9].copy_from_slice(b"IO      ");
+        fcb[9..12].copy_from_slice(b"TXT");
+        cpm.write_block(0x005C, &fcb);
+        // Data to write lives at the default DMA (0x0080), '$'-terminated.
+        cpm.write_block(0x0080, b"DISK OK!$");
+
+        // Assemble the program.
+        let mut p: Vec<u8> = Vec::new();
+        let op = |p: &mut Vec<u8>, de: u16, c: u8| {
+            p.extend_from_slice(&[0x11, de as u8, (de >> 8) as u8]); // LD DE,de
+            p.extend_from_slice(&[0x0E, c]); // LD C,c
+            p.extend_from_slice(&[0xCD, 0x05, 0x00]); // CALL 5
+        };
+        op(&mut p, 0x005C, 22); // make
+        op(&mut p, 0x005C, 21); // write (DMA=0x0080)
+        op(&mut p, 0x005C, 16); // close
+        op(&mut p, 0x005C, 15); // open (resets position)
+        op(&mut p, 0x0200, 26); // set DMA = 0x0200
+        op(&mut p, 0x005C, 20); // read into 0x0200
+        op(&mut p, 0x0200, 9); // print string at 0x0200
+        p.extend_from_slice(&[0x0E, 0x00, 0xCD, 0x05, 0x00]); // LD C,0 / CALL 5
+        cpm.load_com(&p);
+        // load_com zeroed nothing above the program, but our FCB/DMA writes
+        // were done after load_com would overwrite 0x0080? No — TPA starts at
+        // 0x0100, so 0x005C/0x0080 are untouched by load_com.  Re-assert:
+        assert_eq!(cpm.read_block(0x0080, 4), b"DISK");
+
+        let abort = AtomicBool::new(false);
+        let mut out = Vec::new();
+        while let Stop::Bdos(func) = cpm.run(100_000, &abort) {
+            match func {
+                    9 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        out.extend(cpm.read_dollar_string(de, 4096));
+                        cpm.bdos_return(0);
+                    }
+                    15 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        let mut raw = cpm.read_block(de, FCB_SIZE);
+                        let mut f = Fcb::from_bytes(&raw);
+                        let code = if fs.open_existing(&f).is_some() {
+                            f.ex = 0;
+                            f.s2 = 0;
+                            f.cr = 0;
+                            f.rc = 0;
+                            f.store_position(&mut raw);
+                            cpm.write_block(de, &raw);
+                            0
+                        } else {
+                            0xFF
+                        };
+                        cpm.bdos_return(code);
+                    }
+                    16 => cpm.bdos_return(0),
+                    20 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        let mut raw = cpm.read_block(de, FCB_SIZE);
+                        let mut f = Fcb::from_bytes(&raw);
+                        let rec = f.seq_record();
+                        let code = match fs.read_record(&f, rec).unwrap() {
+                            Some(buf) => {
+                                cpm.write_block(fs.dma(), &buf);
+                                f.advance_record();
+                                f.store_position(&mut raw);
+                                cpm.write_block(de, &raw);
+                                0
+                            }
+                            None => 1,
+                        };
+                        cpm.bdos_return(code);
+                    }
+                    21 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        let mut raw = cpm.read_block(de, FCB_SIZE);
+                        let mut f = Fcb::from_bytes(&raw);
+                        let rec = f.seq_record();
+                        let dma = cpm.read_block(fs.dma(), 128);
+                        let mut data = [0u8; 128];
+                        data.copy_from_slice(&dma);
+                        fs.write_record(&f, rec, &data).unwrap();
+                        f.advance_record();
+                        f.store_position(&mut raw);
+                        cpm.write_block(de, &raw);
+                        cpm.bdos_return(0);
+                    }
+                    22 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        let mut raw = cpm.read_block(de, FCB_SIZE);
+                        let f = Fcb::from_bytes(&raw);
+                        assert!(fs.make(&f).is_some());
+                        f.store_position(&mut raw);
+                        cpm.write_block(de, &raw);
+                        cpm.bdos_return(0);
+                    }
+                    26 => {
+                        let de = cpm.reg16(iz80::Reg16::DE);
+                        fs.set_dma(de);
+                        cpm.bdos_return(0);
+                    }
+                    _ => cpm.bdos_return(0),
+            }
+        }
+
+        assert_eq!(out, b"DISK OK!");
+        // The file really exists on disk with our bytes.
+        let disk = std::fs::read(base.join("A").join("IO.TXT")).unwrap();
+        assert_eq!(&disk[..8], b"DISK OK!");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

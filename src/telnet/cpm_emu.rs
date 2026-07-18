@@ -27,7 +27,7 @@
 //! (`HELLO`, `ECHO`) exercise the path.  Loading real user `.COM`s from the
 //! `CPM/` drives and the FCB filesystem come next (B3/B4).
 use super::*;
-use crate::cpm::{Cpm, Stop};
+use crate::cpm::{Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -85,7 +85,16 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.dim("leave."))).await?;
         self.send_line("").await?;
 
-        self.cpmemu_repl().await
+        // The filesystem state (current drive, DMA) persists across the
+        // whole session at the `CPM/` container.  Canonicalize so the jail
+        // prefix check compares absolute paths.
+        let cfg = config::get_config();
+        let mut base = PathBuf::from(&cfg.transfer_dir);
+        base.push("CPM");
+        let base = std::fs::canonicalize(&base).unwrap_or(base);
+        let mut fs = CpmFs::new(base);
+
+        self.cpmemu_repl(&mut fs).await
     }
 
     /// Ensure `CPM/` and each drive folder `CPM/A`..`CPM/H` exist under
@@ -108,9 +117,9 @@ impl TelnetSession {
     /// line, and dispatches: host-exit words leave; built-ins run; anything
     /// else echoes back CP/M's classic bad-verb error (`VERB?`).  Loading a
     /// named `.COM` from the drive comes in B4.
-    async fn cpmemu_repl(&mut self) -> Result<(), std::io::Error> {
+    async fn cpmemu_repl(&mut self, fs: &mut CpmFs) -> Result<(), std::io::Error> {
         loop {
-            let prompt = self.cyan("A>");
+            let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -128,6 +137,17 @@ impl TelnetSession {
                 .unwrap_or("")
                 .to_ascii_uppercase();
 
+            // Drive change: "A:".."H:" selects that drive (CCP convention).
+            if verb.len() == 2 && verb.ends_with(':') {
+                let d = verb.as_bytes()[0];
+                if (b'A'..=b'H').contains(&d) {
+                    fs.select(d - b'A');
+                } else {
+                    self.send_line(&format!("  {}?", self.red(&verb))).await?;
+                }
+                continue;
+            }
+
             match verb.as_str() {
                 "EXIT" | "BYE" | "QUIT" => return Ok(()),
                 "HELP" | "?" => self.cpmemu_help().await?,
@@ -140,7 +160,7 @@ impl TelnetSession {
                 }
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_hello()).await? {
+                    if !self.cpmemu_run_program(&Self::cpmemu_demo_hello(), fs).await? {
                         return Ok(());
                     }
                 }
@@ -152,7 +172,7 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_echo()).await? {
+                    if !self.cpmemu_run_program(&Self::cpmemu_demo_echo(), fs).await? {
                         return Ok(());
                     }
                 }
@@ -170,6 +190,7 @@ impl TelnetSession {
             "  Built-in commands:",
             "  HELP / ?   this help",
             "  VER        emulator version",
+            "  A: .. H:   change drive",
             "  HELLO      BDOS print-string demo",
             "  ECHO       interactive console demo",
             "  EXIT/BYE/QUIT  leave CP/M",
@@ -184,7 +205,11 @@ impl TelnetSession {
     /// out, or the instruction ceiling is hit.  Returns `Ok(false)` if the
     /// session disconnected (the caller should leave the emulator), else
     /// `Ok(true)` (return to the `A>` prompt).
-    async fn cpmemu_run_program(&mut self, program: &[u8]) -> Result<bool, std::io::Error> {
+    async fn cpmemu_run_program(
+        &mut self,
+        program: &[u8],
+        fs: &mut CpmFs,
+    ) -> Result<bool, std::io::Error> {
         let mut cpm = Cpm::new();
         cpm.load_com(program);
         // No concurrent wire-reader yet (B4); the abort flag stays clear and
@@ -257,7 +282,102 @@ impl TelnetSession {
                         }
                         11 => cpm.bdos_return(0), // console status: none ready
                         12 => cpm.bdos_return(0x22), // version: CP/M 2.2
-                        _ => cpm.bdos_return(0), // unimplemented (B3): no-op
+                        13 => {
+                            // Reset disk system: default drive A:, DMA 0x0080.
+                            fs.select(0);
+                            fs.set_dma(0x0080);
+                            cpm.bdos_return(0);
+                        }
+                        14 => {
+                            // Select disk: E = drive (0 = A:).
+                            let e = cpm.arg_e();
+                            fs.select(e);
+                            cpm.bdos_return(0);
+                        }
+                        15 => {
+                            // Open file.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let code = if fs.open_existing(&fcb).is_some() {
+                                fcb.ex = 0;
+                                fcb.s2 = 0;
+                                fcb.cr = 0;
+                                fcb.rc = 0;
+                                fcb.store_position(&mut raw);
+                                cpm.write_block(de, &raw);
+                                0x00
+                            } else {
+                                0xFF
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        16 => cpm.bdos_return(0), // close: write-through, nothing to flush
+                        20 => {
+                            // Read next sequential record into the DMA buffer.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let rec = fcb.seq_record();
+                            let code = match fs.read_record(&fcb, rec) {
+                                Ok(Some(buf)) => {
+                                    cpm.write_block(fs.dma(), &buf);
+                                    fcb.advance_record();
+                                    fcb.store_position(&mut raw);
+                                    cpm.write_block(de, &raw);
+                                    0x00
+                                }
+                                Ok(None) => 0x01, // EOF
+                                Err(_) => 0x01,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        21 => {
+                            // Write next sequential record from the DMA buffer.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let rec = fcb.seq_record();
+                            let dma = cpm.read_block(fs.dma(), 128);
+                            let mut data = [0u8; 128];
+                            data.copy_from_slice(&dma);
+                            let code = match fs.write_record(&fcb, rec, &data) {
+                                Ok(()) => {
+                                    fcb.advance_record();
+                                    fcb.store_position(&mut raw);
+                                    cpm.write_block(de, &raw);
+                                    0x00
+                                }
+                                Err(_) => 0xFF,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        22 => {
+                            // Make (create) file.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let code = if fs.make(&fcb).is_some() {
+                                fcb.ex = 0;
+                                fcb.s2 = 0;
+                                fcb.cr = 0;
+                                fcb.rc = 0;
+                                fcb.store_position(&mut raw);
+                                cpm.write_block(de, &raw);
+                                0x00
+                            } else {
+                                0xFF
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        25 => cpm.bdos_return(fs.current_drive()), // current disk
+                        26 => {
+                            // Set DMA transfer address.
+                            let de = cpm.arg_de();
+                            fs.set_dma(de);
+                            cpm.bdos_return(0);
+                        }
+                        _ => cpm.bdos_return(0), // unimplemented (B3b/B3d): no-op
                     }
                 }
                 Stop::WarmBoot | Stop::Aborted => return Ok(true),

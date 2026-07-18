@@ -20,10 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercise it. Works correctly on PETSCII (C64) terminals as well as ANSI/ASCII.
   On launch it creates the drive folders `CPM/A`..`CPM/H` under `transfer_dir`.
   An interactive program can be aborted with a double-`ESC`, and a runaway is
-  bounded by an instruction budget. It does not yet load user-supplied `.COM`
-  files or expose the FCB filesystem — those arrive next (see `kernelplan.md`
-  §13). Completely separate from the Gateway Shell (Flavor A); the item is
-  hidden and the key rejected while the toggle is off.
+  bounded by an instruction budget. Completely separate from the Gateway Shell
+  (Flavor A); the item is hidden and the key rejected while the toggle is off.
+  - **Filesystem, part 1 — FCB + drives + sequential file I/O.** The emulator
+    now has a directory-backed CP/M filesystem: each drive A:–H: is a folder in
+    the `CPM/` container, and the BDOS file calls for opening, creating,
+    closing, and sequentially reading/writing files (via the DMA buffer and a
+    parsed 36-byte FCB) are implemented and jailed under `transfer_dir`. Drive
+    select / current-disk / set-DMA are wired, 8.3 filenames are enforced
+    (case-insensitive; host files that aren't valid 8.3 are invisible to CP/M),
+    and the `A>` prompt gained `A:`..`H:` drive-change commands with a
+    drive-aware prompt. Directory search/delete and random-record I/O land in
+    the following steps, after which real utilities like `PIP`/`STAT` become
+    runnable.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the
