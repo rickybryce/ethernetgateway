@@ -195,6 +195,20 @@ impl Cpm {
         out
     }
 
+    /// Service BDOS "read console buffer" (function 10): write an input
+    /// line into the buffer at `de` using CP/M's layout — byte 0 is the
+    /// caller-set maximum, byte 1 the count we filled in, and the
+    /// characters follow.  The line is truncated to the maximum so a long
+    /// paste can never overrun the guest's buffer.
+    pub fn bdos_read_buffer(&mut self, de: u16, line: &[u8]) {
+        let max = self.mem.peek(de) as usize;
+        let n = line.len().min(max);
+        self.mem.poke(de.wrapping_add(1), n as u8);
+        for (i, b) in line.iter().take(n).enumerate() {
+            self.mem.poke(de.wrapping_add(2).wrapping_add(i as u16), *b);
+        }
+    }
+
     /// Total instructions executed since the last `load_com` (diagnostics).
     pub fn instructions(&self) -> u64 {
         self.instructions
@@ -286,6 +300,36 @@ mod tests {
         let abort = AtomicBool::new(false);
         assert_eq!(cpm.run(1000, &abort), Stop::BudgetExhausted);
         assert!(cpm.instructions() >= 1000);
+    }
+
+    #[test]
+    fn test_bdos_read_buffer_writes_cpm_layout() {
+        let mut cpm = Cpm::new();
+        let de = 0x0200u16;
+        // Caller sets the maximum length in byte 0.
+        cpm.mem.poke(de, 8);
+        cpm.bdos_read_buffer(de, b"HELLO");
+        assert_eq!(cpm.mem.peek(de), 8); // max preserved
+        assert_eq!(cpm.mem.peek(de + 1), 5); // count filled in
+        let mut got = Vec::new();
+        for i in 0..5 {
+            got.push(cpm.mem.peek(de + 2 + i));
+        }
+        assert_eq!(got, b"HELLO");
+    }
+
+    #[test]
+    fn test_bdos_read_buffer_truncates_to_max() {
+        let mut cpm = Cpm::new();
+        let de = 0x0300u16;
+        cpm.mem.poke(de, 3); // max 3
+        cpm.bdos_read_buffer(de, b"OVERLONG");
+        assert_eq!(cpm.mem.peek(de + 1), 3); // truncated count
+        let mut got = Vec::new();
+        for i in 0..3 {
+            got.push(cpm.mem.peek(de + 2 + i));
+        }
+        assert_eq!(got, b"OVE");
     }
 
     #[test]

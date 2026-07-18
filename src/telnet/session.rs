@@ -761,7 +761,7 @@ impl TelnetSession {
             // Gated: when `cpm_emu_enabled` is off, `k` falls through to the
             // generic error arm (item hidden, key rejected).
             "k" if config::get_config().cpm_emu_enabled => {
-                self.cpm_emulator().await?;
+                self.cpmemu_shell().await?;
             }
             "s" => {
                 self.gateway_ssh().await?;

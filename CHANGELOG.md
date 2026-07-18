@@ -8,19 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - Unreleased
 
 ### Added
-- **CP/M emulator (Flavor B) — Z80 CPU + console (early, in progress).** A new
-  default-off config key `cpm_emu_enabled` (wired into the telnet, web, and GUI
-  config UIs) gates a `K  CP/M System` main-menu item. Selecting it now boots a
+- **CP/M emulator (Flavor B) — Z80 CPU + interactive console (in progress).** A
+  new default-off config key `cpm_emu_enabled` (wired into the telnet, web, and
+  GUI config UIs) gates a `K  CP/M System` main-menu item. Selecting it boots a
   real Z80 CPU (the BSD-licensed [`iz80`](https://crates.io/crates/iz80) crate)
-  in a 64 KB machine driven by our own CP/M 2.2 BDOS console calls, and runs a
-  built-in self-test `.COM` that prints through the emulated BDOS to the
-  telnet/SSH session. This is an in-progress step toward a full CP/M 2.2
-  environment (see `kernelplan.md` §13); it does not yet load user-supplied
-  `.COM` files, expose a filesystem, or accept interactive input — those,
-  plus an out-of-band `ESC ESC` break-out, arrive in later phases. A runaway
-  program is bounded by an instruction budget. Completely separate from the
-  Gateway Shell (Flavor A); the item is hidden and the key rejected while the
-  toggle is off.
+  in a 64 KB machine driven by our own CP/M 2.2 BDOS, and drops into a Rust
+  CCP-lite `A>` prompt. The full console BDOS group (character/string output,
+  console input with echo, direct console I/O, read-console-buffer, console
+  status, version) is wired to the telnet/SSH session, so interactive Z80
+  programs can read and write the console; built-in `HELLO` and `ECHO` demos
+  exercise it. Works correctly on PETSCII (C64) terminals as well as ANSI/ASCII.
+  On launch it creates the drive folders `CPM/A`..`CPM/H` under `transfer_dir`.
+  An interactive program can be aborted with a double-`ESC`, and a runaway is
+  bounded by an instruction budget. It does not yet load user-supplied `.COM`
+  files or expose the FCB filesystem — those arrive next (see `kernelplan.md`
+  §13). Completely separate from the Gateway Shell (Flavor A); the item is
+  hidden and the key rejected while the toggle is off.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the
