@@ -4746,7 +4746,9 @@ pub(crate) async fn kermit_server(
     verbose: bool,
     on_file: impl FnMut(&KermitReceive),
 ) -> Result<Vec<KermitReceive>, String> {
-    kermit_server_with_outcome(reader, writer, is_tcp, is_petscii, verbose, on_file)
+    // Tests read the file bytes back off the returned Vec, so retain them
+    // (`retain_data = true`); the production `_with_outcome` path frees them.
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, true)
         .await
         .map(|outcome| outcome.files)
 }
@@ -4779,13 +4781,37 @@ pub(crate) struct KermitServerOutcome {
 /// Same as [`kermit_server`] but returns a [`KermitServerOutcome`]
 /// so the caller can distinguish idle-timeout from clean exits.  See
 /// the struct doc for what the flag means and why it matters.
+///
+/// This is the production entry point.  It frees each received file's
+/// payload as soon as the `on_file` hook has committed it to disk (see
+/// `kermit_server_dispatch`'s `retain_data = false`), so a long-lived
+/// server session doesn't accumulate every upload in memory.
 pub(crate) async fn kermit_server_with_outcome(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     is_petscii: bool,
     verbose: bool,
+    on_file: impl FnMut(&KermitReceive),
+) -> Result<KermitServerOutcome, String> {
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false).await
+}
+
+/// Shared server-mode dispatch loop behind [`kermit_server`] and
+/// [`kermit_server_with_outcome`].  `retain_data` controls whether each
+/// received file's bytes are kept in the returned `Vec<KermitReceive>`
+/// after the `on_file` hook runs: production passes `false` (free them —
+/// the hook has already committed the file to disk and no production
+/// caller reads them back), tests pass `true` so they can assert on the
+/// round-tripped content.
+async fn kermit_server_dispatch(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
     mut on_file: impl FnMut(&KermitReceive),
+    retain_data: bool,
 ) -> Result<KermitServerOutcome, String> {
     let cfg = config::get_config();
     if verbose {
@@ -5543,6 +5569,24 @@ pub(crate) async fn kermit_server_with_outcome(
                 // can't strand the data in memory.
                 for rx in &received {
                     on_file(rx);
+                }
+                // The on_file hook has committed each file to disk, so in
+                // production its payload is no longer needed.  Unless the
+                // caller asked to retain it (`retain_data`, used only by the
+                // `#[cfg(test)]` `kermit_server` wrapper for round-trip
+                // assertions), free the bytes before adding the record to
+                // `all_received`: a long-lived server session (many uploads
+                // with no intervening Finish/BYE — the norm on the always-on
+                // serial and standalone-TCP Kermit servers, both reachable
+                // without auth) would otherwise retain every completed file's
+                // full contents in memory until the session ended.  No
+                // production caller reads `.data` off the returned outcome —
+                // all committing goes through on_file — so keeping just the
+                // filename + metadata is enough for the post-session summary.
+                if !retain_data {
+                    for rx in &mut received {
+                        rx.data = Vec::new();
+                    }
                 }
                 all_received.extend(received);
                 continue;
@@ -7805,6 +7849,9 @@ mod tests {
         // a file via the server's S handler.  After the transfer
         // completes, client closes the session with G F.  The server
         // must return the received file in its Vec<KermitReceive>.
+        // (This uses the `kermit_server` test wrapper, which retains the
+        // file bytes; the production `_with_outcome` path frees them after
+        // the on_file commit — see `kermit_server_dispatch`.)
         let payload: Vec<u8> = b"hello kermit server".to_vec();
         let payload_for_client = payload.clone();
         let ((), result) = run_server_with_client(async move |w, r| {
@@ -9677,7 +9724,8 @@ mod tests {
         // G F.  Server must accumulate both files in its
         // Vec<KermitReceive> return value.  Locks in the per-file
         // state-reset across S boundaries (pending_resume_offset,
-        // declared_size, etc.).
+        // declared_size, etc.).  (Uses the `kermit_server` test wrapper,
+        // which retains file bytes; production frees them post-commit.)
         let _guard = CONFIG_LOCK.lock().await;
         init_test_config();
 
