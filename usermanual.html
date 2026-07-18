@@ -283,6 +283,7 @@ including Claude Code.
             <li><a href="#ch8-kermit">Kermit — Server &amp; Client Mode</a></li>
             <li><a href="#ch8-punter">Punter (C1) — Commodore</a></li>
             <li><a href="#ch8-shell">Gateway Shell (drive A:)</a></li>
+            <li><a href="#ch8-cpm">CP/M Emulator (Flavor B)</a></li>
         </ol>
     </li>
     <li><span class="num">9.</span> <a href="#ch9">Serial / Hayes AT Modem Emulation</a>
@@ -371,6 +372,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 <ul>
     <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with autostart), Kermit (incl. standalone server mode), and Punter C1 (Commodore 64/128), with auto-detection on upload and a selection prompt on download.</li>
     <li><strong>Gateway Shell</strong> — a CP/M-inspired <code>A&gt;</code> file-manager prompt over telnet/SSH (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, &hellip;), operating on the transfer directory as drive A: (no Z80 emulation; chapter 8.10).</li>
+    <li><strong>CP/M emulator</strong> — an optional, default-off <code>K</code> main-menu item that runs a real CP/M&nbsp;2.2 environment on an emulated Z80 (the <code>iz80</code> core), executing user-supplied <code>.COM</code> software (PIP, STAT, ASM, WordStar, &hellip;) sandboxed to <code>CPM/A</code>&ndash;<code>CPM/H</code> under the transfer directory (chapter 8.11).</li>
     <li><strong>Hayes AT modem emulator</strong> — two physically independent serial ports (Port A and Port B), each with its own enabled flag, mode, baud, AT/S-register state (S0–S26), and stored phone-number slots, plus the <code>+++</code> escape.</li>
     <li><strong>Telnet-serial console bridge</strong> — either port can be flipped to <em>console mode</em> per-port, so a telnet/SSH user can drive a microcontroller or RS-232 device directly through the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu (chapter 9.13).  Both ports can host bridges concurrently.</li>
     <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
@@ -605,6 +607,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
         <tr><td><code>weather_location</code></td><td>string</td><td>empty</td><td>Last-used city or postal code, worldwide (migrates legacy <code>weather_zip</code>). Updated automatically.</td></tr>
         <tr><td><code>weather_units</code></td><td>string</td><td><code>auto</code></td><td>Weather units: <code>auto</code>, <code>us</code>, or <code>metric</code>.</td></tr>
+        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable the CP/M emulator (Flavor B) <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. Off by default; configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the far-end sender/receiver to start. Shared by XMODEM, XMODEM-1K, and YMODEM (same protocol code path).</td></tr>
         <tr><td><code>xmodem_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block timeout.</td></tr>
@@ -962,11 +966,19 @@ that lifts it. So to reach the web UI from a non-private address you must set
   C  Configuration
   F  File Transfer
   G  Serial Gateway
+  K  CP/M System
   R  Troubleshooting
   S  SSH Gateway
   T  Telnet Gateway
   W  Weather
   X  Exit</code></pre>
+
+<p>
+<strong>K&nbsp;&nbsp;CP/M System</strong> appears only when
+<code>cpm_emu_enabled</code> is set; it boots the CP/M emulator
+(chapter&nbsp;8.11). While the toggle is off the item is hidden and the
+<span class="kbd">K</span> key is rejected.
+</p>
 
 <p>
 <strong>G&nbsp;&nbsp;Serial Gateway</strong> appears whenever at least one
@@ -2083,6 +2095,152 @@ viewers cap the files they will read at <strong>1&nbsp;MiB</strong> (paging a
 larger file over a retro link isn&rsquo;t useful &mdash; transfer it instead);
 <code>DUMP</code> shows 8 bytes per row on a 40-column PETSCII screen and 16
 on wider terminals.
+</aside>
+
+<h2 id="ch8-cpm">8.11 CP/M Emulator (Flavor B)</h2>
+
+<p>
+The CP/M Emulator is a <strong>real CP/M&nbsp;2.2 environment running on an
+emulated Zilog&nbsp;Z80</strong> (the BSD-licensed
+<a href="https://crates.io/crates/iz80"><code>iz80</code></a> CPU core driven by
+the gateway&rsquo;s own CP/M&nbsp;2.2 BDOS). Unlike the Gateway Shell of
+chapter&nbsp;8.10 &mdash; a Rust <em>file manager</em> that only <em>looks</em>
+like CP/M &mdash; this feature actually <strong>runs user-supplied
+<code>.COM</code> software</strong>: PIP, STAT, ASM, WordStar, MBASIC, and the
+rest. The two features are independent and have separate sandboxes; don&rsquo;t
+confuse them.
+</p>
+
+<aside class="note">
+<span class="label">Off by default &mdash; runs arbitrary Z80 code</span>
+Because a <code>.COM</code> is arbitrary machine code, the emulator is gated
+behind the <code>cpm_emu_enabled</code> key and ships <strong>disabled</strong>;
+while off, the main-menu item is hidden and the key is rejected. Enable it in
+the GUI or web UI under the <strong>&ldquo;AI, Browser &amp; Weather &mdash;
+More&rdquo;</strong> panel, or over telnet/SSH in
+<strong>Configuration&nbsp;&rarr;&nbsp;Other&nbsp;Settings&nbsp;&rarr;&nbsp;<span class="kbd">E</span></strong>
+(a small CP/M submenu). Treat it as a trusted-LAN feature.
+</aside>
+
+<h3>Launching</h3>
+
+<p>
+With the feature enabled, the main menu gains a <span class="kbd">K</span>
+&ldquo;CP/M System&rdquo; item. Selecting it boots the machine and drops you at
+the CP/M <code>A&gt;</code> prompt. Type <code>HELP</code> for the built-in
+command list; <code>EXIT</code> (or <code>BYE</code> / <code>QUIT</code>) returns
+to the gateway. The prompt tracks the current drive
+(<code>A&gt;</code>&hellip;<code>H&gt;</code>).
+</p>
+
+<h3>Drives &amp; staging a program</h3>
+
+<p>
+The emulator has eight drives, <strong>A:&ndash;H:</strong>, each mapped to a
+folder under a dedicated <code>CPM/</code> container inside
+<code>transfer_dir</code> (<code>CPM/A</code>&hellip;<code>CPM/H</code>, all
+created on launch). This is a <em>separate</em> sandbox from the Gateway
+Shell&rsquo;s drive&nbsp;A: (which is the whole transfer directory). To run a
+program:
+</p>
+
+<ol>
+    <li>Upload the <code>.COM</code> to the transfer area with any protocol
+        (chapter&nbsp;8.3).</li>
+    <li>Use the Gateway Shell (chapter&nbsp;8.10) to
+        <code>COPY&nbsp;CPM/A/&nbsp;PROG.COM</code> it into a CP/M drive.</li>
+    <li>Enter the emulator (<span class="kbd">K</span>) and type its name.</li>
+</ol>
+
+<p>
+Typing a name that isn&rsquo;t a built-in loads <code>&lt;name&gt;.COM</code>
+from the current drive (a <code>B:</code> prefix selects a drive), sets up page
+zero exactly as CP/M&rsquo;s console command processor does &mdash; the command
+tail at <code>0080h</code> and the two default FCBs at <code>005Ch</code> /
+<code>006Ch</code> &mdash; and runs it. A name with no matching
+<code>.COM</code> echoes back with a <code>?</code>, as CP/M does.
+</p>
+
+<h3>Built-in commands</h3>
+
+<p>
+These commands are handled by the built-in command processor and work with
+<strong>no <code>.COM</code> file present</strong> on the drive &mdash; anything
+else you type is loaded as a program (above). The <strong>CP/M</strong> column
+marks the ones that are authentic CP/M&nbsp;2.2 resident commands; the others
+are gateway conveniences.
+</p>
+
+<table>
+    <thead><tr><th>Command</th><th>CP/M</th><th>Action</th></tr></thead>
+    <tbody>
+        <tr><td><code>A:</code> &hellip; <code>H:</code></td><td>&#10003;</td><td>Change the current drive (the CP/M <code>d:</code> resident command).</td></tr>
+        <tr><td><code>DIR</code></td><td>&#10003;</td><td>List the files on the current drive.</td></tr>
+        <tr><td><code>ERA name</code> (<code>DEL</code>)</td><td>&#10003;</td><td>Erase file(s), wildcards allowed (<code>*.*</code> confirms first).</td></tr>
+        <tr><td><code>VER</code> (<code>VERSION</code>)</td><td>&mdash;</td><td>Show the emulator identity (CP/M&nbsp;2.2, iz80 core).</td></tr>
+        <tr><td><code>HELP</code> (<code>?</code>)</td><td>&mdash;</td><td>Show the built-in command list.</td></tr>
+        <tr><td><code>HELLO</code></td><td>&mdash;</td><td>Demo: print a banner via BDOS, then warm-boot.</td></tr>
+        <tr><td><code>ECHO</code></td><td>&mdash;</td><td>Demo: echo typed keys (press <code>.</code> to end).</td></tr>
+        <tr><td><code>EXIT</code> (<code>BYE</code>, <code>QUIT</code>)</td><td>&mdash;</td><td>Leave the emulator and return to the gateway.</td></tr>
+        <tr><td><code>name</code></td><td>&mdash;</td><td>Any other word loads and runs <code>name.COM</code> from the drive.</td></tr>
+    </tbody>
+</table>
+
+<aside class="note">
+<span class="label">Stock CP/M resident commands not built in</span>
+CP/M&nbsp;2.2&rsquo;s command processor also resides <code>REN</code> (rename),
+<code>TYPE</code> (show a text file), <code>SAVE</code> (save memory to a file),
+and <code>USER</code> (select a user area). These are <strong>not</strong> built
+into the emulator&rsquo;s prompt &mdash; typing them looks for a <code>.COM</code>
+of that name instead. For everyday file management (rename, view, copy, erase
+across directories) use the Gateway Shell (chapter&nbsp;8.10) on the staging
+side, and upload <code>PIP.COM</code>&nbsp;/&nbsp;<code>STAT.COM</code> for the
+in-CP/M equivalents. User areas are not modelled (each drive is one flat area).
+</aside>
+
+<h3>Breaking out &amp; the runaway ceiling</h3>
+
+<p>
+An interactive program can be aborted at any console-input prompt with a
+<strong>double-<span class="kbd">ESC</span></strong> (a single <span class="kbd">ESC</span>
+is delivered to the program, so CP/M editors still work); the C64 PETSCII
+escape byte works too. A compute-bound program that never reads the console is
+bounded by a <strong>runaway instruction ceiling</strong> &mdash;
+<code>cpm_emu_max_minstr</code>, in millions of Z80 instructions per run
+(default&nbsp;2000&nbsp;=&nbsp;2&nbsp;billion) &mdash; after which it is aborted
+back to the <code>A&gt;</code> prompt. Raise or lower it in the same CP/M
+settings panel as the enable toggle.
+</p>
+
+<aside class="note">
+<span class="label">Which <code>.COM</code> files to upload</span>
+The gateway ships <em>no</em> CP/M software &mdash; you supply your own. The
+resident commands (<code>DIR</code>, <code>ERA</code>, &hellip;) are provided by
+the built-in prompt above. The freely redistributable Digital Research transient
+utilities are the usual first uploads: <code>PIP.COM</code> (copy),
+<code>STAT.COM</code> (status), <code>ED.COM</code> (editor),
+<code>ASM.COM</code> (assembler), <code>LOAD.COM</code> (HEX&rarr;COM),
+<code>DDT.COM</code> (debugger), <code>DUMP.COM</code>, and
+<code>SUBMIT.COM</code>&nbsp;/&nbsp;<code>XSUB.COM</code>. Full applications you
+own &mdash; WordStar, MBASIC, Turbo Pascal, dBASE&nbsp;II, SuperCalc &mdash; run
+too. Copy them off your own RC2014&nbsp;/&nbsp;SC126&nbsp;/&nbsp;RomWBW disk
+images or a CP/M archive. Disk/machine tools (<code>FORMAT</code>,
+<code>SYSGEN</code>, <code>MOVCPM</code>) are meaningless in a directory-backed
+system and are never needed.
+</aside>
+
+<aside class="note">
+<span class="label">Sandbox &amp; limits</span>
+Every BDOS file call is confined to the <code>CPM/</code> container: 8.3
+filenames are enforced (a host file that isn&rsquo;t a valid 8.3 name is
+invisible to CP/M), paths are canonicalised, and a symlink planted in a drive
+folder cannot point out of the jail. A single emulated file is capped at
+<strong>8&nbsp;MB</strong> so a stray high random-record write can&rsquo;t fill
+the host disk, and each session&rsquo;s machine is a fixed 64&nbsp;KB (bounded by
+<code>max_sessions</code>). The emulator services only the CP/M BDOS &mdash; it
+has no way to run host commands, and outbound networking from inside CP/M (a
+&ldquo;virtual modem&rdquo; so a CP/M comms program could dial a BBS) is
+<em>not</em> part of this release.
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->
@@ -3461,6 +3619,8 @@ numeric values fall back to the default.
     <tbody>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit</code> / <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
+        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Enable the CP/M emulator (Flavor B) <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/H</code> under <code>transfer_dir</code>. Off by default (arbitrary-code risk); when off the menu item is hidden and the key rejected. See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
