@@ -44,6 +44,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     records, and rename moves a file to a new 8.3 name (no clobber). This
     completes the CP/M 2.2 file BDOS surface, so real utilities like `PIP`
     and `STAT` become runnable once `.COM` loading lands.
+  - **Run a real `.COM` from a drive.** A command at the `A>` prompt that
+    isn't a built-in is now resolved as `<verb>.COM` on the drive (honoring a
+    `B:` drive prefix), loaded into the TPA, and executed — so actual CP/M
+    software (PIP, STAT, ASM, …) uploaded into a `CPM/` drive runs over
+    telnet/SSH. Page zero is set up exactly as the CCP does before launch: the
+    command tail is placed at 0x0080 and the first two arguments are parsed
+    into the default FCBs at 0x005C / 0x006C. The program image is loaded
+    jailed under `transfer_dir` (canonical-prefix + symlink checks) and bounded
+    by the per-file size cap.
+  - **Configurable runaway ceiling.** A new config key `cpm_emu_max_minstr`
+    (millions of Z80 instructions per program run, default 2000 = 2 billion;
+    wired into the telnet, web, and GUI config UIs) bounds a compute-bound
+    `.COM` that never reads the console, so the `A>` prompt always returns.
+    Interactive programs remain escapable with a double-`ESC` at any input
+    prompt. In the GUI and web UIs the CP/M controls (enable + ceiling) moved
+    into the "AI, Browser & Weather — More" panel to keep the main screen
+    uncluttered; in the telnet UI they live in a CP/M submenu under Other
+    Settings → `E`.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the

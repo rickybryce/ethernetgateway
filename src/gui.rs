@@ -482,6 +482,7 @@ struct App {
     punter_max_retries_buf: String,
     punter_max_bad_rounds_buf: String,
     punter_negotiation_retry_interval_buf: String,
+    cpm_emu_max_minstr_buf: String,
     /// Per-port baud text buffer, indexed by `SerialPortId::index()`.
     /// Two slots — one each for Port A and Port B — let the user type
     /// freely without their input being clobbered by a partial parse.
@@ -568,6 +569,7 @@ impl App {
         let punter_max_bad_rounds_buf = cfg.punter_max_bad_rounds.to_string();
         let punter_negotiation_retry_interval_buf =
             cfg.punter_negotiation_retry_interval.to_string();
+        let cpm_emu_max_minstr_buf = cfg.cpm_emu_max_minstr.to_string();
         let serial_baud_buf = [
             cfg.serial_a.baud.to_string(),
             cfg.serial_b.baud.to_string(),
@@ -614,6 +616,7 @@ impl App {
             punter_max_retries_buf,
             punter_max_bad_rounds_buf,
             punter_negotiation_retry_interval_buf,
+            cpm_emu_max_minstr_buf,
             serial_baud_buf,
             serial_ports,
             dirty: false,
@@ -661,6 +664,7 @@ impl App {
         if let Ok(v) = self.punter_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_retries = v; }
         if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
+        if let Ok(v) = self.cpm_emu_max_minstr_buf.parse::<u32>() && v >= 1 { self.cfg.cpm_emu_max_minstr = v; }
         for id in crate::config::SERIAL_PORT_IDS {
             if let Ok(v) = self.serial_baud_buf[id.index()].parse::<u32>()
                 && v >= 300
@@ -857,6 +861,21 @@ impl App {
                         );
                     }
                 });
+        });
+        // CP/M emulator (Flavor B) lives here rather than on the main screen
+        // (no room left there): its default-off enable + the runaway ceiling.
+        ui.separator();
+        ui.checkbox(
+            &mut self.cfg.cpm_emu_enabled,
+            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
+        );
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "CP/M ceiling (M-instr):",
+                &mut self.cpm_emu_max_minstr_buf,
+                70.0,
+            );
         });
     }
 
@@ -1837,6 +1856,7 @@ impl App {
         self.punter_max_bad_rounds_buf = self.cfg.punter_max_bad_rounds.to_string();
         self.punter_negotiation_retry_interval_buf =
             self.cfg.punter_negotiation_retry_interval.to_string();
+        self.cpm_emu_max_minstr_buf = self.cfg.cpm_emu_max_minstr.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
             self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
         }
@@ -2334,12 +2354,9 @@ impl eframe::App for App {
                                     ui.add_space(40.0);
                                     ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
                                 });
-                                // CP/M emulator (Flavor B) main-menu item.
-                                // Default-off; runs arbitrary Z80 code.
-                                ui.checkbox(
-                                    &mut self.cfg.cpm_emu_enabled,
-                                    "CP/M Emulator (runs arbitrary Z80 code)",
-                                );
+                                // The CP/M emulator toggle + runaway ceiling live
+                                // in the "AI, Browser & Weather — More" popup
+                                // (no room left on the main screen).
                             });
                         },
                     );
@@ -2929,6 +2946,7 @@ impl eframe::App for App {
                 || self.punter_max_retries_buf != self.last_synced_cfg.punter_max_retries.to_string()
                 || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
                 || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
+                || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
                 || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
         }

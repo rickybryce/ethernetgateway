@@ -37,14 +37,6 @@ use std::sync::atomic::AtomicBool;
 /// yield to the async runtime.
 const CPM_RUN_BATCH: u64 = 200_000;
 
-/// Absolute instruction ceiling per program run — a hard backstop so a
-/// compute-bound guest that never performs console I/O still terminates
-/// (interactive programs are additionally escapable with double-`ESC` at
-/// any input prompt).  Generous enough for the built-in demos; a proper
-/// concurrent break-out reader / configurable budget arrives with real
-/// `.COM` execution (B4).
-const CPM_MAX_INSTRUCTIONS: u64 = 50_000_000;
-
 /// Highest emulated drive letter (A:–H:, 8 drives).
 const CPM_LAST_DRIVE: u8 = b'H';
 
@@ -299,9 +291,13 @@ impl TelnetSession {
         // finds its arguments where CP/M puts them.  Built-in demos pass an
         // empty tail.
         cpm.setup_command_line(tail);
-        // No concurrent wire-reader yet (B4); the abort flag stays clear and
-        // the instruction ceiling below is the compute-bound runaway guard,
-        // while double-ESC at an input prompt handles interactive break-out.
+        // Runaway ceiling for this run, from config (millions of Z80
+        // instructions).  No concurrent wire-reader yet (deferred B6+); the
+        // abort flag stays clear and this ceiling is the compute-bound
+        // runaway guard, while double-ESC at an input prompt handles
+        // interactive break-out.
+        let max_instructions =
+            config::get_config().cpm_emu_max_minstr as u64 * 1_000_000;
         let abort = AtomicBool::new(false);
         let mut last_esc = false;
 
@@ -311,7 +307,7 @@ impl TelnetSession {
             // `LD C,11 / CALL 5 / JR Z`) returns Stop::Bdos each batch and
             // never reaches Stop::BudgetExhausted, so the ceiling must be
             // enforced here, not only in that arm.
-            if cpm.instructions() >= CPM_MAX_INSTRUCTIONS {
+            if cpm.instructions() >= max_instructions {
                 self.send_line("").await?;
                 self.send_line(&format!(
                     "  {}",

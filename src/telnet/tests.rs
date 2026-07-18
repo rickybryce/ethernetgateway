@@ -1041,6 +1041,8 @@ fn test_all_error_messages_fit_petscii() {
         "Press E, F, G, M, O, R, S, T, H, or Q.",
         // Other settings (uses the generic hint — too many keys to list)
         "Press a letter from the menu.",
+        // CP/M emulator submenu
+        "Press E, C, or Q.",
         // Security
         // Post unified-credentials merge: S (Set SSH user) and
         // W (Set SSH pass) menu keys went away.
@@ -1116,7 +1118,10 @@ fn test_all_menu_items_fit_petscii() {
         "  U  Cycle weather units",
         "  V  Toggle verbose transfer logging",
         "  G  Toggle GUI on startup",
-        "  E  Toggle CP/M emulator",
+        "  E  CP/M settings",
+        // CP/M emulator submenu (Other Settings -> E)
+        "  E  Toggle emulator on/off",
+        "  C  Set runaway ceiling (M-instr)",
         // Security menu (post unified-credentials merge — the
         // Telnet/SSH user+pass items collapsed into a single
         // username/password pair shared across both protocols

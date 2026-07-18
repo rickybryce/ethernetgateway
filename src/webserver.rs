@@ -856,6 +856,7 @@ fn collect_form_updates(
         "punter_block_size", "punter_negotiation_timeout",
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
+        "cpm_emu_max_minstr",
         "ssh_gateway_auth",
         "gateway_role", "slave_master_host", "slave_master_port",
         "slave_master_username", "slave_master_password",
@@ -1389,17 +1390,11 @@ fn frame_general(cfg: &Config) -> String {
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{v}</div>\
          <div class=\"row\">{d}<span class=\"hspace\"></span>{g}</div>\
-         <div class=\"row\">{k}</div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         v = checkbox("verbose", "Verbose Transfer Logging", cfg.verbose),
         d = checkbox("gateway_debug", "Gateway Debug Trace", cfg.gateway_debug),
         g = checkbox("enable_console", "Show GUI on Startup", cfg.enable_console),
-        k = checkbox(
-            "cpm_emu_enabled",
-            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
-            cfg.cpm_emu_enabled,
-        ),
     )
 }
 
@@ -1557,12 +1552,24 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"us\" {u_us}>US (F/mph)</option>\
          <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
          </select></div>\
+         <div class=\"row\">{cpm}</div>\
+         <div class=\"row\">{cpmmax}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         loc = html_escape(&cfg.weather_location),
         u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
         u_us = if cfg.weather_units == "us" { "selected" } else { "" },
         u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
+        cpm = checkbox(
+            "cpm_emu_enabled",
+            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
+            cfg.cpm_emu_enabled,
+        ),
+        cpmmax = numfield(
+            "cpm_emu_max_minstr",
+            "CP/M runaway ceiling (M-instr)",
+            cfg.cpm_emu_max_minstr,
+        ),
         save = save_button("save", "Save", "secondary"),
     ));
 

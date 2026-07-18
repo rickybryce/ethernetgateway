@@ -270,7 +270,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle CP/M emulator",
+                "  {}  CP/M settings",
                 self.cyan("E")
             ))
             .await?;
@@ -367,15 +367,11 @@ impl TelnetSession {
                     .ok();
                 }
                 "e" => {
-                    // Toggle the CP/M emulator (Flavor B) main-menu item.
-                    // Default-off; runs arbitrary Z80 code once built out.
-                    // Takes effect for new menu renders — no restart needed.
-                    let v = (!cfg.cpm_emu_enabled).to_string();
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("cpm_emu_enabled", &v);
-                    })
-                    .await
-                    .ok();
+                    // CP/M emulator (Flavor B) has two settings now (enable +
+                    // runaway ceiling), so `E` opens their own submenu rather
+                    // than toggling in place — keeps this menu inside the
+                    // 22-row PETSCII budget.
+                    self.cpm_settings().await?;
                 }
                 "r" => {
                     self.config_restart_server().await?;
@@ -472,8 +468,8 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
                 "  D  Toggle gateway debug trace",
-                "  E  Toggle CP/M emulator menu",
-                "     item (off by default)",
+                "  E  CP/M emulator settings",
+                "     (enable + runaway ceiling)",
                 "  R  Restart the server",
             ]
         } else {
@@ -488,10 +484,101 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
                 "  D  Toggle gateway debug trace",
-                "  E  Toggle CP/M emulator menu item (off",
-                "     by default; runs arbitrary Z80 code)",
+                "  E  CP/M emulator settings (enable +",
+                "     runaway instruction ceiling)",
                 "  R  Restart the server",
             ]
+        }
+    }
+
+    // ─── CP/M EMULATOR SETTINGS ──────────────────────────────
+
+    /// CP/M-emulator (Flavor B) submenu, reached from Other Settings → `E`.
+    /// Holds the default-off enable toggle and the runaway instruction
+    /// ceiling (millions of Z80 instructions per program run).  Its own
+    /// screen so both fit comfortably inside the 22-row PETSCII budget.
+    pub(in crate::telnet) async fn cpm_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("CP/M EMULATOR")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}",
+                self.amber("Runs arbitrary Z80 .COM software.")
+            ))
+            .await?;
+            self.send_line("").await?;
+
+            let status = if cfg.cpm_emu_enabled {
+                self.green("ON")
+            } else {
+                self.dim("off")
+            };
+            self.send_line(&format!("  Emulator:  {}", status)).await?;
+            self.send_line(&format!(
+                "  Ceiling:   {} M-instr",
+                self.amber(&cfg.cpm_emu_max_minstr.to_string())
+            ))
+            .await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}  Toggle emulator on/off",
+                self.cyan("E")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set runaway ceiling (M-instr)",
+                self.cyan("C")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.action_prompt("Q", "Back")
+            ))
+            .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            match input.as_str() {
+                "e" => {
+                    // Takes effect for new menu renders — no restart needed.
+                    let v = (!cfg.cpm_emu_enabled).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_emu_enabled", &v);
+                    })
+                    .await
+                    .ok();
+                }
+                "c" => {
+                    self.other_set_field(
+                        "CP/M ceiling (M-instr)",
+                        "cpm_emu_max_minstr",
+                        &cfg.cpm_emu_max_minstr.to_string(),
+                        false,
+                    )
+                    .await?;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press E, C, or Q.").await?;
+                }
+            }
         }
     }
 

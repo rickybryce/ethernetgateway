@@ -278,6 +278,12 @@ const DEFAULT_WEB_PORT: u16 = 8080;
 /// feature): once built out it runs arbitrary user-supplied `.COM` software in
 /// an emulated Z80, sandboxed to a `CPM/` directory under `transfer_dir`.
 const DEFAULT_CPM_EMU_ENABLED: bool = false;
+/// Runaway ceiling for the CP/M emulator, in millions of Z80 instructions
+/// per program run (2000 = 2 billion).  Generous enough for real utilities
+/// (an assembler pass, a BASIC run) yet finite so a compute-bound `.COM`
+/// that never reads the console still terminates.  Interactive programs are
+/// additionally escapable with double-`ESC` at any input prompt.
+const DEFAULT_CPM_EMU_MAX_MINSTR: u32 = 2000;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -647,6 +653,11 @@ pub struct Config {
     /// 2.2 environment, sandboxed to a `CPM/` directory under `transfer_dir`.
     /// When false the main-menu item is hidden and the `K` key is rejected.
     pub cpm_emu_enabled: bool,
+    /// Runaway ceiling for a single CP/M-emulator program run, in millions
+    /// of Z80 instructions (2000 = 2 billion).  A compute-bound `.COM` that
+    /// never performs console I/O is aborted once it reaches this count, so
+    /// the user always regains the `A>` prompt.
+    pub cpm_emu_max_minstr: u32,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
     /// on first read.
@@ -751,6 +762,7 @@ impl Default for Config {
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
+            cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
@@ -1234,6 +1246,11 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_emu_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_EMU_ENABLED),
+        cpm_emu_max_minstr: map
+            .get("cpm_emu_max_minstr")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u32| v >= 1)
+            .unwrap_or(DEFAULT_CPM_EMU_MAX_MINSTR),
         serial_a: read_serial_port_config(&map, "serial_a", true),
         serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
@@ -1831,8 +1848,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # directory under transfer_dir.  Default-off (it runs arbitrary code); when
 # off the menu item is hidden and the key is rejected.
 # cpm_emu_enabled: enable the CP/M emulator main-menu item.
+# cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
+#   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
+#   the console is aborted at this count so the A> prompt always returns.
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
+    write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     content.push('\n');
 
     content.push_str("\
@@ -2305,6 +2326,11 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
+        "cpm_emu_max_minstr" => {
+            if let Ok(v) = value.parse::<u32>() && v >= 1 {
+                cfg.cpm_emu_max_minstr = v;
+            }
+        }
         "web_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.web_port = v;
@@ -2886,6 +2912,7 @@ mod tests {
             web_enabled: true,
             web_port: 9090,
             cpm_emu_enabled: true,
+            cpm_emu_max_minstr: 500,
             serial_a: SerialPortConfig {
                 enabled: true,
                 mode: "console".into(),
@@ -3165,6 +3192,7 @@ mod tests {
             "web_enabled",
             "web_port",
             "cpm_emu_enabled",
+            "cpm_emu_max_minstr",
             "serial_a_enabled",
             "serial_a_mode",
             "serial_a_port",
@@ -3748,6 +3776,20 @@ mod tests {
         assert!(cfg.cpm_emu_enabled);
         apply_config_key(&mut cfg, "cpm_emu_enabled", "false");
         assert!(!cfg.cpm_emu_enabled);
+    }
+
+    #[test]
+    fn test_apply_config_key_cpm_emu_max_minstr() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.cpm_emu_max_minstr, DEFAULT_CPM_EMU_MAX_MINSTR);
+
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", "500");
+        assert_eq!(cfg.cpm_emu_max_minstr, 500);
+        // Zero and non-numeric are rejected (>= 1 guard), value unchanged.
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", "0");
+        assert_eq!(cfg.cpm_emu_max_minstr, 500);
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", "abc");
+        assert_eq!(cfg.cpm_emu_max_minstr, 500);
     }
 
     #[test]
