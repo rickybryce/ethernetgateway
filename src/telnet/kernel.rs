@@ -60,6 +60,9 @@ const CPM_VIEW_MAX: usize = 1024 * 1024;
 pub(in crate::telnet) enum CpmCmd {
     /// `DIR [pattern]` / `LS` — list the cwd (or a wildcard/path match).
     Dir(Option<String>),
+    /// `FIND pattern` / `WHERE` — recursively search drive A: for files
+    /// whose name matches the wildcard, printing each match's A: path.
+    Find(String),
     /// `TYPE file` — display a text file, paginated.
     Type(String),
     /// `DUMP file` — hex + ASCII dump, paginated.
@@ -82,6 +85,10 @@ pub(in crate::telnet) enum CpmCmd {
     Pwd,
     /// `STAT [file]` — free space / per-file size.
     Stat(Option<String>),
+    /// `CLS` / `CLEAR` — clear the screen.
+    Cls,
+    /// `VER` / `VERSION` — show the gateway/shell version.
+    Ver,
     /// `HELP` / `?` — the command reference.  Any trailing operand is
     /// accepted but ignored (there is no per-command help yet), so
     /// `HELP DIR` shows the full page rather than erroring.
@@ -100,6 +107,18 @@ pub(in crate::telnet) enum CpmCmd {
 
 impl TelnetSession {
     // ─── Entry point / REPL ──────────────────────────────────
+
+    /// The CP/M-style COPY/MOVE reminder + examples shown in the entry banner
+    /// so users meet the (unusual today) destination-first operand order
+    /// before their first COPY/MOVE.  Mirrors the "DEST first" lines in
+    /// [`cpm_help_lines`]; keep the two in sync.  Lines embed their own
+    /// indentation and are fit-tested for 40-col PETSCII via
+    /// `all_help_line_groups`.
+    pub(in crate::telnet) const CPM_ENTRY_TIPS: &'static [&'static str] = &[
+        "  COPY/MOVE take DEST first:",
+        "    COPY SUB/ FILE.TXT",
+        "    MOVE /DONE/ OLD.DAT",
+    ];
 
     /// Run the Gateway Shell as a blocking sub-loop, exactly like
     /// `weather()` / `ai_chat()`.  Returns to the File Transfer menu on
@@ -127,6 +146,13 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.dim("return to the transfer menu.")))
             .await?;
         self.send_line("").await?;
+        // Surface the CP/M destination-first operand order up front so a
+        // user's first COPY/MOVE isn't a surprise (mirrors HELP).  Lines embed
+        // their own indentation, so print them as-is (dimmed).
+        for tip in Self::CPM_ENTRY_TIPS {
+            self.send_line(&self.dim(tip)).await?;
+        }
+        self.send_line("").await?;
 
         loop {
             let prompt = self.cpm_prompt();
@@ -142,6 +168,9 @@ impl TelnetSession {
                 CpmCmd::Empty => continue,
                 CpmCmd::Exit => break,
                 CpmCmd::Pwd => self.cpm_pwd().await?,
+                CpmCmd::Cls => self.clear_screen().await?,
+                CpmCmd::Ver => self.cpm_ver().await?,
+                CpmCmd::Find(pat) => self.cpm_find(&pat).await?,
                 CpmCmd::Dir(pat) => self.cpm_dir(pat.as_deref()).await?,
                 CpmCmd::Cd(path) => self.cpm_cd(path.as_deref()).await?,
                 CpmCmd::Stat(f) => self.cpm_stat(f.as_deref()).await?,
@@ -186,6 +215,17 @@ impl TelnetSession {
     async fn cpm_err(&mut self, msg: &str) -> Result<(), std::io::Error> {
         let colored = self.red(msg);
         self.send_line(&format!("  {}", colored)).await
+    }
+
+    /// Like [`cpm_err`], but follows the red error with a dim usage-example
+    /// line.  Used by COPY / MOVE, whose CP/M-style **destination-first**
+    /// operand order (`COPY dst src`) is the reverse of the src-first order
+    /// most users expect today, so a failing command (typically "File not
+    /// found." after the operands were swapped) reminds them of the form.
+    async fn cpm_err_eg(&mut self, msg: &str, example: &str) -> Result<(), std::io::Error> {
+        self.cpm_err(msg).await?;
+        let eg = self.dim(&format!("e.g. {}", example));
+        self.send_line(&format!("  {}", eg)).await
     }
 
     // ─── Parsing (pure) ──────────────────────────────────────
@@ -238,6 +278,12 @@ impl TelnetSession {
             "cd" | "chdir" => CpmCmd::Cd(arg),
             "pwd" => CpmCmd::Pwd,
             "stat" => CpmCmd::Stat(arg),
+            "cls" | "clear" => CpmCmd::Cls,
+            "ver" | "version" => CpmCmd::Ver,
+            "find" | "where" => match arg {
+                Some(a) => CpmCmd::Find(a),
+                None => CpmCmd::NeedsArg("FIND pattern"),
+            },
             "help" | "?" => CpmCmd::Help(arg),
             "exit" | "bye" | "quit" => CpmCmd::Exit,
             "user" => CpmCmd::User,
@@ -586,6 +632,100 @@ impl TelnetSession {
             Self::format_file_size(total_bytes)
         ));
         self.cpm_page_lines(&lines).await
+    }
+
+    /// `VER` / `VERSION` — print the shell identity + gateway version.
+    async fn cpm_ver(&mut self) -> Result<(), std::io::Error> {
+        let line = format!("Ethernet Gateway Shell {}", env!("CARGO_PKG_VERSION"));
+        self.send_line(&format!("  {}", line)).await
+    }
+
+    /// `FIND pattern` / `WHERE` — recursively search the whole of drive A:
+    /// (not just the cwd) for files whose leaf name matches the wildcard,
+    /// printing each hit's A: path.  The walk is bounded and offloaded to a
+    /// blocking thread; symlinks are never followed (jail safety).
+    async fn cpm_find(&mut self, pattern: &str) -> Result<(), std::io::Error> {
+        // A whole-drive search matches on the leaf name only; a path-qualified
+        // pattern isn't meaningful here.
+        if pattern.contains('/') {
+            return self.cpm_err("FIND takes a name, not a path.").await;
+        }
+        let cfg = config::get_config();
+        let base = match std::fs::canonicalize(&cfg.transfer_dir) {
+            Ok(b) => b,
+            Err(_) => return self.cpm_err("No such directory.").await,
+        };
+        let pat = pattern.to_string();
+        let (mut matches, truncated) =
+            tokio::task::spawn_blocking(move || Self::cpm_find_walk(&base, &pat))
+                .await
+                .unwrap_or_else(|_| (Vec::new(), false));
+        if matches.is_empty() {
+            return self.cpm_err("No file").await;
+        }
+        matches.sort();
+        let count = matches.len();
+        matches.push(String::new());
+        matches.push(format!(
+            "  {} found.{}",
+            count,
+            if truncated { "  (more not shown)" } else { "" }
+        ));
+        self.cpm_page_lines(&matches).await
+    }
+
+    /// Bounded, symlink-safe recursive walk under `base` collecting files whose
+    /// leaf name matches `pattern` (case-insensitive).  Returns the display
+    /// lines (`  /SUB/FILE.TXT`, uppercased like DIR) and whether a scan or
+    /// result cap was hit.  Pure/blocking — call via `spawn_blocking`.
+    fn cpm_find_walk(base: &std::path::Path, pattern: &str) -> (Vec<String>, bool) {
+        const SCAN_CAP: usize = 20_000;
+        const RESULT_CAP: usize = 500;
+        let mut out: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        // Iterative DFS: (dir path, A:-relative prefix).
+        let mut stack: Vec<(std::path::PathBuf, String)> =
+            vec![(base.to_path_buf(), String::new())];
+        while let Some((dir, rel)) = stack.pop() {
+            let rd = match std::fs::read_dir(&dir) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            for entry in rd.flatten() {
+                scanned += 1;
+                if scanned > SCAN_CAP {
+                    return (out, true);
+                }
+                // Never follow symlinks — keeps the walk inside the jail and
+                // rules out cycles.
+                let ft = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if ft.is_symlink() {
+                    continue;
+                }
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                let child_rel = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", rel, name)
+                };
+                if ft.is_dir() {
+                    stack.push((entry.path(), child_rel));
+                } else if ft.is_file() && Self::cpm_glob_match(pattern, &name) {
+                    // Stop as soon as the result cap is reached — no point
+                    // walking the rest of the tree once the output is full.
+                    if out.len() >= RESULT_CAP {
+                        return (out, true);
+                    }
+                    out.push(format!("  /{}", child_rel.to_uppercase()));
+                }
+            }
+        }
+        (out, false)
     }
 
     /// `CD [path]` — change the working directory (jailed).
@@ -1028,19 +1168,22 @@ impl TelnetSession {
     /// operands may be path-qualified; a wildcard source copies each match
     /// into a directory destination.
     async fn cpm_copy(&mut self, dst: &str, src: &str) -> Result<(), std::io::Error> {
+        // COPY takes the destination first (CP/M `PIP dest=source` order),
+        // so operand errors echo the form to keep users from swapping them.
+        let eg = "COPY dst src (dest first)";
         let (src_dir_part, src_leaf) = Self::cpm_split_leaf(src);
 
         if Self::cpm_has_wildcard(src_leaf) {
             // Wildcard source requires a directory destination.
             let src_dir = match self.cpm_dir_abs(src_dir_part) {
                 Ok(d) => d,
-                Err(e) => return self.cpm_err(e).await,
+                Err(e) => return self.cpm_err_eg(e, eg).await,
             };
             let dst_dir = match self.cpm_dir_abs(dst) {
                 Ok(d) => d,
                 Err(_) => {
                     return self
-                        .cpm_err("Wildcard COPY needs a directory dest.")
+                        .cpm_err_eg("Wildcard COPY needs a directory dest.", eg)
                         .await
                 }
             };
@@ -1051,7 +1194,7 @@ impl TelnetSession {
                 .map(|(name, size, _)| (name, size))
                 .collect();
             if matches.is_empty() {
-                return self.cpm_err("No file").await;
+                return self.cpm_err_eg("No file", eg).await;
             }
             let mut copied = 0u64;
             for (name, _) in &matches {
@@ -1074,7 +1217,7 @@ impl TelnetSession {
         // Single-file copy.
         let src_path = match self.cpm_existing_file(src) {
             Ok(p) => p,
-            Err(e) => return self.cpm_err(e).await,
+            Err(e) => return self.cpm_err_eg(e, eg).await,
         };
         let src_name = src_path
             .file_name()
@@ -1083,11 +1226,11 @@ impl TelnetSession {
             .to_string();
         let (dst_dir, dst_name) = match self.cpm_dest_file(dst, &src_name) {
             Ok(v) => v,
-            Err(e) => return self.cpm_err(e).await,
+            Err(e) => return self.cpm_err_eg(e, eg).await,
         };
         let dst_path = dst_dir.join(&dst_name);
         if dst_path == src_path {
-            return self.cpm_err("Source and destination are the same.").await;
+            return self.cpm_err_eg("Source and destination are the same.", eg).await;
         }
         let data = match Self::cpm_read_capped(&src_path, Self::MAX_FILE_SIZE).await {
             Ok(d) => d,
@@ -1104,12 +1247,15 @@ impl TelnetSession {
     /// rename, falling back to copy-then-erase when rename can't cross a
     /// boundary.  Never clobbers an existing destination.
     async fn cpm_move(&mut self, dst: &str, src: &str) -> Result<(), std::io::Error> {
+        // Like COPY, MOVE takes the destination first; echo the form on
+        // operand errors so a swapped-order command is self-correcting.
+        let eg = "MOVE dst src (dest first)";
         if Self::cpm_has_wildcard(src) || Self::cpm_has_wildcard(dst) {
-            return self.cpm_err("MOVE takes one source file.").await;
+            return self.cpm_err_eg("MOVE takes one source file.", eg).await;
         }
         let src_path = match self.cpm_existing_file(src) {
             Ok(p) => p,
-            Err(e) => return self.cpm_err(e).await,
+            Err(e) => return self.cpm_err_eg(e, eg).await,
         };
         let src_name = src_path
             .file_name()
@@ -1118,11 +1264,11 @@ impl TelnetSession {
             .to_string();
         let (dst_dir, dst_name) = match self.cpm_dest_file(dst, &src_name) {
             Ok(v) => v,
-            Err(e) => return self.cpm_err(e).await,
+            Err(e) => return self.cpm_err_eg(e, eg).await,
         };
         let dst_path = dst_dir.join(&dst_name);
         if dst_path == src_path {
-            return self.cpm_err("Source and destination are the same.").await;
+            return self.cpm_err_eg("Source and destination are the same.", eg).await;
         }
         // The `exists()` check is a courtesy guard, not an atomic gate: POSIX
         // `rename(2)` replaces its destination and std has no
@@ -1184,6 +1330,7 @@ impl TelnetSession {
         &[
             "  Commands (case-insensitive):",
             "  DIR [pat]   List files (LS)",
+            "  FIND pat    Find in A: (WHERE)",
             "  TYPE file   Show a text file",
             "  DUMP file   Hex dump a file",
             "  ERA file    Erase files (DEL,RM)",
@@ -1195,6 +1342,8 @@ impl TelnetSession {
             "  CD [path]   Change dir (CHDIR)",
             "  PWD         Show current dir",
             "  STAT [file] Space / file size",
+            "  CLS         Clear the screen",
+            "  VER         Show version",
             "  HELP        This help (?)",
             "  EXIT        Back to menu (BYE)",
             "",
@@ -1205,6 +1354,8 @@ impl TelnetSession {
             "    /F.TXT     at the A: root",
             "    ../F.TXT   in the parent dir",
             "",
+            // These three mirror Self::CPM_ENTRY_TIPS (shown on shell entry);
+            // keep the wording/examples in sync.
             "  COPY/MOVE take DEST first:",
             "    COPY SUB/ FILE.TXT",
             "    MOVE /DONE/ OLD.DAT",

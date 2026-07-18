@@ -2318,7 +2318,7 @@ fn test_modem_console_menu_row_counts() {
 /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
 /// new help screen is only width-checked once added below (bump the array
 /// length to match).  Single-width tables ignore `petscii` (they fit 40).
-fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 26] {
+fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 27] {
     [
         TelnetSession::main_help_lines(),
         TelnetSession::config_submenu_help_lines(petscii),
@@ -2346,6 +2346,7 @@ fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 26] {
         TelnetSession::serial_config_help_lines(),
         TelnetSession::master_slave_help_lines(petscii),
         TelnetSession::cpm_help_lines(),
+        TelnetSession::CPM_ENTRY_TIPS,
     ]
 }
 
@@ -5433,6 +5434,23 @@ fn test_cpm_parse_needs_arg() {
     assert!(matches!(TelnetSession::cpm_parse("mkdir"), CpmCmd::NeedsArg(_)));
     assert!(matches!(TelnetSession::cpm_parse("copy onlyone"), CpmCmd::NeedsArg(_)));
     assert!(matches!(TelnetSession::cpm_parse("ren"), CpmCmd::NeedsArg(_)));
+    assert!(matches!(TelnetSession::cpm_parse("find"), CpmCmd::NeedsArg(_)));
+}
+
+#[test]
+fn test_cpm_parse_cls_ver_find() {
+    assert_eq!(TelnetSession::cpm_parse("cls"), CpmCmd::Cls);
+    assert_eq!(TelnetSession::cpm_parse("CLEAR"), CpmCmd::Cls);
+    assert_eq!(TelnetSession::cpm_parse("ver"), CpmCmd::Ver);
+    assert_eq!(TelnetSession::cpm_parse("VERSION"), CpmCmd::Ver);
+    assert_eq!(
+        TelnetSession::cpm_parse("find *.txt"),
+        CpmCmd::Find("*.txt".into())
+    );
+    assert_eq!(
+        TelnetSession::cpm_parse("WHERE readme"),
+        CpmCmd::Find("readme".into())
+    );
 }
 
 #[test]
