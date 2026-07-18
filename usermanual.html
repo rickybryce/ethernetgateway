@@ -283,7 +283,7 @@ including Claude Code.
             <li><a href="#ch8-kermit">Kermit — Server &amp; Client Mode</a></li>
             <li><a href="#ch8-punter">Punter (C1) — Commodore</a></li>
             <li><a href="#ch8-shell">Gateway Shell (drive A:)</a></li>
-            <li><a href="#ch8-cpm">CP/M Emulator (Flavor B)</a></li>
+            <li><a href="#ch8-cpm">CP/M Emulator</a></li>
         </ol>
     </li>
     <li><span class="num">9.</span> <a href="#ch9">Serial / Hayes AT Modem Emulation</a>
@@ -607,7 +607,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
         <tr><td><code>weather_location</code></td><td>string</td><td>empty</td><td>Last-used city or postal code, worldwide (migrates legacy <code>weather_zip</code>). Updated automatically.</td></tr>
         <tr><td><code>weather_units</code></td><td>string</td><td><code>auto</code></td><td>Weather units: <code>auto</code>, <code>us</code>, or <code>metric</code>.</td></tr>
-        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable the CP/M emulator (Flavor B) <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. Off by default; configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable the CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. Off by default; configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the far-end sender/receiver to start. Shared by XMODEM, XMODEM-1K, and YMODEM (same protocol code path).</td></tr>
@@ -2097,7 +2097,7 @@ larger file over a retro link isn&rsquo;t useful &mdash; transfer it instead);
 on wider terminals.
 </aside>
 
-<h2 id="ch8-cpm">8.11 CP/M Emulator (Flavor B)</h2>
+<h2 id="ch8-cpm">8.11 CP/M Emulator</h2>
 
 <p>
 The CP/M Emulator is a <strong>real CP/M&nbsp;2.2 environment running on an
@@ -3619,7 +3619,7 @@ numeric values fall back to the default.
     <tbody>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit</code> / <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
-        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Enable the CP/M emulator (Flavor B) <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/H</code> under <code>transfer_dir</code>. Off by default (arbitrary-code risk); when off the menu item is hidden and the key rejected. See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Enable the CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/H</code> under <code>transfer_dir</code>. Off by default (arbitrary-code risk); when off the menu item is hidden and the key rejected. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
