@@ -160,6 +160,26 @@ impl CpmFs {
         }
     }
 
+    /// Read an entire file's bytes for loading a transient program (a
+    /// `.COM`) into the TPA.  Jailed via `open_existing` (canonical-prefix +
+    /// symlink checks); returns `Ok(None)` when the file doesn't exist, and
+    /// refuses a file larger than the CP/M per-file cap so a giant host file
+    /// can't be slurped whole into memory.  (`load_com` further truncates to
+    /// the usable TPA, but bounding the read keeps the `Vec` small.)
+    pub fn read_whole_file(&self, fcb: &Fcb) -> std::io::Result<Option<Vec<u8>>> {
+        let path = match self.open_existing(fcb) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        if std::fs::metadata(&path)?.len() > MAX_CPM_FILE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file exceeds max CP/M file size",
+            ));
+        }
+        Ok(Some(std::fs::read(&path)?))
+    }
+
     /// BDOS "make file" (22): create (truncating any existing file) the
     /// file the FCB names, so subsequent writes land in it.  Returns the
     /// path on success.
@@ -658,6 +678,20 @@ mod tests {
         assert_eq!(fs.file_size_records(&fcb_named(1, "A", "DAT")), Some(2));
         assert_eq!(fs.file_size_records(&fcb_named(1, "B", "DAT")), Some(1));
         assert_eq!(fs.file_size_records(&fcb_named(1, "C", "DAT")), Some(0));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_read_whole_file() {
+        let base = temp_base("wholefile");
+        let fs = CpmFs::new(base.clone());
+        let fcb = fcb_named(1, "PROG", "COM");
+        // Missing file -> Ok(None).
+        assert!(fs.read_whole_file(&fcb).unwrap().is_none());
+        // Write some bytes, read them all back.
+        std::fs::write(base.join("A").join("PROG.COM"), b"\xC3\x00\x01hi").unwrap();
+        let got = fs.read_whole_file(&fcb).unwrap().unwrap();
+        assert_eq!(got, b"\xC3\x00\x01hi");
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -32,7 +32,7 @@ mod fcb;
 mod fs;
 mod machine;
 
-pub use fcb::{parse_afn, Fcb, FCB_SIZE};
+pub use fcb::{parse_afn, parse_command_fcb, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
 
@@ -232,6 +232,71 @@ impl Cpm {
         self.mem.poke(de.wrapping_add(1), n as u8);
         for (i, b) in line.iter().take(n).enumerate() {
             self.mem.poke(de.wrapping_add(2).wrapping_add(i as u16), *b);
+        }
+    }
+
+    /// Build page zero for a transient-program launch exactly as the CP/M
+    /// CCP does before it jumps to the TPA: the command tail (the arguments
+    /// after the program name) is uppercased and stored at 0x0080 as a
+    /// length-prefixed, NUL-terminated string, and the first two tail tokens
+    /// are parsed into the two default FCBs at 0x005C and 0x006C.
+    ///
+    /// Notes matching real CP/M behavior:
+    /// - The tail carries its leading delimiter space and the length counts
+    ///   it (`PIP A:=B:X` ⇒ tail ` A:=B:X`, length 8).
+    /// - The 0x0080 region *is* the default 128-byte DMA buffer, so the
+    ///   first disk read a program performs overwrites the tail — programs
+    ///   that need their arguments copy them out first (as they always did).
+    /// - The two default FCBs overlap (0x006C lies inside the 0x005C FCB);
+    ///   FCB1 gets its extent/record fields zeroed, FCB2 is only the 12-byte
+    ///   drive+name+ext the CCP lays down there.
+    ///
+    /// Call after [`Cpm::load_com`], before [`Cpm::run`].
+    pub fn setup_command_line(&mut self, tail: &str) {
+        let up = tail.trim().to_ascii_uppercase();
+
+        // Command tail at 0x0080: a leading space when non-empty, capped so
+        // the length byte + text + NUL terminator all fit the 128-byte page.
+        let body = if up.is_empty() {
+            String::new()
+        } else {
+            format!(" {up}")
+        };
+        let bytes = body.as_bytes();
+        let n = bytes.len().min(126);
+        self.mem.poke(0x0080, n as u8);
+        for (i, &b) in bytes.iter().take(n).enumerate() {
+            self.mem.poke(0x0081 + i as u16, b);
+        }
+        self.mem.poke(0x0081 + n as u16, 0x00);
+
+        // Default FCBs parsed from the first two whitespace tokens.
+        let mut toks = up.split_whitespace();
+        let (d1, n1, e1) = parse_command_fcb(toks.next().unwrap_or(""));
+        let (d2, n2, e2) = parse_command_fcb(toks.next().unwrap_or(""));
+        self.write_default_fcb(0x005C, d1, &n1, &e1, true);
+        self.write_default_fcb(0x006C, d2, &n2, &e2, false);
+    }
+
+    /// Lay a parsed default FCB (drive byte + 8.3 name/ext) into guest memory
+    /// at `at`.  For the primary FCB (`zero_fields`) the extent/record fields
+    /// (ex,s1,s2,rc and cr,r0..r2) are cleared so the program starts at
+    /// record 0; the secondary FCB is just the 12-byte name the CCP writes.
+    fn write_default_fcb(&mut self, at: u16, drive: u8, name: &[u8; 8], ext: &[u8; 3], zero_fields: bool) {
+        self.mem.poke(at, drive);
+        for (i, &b) in name.iter().enumerate() {
+            self.mem.poke(at + 1 + i as u16, b);
+        }
+        for (i, &b) in ext.iter().enumerate() {
+            self.mem.poke(at + 9 + i as u16, b);
+        }
+        if zero_fields {
+            for off in 12u16..16 {
+                self.mem.poke(at + off, 0); // ex, s1, s2, rc
+            }
+            for off in 32u16..36 {
+                self.mem.poke(at + off, 0); // cr, r0, r1, r2
+            }
         }
     }
 
@@ -621,6 +686,99 @@ mod tests {
         // The file really exists on disk with our bytes.
         let disk = std::fs::read(base.join("A").join("IO.TXT")).unwrap();
         assert_eq!(&disk[..8], b"DISK OK!");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_setup_command_line_page_zero() {
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]); // RET
+        cpm.setup_command_line("B:FOO.TXT BAR.DAT");
+
+        // Command tail at 0x0080: length byte + the (leading-space) tail.
+        let n = cpm.read_block(0x0080, 1)[0] as usize;
+        assert_eq!(&cpm.read_block(0x0081, n), b" B:FOO.TXT BAR.DAT");
+        assert_eq!(cpm.read_block(0x0081 + n as u16, 1)[0], 0); // NUL terminator
+
+        // Default FCB1 at 0x005C: drive B: (2), FOO.TXT, fields zeroed.
+        let f1 = cpm.read_block(0x005C, 16);
+        assert_eq!(f1[0], 2);
+        assert_eq!(&f1[1..9], b"FOO     ");
+        assert_eq!(&f1[9..12], b"TXT");
+        assert_eq!(&f1[12..16], &[0, 0, 0, 0]); // ex,s1,s2,rc
+
+        // Default FCB2 at 0x006C: default drive (0), BAR.DAT.
+        let f2 = cpm.read_block(0x006C, 12);
+        assert_eq!(f2[0], 0);
+        assert_eq!(&f2[1..9], b"BAR     ");
+        assert_eq!(&f2[9..12], b"DAT");
+    }
+
+    #[test]
+    fn test_setup_command_line_empty_tail() {
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]);
+        cpm.setup_command_line("");
+        assert_eq!(cpm.read_block(0x0080, 1)[0], 0); // zero-length tail
+        // FCB1 carries a blank name on the default drive.
+        let f1 = cpm.read_block(0x005C, 12);
+        assert_eq!(f1[0], 0);
+        assert_eq!(&f1[1..9], b"        ");
+        assert_eq!(&f1[9..12], b"   ");
+    }
+
+    /// End-to-end B4a: write a `.COM` onto a temp drive through the real FS
+    /// API, read it back with `read_whole_file`, load it into the TPA with
+    /// `setup_command_line`, and run it — proving a real program image is
+    /// loaded from a drive and executed.  The program prints a banner via
+    /// BDOS 9, the same path the CCP-lite driver uses.
+    #[test]
+    fn test_run_com_loaded_from_drive() {
+        let base = std::env::temp_dir().join("xmodem_cpm_run_from_drive");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let fs = CpmFs::new(base.clone());
+
+        // A tiny HELLO.COM: LD DE,msg / LD C,9 / CALL 5 / RET ; msg "OK!$".
+        let prog: [u8; 13] = [
+            0x11, 0x09, 0x01, // LD DE,0x0109
+            0x0E, 0x09, // LD C,9
+            0xCD, 0x05, 0x00, // CALL 5
+            0xC9, // RET -> warm boot
+            b'O', b'K', b'!', b'$',
+        ];
+
+        // Write it to A:HELLO.COM via the real make + write_record path.
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(b"HELLO   ");
+        raw[9..12].copy_from_slice(b"COM");
+        let fcb = Fcb::from_bytes(&raw);
+        assert!(fs.make(&fcb).is_some());
+        let mut rec = [0u8; 128];
+        rec[..prog.len()].copy_from_slice(&prog);
+        fs.write_record(&fcb, 0, &rec).unwrap();
+
+        // Load it back the way the driver does and run it.
+        let bytes = fs.read_whole_file(&fcb).unwrap().expect("HELLO.COM exists");
+        assert_eq!(&bytes[..prog.len()], &prog);
+        let mut cpm = Cpm::new();
+        cpm.load_com(&bytes);
+        cpm.setup_command_line("");
+        let abort = AtomicBool::new(false);
+        let mut out = Vec::new();
+        loop {
+            match cpm.run(100_000, &abort) {
+                Stop::Bdos(9) => {
+                    let de = cpm.reg16(Reg16::DE);
+                    out.extend(cpm.read_dollar_string(de, 4096));
+                    cpm.bdos_return(0);
+                }
+                Stop::Bdos(_) => cpm.bdos_return(0),
+                Stop::WarmBoot => break,
+                other => panic!("unexpected stop {other:?}"),
+            }
+        }
+        assert_eq!(out, b"OK!");
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -20,14 +20,16 @@
 //! a double-`ESC` at any console-input prompt.  Every future BDOS file call
 //! (B3) resolves under `CPM/` via the existing `transfer_dir` jail.
 //!
-//! ## Status: B2 (CCP-lite `A>` REPL + console BDOS)
+//! ## Status: B4a (run a real `.COM` from a drive)
 //! Entering the shell drops into our Rust CCP-lite `A>` prompt.  The full
-//! console BDOS group (1/2/6/9/10/11/12) is wired to the session, so
-//! interactive Z80 programs can read and write the console; built-in demos
-//! (`HELLO`, `ECHO`) exercise the path.  Loading real user `.COM`s from the
-//! `CPM/` drives and the FCB filesystem come next (B3/B4).
+//! console BDOS group (1/2/6/9/10/11/12) plus the disk/FCB group (B3) are
+//! wired, so a verb that isn't a built-in is looked up as `<verb>.COM` on
+//! the drive, loaded into the TPA with page zero set up (command tail +
+//! default FCBs), and run — actual CP/M software (PIP, STAT, ASM, …) runs
+//! over telnet/SSH.  Still to come (B4b+): richer terminal translation
+//! (ADM-3A/VT52/VT100) and a concurrent out-of-band break-out reader.
 use super::*;
-use crate::cpm::{parse_afn, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
+use crate::cpm::{parse_afn, parse_command_fcb, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -115,8 +117,9 @@ impl TelnetSession {
 
     /// The Rust CCP-lite command loop.  Prints the `A>` prompt, reads a
     /// line, and dispatches: host-exit words leave; built-ins run; anything
-    /// else echoes back CP/M's classic bad-verb error (`VERB?`).  Loading a
-    /// named `.COM` from the drive comes in B4.
+    /// else is looked up as `<verb>.COM` on the drive and run as a real
+    /// transient program, falling back to CP/M's bad-verb error (`VERB?`)
+    /// when no such file exists.
     async fn cpmemu_repl(&mut self, fs: &mut CpmFs) -> Result<(), std::io::Error> {
         loop {
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
@@ -162,7 +165,7 @@ impl TelnetSession {
                 "ERA" | "DEL" => self.cpmemu_era(fs, trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_hello(), fs).await? {
+                    if !self.cpmemu_run_program(&Self::cpmemu_demo_hello(), "", fs).await? {
                         return Ok(());
                     }
                 }
@@ -174,13 +177,20 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_echo(), fs).await? {
+                    if !self.cpmemu_run_program(&Self::cpmemu_demo_echo(), "", fs).await? {
                         return Ok(());
                     }
                 }
                 other => {
-                    // CP/M CCP prints the bad verb followed by '?'.
-                    self.send_line(&format!("  {}?", self.red(other))).await?;
+                    // Not a built-in: try to load and run `<verb>.COM` from
+                    // the drive.  `None` = no such file (CP/M prints VERB?).
+                    match self.cpmemu_try_run_com(fs, &verb, trimmed).await? {
+                        Some(true) => {}                    // ran; back to A>
+                        Some(false) => return Ok(()),       // session gone
+                        None => {
+                            self.send_line(&format!("  {}?", self.red(other))).await?;
+                        }
+                    }
                 }
             }
         }
@@ -264,6 +274,7 @@ impl TelnetSession {
             "  A: .. H:   change drive",
             "  HELLO      BDOS print-string demo",
             "  ECHO       interactive console demo",
+            "  name       run name.COM from the drive",
             "  EXIT/BYE/QUIT  leave CP/M",
         ] {
             self.send_line(line).await?;
@@ -279,10 +290,15 @@ impl TelnetSession {
     async fn cpmemu_run_program(
         &mut self,
         program: &[u8],
+        tail: &str,
         fs: &mut CpmFs,
     ) -> Result<bool, std::io::Error> {
         let mut cpm = Cpm::new();
         cpm.load_com(program);
+        // Lay down page zero (command tail + default FCBs) so a real `.COM`
+        // finds its arguments where CP/M puts them.  Built-in demos pass an
+        // empty tail.
+        cpm.setup_command_line(tail);
         // No concurrent wire-reader yet (B4); the abort flag stays clear and
         // the instruction ceiling below is the compute-bound runaway guard,
         // while double-ESC at an input prompt handles interactive break-out.
@@ -388,6 +404,52 @@ impl TelnetSession {
             // await; this makes the non-awaiting ones cooperative too.
             tokio::task::yield_now().await;
         }
+    }
+
+    /// Try to load and run `<verb>.COM` from a drive as a real transient
+    /// program.  The verb may carry a drive prefix (`B:PIP`); its extension
+    /// is always forced to `COM` (the CCP ignores any typed extension for the
+    /// command name).  The command tail (everything after the verb) is laid
+    /// into page zero for the program.
+    ///
+    /// Returns `Ok(None)` when no such `.COM` exists (so the caller can print
+    /// CP/M's `VERB?`), `Ok(Some(true))` when the program ran and control
+    /// should return to the `A>` prompt, and `Ok(Some(false))` when the
+    /// session disconnected mid-run (leave the emulator).
+    async fn cpmemu_try_run_com(
+        &mut self,
+        fs: &mut CpmFs,
+        verb: &str,
+        line: &str,
+    ) -> Result<Option<bool>, std::io::Error> {
+        // Parse the verb's drive prefix + name; force the extension to COM.
+        let (drive, name, _ext) = parse_command_fcb(verb);
+        let fcb = Fcb {
+            drive,
+            name,
+            ext: *b"COM",
+            ex: 0,
+            s2: 0,
+            cr: 0,
+            rc: 0,
+            r: [0; 3],
+        };
+        let bytes = match fs.read_whole_file(&fcb) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None), // no such .COM
+            Err(_) => {
+                self.send_line(&format!("  {}", self.red("[load error]")))
+                    .await?;
+                return Ok(Some(true));
+            }
+        };
+        // The command tail is everything after the first token (the verb).
+        let tail = line
+            .split_once(char::is_whitespace)
+            .map(|x| x.1)
+            .unwrap_or("");
+        let cont = self.cpmemu_run_program(&bytes, tail, fs).await?;
+        Ok(Some(cont))
     }
 
     /// Read one console byte for a running program, translating for the

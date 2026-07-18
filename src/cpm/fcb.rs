@@ -190,6 +190,24 @@ pub fn parse_afn(spec: &str) -> Option<([u8; 8], [u8; 3])> {
     Some((name, ext))
 }
 
+/// Parse one CCP command-line token into a default-FCB triple the way the
+/// CCP does when it lays down the two default FCBs before running a program:
+/// an optional single-letter drive prefix (`B:FOO.TXT`) becomes the FCB
+/// drive byte (0 = default/current, 1 = A:, 2 = B:, …), and the remainder is
+/// parsed as an ambiguous 8.3 name/ext (wildcards allowed).  An empty or
+/// unparseable token yields an all-blank name on the default drive — exactly
+/// what the CCP leaves in an unused default FCB.
+pub fn parse_command_fcb(token: &str) -> (u8, [u8; 8], [u8; 3]) {
+    let (drive, rest) = match token.split_once(':') {
+        Some((d, r)) if d.len() == 1 && d.as_bytes()[0].is_ascii_alphabetic() => {
+            (d.as_bytes()[0].to_ascii_uppercase() - b'A' + 1, r)
+        }
+        _ => (0u8, token),
+    };
+    let (name, ext) = parse_afn(rest).unwrap_or(([b' '; 8], [b' '; 3]));
+    (drive, name, ext)
+}
+
 /// Expand one field of an ambiguous filename into `WIDTH` space-padded
 /// bytes: `*` fills the remainder of the field with `?`; `?` passes
 /// through; other characters must be legal 8.3 characters.  Too-long
@@ -248,6 +266,28 @@ mod tests {
             format!("{}.{}", n, e)
         })
         .unwrap()
+    }
+
+    #[test]
+    fn test_parse_command_fcb() {
+        // Drive prefix -> drive byte (A:=1, B:=2, …), name/ext parsed.
+        let (d, n, e) = parse_command_fcb("B:FOO.TXT");
+        assert_eq!(d, 2);
+        assert_eq!(&n, b"FOO     ");
+        assert_eq!(&e, b"TXT");
+        // No prefix -> default drive (0).
+        let (d, n, e) = parse_command_fcb("bar.dat");
+        assert_eq!(d, 0);
+        assert_eq!(&n, b"BAR     ");
+        assert_eq!(&e, b"DAT");
+        // Wildcards are allowed in a default FCB (the CCP fills them).
+        let (d, n, e) = parse_command_fcb("*.COM");
+        assert_eq!(d, 0);
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"COM");
+        // Empty / unparseable token -> all-blank name on the default drive.
+        let (d, n, e) = parse_command_fcb("");
+        assert_eq!((d, n, e), (0, [b' '; 8], [b' '; 3]));
     }
 
     #[test]
