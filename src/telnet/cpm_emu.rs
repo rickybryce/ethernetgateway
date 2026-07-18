@@ -13,12 +13,29 @@
 //! the `cpm_emu_*` names (and the config key `cpm_emu_enabled`) to keep the
 //! two unambiguous.
 //!
-//! ## Security
-//! Gated behind `cpm_emu_enabled` (default-off): when disabled the menu
-//! item is hidden and `K` is rejected.  A runaway program is bounded by an
-//! instruction ceiling, and interactive programs can be broken out of with
-//! a double-`ESC` at any console-input prompt.  Every future BDOS file call
-//! (B3) resolves under `CPM/` via the existing `transfer_dir` jail.
+//! ## Security (finalized B5)
+//! The feature runs arbitrary Z80 code, so it is gated behind
+//! `cpm_emu_enabled` (default-off): when disabled the menu item is hidden
+//! and `K` is rejected.  The trusted-LAN posture is bounded on three axes:
+//! - **Jail.** Every BDOS file call resolves through `CpmFs` under the
+//!   `CPM/` container in `transfer_dir`: 8.3-name validation (no separators
+//!   or `..`), a lexical `starts_with` check, and a canonical-path +
+//!   symlink check (a symlink planted in a drive folder can't point out).
+//!   Drive indices are clamped to A:–H:.
+//! - **CPU.** A runaway is bounded by the configurable instruction ceiling
+//!   (`cpm_emu_max_minstr`); the run loop yields every batch, and
+//!   interactive programs are additionally escapable with a double-`ESC` at
+//!   any console-input prompt.
+//! - **Memory/disk.** Each session's machine is a fixed 64 KB (bounded by
+//!   `max_sessions`); a single emulated file is capped at 8 MB
+//!   (`MAX_CPM_FILE_BYTES`) so a high random-record write can't spray a
+//!   multi-gigabyte sparse file.  All BDOS read helpers are length-bounded.
+//!
+//! The emulator services only BDOS — it has no path to execute host
+//! commands, and outbound I/O (a virtual modem) is deliberately absent
+//! (deferred B6+).  There is no per-drive file-*count* cap (a guest can
+//! create many small files); bounded by host disk and acceptable under the
+//! trusted-LAN model.
 //!
 //! ## Status: B4a (run a real `.COM` from a drive)
 //! Entering the shell drops into our Rust CCP-lite `A>` prompt.  The full
