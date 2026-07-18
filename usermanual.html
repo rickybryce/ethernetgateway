@@ -1718,7 +1718,7 @@ received files.
         <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory). A name that already exists is renamed, not overwritten or dropped &mdash; see the note below.</td></tr>
         <tr><td><code>get &lt;file&gt;</code></td><td>R, then we send</td><td>Download a file from the gateway to the peer.</td></tr>
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
-        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed.</td></tr>
+        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed. The optional second &sect;6.7 field (a per-directory password) is <strong>accepted and ignored</strong> &mdash; see the note below.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
         <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.7.0</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
@@ -1731,6 +1731,37 @@ received files.
         <tr><td><em>any other</em> <code>remote ...</code></td><td>G <em>letter</em></td><td>Refused with an explicit E-packet (per spec &sect;6) so the peer's UI surfaces a clean &ldquo;command not supported&rdquo; error instead of a phantom-success ACK.</td></tr>
     </tbody>
 </table>
+
+<aside class="note" id="ch8-remote-cd-password">
+<span class="label">&ldquo;Password:&rdquo; prompt on <code>remote cd</code> (CP/M Kermit / kercpm3)</span>
+<p>
+Some CP/M Kermit clients &mdash; notably <strong>kercpm3</strong> on RomWBW
+&mdash; display a <strong>Password:</strong> prompt when you change the remote
+directory (<code>remote cd</code>).  <em>This is normal client-side behavior and
+is not the gateway asking you to log in.</em>  The Kermit CWD command
+(Protocol Manual &sect;6.7) is defined with two field-encoded arguments,
+<code>C &lt;directory&gt; &lt;password&gt;</code> &mdash; the second field is an
+optional <em>per-directory</em> password inherited from multi-user hosts
+(VMS / TOPS-20) where a directory could itself be password-protected.  Clients
+like kercpm3 prompt for that field <strong>before sending anything on the
+wire</strong>, whether or not the server wants it.
+</p>
+<p>
+The gateway&rsquo;s Kermit server is <strong>unauthenticated by design</strong>
+(see &sect;9), so it reads only the directory field and <strong>ignores the
+password entirely</strong>: the directory change succeeds no matter what you
+type.  Simply <strong>press Enter</strong> at the prompt to send an empty
+password.  This is independent of the <em>Require Login</em>
+(<code>security_enabled</code>) setting, which gates telnet, SSH, and the web UI
+only &mdash; it never applies to the Kermit server, and is deliberately
+<em>not</em> wired to this per-directory password field.
+</p>
+<p class="warn">
+Because Kermit runs in cleartext over serial/telnet, do <strong>not</strong>
+type a real secret at this prompt &mdash; it would travel unencrypted and serves
+no purpose, since the gateway discards it.  Press Enter instead.
+</p>
+</aside>
 
 <aside class="note" id="ch8-upload-collision">
 <span class="label">Upload name collisions — renamed, never dropped</span>
