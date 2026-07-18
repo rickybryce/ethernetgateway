@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-07-17
 
 ### Added
 - **Gateway Shell — a CP/M-inspired file manager over telnet/SSH.** A new
@@ -35,6 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a full "as is" / no-warranty disclaimer at the top **and** bottom of
   both `README.md` and the user manual (`usermanual.html`), including a note
   that portions of the project were developed with the assistance of AI tools.
+- **`README.md` condensed to a quick-start + feature overview** (~1815 → ~190
+  lines). The reference material that duplicated the user manual (the annotated
+  `egateway.conf` dump, AT-command / S-register tables, telnet RFC compliance
+  matrix, release-verification and systemd walkthroughs, per-distro build
+  matrix) now lives only in the manual, with links; the repo-unique hardware
+  quick-start, security posture, and license are kept, and the screenshot is
+  surfaced near the top.
+- **User manual: documented kercpm3's `Password:` prompt on `remote cd`.**
+  CP/M Kermit clients prompt for the optional Kermit CWD password (Protocol
+  Manual §6.7 second field) before sending the `G C` packet; the gateway's
+  Kermit server is unauthenticated by design and ignores that field, so the
+  directory change always succeeds — press Enter. Also noted the
+  recognised-but-unsupported `USER` command in the Gateway Shell (§8.10).
 
 ### Fixed
 - **Gateway Shell: `DIR SUB` now lists the subdirectory's contents** (like
@@ -1874,7 +1887,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[0.7.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.6.4...HEAD
+[0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
 [0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3
 [0.6.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.2
