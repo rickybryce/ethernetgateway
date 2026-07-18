@@ -9,7 +9,7 @@
 //! container base, a guest can never escape to the host filesystem — the
 //! same jail guarantee the transfer subsystem relies on.
 
-use super::fcb::{split_8_3, Fcb};
+use super::fcb::{format_8_3, split_8_3, Fcb};
 use std::path::{Path, PathBuf};
 
 /// Number of emulated drives (A: through H:).
@@ -103,10 +103,14 @@ impl CpmFs {
     /// directory, guarantees the path stays inside the `CPM/` container.
     pub fn resolve(&self, fcb: &Fcb) -> Option<PathBuf> {
         let drive0 = self.drive_index_for(fcb.drive)?;
-        let filename = fcb.filename();
-        // Re-validate as a concrete 8.3 name: rejects wildcards ('?'/'*'
-        // are not valid filename chars) and anything with a separator, so
-        // the join below cannot traverse out of the drive directory.
+        self.resolve_name(drive0, &fcb.name, &fcb.ext)
+    }
+
+    /// Resolve a concrete 8.3 name on a 0-based drive to a jailed host
+    /// path.  Re-validates as a concrete name (rejecting wildcards and
+    /// separators) so the join cannot traverse out of the drive directory.
+    fn resolve_name(&self, drive0: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<PathBuf> {
+        let filename = format_8_3(name, ext);
         split_8_3(&filename)?;
         let path = self.drive_dir(drive0).join(&filename);
         // Belt-and-suspenders: the resolved path must stay under base.
@@ -143,6 +147,36 @@ impl CpmFs {
             Ok(_) => Some(path),
             Err(_) => None,
         }
+    }
+
+    /// BDOS "rename file" (23): rename the file `old` names to the new 8.3
+    /// name on the same drive.  Refuses if the source is missing or the
+    /// destination already exists (no silent clobber).  Returns success.
+    pub fn rename(&self, old: &Fcb, new_name: &[u8; 8], new_ext: &[u8; 3]) -> bool {
+        let drive0 = match self.drive_index_for(old.drive) {
+            Some(d) => d,
+            None => return false,
+        };
+        let old_path = match self.resolve_name(drive0, &old.name, &old.ext) {
+            Some(p) => p,
+            None => return false,
+        };
+        let new_path = match self.resolve_name(drive0, new_name, new_ext) {
+            Some(p) => p,
+            None => return false,
+        };
+        if !old_path.is_file() || new_path.exists() {
+            return false;
+        }
+        std::fs::rename(old_path, new_path).is_ok()
+    }
+
+    /// BDOS "compute file size" (35): the number of 128-byte records in the
+    /// file the FCB names (its virtual CP/M size), or `None` if unresolved.
+    pub fn file_size_records(&self, fcb: &Fcb) -> Option<u32> {
+        let path = self.resolve(fcb)?;
+        let size = std::fs::metadata(&path).ok()?.len();
+        Some(size.div_ceil(128) as u32)
     }
 
     /// Read one 128-byte record at `record` from the file the FCB names.
@@ -538,6 +572,38 @@ mod tests {
         assert!(base.join("A").join("KEEP.COM").exists()); // untouched
         // Deleting again matches nothing.
         assert_eq!(fs.delete(&del), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_rename() {
+        let base = temp_base("rename");
+        std::fs::write(base.join("A").join("OLD.TXT"), b"data").unwrap();
+        let fs = CpmFs::new(base.clone());
+        let old = fcb_named(1, "OLD", "TXT");
+        let (nn, ne) = super::super::fcb::split_8_3("NEW.TXT").unwrap();
+        assert!(fs.rename(&old, &nn, &ne));
+        assert!(!base.join("A").join("OLD.TXT").exists());
+        assert!(base.join("A").join("NEW.TXT").exists());
+        // Renaming a missing source fails.
+        assert!(!fs.rename(&old, &nn, &ne));
+        // No clobber: renaming onto an existing file fails.
+        std::fs::write(base.join("A").join("SRC.TXT"), b"s").unwrap();
+        let src = fcb_named(1, "SRC", "TXT");
+        assert!(!fs.rename(&src, &nn, &ne)); // NEW.TXT already exists
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_file_size_records() {
+        let base = temp_base("size");
+        std::fs::write(base.join("A").join("A.DAT"), vec![0u8; 200]).unwrap(); // 2 records
+        std::fs::write(base.join("A").join("B.DAT"), vec![0u8; 128]).unwrap(); // 1 record
+        std::fs::write(base.join("A").join("C.DAT"), b"").unwrap(); // 0 records
+        let fs = CpmFs::new(base.clone());
+        assert_eq!(fs.file_size_records(&fcb_named(1, "A", "DAT")), Some(2));
+        assert_eq!(fs.file_size_records(&fcb_named(1, "B", "DAT")), Some(1));
+        assert_eq!(fs.file_size_records(&fcb_named(1, "C", "DAT")), Some(0));
         let _ = std::fs::remove_dir_all(&base);
     }
 

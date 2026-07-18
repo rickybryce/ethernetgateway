@@ -37,8 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     delete call removes matching files. The CCP-lite gained the authentic
     built-ins `DIR` (list the current drive) and `ERA name` (erase, with a
     `*.*` confirmation), so files uploaded into a `CPM/` drive can be listed
-    and removed interactively. Random-record I/O, compute-file-size, and rename
-    land next, after which real utilities like `PIP`/`STAT` become runnable.
+    and removed interactively.
+  - **Filesystem, part 3 — random-record I/O, file size, rename.** The BDOS
+    random read/write calls seek to a record number (with the sequential
+    position kept in sync), compute-file-size reports a file's length in
+    records, and rename moves a file to a new 8.3 name (no clobber). This
+    completes the CP/M 2.2 file BDOS surface, so real utilities like `PIP`
+    and `STAT` become runnable once `.COM` loading lands.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the

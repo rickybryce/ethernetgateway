@@ -410,6 +410,92 @@ impl TelnetSession {
                             let n = fs.delete(&fcb);
                             cpm.bdos_return(if n > 0 { 0x00 } else { 0xFF });
                         }
+                        23 => {
+                            // Rename: old name in the FCB, new name in its
+                            // second half (byte 16 = drive, 17..25 = name,
+                            // 25..28 = ext).
+                            let de = cpm.arg_de();
+                            let raw = cpm.read_block(de, FCB_SIZE);
+                            let old = Fcb::from_bytes(&raw);
+                            let mut new_name = [b' '; 8];
+                            let mut new_ext = [b' '; 3];
+                            for (slot, &src) in new_name.iter_mut().zip(&raw[17..25]) {
+                                *slot = src & 0x7F;
+                            }
+                            for (slot, &src) in new_ext.iter_mut().zip(&raw[25..28]) {
+                                *slot = src & 0x7F;
+                            }
+                            let code = if fs.rename(&old, &new_name, &new_ext) {
+                                0x00
+                            } else {
+                                0xFF
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        33 => {
+                            // Read random: record number is in R0..R2.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let rr = fcb.random_record();
+                            let code = match fs.read_record(&fcb, rr) {
+                                Ok(Some(buf)) => {
+                                    cpm.write_block(fs.dma(), &buf);
+                                    fcb.set_seq_record(rr);
+                                    fcb.store_position(&mut raw);
+                                    cpm.write_block(de, &raw);
+                                    0x00
+                                }
+                                Ok(None) => 0x01, // reading unwritten data
+                                Err(_) => 0x01,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        34 => {
+                            // Write random: record number is in R0..R2.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let mut fcb = Fcb::from_bytes(&raw);
+                            let rr = fcb.random_record();
+                            let dma = cpm.read_block(fs.dma(), 128);
+                            let mut data = [0u8; 128];
+                            data.copy_from_slice(&dma);
+                            let code = match fs.write_record(&fcb, rr, &data) {
+                                Ok(()) => {
+                                    fcb.set_seq_record(rr);
+                                    fcb.store_position(&mut raw);
+                                    cpm.write_block(de, &raw);
+                                    0x00
+                                }
+                                Err(_) => 0xFF,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        35 => {
+                            // Compute file size -> set R0..R2 to record count.
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let fcb = Fcb::from_bytes(&raw);
+                            let recs = fs.file_size_records(&fcb).unwrap_or(0);
+                            raw[33] = recs as u8;
+                            raw[34] = (recs >> 8) as u8;
+                            raw[35] = (recs >> 16) as u8;
+                            cpm.write_block(de, &raw);
+                            cpm.bdos_return(0);
+                        }
+                        36 => {
+                            // Set random record from the current sequential
+                            // position (R0..R2 <- seq record).
+                            let de = cpm.arg_de();
+                            let mut raw = cpm.read_block(de, FCB_SIZE);
+                            let fcb = Fcb::from_bytes(&raw);
+                            let rr = fcb.seq_record();
+                            raw[33] = rr as u8;
+                            raw[34] = (rr >> 8) as u8;
+                            raw[35] = (rr >> 16) as u8;
+                            cpm.write_block(de, &raw);
+                            cpm.bdos_return(0);
+                        }
                         20 => {
                             // Read next sequential record into the DMA buffer.
                             let de = cpm.arg_de();

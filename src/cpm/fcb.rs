@@ -69,12 +69,6 @@ impl Fcb {
         }
     }
 
-    /// The human-readable `NAME.EXT` (uppercase, no padding); `NAME` when
-    /// the extension is blank.
-    pub fn filename(&self) -> String {
-        format_8_3(&self.name, &self.ext)
-    }
-
     /// Sequential record index = full-extent × 128 + current record.
     /// The full extent combines S2 (high) and EX (low, 5 bits).
     pub fn seq_record(&self) -> u32 {
@@ -83,8 +77,6 @@ impl Fcb {
     }
 
     /// The 24-bit random record number (R0 low .. R2 overflow).
-    // Wired up by B3d (random I/O); the value + tests are ready now.
-    #[allow(dead_code)]
     pub fn random_record(&self) -> u32 {
         (self.r[0] as u32) | ((self.r[1] as u32) << 8) | ((self.r[2] as u32) << 16)
     }
@@ -107,8 +99,6 @@ impl Fcb {
 
     /// Set the sequential position (EX/S2/CR) from an absolute record
     /// index — used to seek after a random operation or on open.
-    // Wired up by B3d (random I/O); the logic + round-trip test are ready.
-    #[allow(dead_code)]
     pub fn set_seq_record(&mut self, record: u32) {
         self.cr = (record % 128) as u8;
         let extent = record / 128;
@@ -321,7 +311,7 @@ mod tests {
         b[1] |= 0x80;
         let fcb = Fcb::from_bytes(&b);
         assert_eq!(fcb.drive, 1);
-        assert_eq!(fcb.filename(), "STAT.COM");
+        assert_eq!(format_8_3(&fcb.name, &fcb.ext), "STAT.COM");
     }
 
     #[test]
