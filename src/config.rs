@@ -14,6 +14,37 @@ use crate::logger::glog;
 /// Name of the configuration file (lives next to the binary).
 pub const CONFIG_FILE: &str = "egateway.conf";
 
+/// Path to the configuration file actually read/written at runtime.
+///
+/// Production always uses [`CONFIG_FILE`] in the working directory.  Under
+/// `cfg(test)` it redirects to a **process-unique** file in the temp
+/// directory, so the parallel test binary never reads or writes the
+/// developer's real `egateway.conf`.  That shared working-dir file (plus the
+/// global `CONFIG` singleton) was the one piece of cross-test mutable state
+/// that let a config-mutating test (e.g. the relay onward-dial tests) leak
+/// into another test's `get_config()` read, and let one `cargo test`
+/// invocation contaminate the next through the file left behind.  The
+/// redirect is compile-time gated, so the release binary is byte-for-byte
+/// unchanged; only test builds see the temp path.
+#[cfg(not(test))]
+fn config_file_path() -> String {
+    CONFIG_FILE.to_string()
+}
+
+#[cfg(test)]
+fn config_file_path() -> String {
+    use std::sync::OnceLock;
+    static TEST_CONFIG_PATH: OnceLock<String> = OnceLock::new();
+    TEST_CONFIG_PATH
+        .get_or_init(|| {
+            std::env::temp_dir()
+                .join(format!("egateway_test_{}.conf", std::process::id()))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .clone()
+}
+
 // ─── Defaults ──────────────────────────────────────────────
 const DEFAULT_TELNET_ENABLED: bool = true;
 const DEFAULT_TELNET_PORT: u16 = 2323;
@@ -807,11 +838,12 @@ pub fn get_gateway_debug() -> bool {
 
 /// Load (or create) the configuration file and store it in the global singleton.
 pub fn load_or_create_config() -> Config {
-    let cfg = if Path::new(CONFIG_FILE).exists() {
-        match read_config_file_checked(CONFIG_FILE) {
+    let path = config_file_path();
+    let cfg = if Path::new(&path).exists() {
+        match read_config_file_checked(&path) {
             Ok(cfg) => {
                 // Rewrite to ensure all keys are present.
-                if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
+                if let Err(e) = write_config_file(&path, &cfg) {
                     glog!("Warning: {}", e);
                 }
                 cfg
@@ -848,7 +880,7 @@ pub fn load_or_create_config() -> Config {
         }
     } else {
         let cfg = Config::default();
-        match write_config_file(CONFIG_FILE, &cfg) {
+        match write_config_file(&path, &cfg) {
             Ok(()) => glog!("Created default configuration: {}", CONFIG_FILE),
             Err(e) => glog!("Warning: {}", e),
         }
@@ -1413,7 +1445,7 @@ fn sanitize_value(s: &str) -> String {
 /// when persistence fails.
 pub fn save_config(cfg: &Config) -> Result<(), String> {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    let result = write_config_file(CONFIG_FILE, cfg);
+    let result = write_config_file(&config_file_path(), cfg);
     if let Err(ref e) = result {
         glog!("Warning: {}", e);
     }
@@ -1945,8 +1977,9 @@ pub fn update_config_value(key: &str, value: &str) {
 /// concurrent callers from overwriting each other's changes.
 pub fn update_config_values(pairs: &[(&str, &str)]) {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    let mut cfg = if Path::new(CONFIG_FILE).exists() {
-        match read_config_file_checked(CONFIG_FILE) {
+    let path = config_file_path();
+    let mut cfg = if Path::new(&path).exists() {
+        match read_config_file_checked(&path) {
             Ok(c) => c,
             // Unreadable mid-run: keep the current in-memory config rather
             // than clobbering the on-disk file with defaults in the write
@@ -1968,7 +2001,7 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     // High-frequency runtime persistence (setting toggles, AT&W, etc.):
     // best-effort with a logged warning rather than propagating to every
     // call site.  The explicit save_config path returns the error instead.
-    if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
+    if let Err(e) = write_config_file(&path, &cfg) {
         glog!("Warning: {}", e);
     }
     *guard = Some(cfg);
