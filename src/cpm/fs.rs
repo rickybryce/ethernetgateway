@@ -19,6 +19,9 @@ pub const NUM_DRIVES: u8 = 8;
 /// buffer at 0x0080 (the second half of the zero page).
 pub const DEFAULT_DMA: u16 = 0x0080;
 
+/// A synthetic 32-byte CP/M directory entry (one extent of one file).
+pub type DirEntry = [u8; 32];
+
 /// Directory-backed CP/M filesystem: which drive is current, where the
 /// DMA buffer is, and the `CPM/` container base on the host.
 pub struct CpmFs {
@@ -28,6 +31,11 @@ pub struct CpmFs {
     drive: u8,
     /// Current DMA transfer address in guest memory.
     dma: u16,
+    /// Directory entries produced by the last `search_first`, walked one at
+    /// a time by `search_next` (a point-in-time snapshot of the drive).
+    search: Vec<DirEntry>,
+    /// Cursor into `search` (index of the last entry returned).
+    search_pos: usize,
 }
 
 impl CpmFs {
@@ -38,6 +46,8 @@ impl CpmFs {
             base,
             drive: 0,
             dma: DEFAULT_DMA,
+            search: Vec::new(),
+            search_pos: 0,
         }
     }
 
@@ -171,6 +181,105 @@ impl CpmFs {
         }
     }
 
+    /// BDOS "search first" (17): find every host file on the FCB's drive
+    /// whose 8.3 name matches the (possibly `?`-wildcarded) FCB, build a
+    /// directory entry per extent, and return the first.  `search_next`
+    /// walks the rest.  Returns `None` when nothing matches.
+    pub fn search_first(&mut self, fcb: &Fcb) -> Option<DirEntry> {
+        self.search = self.build_dir_entries(fcb);
+        self.search_pos = 0;
+        self.search.first().copied()
+    }
+
+    /// BDOS "search next" (18): the next entry from the last `search_first`,
+    /// or `None` when the directory listing is exhausted.
+    pub fn search_next(&mut self) -> Option<DirEntry> {
+        if self.search_pos + 1 < self.search.len() {
+            self.search_pos += 1;
+            Some(self.search[self.search_pos])
+        } else {
+            None
+        }
+    }
+
+    /// List the valid 8.3 filenames on the current drive, sorted — for the
+    /// CCP-lite's built-in `DIR` (which, like real CP/M, is a command
+    /// processor built-in rather than a `.COM`).  Host files that are not
+    /// legal 8.3 names are omitted, matching what CP/M programs can see.
+    pub fn list_current(&self) -> Vec<String> {
+        let dir = self.drive_dir(self.drive);
+        let mut names = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    let fname = e.file_name().to_string_lossy().to_string();
+                    if let Some((n, x)) = split_8_3(&fname) {
+                        names.push(super::fcb::format_8_3(&n, &x));
+                    }
+                }
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// BDOS "delete file" (19): remove every host file on the FCB's drive
+    /// matching the (possibly wildcarded) FCB.  Returns the count deleted.
+    pub fn delete(&self, fcb: &Fcb) -> usize {
+        let drive0 = match self.drive_index_for(fcb.drive) {
+            Some(d) => d,
+            None => return 0,
+        };
+        let dir = self.drive_dir(drive0);
+        let mut count = 0;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if let Some((n, x)) = split_8_3(&fname) {
+                    if fcb.matches(&n, &x) && std::fs::remove_file(e.path()).is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Build the directory-entry list for every file matching `fcb`, sorted
+    /// by name, one entry per 16 KB extent (so multi-extent files and file
+    /// sizes are represented the way `STAT`/`DIR` expect).
+    fn build_dir_entries(&self, fcb: &Fcb) -> Vec<DirEntry> {
+        let mut out = Vec::new();
+        let drive0 = match self.drive_index_for(fcb.drive) {
+            Some(d) => d,
+            None => return out,
+        };
+        let dir = self.drive_dir(drive0);
+        let mut files: Vec<([u8; 8], [u8; 3], u64, String)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if let Some((n, x)) = split_8_3(&fname) {
+                    if fcb.matches(&n, &x) {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        files.push((n, x, size, fname));
+                    }
+                }
+            }
+        }
+        files.sort_by(|a, b| a.3.cmp(&b.3));
+        for (n, x, size, _) in files {
+            out.extend(dir_entries_for_file(&n, &x, size));
+        }
+        out
+    }
+
     /// Write one 128-byte record at `record` into the file the FCB names
     /// (which must already exist via open/make).  Seeking past the current
     /// end zero-fills the gap, matching CP/M's record model.
@@ -190,6 +299,46 @@ impl CpmFs {
         f.write_all(data)?;
         Ok(())
     }
+}
+
+/// Build the CP/M directory entries for a single file: one 32-byte entry
+/// per 16 KB extent, carrying user 0, the 8.3 name, the extent number
+/// (EX/S2), and the record count (RC).  The allocation map is filled with
+/// distinct non-zero block numbers so a directory scanner treats the space
+/// as used.  An empty file still gets one entry (RC = 0).
+fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64) -> Vec<DirEntry> {
+    let records = size.div_ceil(128) as u32; // 128-byte records
+    let extents = if records == 0 {
+        1
+    } else {
+        records.div_ceil(128) // 128 records per 16 KB extent
+    };
+    let mut out = Vec::new();
+    let mut block: u8 = 1;
+    for k in 0..extents {
+        let mut e: DirEntry = [0u8; 32];
+        e[0] = 0; // user number 0
+        e[1..9].copy_from_slice(name);
+        e[9..12].copy_from_slice(ext);
+        e[12] = (k & 0x1F) as u8; // EX
+        e[14] = ((k >> 5) & 0x3F) as u8; // S2
+        let recs_this = if records == 0 {
+            0
+        } else if k == extents - 1 {
+            records - k * 128
+        } else {
+            128
+        };
+        e[15] = recs_this as u8; // RC (128 fits as 0x80)
+        // Allocation map: one 8-bit block per 8 records (1 KB blocks).
+        let blocks = (recs_this.div_ceil(8)).min(16) as usize;
+        for slot in e.iter_mut().skip(16).take(blocks) {
+            *slot = block;
+            block = block.wrapping_add(1).max(1);
+        }
+        out.push(e);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -293,6 +442,102 @@ mod tests {
         // Reading past EOF yields None.
         assert!(fs.read_record(&fcb, 2).unwrap().is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Decode the 8.3 name out of a 32-byte directory entry.
+    fn entry_name(e: &DirEntry) -> String {
+        let mut n = [b' '; 8];
+        let mut x = [b' '; 3];
+        n.copy_from_slice(&e[1..9]);
+        x.copy_from_slice(&e[9..12]);
+        super::super::fcb::format_8_3(&n, &x)
+    }
+
+    #[test]
+    fn test_search_enumerates_matching() {
+        let base = temp_base("search");
+        std::fs::write(base.join("A").join("ALPHA.TXT"), b"a").unwrap();
+        std::fs::write(base.join("A").join("BETA.TXT"), b"b").unwrap();
+        std::fs::write(base.join("A").join("GAMMA.COM"), b"c").unwrap();
+        // A host file that is not a valid 8.3 name is invisible.
+        std::fs::write(base.join("A").join("not a cpm name!.zzzz"), b"x").unwrap();
+        let mut fs = CpmFs::new(base.clone());
+
+        // "????????.???" matches every valid 8.3 file.
+        let all = fcb_named(1, "????????", "???");
+        let mut names = Vec::new();
+        let mut cur = fs.search_first(&all);
+        while let Some(e) = cur {
+            names.push(entry_name(&e));
+            cur = fs.search_next();
+        }
+        assert_eq!(names, vec!["ALPHA.TXT", "BETA.TXT", "GAMMA.COM"]);
+
+        // "????????.TXT" matches only the .TXT files.
+        let txt = fcb_named(1, "????????", "TXT");
+        let mut txts = Vec::new();
+        let mut cur = fs.search_first(&txt);
+        while let Some(e) = cur {
+            txts.push(entry_name(&e));
+            cur = fs.search_next();
+        }
+        assert_eq!(txts, vec!["ALPHA.TXT", "BETA.TXT"]);
+
+        // No match -> None.
+        let none = fcb_named(1, "NOPE", "XYZ");
+        assert!(fs.search_first(&none).is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_search_multi_extent_file() {
+        let base = temp_base("multiext");
+        // 20000 bytes > 16 KB -> two extents.
+        std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 20000]).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let pat = fcb_named(1, "BIG", "DAT");
+        let e0 = fs.search_first(&pat).unwrap();
+        let e1 = fs.search_next().unwrap();
+        assert!(fs.search_next().is_none());
+        assert_eq!(e0[12], 0); // EX 0
+        assert_eq!(e0[15], 128); // first extent full (128 records)
+        assert_eq!(e1[12], 1); // EX 1
+        // 20000 bytes = 157 records total; second extent has 157-128 = 29.
+        assert_eq!(e1[15], 29);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_list_current() {
+        let base = temp_base("list");
+        std::fs::write(base.join("A").join("B.TXT"), b"b").unwrap();
+        std::fs::write(base.join("A").join("A.COM"), b"a").unwrap();
+        std::fs::write(base.join("A").join("bad name.zzzz"), b"x").unwrap(); // invisible
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        std::fs::write(base.join("B").join("ONLY.B"), b"1").unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        assert_eq!(fs.list_current(), vec!["A.COM", "B.TXT"]); // A: sorted
+        fs.select(1); // B:
+        assert_eq!(fs.list_current(), vec!["ONLY.B"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_delete_matching() {
+        let base = temp_base("delete");
+        std::fs::write(base.join("A").join("ONE.TXT"), b"1").unwrap();
+        std::fs::write(base.join("A").join("TWO.TXT"), b"2").unwrap();
+        std::fs::write(base.join("A").join("KEEP.COM"), b"k").unwrap();
+        let fs = CpmFs::new(base.clone());
+        let del = fcb_named(1, "????????", "TXT");
+        assert_eq!(fs.delete(&del), 2);
+        assert!(!base.join("A").join("ONE.TXT").exists());
+        assert!(!base.join("A").join("TWO.TXT").exists());
+        assert!(base.join("A").join("KEEP.COM").exists()); // untouched
+        // Deleting again matches nothing.
+        assert_eq!(fs.delete(&del), 0);
         let _ = std::fs::remove_dir_all(&base);
     }
 

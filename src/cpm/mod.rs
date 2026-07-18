@@ -32,7 +32,7 @@ mod fcb;
 mod fs;
 mod machine;
 
-pub use fcb::{Fcb, FCB_SIZE};
+pub use fcb::{parse_afn, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
 

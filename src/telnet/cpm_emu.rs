@@ -27,7 +27,7 @@
 //! (`HELLO`, `ECHO`) exercise the path.  Loading real user `.COM`s from the
 //! `CPM/` drives and the FCB filesystem come next (B3/B4).
 use super::*;
-use crate::cpm::{Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
+use crate::cpm::{parse_afn, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -158,6 +158,8 @@ impl TelnetSession {
                     ))
                     .await?;
                 }
+                "DIR" => self.cpmemu_dir(fs).await?,
+                "ERA" | "DEL" => self.cpmemu_era(fs, trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
                     if !self.cpmemu_run_program(&Self::cpmemu_demo_hello(), fs).await? {
@@ -184,12 +186,74 @@ impl TelnetSession {
         }
     }
 
+    /// Built-in `DIR`: list the files on the current drive, four per row
+    /// (CP/M's `DIR` is a CCP built-in, not a `.COM`).  Prints `No file`
+    /// when the drive is empty, as CP/M does.
+    async fn cpmemu_dir(&mut self, fs: &CpmFs) -> Result<(), std::io::Error> {
+        let names = fs.list_current();
+        if names.is_empty() {
+            self.send_line("  No file").await?;
+            return Ok(());
+        }
+        for chunk in names.chunks(4) {
+            let row: Vec<String> = chunk.iter().map(|n| format!("{:<12}", n)).collect();
+            self.send_line(&format!("  {}", row.join(" ").trim_end()))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Built-in `ERA`: erase file(s) on the current drive matching a
+    /// (possibly wildcarded) operand.  An all-wildcard erase (`ERA *.*`)
+    /// asks for confirmation first, as CP/M does.  Silent on success;
+    /// prints `No file` when nothing matched.
+    async fn cpmemu_era(&mut self, fs: &mut CpmFs, line: &str) -> Result<(), std::io::Error> {
+        let arg = match line.split_whitespace().nth(1) {
+            Some(a) => a,
+            None => {
+                self.send_line("  ERA what?").await?;
+                return Ok(());
+            }
+        };
+        let (name, ext) = match parse_afn(arg) {
+            Some(pair) => pair,
+            None => {
+                self.send_line(&format!("  {}?", self.red(&arg.to_ascii_uppercase())))
+                    .await?;
+                return Ok(());
+            }
+        };
+        // Confirm a wholesale erase (name and ext all '?').
+        if name == [b'?'; 8] && ext == [b'?'; 3] {
+            self.send(&format!("  {}", self.amber("ALL FILES (Y/N)? ")))
+                .await?;
+            self.flush().await?;
+            let yes = match self.get_line_input().await? {
+                Some(s) => s.trim().eq_ignore_ascii_case("y"),
+                None => return Ok(()),
+            };
+            if !yes {
+                return Ok(());
+            }
+        }
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(&name);
+        raw[9..12].copy_from_slice(&ext);
+        let fcb = Fcb::from_bytes(&raw);
+        if fs.delete(&fcb) == 0 {
+            self.send_line("  No file").await?;
+        }
+        Ok(())
+    }
+
     /// One-screen help for the CCP-lite built-ins.
     async fn cpmemu_help(&mut self) -> Result<(), std::io::Error> {
         for line in [
             "  Built-in commands:",
             "  HELP / ?   this help",
             "  VER        emulator version",
+            "  DIR        list files on this drive",
+            "  ERA name   erase file(s) (wildcards)",
             "  A: .. H:   change drive",
             "  HELLO      BDOS print-string demo",
             "  ECHO       interactive console demo",
@@ -313,6 +377,39 @@ impl TelnetSession {
                             cpm.bdos_return(code);
                         }
                         16 => cpm.bdos_return(0), // close: write-through, nothing to flush
+                        17 => {
+                            // Search for first matching directory entry.
+                            let de = cpm.arg_de();
+                            let raw = cpm.read_block(de, FCB_SIZE);
+                            let fcb = Fcb::from_bytes(&raw);
+                            let code = match fs.search_first(&fcb) {
+                                Some(entry) => {
+                                    Self::cpmemu_write_dir_entry(&mut cpm, fs.dma(), &entry);
+                                    0x00 // entry lives in directory slot 0
+                                }
+                                None => 0xFF,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        18 => {
+                            // Search for the next matching directory entry.
+                            let code = match fs.search_next() {
+                                Some(entry) => {
+                                    Self::cpmemu_write_dir_entry(&mut cpm, fs.dma(), &entry);
+                                    0x00
+                                }
+                                None => 0xFF,
+                            };
+                            cpm.bdos_return(code);
+                        }
+                        19 => {
+                            // Delete matching file(s).
+                            let de = cpm.arg_de();
+                            let raw = cpm.read_block(de, FCB_SIZE);
+                            let fcb = Fcb::from_bytes(&raw);
+                            let n = fs.delete(&fcb);
+                            cpm.bdos_return(if n > 0 { 0x00 } else { 0xFF });
+                        }
                         20 => {
                             // Read next sequential record into the DMA buffer.
                             let de = cpm.arg_de();
@@ -447,6 +544,16 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("[broke out to A>]")))
             .await
+    }
+
+    /// Place a 32-byte directory entry into the guest's 128-byte DMA
+    /// record for a search result: the rest of the record is filled with
+    /// the CP/M "empty entry" marker (0xE5) so a scanner sees only slot 0
+    /// (directory code 0) as valid.
+    fn cpmemu_write_dir_entry(cpm: &mut Cpm, dma: u16, entry: &[u8; 32]) {
+        let mut record = [0xE5u8; 128];
+        record[..32].copy_from_slice(entry);
+        cpm.write_block(dma, &record);
     }
 
     /// Built-in demo: print a banner via BDOS 9, then warm-boot.

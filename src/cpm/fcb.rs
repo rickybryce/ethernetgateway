@@ -129,8 +129,6 @@ impl Fcb {
     /// Does this FCB's (possibly `?`-wildcarded) name/ext match a concrete
     /// 8.3 candidate?  A `?` in any position matches any character; used by
     /// the search-first/next directory walk.
-    // Wired up by B3b (search-first/next); the matcher + tests are ready.
-    #[allow(dead_code)]
     pub fn matches(&self, cand_name: &[u8; 8], cand_ext: &[u8; 3]) -> bool {
         for (&pat, &c) in self.name.iter().zip(cand_name.iter()) {
             if pat != b'?' && pat != c {
@@ -181,6 +179,52 @@ pub fn split_8_3(filename: &str) -> Option<([u8; 8], [u8; 3])> {
         ext[i] = c;
     }
     Some((name, ext))
+}
+
+/// Parse an *ambiguous* filename (a CCP-style spec that may contain the
+/// `*` and `?` wildcards, e.g. `*.TXT`, `FOO?.*`) into a space-padded 8.3
+/// name/ext pair where `*` has been expanded to `?` across the rest of its
+/// field.  Returns `None` for an illegal spec.  Used by built-ins like
+/// `ERA` that take a wildcard operand.
+pub fn parse_afn(spec: &str) -> Option<([u8; 8], [u8; 3])> {
+    let upper = spec.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return None;
+    }
+    let (name_part, ext_part) = match upper.rsplit_once('.') {
+        Some((n, e)) => (n, e),
+        None => (upper.as_str(), ""),
+    };
+    let name = expand_afn_field::<8>(name_part)?;
+    let ext = expand_afn_field::<3>(ext_part)?;
+    Some((name, ext))
+}
+
+/// Expand one field of an ambiguous filename into `WIDTH` space-padded
+/// bytes: `*` fills the remainder of the field with `?`; `?` passes
+/// through; other characters must be legal 8.3 characters.  Too-long
+/// fields (without a `*`) are rejected.
+fn expand_afn_field<const WIDTH: usize>(s: &str) -> Option<[u8; WIDTH]> {
+    let mut out = [b' '; WIDTH];
+    for (i, c) in s.bytes().enumerate() {
+        if c == b'*' {
+            for slot in out.iter_mut().skip(i) {
+                *slot = b'?';
+            }
+            return Some(out);
+        }
+        if i >= WIDTH {
+            return None; // too long and no '*' to absorb it
+        }
+        if c == b'?' {
+            out[i] = b'?';
+        } else if is_valid_8_3_char(c) {
+            out[i] = c;
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// Format a space-padded 8.3 pair as `NAME.EXT` (or `NAME` if the
@@ -240,6 +284,31 @@ mod tests {
         assert!(split_8_3("a b.c").is_none()); // space not allowed
         assert!(split_8_3("a*.c").is_none()); // wildcard not a concrete name
         assert!(split_8_3(".com").is_none()); // empty name
+    }
+
+    #[test]
+    fn test_parse_afn_wildcards() {
+        let (n, e) = parse_afn("*.TXT").unwrap();
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"TXT");
+        // '*' only expands within its own field: FOO? stays literal.
+        let (n, e) = parse_afn("FOO?.*").unwrap();
+        assert_eq!(&n, b"FOO?    ");
+        assert_eq!(&e, b"???");
+        // 'FOO*' expands the name field.
+        let (n, e) = parse_afn("FOO*.TXT").unwrap();
+        assert_eq!(&n, b"FOO?????");
+        assert_eq!(&e, b"TXT");
+        let (n, e) = parse_afn("*.*").unwrap();
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"???");
+        // Concrete name expands with trailing spaces.
+        let (n, e) = parse_afn("PIP.COM").unwrap();
+        assert_eq!(&n, b"PIP     ");
+        assert_eq!(&e, b"COM");
+        // Illegal.
+        assert!(parse_afn("").is_none());
+        assert!(parse_afn("TOOLONGNM.TXT").is_none()); // >8 no '*'
     }
 
     #[test]

@@ -30,9 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     select / current-disk / set-DMA are wired, 8.3 filenames are enforced
     (case-insensitive; host files that aren't valid 8.3 are invisible to CP/M),
     and the `A>` prompt gained `A:`..`H:` drive-change commands with a
-    drive-aware prompt. Directory search/delete and random-record I/O land in
-    the following steps, after which real utilities like `PIP`/`STAT` become
-    runnable.
+    drive-aware prompt.
+  - **Filesystem, part 2 — directory search + erase.** The BDOS
+    search-first/search-next calls enumerate a drive's files (with `?`
+    wildcards, synthesizing CP/M directory entries per 16 KB extent) and the
+    delete call removes matching files. The CCP-lite gained the authentic
+    built-ins `DIR` (list the current drive) and `ERA name` (erase, with a
+    `*.*` confirmation), so files uploaded into a `CPM/` drive can be listed
+    and removed interactively. Random-record I/O, compute-file-size, and rename
+    land next, after which real utilities like `PIP`/`STAT` become runnable.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the
