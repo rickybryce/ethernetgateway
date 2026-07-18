@@ -39,6 +39,7 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 egui_extras = { version = "0.34", features = ["image"] }
 arboard = { version = "3", default-features = false }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+iz80 = "0.5.1"
 
 [dev-dependencies]
 proptest = "1"

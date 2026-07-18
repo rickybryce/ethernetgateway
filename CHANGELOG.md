@@ -8,13 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - Unreleased
 
 ### Added
-- **CP/M emulator (Flavor B) — scaffold only.** A new default-off config key
-  `cpm_emu_enabled` (wired into the telnet, web, and GUI config UIs) gates a
-  `K  CP/M System` main-menu item. This is the first, no-risk step of a real
-  CP/M 2.2 Z80 emulator (see `kernelplan.md` §13): enabling the key and
-  choosing `K` currently opens a placeholder screen that announces the feature
-  and returns — no emulator runs yet. It is completely separate from the
-  Gateway Shell (Flavor A). The item is hidden and the key rejected while the
+- **CP/M emulator (Flavor B) — Z80 CPU + console (early, in progress).** A new
+  default-off config key `cpm_emu_enabled` (wired into the telnet, web, and GUI
+  config UIs) gates a `K  CP/M System` main-menu item. Selecting it now boots a
+  real Z80 CPU (the BSD-licensed [`iz80`](https://crates.io/crates/iz80) crate)
+  in a 64 KB machine driven by our own CP/M 2.2 BDOS console calls, and runs a
+  built-in self-test `.COM` that prints through the emulated BDOS to the
+  telnet/SSH session. This is an in-progress step toward a full CP/M 2.2
+  environment (see `kernelplan.md` §13); it does not yet load user-supplied
+  `.COM` files, expose a filesystem, or accept interactive input — those,
+  plus an out-of-band `ESC ESC` break-out, arrive in later phases. A runaway
+  program is bounded by an instruction budget. Completely separate from the
+  Gateway Shell (Flavor A); the item is hidden and the key rejected while the
   toggle is off.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and

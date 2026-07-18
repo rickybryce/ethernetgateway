@@ -11,6 +11,7 @@
 
 mod aichat;
 mod config;
+mod cpm;
 mod gui;
 mod kermit;
 mod logger;
