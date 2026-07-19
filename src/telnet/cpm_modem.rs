@@ -60,6 +60,17 @@ pub(in crate::telnet) struct CpmModem {
     rings: u8,
     /// Auto-answer after this many rings (S0; 0 = manual `ATA` only).
     autoanswer: u8,
+    /// `ATV1` verbose result codes (default) vs `ATV0` numeric.
+    verbose: bool,
+    /// `ATQ1` suppresses result codes.
+    quiet: bool,
+    /// `ATX` result-code level (0..4); low levels collapse BUSY / NO ANSWER
+    /// to NO CARRIER, as a real modem without call-progress detection does.
+    x_level: u8,
+    /// `AT&C` DCD handling (0 = DCD forced on; 1 = DCD tracks carrier).
+    dcd_mode: u8,
+    /// S-registers S0..S27 (S0 auto-answer is mirrored to `autoanswer`).
+    s_regs: [u8; 28],
     /// Keeps a relay (SSH) session alive while a slave-originated remote call
     /// is online, alongside `conn` (its channel stream).  Type-erased so this
     /// module needn't name the russh types.  Cleared on hangup.
@@ -79,8 +90,24 @@ impl CpmModem {
             ring_at: None,
             rings: 0,
             autoanswer: 0,
+            verbose: true,
+            quiet: false,
+            x_level: 4,
+            dcd_mode: 1,
+            s_regs: default_s_regs(),
             relay_keepalive: None,
         }
+    }
+
+    /// Reset AT state to power-on defaults (ATZ / AT&F).
+    fn reset_defaults(&mut self) {
+        self.echo = true;
+        self.verbose = true;
+        self.quiet = false;
+        self.x_level = 4;
+        self.dcd_mode = 1;
+        self.autoanswer = 0;
+        self.s_regs = default_s_regs();
     }
 
     pub(in crate::telnet) fn enabled(&self) -> bool {
@@ -154,7 +181,11 @@ impl CpmModem {
         }
     }
 
-    /// Handle one complete AT command line.
+    /// Handle one complete AT command line, walking a (possibly chained) body
+    /// such as `ATE0Q0V1X4S0=1` left to right and applying each command.  `D`
+    /// (dial), `A` (answer) and `O` (online) are terminal — they consume the
+    /// rest and produce their own result; everything else sets state and the
+    /// line ends with `OK`.
     async fn dispatch(&mut self, line: &[u8], out: &mut Vec<u8>) {
         let s: String = String::from_utf8_lossy(line).trim().to_ascii_uppercase();
         if s.is_empty() {
@@ -164,39 +195,78 @@ impl CpmModem {
             self.result(out, "ERROR");
             return;
         };
-        // Dial is the one command that changes connection state.
-        if let Some(rest) = body.strip_prefix('D') {
-            self.dial(rest, out).await;
-            return;
-        }
-        // ATS0=n sets auto-answer (rings before auto-pickup of an inbound call).
-        if let Some(rest) = body.strip_prefix("S0=") {
-            self.autoanswer = rest.trim().parse().unwrap_or(0);
-            self.result(out, "OK");
-            return;
-        }
-        match body {
-            "" => self.result(out, "OK"),          // bare AT
-            "A" | "A0" => self.answer_incoming(out).await, // ATA: answer inbound
-            "E0" => { self.echo = false; self.result(out, "OK"); }
-            "E1" | "E" => { self.echo = true; self.result(out, "OK"); }
-            "H" | "H0" => { self.hangup(out, false); self.result(out, "OK"); }
-            "O" | "O0" => {
-                if self.conn.is_some() {
-                    self.mode = Mode::Online;
-                    self.result(out, "CONNECT");
-                } else {
-                    self.result(out, "NO CARRIER");
+        let b = body.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            i += 1;
+            match c {
+                b' ' => {}
+                b'D' => {
+                    // Dial consumes the rest of the line.
+                    self.dial(&body[i..], out).await;
+                    return;
                 }
+                b'A' => {
+                    let _ = read_digit(b, &mut i);
+                    self.answer_incoming(out).await;
+                    return;
+                }
+                b'O' => {
+                    let _ = read_digit(b, &mut i);
+                    if self.conn.is_some() {
+                        self.mode = Mode::Online;
+                        self.result(out, "CONNECT");
+                    } else {
+                        self.result(out, "NO CARRIER");
+                    }
+                    return;
+                }
+                b'E' => self.echo = read_digit(b, &mut i) != 0,
+                b'Q' => self.quiet = read_digit(b, &mut i) != 0,
+                b'V' => self.verbose = read_digit(b, &mut i) != 0,
+                b'X' => self.x_level = read_digit(b, &mut i),
+                b'H' => {
+                    let _ = read_digit(b, &mut i);
+                    self.hangup(out, false);
+                }
+                b'Z' => {
+                    let _ = read_digit(b, &mut i);
+                    self.reset_defaults();
+                }
+                b'I' => {
+                    let _ = read_digit(b, &mut i);
+                    out.extend_from_slice(b"\r\nCP/M virtual modem (Ethernet Gateway)\r\n");
+                }
+                b'S' => self.parse_s_register(b, &mut i, out),
+                b'&' if i < b.len() => {
+                    let sub = b[i];
+                    i += 1;
+                    let n = read_digit(b, &mut i);
+                    match sub {
+                        b'C' => self.dcd_mode = n, // &C DCD handling
+                        b'D' => {}                 // &D DTR: accepted, not modeled
+                        b'F' => self.reset_defaults(), // &F factory reset
+                        _ => {}
+                    }
+                }
+                _ => {} // unknown: ignore leniently so a chain still succeeds
             }
-            // Reset / config strings we don't model: accept leniently so a
-            // program's init string (ATZ, AT&F, ATE0Q1V1, ATS0=0, …) succeeds.
-            _ => self.result(out, "OK"),
         }
+        self.result(out, "OK");
     }
 
     /// Dial an outbound call: a local serial Port A/B (peer-dial) or a TCP
     /// `host:port`.
+    /// Carrier-wait timeout for a dial, from S7 (seconds); falls back to the
+    /// default when S7 is 0.
+    fn carrier_wait(&self) -> Duration {
+        match self.s_regs[7] {
+            0 => ANSWER_WAIT,
+            s => Duration::from_secs(s as u64),
+        }
+    }
+
     async fn dial(&mut self, target: &str, out: &mut Vec<u8>) {
         // Strip a leading tone/pulse modifier.
         let t = target.trim();
@@ -258,7 +328,7 @@ impl CpmModem {
                         }
                     }
                 }
-                _ => match request_peer_call(id, ANSWER_WAIT).await {
+                _ => match request_peer_call(id, self.carrier_wait()).await {
                     Ok(duplex) => {
                         self.conn = Some(Box::new(duplex));
                         self.mode = Mode::Online;
@@ -354,7 +424,7 @@ impl CpmModem {
             self.rings = 0;
             return;
         }
-        out.extend_from_slice(b"\r\nRING\r\n");
+        self.result(out, "RING");
         self.rings = self.rings.saturating_add(1);
         self.ring_at = Some(now + RING_EVERY);
         if self.autoanswer > 0 && self.rings >= self.autoanswer {
@@ -378,12 +448,89 @@ impl CpmModem {
         self.result(out, "CONNECT");
     }
 
-    /// Emit a Hayes result code in verbose form (`\r\n<CODE>\r\n`).
-    fn result(&self, out: &mut Vec<u8>, code: &str) {
-        out.extend_from_slice(b"\r\n");
-        out.extend_from_slice(code.as_bytes());
-        out.extend_from_slice(b"\r\n");
+    /// Parse an `S<n>` clause at `b[*i-1]=='S'`: `S<n>=<v>` sets a register,
+    /// `S<n>?` queries it (emitting the value), bare `S<n>` selects it (no-op).
+    fn parse_s_register(&mut self, b: &[u8], i: &mut usize, out: &mut Vec<u8>) {
+        let reg = read_number(b, i) as usize;
+        if *i < b.len() && b[*i] == b'=' {
+            *i += 1;
+            let val = read_number(b, i).min(255) as u8;
+            if reg < self.s_regs.len() {
+                self.s_regs[reg] = val;
+                if reg == 0 {
+                    self.autoanswer = val; // S0 mirrors auto-answer
+                }
+            }
+        } else if *i < b.len() && b[*i] == b'?' {
+            *i += 1;
+            let v = self.s_regs.get(reg).copied().unwrap_or(0);
+            out.extend_from_slice(format!("\r\n{v:03}\r\n").as_bytes());
+        }
     }
+
+    /// Emit a Hayes result code, honouring `ATQ` (quiet), `ATV` (verbose vs
+    /// numeric) and `ATX` (low levels collapse BUSY / NO ANSWER to NO CARRIER,
+    /// as a modem without call-progress detection does).
+    fn result(&self, out: &mut Vec<u8>, code: &str) {
+        if self.quiet {
+            return;
+        }
+        let code = if self.x_level == 0 && matches!(code, "BUSY" | "NO ANSWER") {
+            "NO CARRIER"
+        } else {
+            code
+        };
+        if self.verbose {
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(code.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        } else {
+            let n: u8 = match code {
+                "OK" => b'0',
+                "CONNECT" => b'1',
+                "RING" => b'2',
+                "NO CARRIER" => b'3',
+                "BUSY" => b'7',
+                "NO ANSWER" => b'8',
+                _ => b'4', // ERROR and anything unmapped
+            };
+            out.push(n);
+            out.push(b'\r');
+        }
+    }
+}
+
+/// Power-on S-register defaults (S0..S27); mirrors a typical Hayes modem.
+fn default_s_regs() -> [u8; 28] {
+    let mut s = [0u8; 28];
+    s[2] = 43; // escape char '+'
+    s[3] = 13; // CR
+    s[4] = 10; // LF
+    s[5] = 8; // backspace
+    s[7] = 50; // wait for carrier (seconds)
+    s[12] = 50; // escape guard time (1/50 s)
+    s
+}
+
+/// Read a single decimal digit at `b[*i]` (advancing `i`); 0 if none.
+fn read_digit(b: &[u8], i: &mut usize) -> u8 {
+    if *i < b.len() && b[*i].is_ascii_digit() {
+        let v = b[*i] - b'0';
+        *i += 1;
+        v
+    } else {
+        0
+    }
+}
+
+/// Read a (multi-digit) decimal number at `b[*i]` (advancing `i`); 0 if none.
+fn read_number(b: &[u8], i: &mut usize) -> u16 {
+    let mut n: u16 = 0;
+    while *i < b.len() && b[*i].is_ascii_digit() {
+        n = n.saturating_mul(10).saturating_add((b[*i] - b'0') as u16);
+        *i += 1;
+    }
+    n
 }
 
 /// Map a dial-string label to a local serial port, if it names one.
@@ -484,6 +631,64 @@ mod tests {
         near.write_all(b"yo").await.unwrap();
         let out = m.service(vec![]).await;
         assert!(out.windows(2).any(|w| w == b"yo"));
+    }
+
+    #[tokio::test]
+    async fn test_numeric_result_codes_and_quiet() {
+        let mut m = CpmModem::new(true);
+        // Echo off so only result codes appear in the output.
+        let _ = m.service(b"ATE0\r".to_vec()).await;
+        // ATV0: numeric result codes ("0\r" for OK).
+        let out = m.service(b"ATV0\r".to_vec()).await;
+        assert_eq!(out, b"0\r");
+        // ATQ1: result codes suppressed entirely (echo off ⇒ nothing at all).
+        let out = m.service(b"ATQ1\r".to_vec()).await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chained_at_init_string_applies_each_command() {
+        let mut m = CpmModem::new(true);
+        // A single chained init string: echo off, quiet off, verbose, X4, S0=2.
+        let out = m.service(b"ATE0Q0V1X4S0=2\r".to_vec()).await;
+        assert!(String::from_utf8_lossy(&out).contains("OK"));
+        assert!(!m.echo); // E0 applied
+        assert!(!m.quiet); // Q0 applied
+        assert!(m.verbose); // V1 applied
+        assert_eq!(m.x_level, 4); // X4 applied
+        assert_eq!(m.autoanswer, 2); // S0=2 applied
+        assert_eq!(m.s_regs[0], 2);
+    }
+
+    #[tokio::test]
+    async fn test_s_register_set_and_query() {
+        let mut m = CpmModem::new(true);
+        let _ = m.service(b"ATS7=45\r".to_vec()).await;
+        assert_eq!(m.s_regs[7], 45);
+        let out = m.service(b"ATS7?\r".to_vec()).await;
+        assert!(String::from_utf8_lossy(&out).contains("045"));
+    }
+
+    #[tokio::test]
+    async fn test_atz_and_atf_reset_defaults() {
+        let mut m = CpmModem::new(true);
+        let _ = m.service(b"ATE0S0=5\r".to_vec()).await;
+        assert!(!m.echo);
+        let _ = m.service(b"ATZ\r".to_vec()).await;
+        assert!(m.echo); // reset to power-on
+        assert_eq!(m.autoanswer, 0);
+        let _ = m.service(b"ATE0\r".to_vec()).await;
+        let _ = m.service(b"AT&F\r".to_vec()).await;
+        assert!(m.echo); // factory reset too
+    }
+
+    #[tokio::test]
+    async fn test_and_c_sets_dcd_mode() {
+        let mut m = CpmModem::new(true);
+        let _ = m.service(b"AT&C0\r".to_vec()).await;
+        assert_eq!(m.dcd_mode, 0);
+        let _ = m.service(b"AT&C1\r".to_vec()).await;
+        assert_eq!(m.dcd_mode, 1);
     }
 
     #[test]
