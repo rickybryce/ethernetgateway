@@ -457,6 +457,12 @@ pub fn is_local_cpm_peer(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `host` names *this* gateway — for the CP/M modem to decide whether
+/// an `ATD A@<host>` targets a local serial port or a remote (crossbar) one.
+pub fn host_is_local_addr(host: &str) -> bool {
+    host_is_local(host, &local_host_ips())
+}
+
 /// Parse an `ATD` target as the CP/M peer address `CPM@<host>`, returning the
 /// host.  Kept separate from `parse_peer_address` (A/B) so that path is
 /// unchanged.

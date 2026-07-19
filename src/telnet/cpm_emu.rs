@@ -23,9 +23,10 @@
 //!   symlink check (a symlink planted in a drive folder can't point out).
 //!   Drive indices are clamped to A:–H:.
 //! - **CPU.** A runaway is bounded by the configurable instruction ceiling
-//!   (`cpm_emu_max_minstr`); the run loop yields every batch, and
-//!   interactive programs are additionally escapable with a double-`ESC` at
-//!   any console-input prompt.
+//!   (`cpm_emu_max_minstr`); the run loop yields every batch, and a
+//!   double-`ESC` breaks out at any time — at a console prompt (in-band) and,
+//!   via the between-batch out-of-band drain, even from a compute-bound
+//!   program that never reads the console.
 //! - **Memory/disk.** Each session's machine is a fixed 64 KB (bounded by
 //!   `max_sessions`); a single emulated file is capped at 8 MB
 //!   (`MAX_CPM_FILE_BYTES`) so a high random-record write can't spray a
@@ -48,13 +49,15 @@
 //! `d:` drive change) are built in.  Guest output is translated from the
 //! ADM-3A terminal to the connected client (ANSI/PETSCII/ASCII) and client
 //! cursor keys back to ADM-3A codes (see `cpm_term`).  A gated virtual modem
-//! (`cpm_modem`) lets the guest dial out (`ATD A`/`B`, `ATDT host:port`) and be
-//! dialed as `CPM@<ip>`.  Still to come: a concurrent out-of-band break-out
-//! reader.
+//! (`cpm_modem`) lets the guest dial out (`ATD A`/`B` local, `ATD A@<ip>`
+//! remote via the relay, `ATDT host:port` TCP) and be dialed as `CPM@<ip>`.  A
+//! double-`ESC` always returns to `A>` — including from a runaway program —
+//! via the out-of-band drain.
 use super::*;
 use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -91,6 +94,30 @@ impl Drop for CpmPeerReg {
             jh.abort();
         }
     }
+}
+
+/// Outcome of the between-batch out-of-band input drain.
+enum OobDrain {
+    /// Nothing actionable — buffered bytes (if any) were queued for the guest.
+    Continue,
+    /// A double-`ESC` was seen out-of-band — break the running program to `A>`.
+    BreakOut,
+    /// The session closed.
+    Disconnect,
+}
+
+/// Reassemble a buffered ANSI CSI arrow (`ESC [ A..D`) from the pending-input
+/// queue, given the leading `ESC` was already popped.  Consumes the `[` and the
+/// final byte and returns the ADM-3A key code on a plain arrow; otherwise
+/// leaves the queue untouched (the `ESC` is delivered raw).
+fn pending_csi_arrow(pending: &mut VecDeque<u8>) -> Option<u8> {
+    if pending.front() != Some(&b'[') {
+        return None;
+    }
+    let code = cpm_term::csi_arrow_to_adm3a(*pending.get(1)?)?;
+    pending.pop_front(); // '['
+    pending.pop_front(); // final (A..D)
+    Some(code)
 }
 
 /// Result of peeking after an `ESC` for an ANSI CSI arrow sequence.
@@ -130,6 +157,13 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!("  {}", self.dim("leave."))).await?;
+        // How to escape a running program back to A> — the one thing a user
+        // needs to know before running arbitrary software.
+        self.send_line(&format!(
+            "  {}",
+            self.amber("Press ESC twice to stop a program.")
+        ))
+        .await?;
         self.send_line("").await?;
 
         // The filesystem state (current drive, DMA) persists across the
@@ -559,14 +593,26 @@ impl TelnetSession {
         // empty tail.
         cpm.setup_command_line(tail);
         // Runaway ceiling for this run, from config (millions of Z80
-        // instructions).  No concurrent wire-reader yet (deferred B6+); the
-        // abort flag stays clear and this ceiling is the compute-bound
-        // runaway guard, while double-ESC at an input prompt handles
-        // interactive break-out.
+        // instructions) — the last-resort backstop.  Interactively, a
+        // double-`ESC` breaks out: at a console prompt via `cpmemu_conin`, and
+        // between batches via the out-of-band drain below (so even a program
+        // that never reads the console is escapable at once).
         let max_instructions =
             config::get_config().cpm_emu_max_minstr as u64 * 1_000_000;
         let abort = AtomicBool::new(false);
+        // A SINGLE double-`ESC` tracker shared by `cpmemu_conin` (which reads
+        // the wire while the program blocks on a console read) and the
+        // between-batch out-of-band drain (which reads while the program
+        // computes).  Sharing it is essential: an `ESC ESC` split across the
+        // two — e.g. the CSI-arrow peek pushes the 2nd ESC back and the drain
+        // then reads it — must still pair and break out.
         let mut last_esc = false;
+        // Bytes the out-of-band drain reads while the program is computing
+        // (not blocked in a console read) are buffered here for the next
+        // CONIN; the drain also breaks out on a double-`ESC` so a program that
+        // never reads the console (a compute-bound runaway) is still escapable
+        // at once, without waiting out the instruction ceiling.
+        let mut pending_input: VecDeque<u8> = VecDeque::new();
         // ADM-3A output decoder: the guest is told it's driving an ADM-3A,
         // and its control codes are translated to the connected terminal.
         // State persists across BDOS calls (a cursor-address sequence can
@@ -593,7 +639,7 @@ impl TelnetSession {
                     match func {
                         1 => {
                             // Console input WITH echo.
-                            match self.cpmemu_conin(&mut last_esc).await? {
+                            match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
                                 ConIn::Byte(b) => {
                                     self.cpmemu_emit(&mut term, &[b]).await?;
                                     cpm.bdos_return(b);
@@ -615,7 +661,7 @@ impl TelnetSession {
                             // E=0xFE status, else output E.
                             let e = cpm.arg_e();
                             match e {
-                                0xFF => match self.cpmemu_conin(&mut last_esc).await? {
+                                0xFF => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
                                     ConIn::Byte(b) => cpm.bdos_return(b),
                                     ConIn::BreakOut => {
                                         self.cpmemu_break_notice().await?;
@@ -700,6 +746,18 @@ impl TelnetSession {
                     cpm.modem_queue_rx(&rx);
                 }
             }
+            // Out-of-band break-out reader: drain any wire bytes waiting right
+            // now (non-blocking) so a double-`ESC` aborts even a program that
+            // never reads the console; other bytes are buffered for CONIN.
+            match self.cpmemu_oob_drain(&mut pending_input, &mut last_esc).await {
+                Ok(OobDrain::Continue) => {}
+                Ok(OobDrain::BreakOut) => {
+                    self.cpmemu_break_notice().await?;
+                    return Ok(true);
+                }
+                Ok(OobDrain::Disconnect) => return Ok(false),
+                Err(e) => return Err(e),
+            }
             // Cooperative yield every batch so a BDOS-frequent loop whose
             // handlers never .await (console status/version/set-DMA/etc.)
             // can't pin the tokio worker.  Interactive handlers already
@@ -768,8 +826,33 @@ impl TelnetSession {
     ///   ADM-3A code.  A lone `ESC` (an editor command) has no fast follower,
     ///   so the peek times out and the `ESC` is delivered to the guest; a
     ///   second `ESC` on the next read is the break-out (unchanged behavior).
-    async fn cpmemu_conin(&mut self, last_esc: &mut bool) -> Result<ConIn, std::io::Error> {
+    async fn cpmemu_conin(
+        &mut self,
+        pending: &mut VecDeque<u8>,
+        last_esc: &mut bool,
+    ) -> Result<ConIn, std::io::Error> {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
+        // Bytes the out-of-band drain already read (while the program was
+        // computing) are delivered first.  The drain already escape-tracked
+        // them via the shared `last_esc` and never buffers the 2nd ESC of a
+        // break-out pair, so don't retrack here (leave `last_esc` to the drain
+        // / wire path) — just translate.
+        if let Some(b) = pending.pop_front() {
+            if is_petscii {
+                if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
+                    return Ok(ConIn::Byte(code));
+                }
+                return Ok(ConIn::Byte(petscii_to_ascii_byte(b)));
+            }
+            // ANSI: reassemble a buffered CSI arrow (the whole `ESC [ A..D` is
+            // in the buffer, so no wire lookahead is needed) to its ADM-3A code.
+            if b == 0x1B {
+                if let Some(code) = pending_csi_arrow(pending) {
+                    return Ok(ConIn::Byte(code));
+                }
+            }
+            return Ok(ConIn::Byte(b));
+        }
         loop {
             let b = match self.read_byte_filtered().await {
                 Ok(Some(b)) => b,
@@ -847,6 +930,46 @@ impl TelnetSession {
             }
         }
         Ok(ArrowPeek::UnknownCsi)
+    }
+
+    /// Out-of-band input drain, run between CPU batches.  Reads every wire
+    /// byte that is *immediately* available (a zero-length timeout, so it never
+    /// blocks the CPU), detecting a double-`ESC` break-out even while the guest
+    /// is computing and buffering the rest for the next `CONIN`.  This is what
+    /// makes a compute-bound program (one that never reads the console)
+    /// escapable at once instead of only at the instruction ceiling.  It runs
+    /// only *between* batches, and `cpmemu_conin` runs only *during* a console
+    /// read, so the two escape trackers never overlap.
+    async fn cpmemu_oob_drain(
+        &mut self,
+        pending: &mut VecDeque<u8>,
+        last_esc: &mut bool,
+    ) -> Result<OobDrain, std::io::Error> {
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        loop {
+            match tokio::time::timeout(std::time::Duration::ZERO, self.session_read_byte()).await {
+                Ok(Ok(Some(b))) => {
+                    // Escape tracking uses the SAME `last_esc` as cpmemu_conin,
+                    // so a double-`ESC` split across the two still pairs.
+                    if is_esc_key(b, is_petscii) {
+                        if *last_esc {
+                            *last_esc = false;
+                            return Ok(OobDrain::BreakOut);
+                        }
+                        *last_esc = true;
+                    } else {
+                        *last_esc = false;
+                    }
+                    // Buffer for CONIN, bounded so a flood can't grow it.
+                    if pending.len() < 4096 {
+                        pending.push_back(b);
+                    }
+                }
+                Ok(Ok(None)) => return Ok(OobDrain::Disconnect),
+                Ok(Err(e)) => return Err(e),
+                Err(_elapsed) => return Ok(OobDrain::Continue), // nothing waiting
+            }
+        }
     }
 
     /// Read one byte with a short timeout, for CSI-arrow lookahead — fast

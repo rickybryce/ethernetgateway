@@ -641,6 +641,11 @@ pub(crate) struct TelnetSession {
     // One-byte pushback used by drain_trailing_eol to safely return any
     // non-CR/LF byte it reads back to the next real input call.
     pushback: Option<u8>,
+    // Cancel-safety for `session_read_byte`: set true after an IAC byte is
+    // consumed but before its command byte is read, so a cancelled read (e.g.
+    // the CP/M out-of-band drain's zero-timeout) resumes at the command byte
+    // instead of losing the IAC and desyncing telnet parsing.
+    mid_iac_cmd: bool,
     // Telnet option negotiation state. Each per-option flag records a
     // reply we've already sent so we never loop on repeated requests.
     neg_sent_will: Box<[bool; 256]>,
@@ -726,6 +731,7 @@ impl TelnetSession {
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
+            mid_iac_cmd: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -783,6 +789,7 @@ impl TelnetSession {
             is_ssh: true,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
+            mid_iac_cmd: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -856,6 +863,7 @@ impl TelnetSession {
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
+            mid_iac_cmd: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -1440,6 +1448,7 @@ pub fn start_server(
                                     is_ssh: false,
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                     pushback: None,
+                                    mid_iac_cmd: false,
                                     neg_sent_will: Box::new([false; 256]),
                                     neg_sent_do: Box::new([false; 256]),
                                     neg_sent_wont: Box::new([false; 256]),

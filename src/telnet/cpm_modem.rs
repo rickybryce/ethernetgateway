@@ -9,11 +9,11 @@
 //! runs in the emulator's async driver loop ([`super::cpm_emu`]), so unlike the
 //! blocking physical-serial modem it can simply `.await` a dial.
 //!
-//! Both directions work: **outbound** (`ATD A`/`B`, `ATDT host:port`) and
-//! **inbound** — the emulator is dialable as `CPM@<ip>`, ringing the guest
-//! (`RING`) which answers with `ATA` or `ATS0=`*n* auto-answer.  (Dialing a
-//! *remote* `A@host`/`B@host` out of CP/M is still deferred; a local `ATD A`/`B`
-//! reaches the gateway's own ports.)
+//! Both directions work: **outbound** (`ATD A`/`B` for the gateway's own
+//! ports, `ATD A@<remote-ip>` for a port on another gateway via the crossbar
+//! master, `ATDT host:port` for TCP) and **inbound** — the emulator is dialable
+//! as `CPM@<ip>`, ringing the guest (`RING`) which answers with `ATA` or
+//! `ATS0=`*n* auto-answer.
 
 use crate::config::SerialPortId;
 use crate::serial::{request_peer_call, CpmIncomingCall, PeerCallOutcome};
@@ -60,6 +60,10 @@ pub(in crate::telnet) struct CpmModem {
     rings: u8,
     /// Auto-answer after this many rings (S0; 0 = manual `ATA` only).
     autoanswer: u8,
+    /// Keeps a relay (SSH) session alive while a slave-originated remote call
+    /// is online, alongside `conn` (its channel stream).  Type-erased so this
+    /// module needn't name the russh types.  Cleared on hangup.
+    relay_keepalive: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl CpmModem {
@@ -75,6 +79,7 @@ impl CpmModem {
             ring_at: None,
             rings: 0,
             autoanswer: 0,
+            relay_keepalive: None,
         }
     }
 
@@ -197,19 +202,72 @@ impl CpmModem {
         let t = target.trim();
         let t = t.strip_prefix(['T', 'P']).unwrap_or(t).trim();
 
-        // Local serial port: "A"/"B", optionally "A@<host>" (Slice A dials the
-        // local port; remote-relay routing over @<host> is Slice B).
+        // Serial port: "A"/"B", optionally "A@<host>".  A bare label or a
+        // local host rings the gateway's own port; a remote host targets a
+        // port a slave registered with this gateway's crossbar (master).
         let label = t.split('@').next().unwrap_or("").trim();
         if let Some(id) = local_port(label) {
-            match request_peer_call(id, ANSWER_WAIT).await {
-                Ok(duplex) => {
-                    self.conn = Some(Box::new(duplex));
-                    self.mode = Mode::Online;
-                    self.result(out, "CONNECT");
+            // Peer-dialing a serial port is gated like the physical modem's
+            // ATD <Port>@<host>: when the operator hasn't enabled it, behave
+            // like a failed dial (no hint).  (ATDT to a TCP host below is not
+            // peer-dial and stays ungated, matching the physical modem.)
+            let cfg = crate::config::get_config();
+            if !cfg.allow_peer_dial {
+                self.result(out, "NO CARRIER");
+                return;
+            }
+            let host = t.split_once('@').map(|x| x.1.trim()).filter(|h| !h.is_empty());
+            match host {
+                // Remote serial port.  On a slave, relay the address to the
+                // master (which resolves/crossbars it); on a master/standalone,
+                // claim it directly from the crossbar registry.
+                Some(h) if !crate::serial::host_is_local_addr(h) => {
+                    if cfg.gateway_role == "slave" {
+                        let target = crate::relay::RelayTarget::Peer {
+                            addr: format!("{label}@{h}"),
+                        };
+                        match crate::relay::connect_master_relay(
+                            &cfg.slave_master_host,
+                            cfg.slave_master_port,
+                            &cfg.slave_master_username,
+                            &cfg.slave_master_password,
+                            &target,
+                            "CPM",
+                        )
+                        .await
+                        {
+                            Ok(crate::relay::MasterRelay { _session, stream }) => {
+                                self.relay_keepalive = Some(Box::new(_session));
+                                self.conn = Some(Box::new(stream));
+                                self.mode = Mode::Online;
+                                self.result(out, "CONNECT");
+                            }
+                            Err(_) => self.result(out, "NO CARRIER"),
+                        }
+                    } else {
+                        match h.parse::<std::net::IpAddr>() {
+                            Ok(ip) => match crate::relay::claim_remote_peer(ip, label).await {
+                                Some(dup) => {
+                                    self.conn = Some(Box::new(dup));
+                                    self.mode = Mode::Online;
+                                    self.result(out, "CONNECT");
+                                }
+                                None => self.result(out, "NO CARRIER"),
+                            },
+                            Err(_) => self.result(out, "NO CARRIER"),
+                        }
+                    }
                 }
-                Err(PeerCallOutcome::Busy) => self.result(out, "BUSY"),
-                Err(PeerCallOutcome::NoAnswer) => self.result(out, "NO ANSWER"),
-                Err(_) => self.result(out, "NO CARRIER"),
+                _ => match request_peer_call(id, ANSWER_WAIT).await {
+                    Ok(duplex) => {
+                        self.conn = Some(Box::new(duplex));
+                        self.mode = Mode::Online;
+                        self.result(out, "CONNECT");
+                    }
+                    Err(PeerCallOutcome::Busy) => self.result(out, "BUSY"),
+                    Err(PeerCallOutcome::NoAnswer) => self.result(out, "NO ANSWER"),
+                    Err(_) => self.result(out, "NO CARRIER"),
+                },
             }
             return;
         }
@@ -269,6 +327,7 @@ impl CpmModem {
     /// NO CARRIER (peer hangup); a clean local `ATH` emits nothing extra.
     fn hangup(&mut self, out: &mut Vec<u8>, carrier_lost: bool) {
         self.conn = None;
+        self.relay_keepalive = None; // drop the relay SSH session, if any
         self.mode = Mode::Command;
         self.plus_run = 0;
         if carrier_lost {

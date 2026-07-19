@@ -184,16 +184,29 @@ impl TelnetSession {
         let filter_iac = !self.is_serial && !self.is_ssh;
         let mut buf = [0u8; 1];
         loop {
+            // `mid_iac_cmd` is a resume point: if a previous call was cancelled
+            // (e.g. the CP/M out-of-band drain's zero-timeout) after consuming
+            // an IAC but before its command byte, skip re-reading the data byte
+            // and read the command directly — so the IAC isn't lost and telnet
+            // parsing stays in sync.  Normal (uncancelled) callers see the flag
+            // toggle within one call, so behavior is unchanged.
+            if !self.mid_iac_cmd {
+                if self.reader.read(&mut buf).await? == 0 {
+                    return Ok(None);
+                }
+                let byte = buf[0];
+                if !filter_iac || byte != IAC {
+                    return Ok(Some(byte));
+                }
+                // Committed to an IAC sequence: mark the resume point before
+                // the (cancellable) command-byte read.
+                self.mid_iac_cmd = true;
+            }
             if self.reader.read(&mut buf).await? == 0 {
+                self.mid_iac_cmd = false;
                 return Ok(None);
             }
-            let byte = buf[0];
-            if !filter_iac || byte != IAC {
-                return Ok(Some(byte));
-            }
-            if self.reader.read(&mut buf).await? == 0 {
-                return Ok(None);
-            }
+            self.mid_iac_cmd = false;
             let cmd = buf[0];
             match cmd {
                 IAC => return Ok(Some(IAC)), // escaped data 0xFF

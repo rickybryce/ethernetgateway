@@ -115,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `modem_slave_announce_tick`, tied to the shell's lifetime) does the
     registration. So `CPM@<ip>` now works wherever `A@<ip>`/`B@<ip>` do.
     Additive — A/B and the existing relay are unchanged.
+  - **Out-of-band break-out; remote outbound dialing.** A double-`ESC` now
+    returns to `A>` at any time — not just at a console prompt but also from a
+    compute-bound program that never reads the console (the gateway watches the
+    wire out-of-band between CPU bursts), so a runaway no longer has to run out
+    the instruction ceiling. The CP/M-System banner shows "Press ESC twice to
+    stop a program." The CP/M modem can also dial a serial port on *another*
+    gateway — `ATD A@<remote-ip>` / `B@<remote-ip>` routes via the master/slave
+    relay (same routing and `allow_peer_dial` gate as the physical modem);
+    previously only the gateway's own ports were reachable. The CP/M modem's
+    peer-dial is now gated by `allow_peer_dial` like the physical modem.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

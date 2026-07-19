@@ -2227,15 +2227,17 @@ show an 80-column editor in full, but line-oriented use is fine.)
 <h3>Breaking out &amp; the runaway ceiling</h3>
 
 <p>
-An interactive program can be aborted at any console-input prompt with a
-<strong>double-<span class="kbd">ESC</span></strong> (a single <span class="kbd">ESC</span>
-is delivered to the program, so CP/M editors still work); the C64 PETSCII
-escape byte works too. A compute-bound program that never reads the console is
-bounded by a <strong>runaway instruction ceiling</strong> &mdash;
+Press <strong><span class="kbd">ESC</span> twice</strong> at any time to stop a
+running program and return to <code>A&gt;</code> &mdash; this works even for a
+program stuck in a loop that never reads the keyboard (the gateway watches for
+it out-of-band between CPU bursts). A single <span class="kbd">ESC</span> is
+still delivered to the program, so CP/M editors keep working; the C64 PETSCII
+escape byte works too. As a last-resort backstop, a compute-bound program is
+also bounded by a <strong>runaway instruction ceiling</strong> &mdash;
 <code>cpm_emu_max_minstr</code>, in millions of Z80 instructions per run
 (default&nbsp;2000&nbsp;=&nbsp;2&nbsp;billion) &mdash; after which it is aborted
-back to the <code>A&gt;</code> prompt. Raise or lower it in the same CP/M
-settings panel as the enable toggle.
+automatically. Raise or lower it in the same CP/M settings panel as the enable
+toggle.
 </p>
 
 <aside class="note">
@@ -2303,12 +2305,14 @@ doesn&rsquo;t implement, so a direct ASCI <em>port</em> profile can&rsquo;t work
 
 <p>
 With a modem port selected, the CP/M program talks to it with ordinary Hayes
-<code>AT</code> commands. It can <strong>dial the gateway&rsquo;s own serial
-ports</strong> &mdash; <code>ATD A</code> / <code>ATD B</code> reach Port&nbsp;A
-/ Port&nbsp;B like one machine calling another &mdash; or a network host with
-<code>ATDT host:port</code>. On answer the modem reports <code>CONNECT</code>
-and becomes a transparent data pipe; <code>+++</code> returns to command mode
-and <code>ATH</code> hangs up.
+<code>AT</code> commands. It can <strong>dial a serial port</strong> the same
+way Ports A/B dial each other: <code>ATD A</code> / <code>ATD B</code> reach
+this gateway&rsquo;s own ports, and <code>ATD A@&lt;ip&gt;</code> /
+<code>B@&lt;ip&gt;</code> reach a port on another gateway across the master/slave
+relay (same routing and <code>allow_peer_dial</code> gate as the physical
+modem). Or dial a network host directly with <code>ATDT host:port</code>. On
+answer the modem reports <code>CONNECT</code> and becomes a transparent data
+pipe; <code>+++</code> returns to command mode and <code>ATH</code> hangs up.
 </p>
 
 <h3>Inbound calls (dial the CP/M machine)</h3>
