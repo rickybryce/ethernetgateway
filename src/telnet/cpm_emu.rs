@@ -165,12 +165,16 @@ impl TelnetSession {
         .await?;
         self.send_line(&format!(
             "  {}",
-            self.dim("CP/M 2.2 (iz80). Type HELP; EXIT to")
+            self.dim("CP/M 2.2 (iz80).  Type HELP.")
         ))
         .await?;
-        self.send_line(&format!("  {}", self.dim("leave."))).await?;
-        // How to escape a running program back to A> — the one thing a user
-        // needs to know before running arbitrary software.
+        // The two things a user needs before running arbitrary software: how to
+        // leave the emulator, and how to stop a running program.
+        self.send_line(&format!(
+            "  {}",
+            self.amber("Type EXIT to return to the gateway.")
+        ))
+        .await?;
         self.send_line(&format!(
             "  {}",
             self.amber("Press ESC twice to stop a program.")

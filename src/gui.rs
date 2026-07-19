@@ -2298,7 +2298,7 @@ impl eframe::App for App {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("AI Chat, Browser, and Weather").strong().color(AMBER));
+                                    ui.label(egui::RichText::new("AI Chat, Browser, Weather & CP/M").strong().color(AMBER));
                                     if right_aligned_small_button(ui, "Save") {
                                         self.save_config_now();
                                     }
@@ -2525,7 +2525,7 @@ impl eframe::App for App {
         // frame shows only the API key + homepage to stay at three rows.
         let mut ai_browser_open = self.ai_browser_popup_open;
         egui::Window::new(
-            egui::RichText::new("AI, Browser & Weather — More")
+            egui::RichText::new("AI, Browser, Weather & CP/M — More")
                 .strong()
                 .color(AMBER_BRIGHT),
         )
