@@ -4,9 +4,15 @@
 //! UART at a fixed I/O port address — a *status/command* register and a *data*
 //! register.  Different machines place that UART at different addresses and
 //! use different status-bit conventions, so the operator selects a **profile**
-//! naming the machine/port; the profile resolves to `(status_port, data_port,
-//! family)`.  The emulator's [`crate::cpm::CpmMachine`] answers `IN`/`OUT` at
-//! those addresses.
+//! naming the machine/port; the profile resolves to a [`ModemAccess`] telling
+//! the emulator how the guest reaches the modem:
+//! - `Ports(profile)` — direct `IN`/`OUT` at the profile's status + data ports
+//!   ([`crate::cpm::CpmMachine`] answers there).
+//! - `Aux` — the modem is on the CP/M BDOS `AUX:` device (functions 3/4), the
+//!   hardware-independent path RomWBW/SC126 comms software uses (a Z180 ASCI
+//!   *port* profile can't work: our Z80 core doesn't decode the Z180
+//!   `IN0`/`OUT0` instructions the ASCI needs).
+//! - `Off` — no virtual modem.
 //!
 //! Addresses are sourced from real firmware/drivers:
 //! - **RC2014 / RomWBW Z80 SIO/2**: RomWBW `HDIAG/sio.asm` — command/status at
@@ -19,10 +25,6 @@
 //!   bit0 = RDRF (RX), bit1 = TDRE (TX ready).
 //! - **Altair 88-SIO**: same source — 0x00/0x01, active-low status (bit0 set =
 //!   RX *not* ready, bit7 clear = TX ready).
-//!
-//! This layer only models the *idle* UART (TX always ready, no RX pending) so
-//! software can probe and initialise the port; wiring the data registers to
-//! the gateway's outbound dial is the next step.
 
 /// The status-register convention a UART family uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,16 +38,20 @@ pub enum UartFamily {
 }
 
 impl UartFamily {
-    /// The status byte reported while the modem is idle: transmit ready, no
-    /// received character pending, no carrier.  Lets a guest initialise the
-    /// port and see a stable "ready to send, nothing to read" UART.
-    pub fn idle_status(self) -> u8 {
+    /// The status byte the guest reads, given whether a received byte is
+    /// waiting.  Transmit is always reported ready (we can always buffer an
+    /// outbound byte).
+    pub fn status(self, rx_ready: bool) -> u8 {
         match self {
-            UartFamily::Sio => 0x04,   // TX empty (bit2) set, RX (bit0) clear
-            UartFamily::Acia => 0x02,  // TDRE (bit1) set, RDRF (bit0) clear
-            UartFamily::Sio88 => 0x01, // RX-not-ready (bit0) set, TX-ready (bit7) clear
+            // TX empty (bit2) always; RX available (bit0) when a byte waits.
+            UartFamily::Sio => 0x04 | if rx_ready { 0x01 } else { 0x00 },
+            // TDRE (bit1) always; RDRF (bit0) when a byte waits.
+            UartFamily::Acia => 0x02 | if rx_ready { 0x01 } else { 0x00 },
+            // Active-low: bit0 SET means "no RX"; clear means a byte waits.
+            UartFamily::Sio88 => if rx_ready { 0x00 } else { 0x01 },
         }
     }
+
 }
 
 /// A resolved UART placement: where the two registers live and how status is
@@ -57,58 +63,74 @@ pub struct UartProfile {
     pub family: UartFamily,
 }
 
-/// One selectable profile: the config value, a human description for the UIs,
-/// and the resolved placement.  `None` placement = the "off" selection.
+/// How the guest reaches the virtual modem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModemAccess {
+    /// No virtual modem.
+    Off,
+    /// Direct UART port I/O at the given placement.
+    Ports(UartProfile),
+    /// The CP/M BDOS `AUX:` device (functions 3/4).
+    Aux,
+}
+
+/// One selectable choice: the config value, a human description for the UIs,
+/// and how the guest reaches the modem.
 pub struct UartChoice {
     /// Canonical config value (stored in `egateway.conf`).
     pub key: &'static str,
     /// One-line description shown next to the selection in every UI.
     pub description: &'static str,
-    pub profile: Option<UartProfile>,
+    pub access: ModemAccess,
 }
 
-const fn p(status_port: u8, data_port: u8, family: UartFamily) -> Option<UartProfile> {
-    Some(UartProfile { status_port, data_port, family })
+const fn ports(status_port: u8, data_port: u8, family: UartFamily) -> ModemAccess {
+    ModemAccess::Ports(UartProfile { status_port, data_port, family })
 }
 
 /// Every selectable virtual-modem port, in UI display order.  Single source of
 /// truth for config validation and all three UIs.
 pub const UART_CHOICES: &[UartChoice] = &[
-    UartChoice { key: "off", description: "Off — no virtual modem", profile: None },
+    UartChoice { key: "off", description: "Off — no virtual modem", access: ModemAccess::Off },
     UartChoice {
         key: "rc2014_1a",
         description: "RC2014 SIO/2 board 1, ch A — status 0x80 / data 0x81",
-        profile: p(0x80, 0x81, UartFamily::Sio),
+        access: ports(0x80, 0x81, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_1b",
         description: "RC2014 SIO/2 board 1, ch B (usual AUX:) — 0x82 / 0x83",
-        profile: p(0x82, 0x83, UartFamily::Sio),
+        access: ports(0x82, 0x83, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_2a",
         description: "RC2014 SIO/2 board 2, ch A — status 0x84 / data 0x85",
-        profile: p(0x84, 0x85, UartFamily::Sio),
+        access: ports(0x84, 0x85, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_2b",
         description: "RC2014 SIO/2 board 2, ch B — status 0x86 / data 0x87",
-        profile: p(0x86, 0x87, UartFamily::Sio),
+        access: ports(0x86, 0x87, UartFamily::Sio),
     },
     UartChoice {
         key: "altair_2sio1",
         description: "Altair 88-2SIO port 1 — status 0x10 / data 0x11",
-        profile: p(0x10, 0x11, UartFamily::Acia),
+        access: ports(0x10, 0x11, UartFamily::Acia),
     },
     UartChoice {
         key: "altair_2sio2",
         description: "Altair 88-2SIO port 2 — status 0x12 / data 0x13",
-        profile: p(0x12, 0x13, UartFamily::Acia),
+        access: ports(0x12, 0x13, UartFamily::Acia),
     },
     UartChoice {
         key: "altair_sio",
         description: "Altair 88-SIO — status 0x00 / data 0x01",
-        profile: p(0x00, 0x01, UartFamily::Sio88),
+        access: ports(0x00, 0x01, UartFamily::Sio88),
+    },
+    UartChoice {
+        key: "aux",
+        description: "BDOS AUX: device (SC126 / RomWBW, hardware-independent)",
+        access: ModemAccess::Aux,
     },
 ];
 
@@ -120,10 +142,14 @@ pub fn is_valid_uart_key(key: &str) -> bool {
     UART_CHOICES.iter().any(|c| c.key == key)
 }
 
-/// Resolve a config value to its UART placement.  An unknown key (or `off`)
-/// yields `None` — no virtual modem.
-pub fn resolve_uart(key: &str) -> Option<UartProfile> {
-    UART_CHOICES.iter().find(|c| c.key == key).and_then(|c| c.profile)
+/// Resolve a config value to how the guest reaches the modem.  An unknown key
+/// (or `off`) yields [`ModemAccess::Off`].
+pub fn resolve_access(key: &str) -> ModemAccess {
+    UART_CHOICES
+        .iter()
+        .find(|c| c.key == key)
+        .map(|c| c.access)
+        .unwrap_or(ModemAccess::Off)
 }
 
 /// The description for a config value (for a UI to show the current setting),
@@ -141,43 +167,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_off_is_default_and_no_profile() {
+    fn test_off_is_default() {
         assert_eq!(DEFAULT_UART, "off");
-        assert_eq!(resolve_uart("off"), None);
+        assert_eq!(resolve_access("off"), ModemAccess::Off);
         assert_eq!(UART_CHOICES[0].key, "off");
     }
 
     #[test]
     fn test_known_addresses() {
         assert_eq!(
-            resolve_uart("rc2014_1b"),
-            Some(UartProfile { status_port: 0x82, data_port: 0x83, family: UartFamily::Sio })
+            resolve_access("rc2014_1b"),
+            ModemAccess::Ports(UartProfile { status_port: 0x82, data_port: 0x83, family: UartFamily::Sio })
         );
         assert_eq!(
-            resolve_uart("altair_2sio1"),
-            Some(UartProfile { status_port: 0x10, data_port: 0x11, family: UartFamily::Acia })
+            resolve_access("altair_2sio1"),
+            ModemAccess::Ports(UartProfile { status_port: 0x10, data_port: 0x11, family: UartFamily::Acia })
         );
-        assert_eq!(
-            resolve_uart("altair_sio").unwrap().family,
-            UartFamily::Sio88
-        );
+    }
+
+    #[test]
+    fn test_aux_choice() {
+        assert_eq!(resolve_access("aux"), ModemAccess::Aux);
+        assert!(is_valid_uart_key("aux"));
     }
 
     #[test]
     fn test_unknown_key_is_off() {
         assert!(!is_valid_uart_key("bogus"));
-        assert_eq!(resolve_uart("bogus"), None);
+        assert_eq!(resolve_access("bogus"), ModemAccess::Off);
     }
 
     #[test]
-    fn test_idle_status_bytes() {
-        assert_eq!(UartFamily::Sio.idle_status(), 0x04); // TX empty
-        assert_eq!(UartFamily::Acia.idle_status(), 0x02); // TDRE
-        assert_eq!(UartFamily::Sio88.idle_status(), 0x01); // active-low idle
+    fn test_status_bytes() {
+        // Idle (no RX): TX ready only.
+        assert_eq!(UartFamily::Sio.status(false), 0x04);
+        assert_eq!(UartFamily::Acia.status(false), 0x02);
+        assert_eq!(UartFamily::Sio88.status(false), 0x01);
+        // A received byte waiting sets the RX-available bit.
+        assert_eq!(UartFamily::Sio.status(true), 0x05); // TX empty + RX avail
+        assert_eq!(UartFamily::Acia.status(true), 0x03); // TDRE + RDRF
+        assert_eq!(UartFamily::Sio88.status(true), 0x00); // active-low: RX ready
     }
 
     #[test]
-    fn test_all_keys_unique_and_addresses_distinct() {
+    fn test_all_keys_unique() {
         let mut keys = std::collections::HashSet::new();
         for c in UART_CHOICES {
             assert!(keys.insert(c.key), "duplicate key {}", c.key);

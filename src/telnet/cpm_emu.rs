@@ -49,6 +49,7 @@
 //! cursor keys back to ADM-3A codes (see `cpm_term`).  Still to come (B6+):
 //! a concurrent out-of-band break-out reader and the virtual modem.
 use super::*;
+use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
@@ -150,9 +151,13 @@ impl TelnetSession {
         // place — which is what makes SAVE authentic (dump the TPA a prior
         // program, e.g. DDT, left behind).
         let mut cpm = Cpm::new();
-        // Wire the virtual-modem UART (if the operator selected one) so a CP/M
-        // comms program finds its modem at the configured machine ports.
-        cpm.set_uart(crate::cpm::resolve_uart(&config::get_config().cpm_emu_uart));
+        // Wire the virtual-modem access (if the operator selected one) so a
+        // CP/M comms program finds its modem at the configured machine ports
+        // or on the BDOS AUX: device.  The modem "brain" (AT layer + outbound
+        // dial) persists for the whole session alongside the machine.
+        let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
+        cpm.set_modem_access(access);
+        let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
         loop {
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;
@@ -201,7 +206,7 @@ impl TelnetSession {
                 "USER" => self.cpmemu_user(trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&mut cpm, &Self::cpmemu_demo_hello(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_hello(), "", fs).await? {
                         return Ok(());
                     }
                 }
@@ -213,14 +218,14 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&mut cpm, &Self::cpmemu_demo_echo(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_echo(), "", fs).await? {
                         return Ok(());
                     }
                 }
                 other => {
                     // Not a built-in: try to load and run `<verb>.COM` from
                     // the drive.  `None` = no such file (CP/M prints VERB?).
-                    match self.cpmemu_try_run_com(&mut cpm, fs, &verb, trimmed).await? {
+                    match self.cpmemu_try_run_com(&mut cpm, &mut modem, fs, &verb, trimmed).await? {
                         Some(true) => {}                    // ran; back to A>
                         Some(false) => return Ok(()),       // session gone
                         None => {
@@ -498,6 +503,7 @@ impl TelnetSession {
     async fn cpmemu_run_program(
         &mut self,
         cpm: &mut Cpm,
+        modem: &mut CpmModem,
         program: &[u8],
         tail: &str,
         fs: &mut CpmFs,
@@ -598,6 +604,20 @@ impl TelnetSession {
                                 None => return Ok(false),
                             }
                         }
+                        3 => {
+                            // AUX (reader) input: hand the guest the next byte
+                            // from the virtual modem, or ^Z (0x1A) if none.
+                            // (CP/M 2.2 BDOS 3 has no status call; software
+                            // that needs one uses the BIOS — best-effort here.)
+                            let b = cpm.modem_rx_pop().unwrap_or(0x1A);
+                            cpm.bdos_return(b);
+                        }
+                        4 => {
+                            // AUX (punch) output: send E to the virtual modem.
+                            let e = cpm.arg_e();
+                            cpm.modem_tx_push(e);
+                            cpm.bdos_return(0);
+                        }
                         11 => cpm.bdos_return(0), // console status: none ready
                         12 => cpm.bdos_return(0x22), // version: CP/M 2.2
                         _ => {
@@ -614,6 +634,17 @@ impl TelnetSession {
                 }
                 Stop::WarmBoot | Stop::Aborted => return Ok(true),
                 Stop::BudgetExhausted => {}
+            }
+            // Service the virtual modem at the batch seam: hand it whatever the
+            // guest wrote toward the peer, and queue back any result codes /
+            // received bytes for the guest to read.  This is where the
+            // synchronous UART/AUX rings cross into async I/O (dial + pump).
+            if modem.enabled() {
+                let tx = cpm.modem_drain_tx();
+                let rx = modem.service(tx).await;
+                if !rx.is_empty() {
+                    cpm.modem_queue_rx(&rx);
+                }
             }
             // Cooperative yield every batch so a BDOS-frequent loop whose
             // handlers never .await (console status/version/set-DMA/etc.)
@@ -636,6 +667,7 @@ impl TelnetSession {
     async fn cpmemu_try_run_com(
         &mut self,
         cpm: &mut Cpm,
+        modem: &mut CpmModem,
         fs: &mut CpmFs,
         verb: &str,
         line: &str,
@@ -666,7 +698,7 @@ impl TelnetSession {
             .split_once(char::is_whitespace)
             .map(|x| x.1)
             .unwrap_or("");
-        let cont = self.cpmemu_run_program(cpm, &bytes, tail, fs).await?;
+        let cont = self.cpmemu_run_program(cpm, modem, &bytes, tail, fs).await?;
         Ok(Some(cont))
     }
 

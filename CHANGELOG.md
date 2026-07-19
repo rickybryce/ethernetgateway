@@ -73,8 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     conventions are taken from the RomWBW SIO driver and David Hansel's Altair
     simulator. With a profile selected, `CpmMachine`'s port I/O answers at those
     addresses with a valid idle UART (transmit ready, nothing received) so
-    comms software can probe and initialise the port. Bridging the data channel
-    to the gateway's outbound dial is the next step.
+    comms software can probe and initialise the port.
+  - **Virtual modem — outbound dialling.** The CP/M modem now speaks Hayes
+    `AT` and can place calls: `ATD A` / `ATD B` dial the gateway's own serial
+    Port A / Port B (via the existing peer-dial plumbing, like one machine
+    calling another), and `ATDT host:port` opens a TCP connection. On answer it
+    reports `CONNECT` and becomes a transparent data pipe; `+++` returns to
+    command mode and `ATH` hangs up. A new `aux` profile choice puts the modem
+    on the CP/M BDOS `AUX:` device (functions 3/4) — the hardware-independent
+    path for SC126/RomWBW software (a Z180 ASCI *port* profile can't work: the
+    Z80 core doesn't implement the Z180 `IN0`/`OUT0` instructions the ASCI
+    uses). The modem is a self-contained async layer bridged to the guest's
+    synchronous UART/AUX byte rings at the CPU batch seam. Making the emulator
+    *dialable* from another machine (`CPM@<ip>`) is the next step.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

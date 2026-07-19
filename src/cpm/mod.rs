@@ -36,7 +36,7 @@ pub mod uart;
 pub use fcb::{parse_afn, parse_command_fcb, split_8_3, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
-pub use uart::{resolve_uart, UartProfile};
+pub use uart::{resolve_access, ModemAccess};
 
 use iz80::{Cpu, Machine, Reg8, Reg16};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -310,11 +310,34 @@ impl Cpm {
         }
     }
 
-    /// Select (or clear) the virtual-modem UART placement for this machine.
-    /// A CP/M comms program's `IN`/`OUT` to the profile's ports then reach the
-    /// emulated modem.  `None` leaves the ports inert.
-    pub fn set_uart(&mut self, uart: Option<UartProfile>) {
-        self.mem.set_uart(uart);
+    /// Select how the guest reaches the virtual modem (direct UART ports, the
+    /// BDOS `AUX:` device, or off).  For `Ports`, a comms program's `IN`/`OUT`
+    /// at the profile's addresses reach the modem's byte rings.
+    pub fn set_modem_access(&mut self, access: ModemAccess) {
+        self.mem.set_access(access);
+    }
+
+    /// Drain the bytes the guest has written toward the peer (the modem TX
+    /// ring), for the async driver to forward to the connection.
+    pub fn modem_drain_tx(&mut self) -> Vec<u8> {
+        self.mem.modem_drain_tx()
+    }
+
+    /// Queue bytes received from the peer for the guest to read (the modem RX
+    /// ring), serviced by the driver's pump.
+    pub fn modem_queue_rx(&mut self, data: &[u8]) {
+        self.mem.modem_queue_rx(data);
+    }
+
+    /// Pop one received byte for the BDOS `AUX:`-input path (function 3).
+    pub fn modem_rx_pop(&mut self) -> Option<u8> {
+        self.mem.modem_rx_pop()
+    }
+
+    /// Push one byte from the BDOS `AUX:`-output path (function 4) toward the
+    /// peer.
+    pub fn modem_tx_push(&mut self, b: u8) {
+        self.mem.modem_tx_push(b);
     }
 
     /// Total instructions executed since the last `load_com` (diagnostics).
