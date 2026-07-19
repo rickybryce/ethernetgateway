@@ -20,7 +20,7 @@
 //! DTR/RTS correctly.  All settings persist via AT&W into `egateway.conf`.
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -278,12 +278,19 @@ impl Drop for PeerSlotGuard {
 // modem session is per-telnet-session, not one of the two fixed ports.  This
 // is entirely additive: the A/B slots and routing are untouched.
 
-/// Whether a CP/M session with a virtual modem is currently able to receive
-/// inbound calls (set while such a shell is active).  A fast reject so a
-/// caller doesn't wait out the pickup window when no CP/M modem exists.
-static CPM_PEER_LISTENING: AtomicBool = AtomicBool::new(false);
+/// How many CP/M sessions with a virtual modem are currently able to receive
+/// inbound calls.  `CPM@<ip>` is a single dialable address (like one physical
+/// port), but any idle CP/M session in the pool can answer the next call — a
+/// hunt group.  >0 means at least one is listening (a fast reject so a caller
+/// doesn't wait out the pickup window when no CP/M modem exists).
+static CPM_PEER_LISTENERS: AtomicUsize = AtomicUsize::new(0);
 
-/// The CP/M endpoint's single incoming-call slot.
+/// The single gateway-level owner of the slave→master crossbar announcer for
+/// `CPM` (only one announcement per gateway, regardless of pool size).
+static CPM_ANNOUNCE_OWNER: AtomicBool = AtomicBool::new(false);
+
+/// The CP/M endpoint's single incoming-call slot.  An inbound call sits here
+/// until one pool member atomically claims it via [`take_cpm_call_request`].
 static CPM_CALL_REQUEST: std::sync::Mutex<Option<PeerCall>> = std::sync::Mutex::new(None);
 
 /// An inbound call handed to the CP/M emulator's modem: the duplex to pump
@@ -294,23 +301,35 @@ pub struct CpmIncomingCall {
     pub progress: tokio::sync::mpsc::Sender<u8>,
 }
 
-/// Claim the CP/M peer endpoint for a modem-enabled CP/M shell.  There is a
-/// single dialable `CPM` endpoint (like one physical port), so this is a
-/// compare-and-swap: it returns `true` to the first claimer (which becomes the
-/// dialable endpoint and must later `cpm_peer_unregister`), and `false` if
-/// another CP/M session already holds it (that session's modem still dials
-/// *out*, it just isn't the inbound `CPM@` target).  Prevents two concurrent
-/// sessions from fighting over the one global call slot / crossbar label.
-pub fn cpm_peer_register() -> bool {
-    CPM_PEER_LISTENING
+/// Join the inbound-call pool: a modem-enabled CP/M shell that can answer an
+/// inbound `CPM@<ip>` call.  Every such session joins (unlike the old single
+/// owner), and any idle member can claim the next call.  Balanced by
+/// [`cpm_peer_listen_exit`] on every exit path.
+pub fn cpm_peer_listen_enter() {
+    CPM_PEER_LISTENERS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Leave the pool.  When the last member leaves, drop any unclaimed call so a
+/// stale duplex doesn't linger for a pool that no longer exists.
+pub fn cpm_peer_listen_exit() {
+    if CPM_PEER_LISTENERS.fetch_sub(1, Ordering::SeqCst) <= 1 {
+        CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+/// Claim the single per-gateway crossbar-announcer role (slave→master `CPM`
+/// registration).  Only one pool member announces, so the master's crossbar
+/// sees exactly one `CPM` entry for this gateway.  Returns `true` to the
+/// claimer, which must later [`cpm_announce_release`].
+pub fn cpm_announce_claim() -> bool {
+    CPM_ANNOUNCE_OWNER
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
 }
 
-/// Mark it unavailable and drop any unclaimed call (the shell exited).
-pub fn cpm_peer_unregister() {
-    CPM_PEER_LISTENING.store(false, Ordering::SeqCst);
-    CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+/// Release the crossbar-announcer role.
+pub fn cpm_announce_release() {
+    CPM_ANNOUNCE_OWNER.store(false, Ordering::SeqCst);
 }
 
 /// Claim a pending incoming CP/M call, if one is waiting (called by the
@@ -337,7 +356,7 @@ fn try_place_cpm_call(call: PeerCall) -> Result<(), PeerCall> {
 pub async fn request_cpm_call(
     answer_wait: Duration,
 ) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
-    if !CPM_PEER_LISTENING.load(Ordering::SeqCst) {
+    if CPM_PEER_LISTENERS.load(Ordering::SeqCst) == 0 {
         return Err(PeerCallOutcome::Busy); // no CP/M modem session listening
     }
     let (caller_end, target_end) = tokio::io::duplex(65536);
@@ -7239,6 +7258,26 @@ mod tests {
         assert_eq!(parse_cpm_peer_address("bbs@example.com"), None);
         assert_eq!(parse_cpm_peer_address("CPM@"), None);
         assert_eq!(parse_cpm_peer_address("192.168.1.50"), None);
+    }
+
+    #[test]
+    fn test_cpm_pool_listener_count_and_announce_owner() {
+        // Pool: enter twice, exit twice, count returns to 0.  (Global statics,
+        // but no other test touches these.)
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
+        cpm_peer_listen_enter();
+        cpm_peer_listen_enter();
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 2);
+        cpm_peer_listen_exit();
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 1);
+        cpm_peer_listen_exit();
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
+        // Announce ownership is a single-claimer CAS.
+        assert!(cpm_announce_claim());
+        assert!(!cpm_announce_claim()); // already held
+        cpm_announce_release();
+        assert!(cpm_announce_claim()); // reclaimable after release
+        cpm_announce_release();
     }
 
     #[test]

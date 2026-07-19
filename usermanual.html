@@ -2315,6 +2315,19 @@ answer the modem reports <code>CONNECT</code> and becomes a transparent data
 pipe; <code>+++</code> returns to command mode and <code>ATH</code> hangs up.
 </p>
 
+<p>
+The command layer understands a chained Hayes init string
+(<code>ATE0Q0V1X4S0=1</code> applies each clause): <code>E</code> echo,
+<code>Q</code> quiet, <code>V</code> verbose vs numeric result codes,
+<code>X</code> result-code level, <code>S</code><em>n</em><code>=</code>/<code>?</code>
+S-register set/query (<code>S0</code> auto-answer, <code>S7</code> carrier wait),
+<code>&amp;C</code>/<code>&amp;D</code> DCD/DTR, <code>ATZ</code> / <code>AT&amp;F</code>
+reset, and <code>ATI</code> identify. Carrier is surfaced to the guest as the
+UART&rsquo;s DCD bit, and flow control is honoured both ways (the UART reports
+transmit-not-ready and the peer is back-pressured rather than dropping bytes
+when either side outruns the other).
+</p>
+
 <h3>Inbound calls (dial the CP/M machine)</h3>
 
 <p>
@@ -2345,10 +2358,14 @@ wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 The emulator picks up an inbound call only while a program is running its modem
 (that's when it polls for the ring) — run your terminal/BBS software first,
 exactly as on real hardware. Set <code>ATS0=</code><em>n</em> to auto-answer, or
-answer manually with <code>ATA</code> when you see <code>RING</code>. There is a
-single dialable <code>CPM</code> endpoint at a time (as if there were one CP/M
-line): the first modem-enabled CP/M session becomes it; a second concurrent
-session can still dial <em>out</em> but isn't the inbound target.
+answer manually with <code>ATA</code> when you see <code>RING</code>.
+<code>CPM@&lt;ip&gt;</code> is a single dialable address, but every
+modem-enabled CP/M session joins an answer <em>pool</em> (a hunt group): the
+next inbound call rings whichever session is idle, so two concurrent CP/M
+users can both receive calls. On a slave, one session announces <code>CPM</code>
+to the master for remote reachability; if it exits while others remain, remote
+dialling pauses until a new session re-announces (local answering is
+unaffected).
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->

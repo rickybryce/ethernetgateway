@@ -125,6 +125,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     relay (same routing and `allow_peer_dial` gate as the physical modem);
     previously only the gateway's own ports were reachable. The CP/M modem's
     peer-dial is now gated by `allow_peer_dial` like the physical modem.
+  - **Virtual modem — fidelity polish.** Five additive enhancements to the CP/M
+    modem, none of which change the working polled path: (A) the AT command
+    layer parses a chained init string (`ATE0Q0V1X4S0=1`) and applies each
+    clause — echo, quiet, verbose/numeric and `X`-level result codes,
+    S-register set/query (`S0` auto-answer, `S7` carrier wait), `&C`/`&D`,
+    `ATZ`/`AT&F` reset, `ATI` — instead of matching a few fixed strings; (B)
+    carrier is surfaced to the guest as the UART's DCD bit (SIO RR0 bit3, 6850
+    bit2), active-high so the idle status byte is unchanged; (C) flow control
+    both ways — the UART reports transmit-not-ready when the TX ring is full and
+    the peer read is capped to the guest RX ring's free space, so a speed
+    mismatch back-pressures instead of dropping bytes; (D) a fuller Z80 SIO
+    register model (WR0 read-pointer + `RR1`/`RR2`), a strict superset of the
+    RR0-only behaviour; (E) `CPM@<ip>` is now an answer *pool* — every
+    modem-enabled CP/M session can answer the next inbound call (a hunt group),
+    with one session owning the slave→master crossbar announcement.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

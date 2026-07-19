@@ -84,14 +84,16 @@ enum ConIn {
 /// also owns the crossbar announcer task (registering `CPM` with the master),
 /// which it stops + aborts on drop.
 struct CpmPeerReg {
+    /// `Some` while this session owns the single crossbar announcer.
     announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
 }
 impl Drop for CpmPeerReg {
     fn drop(&mut self) {
-        crate::serial::cpm_peer_unregister();
+        crate::serial::cpm_peer_listen_exit();
         if let Some((stop, jh)) = self.announce.take() {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             jh.abort();
+            crate::serial::cpm_announce_release();
         }
     }
 }
@@ -213,18 +215,23 @@ impl TelnetSession {
         let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
         cpm.set_modem_access(access);
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
-        // Claim the single dialable `CPM@<ip>` peer endpoint for this session
-        // (RAII-released on any exit).  Only the owner receives inbound calls;
-        // a second concurrent modem session still dials out but isn't the
-        // inbound target.  On a slave with peer-dial + a master, the owner also
-        // announces `CPM` to the master so a remote `CPM@<this-slave-ip>` dial
-        // reaches us via the crossbar.
-        let owns_peer = modem.enabled() && crate::serial::cpm_peer_register();
-        let _peer_reg = if owns_peer {
+        // Join the inbound `CPM@<ip>` call pool (RAII-released on any exit).
+        // `CPM@<ip>` is a single dialable address, but every modem-enabled
+        // CP/M session joins the pool and any idle member answers the next
+        // inbound call (a hunt group), so two concurrent CP/M users can both
+        // receive calls.  On a slave with peer-dial + a master, exactly one
+        // pool member (the announce-owner) announces `CPM` to the master so a
+        // remote `CPM@<this-slave-ip>` dial reaches the gateway via the
+        // crossbar; if that member exits while others remain, remote
+        // reachability pauses until a new session re-announces (local
+        // answering is unaffected).
+        let _peer_reg = if modem.enabled() {
+            crate::serial::cpm_peer_listen_enter();
             let cfg = config::get_config();
             let announce = if cfg.gateway_role == "slave"
                 && cfg.allow_peer_dial
                 && !cfg.slave_master_host.is_empty()
+                && crate::serial::cpm_announce_claim()
             {
                 let stop = std::sync::Arc::new(AtomicBool::new(false));
                 let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone()));
@@ -284,7 +291,7 @@ impl TelnetSession {
                 "USER" => self.cpmemu_user(trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&mut cpm, &mut modem, owns_peer, &Self::cpmemu_demo_hello(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_hello(), "", fs).await? {
                         return Ok(());
                     }
                 }
@@ -296,14 +303,14 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&mut cpm, &mut modem, owns_peer, &Self::cpmemu_demo_echo(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_echo(), "", fs).await? {
                         return Ok(());
                     }
                 }
                 other => {
                     // Not a built-in: try to load and run `<verb>.COM` from
                     // the drive.  `None` = no such file (CP/M prints VERB?).
-                    match self.cpmemu_try_run_com(&mut cpm, &mut modem, owns_peer, fs, &verb, trimmed).await? {
+                    match self.cpmemu_try_run_com(&mut cpm, &mut modem, fs, &verb, trimmed).await? {
                         Some(true) => {}                    // ran; back to A>
                         Some(false) => return Ok(()),       // session gone
                         None => {
@@ -582,7 +589,6 @@ impl TelnetSession {
         &mut self,
         cpm: &mut Cpm,
         modem: &mut CpmModem,
-        owns_peer: bool,
         program: &[u8],
         tail: &str,
         fs: &mut CpmFs,
@@ -732,10 +738,10 @@ impl TelnetSession {
             // synchronous UART/AUX rings cross into async I/O (dial + pump).
             if modem.enabled() {
                 // Pick up an inbound `CPM@<ip>` call when idle, so the guest
-                // sees RING and can answer (ATA / auto-answer).  Only the
-                // session that owns the CPM endpoint polls the shared slot, so
-                // a second concurrent modem session can't steal its calls.
-                if owns_peer && modem.can_answer() {
+                // sees RING and can answer (ATA / auto-answer).  Any idle pool
+                // member may claim the shared slot; the take is atomic, so only
+                // one session gets each call — no double-answer.
+                if modem.can_answer() {
                     if let Some(call) = crate::serial::take_cpm_call_request() {
                         modem.accept_incoming(call);
                     }
@@ -782,7 +788,6 @@ impl TelnetSession {
         &mut self,
         cpm: &mut Cpm,
         modem: &mut CpmModem,
-        owns_peer: bool,
         fs: &mut CpmFs,
         verb: &str,
         line: &str,
@@ -813,7 +818,7 @@ impl TelnetSession {
             .split_once(char::is_whitespace)
             .map(|x| x.1)
             .unwrap_or("");
-        let cont = self.cpmemu_run_program(cpm, modem, owns_peer, &bytes, tail, fs).await?;
+        let cont = self.cpmemu_run_program(cpm, modem, &bytes, tail, fs).await?;
         Ok(Some(cont))
     }
 
