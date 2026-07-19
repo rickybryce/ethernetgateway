@@ -334,6 +334,12 @@ impl Cpm {
         self.mem.set_carrier(carrier);
     }
 
+    /// Free space in the modem RX ring, so the driver can cap how much it
+    /// reads from the peer (backpressure for a slow guest).
+    pub fn modem_rx_free(&self) -> usize {
+        self.mem.modem_rx_free()
+    }
+
     /// Pop one received byte for the BDOS `AUX:`-input path (function 3).
     pub fn modem_rx_pop(&mut self) -> Option<u8> {
         self.mem.modem_rx_pop()

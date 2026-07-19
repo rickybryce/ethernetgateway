@@ -61,6 +61,14 @@ impl CpmMachine {
         self.tx.drain(..).collect()
     }
 
+    /// Free space remaining in the RX ring — how many peer bytes the guest
+    /// can still accept before the ring is full.  The driver uses this to cap
+    /// how much it reads from the peer, so a slow guest applies backpressure
+    /// (unread bytes stay in the socket / duplex) instead of losing data.
+    pub fn modem_rx_free(&self) -> usize {
+        MODEM_RING_CAP.saturating_sub(self.rx.len())
+    }
+
     /// Queue peer bytes for the guest to read (bounded).
     pub fn modem_queue_rx(&mut self, data: &[u8]) {
         for &b in data {
@@ -103,9 +111,12 @@ impl Machine for CpmMachine {
         let port = address as u8;
         if let ModemAccess::Ports(u) = self.access {
             if port == u.status_port {
-                // Live status: RX-available if a byte waits; TX always ready
-                // (the ring is drained between batches); DCD from carrier.
-                return u.family.status(!self.rx.is_empty(), true, self.carrier);
+                // Live status: RX-available if a byte waits; TX-ready only
+                // while the TX ring has room (so a polled sender that outruns
+                // the driver waits instead of overflowing and losing bytes);
+                // DCD from carrier.
+                let tx_ready = self.tx.len() < MODEM_RING_CAP;
+                return u.family.status(!self.rx.is_empty(), tx_ready, self.carrier);
             }
             if port == u.data_port {
                 return self.rx.pop_front().unwrap_or(0);
@@ -160,6 +171,29 @@ mod tests {
         m.port_out(0x83, b'Y');
         assert_eq!(m.modem_drain_tx(), b"XY");
         assert!(m.modem_drain_tx().is_empty());
+    }
+
+    #[test]
+    fn test_rx_free_tracks_ring() {
+        let mut m = CpmMachine::new();
+        assert_eq!(m.modem_rx_free(), MODEM_RING_CAP);
+        m.modem_queue_rx(b"hello");
+        assert_eq!(m.modem_rx_free(), MODEM_RING_CAP - 5);
+    }
+
+    #[test]
+    fn test_tx_ready_clears_when_ring_full() {
+        let mut m = CpmMachine::new();
+        m.set_access(resolve_access("rc2014_1b")); // Z80 SIO, TX empty = bit2
+        assert_eq!(m.port_in(0x82) & 0x04, 0x04); // TX ready when empty
+        // Fill the TX ring to capacity via the data port.
+        for _ in 0..MODEM_RING_CAP {
+            m.port_out(0x83, b'x');
+        }
+        assert_eq!(m.port_in(0x82) & 0x04, 0x00); // TX no longer ready
+        // Draining restores TX-ready.
+        let _ = m.modem_drain_tx();
+        assert_eq!(m.port_in(0x82) & 0x04, 0x04);
     }
 
     #[test]

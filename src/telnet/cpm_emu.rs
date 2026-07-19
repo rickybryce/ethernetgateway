@@ -741,7 +741,7 @@ impl TelnetSession {
                     }
                 }
                 let tx = cpm.modem_drain_tx();
-                let rx = modem.service(tx).await;
+                let rx = modem.service(tx, cpm.modem_rx_free()).await;
                 if !rx.is_empty() {
                     cpm.modem_queue_rx(&rx);
                 }

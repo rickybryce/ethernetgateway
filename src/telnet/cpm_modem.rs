@@ -141,7 +141,10 @@ impl CpmModem {
     /// act on them (AT commands in command mode, forward to the peer in online
     /// mode), poll the connection for incoming bytes, and return everything the
     /// guest should now read (result codes + received data).
-    pub(in crate::telnet) async fn service(&mut self, guest_tx: Vec<u8>) -> Vec<u8> {
+    /// `rx_budget` is how many bytes the guest's RX ring can still accept;
+    /// the peer poll reads no more than that, so a slow guest applies
+    /// backpressure to the peer instead of overflowing the ring.
+    pub(in crate::telnet) async fn service(&mut self, guest_tx: Vec<u8>, rx_budget: usize) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.enabled {
             return out;
@@ -159,9 +162,10 @@ impl CpmModem {
                 Mode::Online => self.feed_online_byte(b, &mut out).await,
             }
         }
-        // Drain anything the peer has sent us while online.
+        // Drain anything the peer has sent us while online, up to what the
+        // guest's RX ring can still hold (backpressure).
         if self.mode == Mode::Online {
-            self.poll_connection(&mut out).await;
+            self.poll_connection(&mut out, rx_budget).await;
         }
         out
     }
@@ -388,11 +392,17 @@ impl CpmModem {
         }
     }
 
-    /// Non-blocking-ish poll of the connection for received bytes.
-    async fn poll_connection(&mut self, out: &mut Vec<u8>) {
+    /// Non-blocking-ish poll of the connection for received bytes, reading at
+    /// most `rx_budget` bytes so a full guest RX ring leaves bytes in the
+    /// socket/duplex (TCP / duplex backpressure) rather than losing them.
+    async fn poll_connection(&mut self, out: &mut Vec<u8>, rx_budget: usize) {
+        if rx_budget == 0 {
+            return; // guest ring full — don't read, let the peer stall
+        }
         let Some(conn) = self.conn.as_mut() else { return };
         let mut buf = [0u8; 1024];
-        match tokio::time::timeout(READ_POLL, conn.read(&mut buf)).await {
+        let cap = rx_budget.min(buf.len());
+        match tokio::time::timeout(READ_POLL, conn.read(&mut buf[..cap])).await {
             Ok(Ok(0)) => self.hangup(out, true),      // peer closed
             Ok(Ok(n)) => out.extend_from_slice(&buf[..n]),
             Ok(Err(_)) => self.hangup(out, true),
@@ -567,13 +577,13 @@ mod tests {
     #[tokio::test]
     async fn test_disabled_is_inert() {
         let mut m = CpmModem::new(false);
-        assert!(m.service(b"ATZ\r".to_vec()).await.is_empty());
+        assert!(m.service(b"ATZ\r".to_vec(), 65536).await.is_empty());
     }
 
     #[tokio::test]
     async fn test_bare_at_ok_and_echo() {
         let mut m = CpmModem::new(true);
-        let out = m.service(b"AT\r".to_vec()).await;
+        let out = m.service(b"AT\r".to_vec(), 65536).await;
         let s = String::from_utf8_lossy(&out);
         assert!(s.contains("AT")); // echoed
         assert!(s.contains("OK"));
@@ -582,16 +592,16 @@ mod tests {
     #[tokio::test]
     async fn test_non_at_line_errors() {
         let mut m = CpmModem::new(true);
-        let out = m.service(b"HELLO\r".to_vec()).await;
+        let out = m.service(b"HELLO\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("ERROR"));
     }
 
     #[tokio::test]
     async fn test_echo_toggle_and_init_string_ok() {
         let mut m = CpmModem::new(true);
-        let _ = m.service(b"ATE0\r".to_vec()).await;
+        let _ = m.service(b"ATE0\r".to_vec(), 65536).await;
         // Echo now off: an init string returns OK without echoing the command.
-        let out = m.service(b"ATQ0V1S0=0\r".to_vec()).await;
+        let out = m.service(b"ATQ0V1S0=0\r".to_vec(), 65536).await;
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("ATQ0")); // not echoed
         assert!(s.contains("OK"));
@@ -601,7 +611,7 @@ mod tests {
     async fn test_tcp_dial_to_dead_port_reports_no_carrier() {
         let mut m = CpmModem::new(true);
         // Port 1 on loopback is (almost certainly) closed → NO CARRIER.
-        let out = m.service(b"ATDT 127.0.0.1:1\r".to_vec()).await;
+        let out = m.service(b"ATDT 127.0.0.1:1\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("NO CARRIER"));
     }
 
@@ -619,37 +629,55 @@ mod tests {
         assert!(!m.can_answer()); // busy ringing now
 
         // A service tick rings the guest and signals the caller (progress 0).
-        let out = m.service(vec![]).await;
+        let out = m.service(vec![], 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("RING"));
         assert_eq!(rx.recv().await, Some(0));
 
         // Guest answers with ATA → CONNECT, caller gets progress 1, online.
-        let out = m.service(b"ATA\r".to_vec()).await;
+        let out = m.service(b"ATA\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("CONNECT"));
         assert_eq!(rx.recv().await, Some(1));
 
         // Online: a guest write reaches the caller end.
-        let _ = m.service(b"hi".to_vec()).await;
+        let _ = m.service(b"hi".to_vec(), 65536).await;
         let mut buf = [0u8; 2];
         near.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hi");
 
         // A byte from the caller is delivered to the guest on the next tick.
         near.write_all(b"yo").await.unwrap();
-        let out = m.service(vec![]).await;
+        let out = m.service(vec![], 65536).await;
         assert!(out.windows(2).any(|w| w == b"yo"));
+    }
+
+    #[tokio::test]
+    async fn test_rx_budget_zero_applies_backpressure() {
+        use tokio::io::AsyncWriteExt;
+        let (mut near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536).await; // ring
+        let _ = m.service(b"ATA\r".to_vec(), 65536).await; // answer → online
+        near.write_all(b"data").await.unwrap();
+        // With a full guest ring (budget 0) the peer byte is NOT read.
+        let out = m.service(vec![], 0).await;
+        assert!(!out.windows(4).any(|w| w == b"data"));
+        // Once room frees up, the same byte is delivered (still in the duplex).
+        let out = m.service(vec![], 65536).await;
+        assert!(out.windows(4).any(|w| w == b"data"));
     }
 
     #[tokio::test]
     async fn test_numeric_result_codes_and_quiet() {
         let mut m = CpmModem::new(true);
         // Echo off so only result codes appear in the output.
-        let _ = m.service(b"ATE0\r".to_vec()).await;
+        let _ = m.service(b"ATE0\r".to_vec(), 65536).await;
         // ATV0: numeric result codes ("0\r" for OK).
-        let out = m.service(b"ATV0\r".to_vec()).await;
+        let out = m.service(b"ATV0\r".to_vec(), 65536).await;
         assert_eq!(out, b"0\r");
         // ATQ1: result codes suppressed entirely (echo off ⇒ nothing at all).
-        let out = m.service(b"ATQ1\r".to_vec()).await;
+        let out = m.service(b"ATQ1\r".to_vec(), 65536).await;
         assert!(out.is_empty());
     }
 
@@ -657,7 +685,7 @@ mod tests {
     async fn test_chained_at_init_string_applies_each_command() {
         let mut m = CpmModem::new(true);
         // A single chained init string: echo off, quiet off, verbose, X4, S0=2.
-        let out = m.service(b"ATE0Q0V1X4S0=2\r".to_vec()).await;
+        let out = m.service(b"ATE0Q0V1X4S0=2\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("OK"));
         assert!(!m.echo); // E0 applied
         assert!(!m.quiet); // Q0 applied
@@ -670,31 +698,31 @@ mod tests {
     #[tokio::test]
     async fn test_s_register_set_and_query() {
         let mut m = CpmModem::new(true);
-        let _ = m.service(b"ATS7=45\r".to_vec()).await;
+        let _ = m.service(b"ATS7=45\r".to_vec(), 65536).await;
         assert_eq!(m.s_regs[7], 45);
-        let out = m.service(b"ATS7?\r".to_vec()).await;
+        let out = m.service(b"ATS7?\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("045"));
     }
 
     #[tokio::test]
     async fn test_atz_and_atf_reset_defaults() {
         let mut m = CpmModem::new(true);
-        let _ = m.service(b"ATE0S0=5\r".to_vec()).await;
+        let _ = m.service(b"ATE0S0=5\r".to_vec(), 65536).await;
         assert!(!m.echo);
-        let _ = m.service(b"ATZ\r".to_vec()).await;
+        let _ = m.service(b"ATZ\r".to_vec(), 65536).await;
         assert!(m.echo); // reset to power-on
         assert_eq!(m.autoanswer, 0);
-        let _ = m.service(b"ATE0\r".to_vec()).await;
-        let _ = m.service(b"AT&F\r".to_vec()).await;
+        let _ = m.service(b"ATE0\r".to_vec(), 65536).await;
+        let _ = m.service(b"AT&F\r".to_vec(), 65536).await;
         assert!(m.echo); // factory reset too
     }
 
     #[tokio::test]
     async fn test_and_c_sets_dcd_mode() {
         let mut m = CpmModem::new(true);
-        let _ = m.service(b"AT&C0\r".to_vec()).await;
+        let _ = m.service(b"AT&C0\r".to_vec(), 65536).await;
         assert_eq!(m.dcd_mode, 0);
-        let _ = m.service(b"AT&C1\r".to_vec()).await;
+        let _ = m.service(b"AT&C1\r".to_vec(), 65536).await;
         assert_eq!(m.dcd_mode, 1);
     }
 
