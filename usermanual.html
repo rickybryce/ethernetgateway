@@ -2311,11 +2311,26 @@ and becomes a transparent data pipe; <code>+++</code> returns to command mode
 and <code>ATH</code> hangs up.
 </p>
 
+<h3>Inbound calls (dial the CP/M machine)</h3>
+
+<p>
+When a modem port is enabled, the CP/M emulator is itself <strong>dialable as a
+third serial port named <code>CPM</code></strong>. From another modem on this
+gateway (or the Serial Gateway), <code>ATD CPM@&lt;ip&gt;</code> rings it just
+like <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> ring Ports A/B. The
+running CP/M comms program sees <code>RING</code> and answers with
+<code>ATA</code> (or automatically after <code>ATS0=</code><em>n</em> rings);
+the two machines are then joined transparently. Peer-dial must be enabled
+(<code>allow_peer_dial</code>).
+</p>
+
 <aside class="note">
-<span class="label">Inbound calls (dial the CP/M machine) — coming next</span>
-Outbound dialling works now. Making the CP/M emulator <em>dialable</em> from
-another machine (as <code>CPM@&lt;ip&gt;</code>, so it rings like a third serial
-port) is the next step.
+<span class="label">Answering requires a running comms program</span>
+The emulator can pick up an inbound call only while a program is running its
+modem (that's when it polls for the ring) — run your terminal/BBS software
+first, exactly as on real hardware. Reaching a CP/M endpoint on a
+<em>different</em> gateway over the master/slave relay (remote
+<code>CPM@&lt;ip&gt;</code>) is a further step; local dialling works now.
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->

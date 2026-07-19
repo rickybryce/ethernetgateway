@@ -84,8 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     path for SC126/RomWBW software (a Z180 ASCI *port* profile can't work: the
     Z80 core doesn't implement the Z180 `IN0`/`OUT0` instructions the ASCI
     uses). The modem is a self-contained async layer bridged to the guest's
-    synchronous UART/AUX byte rings at the CPU batch seam. Making the emulator
-    *dialable* from another machine (`CPM@<ip>`) is the next step.
+    synchronous UART/AUX byte rings at the CPU batch seam.
+  - **Virtual modem — dialable as `CPM@<ip>` (inbound).** The CP/M emulator is
+    now a third dialable peer endpoint named `CPM`, alongside Ports A/B: from
+    another modem on the gateway, `ATD CPM@<ip>` rings it exactly as
+    `A@<ip>`/`B@<ip>` ring the serial ports. The running CP/M comms program
+    sees `RING` and answers with `ATA` (or auto-answers after `ATS0=`*n*
+    rings), then the machines are joined transparently. Implemented additively
+    with a parallel global call slot and a `CPM@host` dial parser — the A/B
+    peer-dial slots and routing are untouched (208 serial tests still pass).
+    Gated by `allow_peer_dial`; the endpoint answers while a comms program is
+    running (that's when the ring is polled). Reaching a CP/M endpoint on a
+    *remote* gateway over the master/slave relay is a further step.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

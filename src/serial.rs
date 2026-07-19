@@ -269,6 +269,167 @@ impl Drop for PeerSlotGuard {
     }
 }
 
+// ─── CP/M-emulator peer endpoint ("CPM@<ip>") ─────────────
+//
+// The CP/M emulator (Flavor B) is dialable as a *third* peer port named
+// `CPM`, in parallel with the two physical ports A/B.  It uses the same
+// `PeerCall` handshake (`progress`: 0 RING, 1 answer, 2 error), but a single
+// global slot rather than the per-port `PEER_CALL_REQUEST` array — a CP/M
+// modem session is per-telnet-session, not one of the two fixed ports.  This
+// is entirely additive: the A/B slots and routing are untouched.
+
+/// Whether a CP/M session with a virtual modem is currently able to receive
+/// inbound calls (set while such a shell is active).  A fast reject so a
+/// caller doesn't wait out the pickup window when no CP/M modem exists.
+static CPM_PEER_LISTENING: AtomicBool = AtomicBool::new(false);
+
+/// The CP/M endpoint's single incoming-call slot.
+static CPM_CALL_REQUEST: std::sync::Mutex<Option<PeerCall>> = std::sync::Mutex::new(None);
+
+/// An inbound call handed to the CP/M emulator's modem: the duplex to pump
+/// the guest's UART against, and the `progress` channel back to the caller
+/// (send `0` per RING to keep the caller waiting, `1` on answer).
+pub struct CpmIncomingCall {
+    pub bridge: tokio::io::DuplexStream,
+    pub progress: tokio::sync::mpsc::Sender<u8>,
+}
+
+/// Mark the CP/M peer endpoint available (a modem-enabled CP/M shell started).
+pub fn cpm_peer_register() {
+    CPM_PEER_LISTENING.store(true, Ordering::SeqCst);
+}
+
+/// Mark it unavailable and drop any unclaimed call (the shell exited).
+pub fn cpm_peer_unregister() {
+    CPM_PEER_LISTENING.store(false, Ordering::SeqCst);
+    CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
+/// Claim a pending incoming CP/M call, if one is waiting (called by the
+/// emulator's modem pump).
+pub fn take_cpm_call_request() -> Option<CpmIncomingCall> {
+    CPM_CALL_REQUEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .map(|pc| CpmIncomingCall { bridge: pc.bridge, progress: pc.progress })
+}
+
+fn try_place_cpm_call(call: PeerCall) -> Result<(), PeerCall> {
+    let mut slot = CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return Err(call);
+    }
+    *slot = Some(call);
+    Ok(())
+}
+
+/// Caller side: place a peer-dial call to the CP/M endpoint and wait for it
+/// to ring/answer.  Mirrors [`request_peer_call`] but on the global CP/M slot.
+pub async fn request_cpm_call(
+    answer_wait: Duration,
+) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
+    if !CPM_PEER_LISTENING.load(Ordering::SeqCst) {
+        return Err(PeerCallOutcome::Busy); // no CP/M modem session listening
+    }
+    let (caller_end, target_end) = tokio::io::duplex(65536);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+    if try_place_cpm_call(PeerCall { bridge: target_end, progress: tx }).is_err() {
+        return Err(PeerCallOutcome::Busy);
+    }
+    let mut armed = true;
+    let start = tokio::time::Instant::now();
+    let answer_deadline = start + answer_wait;
+    let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
+    let mut saw_ring = false;
+    let outcome = loop {
+        let now = tokio::time::Instant::now();
+        if now >= answer_deadline {
+            break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy };
+        }
+        match tokio::time::timeout(answer_deadline - now, rx.recv()).await {
+            Ok(Some(0)) => saw_ring = true,
+            Ok(Some(1)) => break PeerCallOutcome::Answered,
+            Ok(Some(_)) => break PeerCallOutcome::Error,
+            Ok(None) => break PeerCallOutcome::Error,
+            Err(_) => break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy },
+        }
+        if !saw_ring && tokio::time::Instant::now() >= pickup_deadline {
+            break PeerCallOutcome::Busy;
+        }
+    };
+    if outcome == PeerCallOutcome::Answered {
+        armed = false;
+    }
+    // Reclaim an unclaimed slot on any non-answer outcome (the emulator never
+    // took it), mirroring PeerSlotGuard for the global slot.
+    if armed {
+        CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+    if outcome == PeerCallOutcome::Answered {
+        Ok(caller_end)
+    } else {
+        Err(outcome)
+    }
+}
+
+/// Route an `ATD CPM@<host>` from a serial modem to the local CP/M endpoint.
+/// Local host only for now (remote/relay reachability is a follow-up); gated
+/// by `allow_peer_dial`.
+fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
+    if !config::get_config().allow_peer_dial {
+        send_result(state, "NO CARRIER");
+        return;
+    }
+    if !host_is_local(host, &local_host_ips()) {
+        // Remote CP/M endpoints over the master/slave relay are not wired yet.
+        send_result(state, "NO CARRIER");
+        return;
+    }
+    let answer_wait =
+        Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
+    let ring = state.handle.block_on(async move {
+        tokio::select! {
+            biased;
+            _ = wait_for_serial_abort(&sd, idx) => None,
+            r = request_cpm_call(answer_wait) => Some(r),
+        }
+    });
+    match ring {
+        None => {
+            send_result(state, "NO CARRIER");
+        }
+        Some(Ok(caller_end)) => bridge_duplex_online(state, caller_end),
+        Some(Err(PeerCallOutcome::Busy)) => {
+            send_result(state, "BUSY");
+        }
+        Some(Err(PeerCallOutcome::NoAnswer)) => {
+            send_result(state, "NO ANSWER");
+        }
+        Some(Err(_)) => {
+            send_result(state, "NO CARRIER");
+        }
+    }
+}
+
+/// Parse an `ATD` target as the CP/M peer address `CPM@<host>`, returning the
+/// host.  Kept separate from `parse_peer_address` (A/B) so that path is
+/// unchanged.
+fn parse_cpm_peer_address(target: &str) -> Option<String> {
+    let (label, host) = target.split_once('@')?;
+    let host = host.trim();
+    if host.is_empty() || host.contains('@') {
+        return None;
+    }
+    if label.trim().eq_ignore_ascii_case("CPM") {
+        Some(host.to_string())
+    } else {
+        None
+    }
+}
+
 /// A queued console-bridge request from the telnet menu.  `reply` is a
 /// oneshot the serial thread uses to hand back its half of a tokio
 /// duplex pair once the port is open; `Err(_)` if the port couldn't be
@@ -3459,6 +3620,15 @@ fn handle_dial_with_modifiers(state: &mut ModemState, parsed: &ParsedDial) {
 
 fn handle_dial(state: &mut ModemState, target: &str) {
     let lower = target.to_ascii_lowercase();
+
+    // Peer-dial to the CP/M emulator endpoint (`ATD CPM@<host>`).  Checked
+    // first, before any A/B or hostname path, and handled uniformly for
+    // standalone / master / slave (local endpoint only for now).  Additive:
+    // the A/B peer-dial and all other dial paths are unchanged.
+    if let Some(host) = parse_cpm_peer_address(target) {
+        handle_cpm_peer_dial(state, &host);
+        return;
+    }
 
     // Slave mode (§3 Model B): every connected call bridges to the
     // master.  The slave's modem ran the whole command dialog locally;
@@ -6898,6 +7068,21 @@ mod tests {
         assert_eq!(parse_peer_address("B@"), None);
         assert_eq!(parse_peer_address("C@1.2.3.4"), None);
         assert_eq!(parse_peer_address("B@a@b"), None);
+        // The CP/M endpoint is NOT an A/B port — the A/B parser ignores it
+        // (it's handled by parse_cpm_peer_address instead), so the existing
+        // A/B routing is untouched.
+        assert_eq!(parse_peer_address("CPM@1.2.3.4"), None);
+    }
+
+    #[test]
+    fn test_parse_cpm_peer_address() {
+        assert_eq!(parse_cpm_peer_address("CPM@192.168.1.50"), Some("192.168.1.50".into()));
+        assert_eq!(parse_cpm_peer_address("cpm @ localhost"), Some("localhost".into()));
+        // Not the CP/M endpoint (A/B ports, ordinary hosts, malformed).
+        assert_eq!(parse_cpm_peer_address("A@1.2.3.4"), None);
+        assert_eq!(parse_cpm_peer_address("bbs@example.com"), None);
+        assert_eq!(parse_cpm_peer_address("CPM@"), None);
+        assert_eq!(parse_cpm_peer_address("192.168.1.50"), None);
     }
 
     #[test]

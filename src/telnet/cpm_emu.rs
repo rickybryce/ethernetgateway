@@ -72,6 +72,16 @@ enum ConIn {
     Disconnect,
 }
 
+/// RAII registration of the CP/M emulator as the dialable `CPM@<ip>` peer
+/// endpoint: registered while a modem-enabled shell is active, unregistered
+/// (dropping any unclaimed call) on every exit path.
+struct CpmPeerReg;
+impl Drop for CpmPeerReg {
+    fn drop(&mut self) {
+        crate::serial::cpm_peer_unregister();
+    }
+}
+
 /// Result of peeking after an `ESC` for an ANSI CSI arrow sequence.
 enum ArrowPeek {
     /// A recognised arrow → this ADM-3A key code.
@@ -158,6 +168,14 @@ impl TelnetSession {
         let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
         cpm.set_modem_access(access);
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
+        // Register as the dialable `CPM@<ip>` peer endpoint while this
+        // modem-enabled shell is active (RAII-unregistered on any exit).
+        let _peer_reg = if modem.enabled() {
+            crate::serial::cpm_peer_register();
+            Some(CpmPeerReg)
+        } else {
+            None
+        };
         loop {
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;
@@ -640,6 +658,13 @@ impl TelnetSession {
             // received bytes for the guest to read.  This is where the
             // synchronous UART/AUX rings cross into async I/O (dial + pump).
             if modem.enabled() {
+                // Pick up an inbound `CPM@<ip>` call when idle, so the guest
+                // sees RING and can answer (ATA / auto-answer).
+                if modem.can_answer() {
+                    if let Some(call) = crate::serial::take_cpm_call_request() {
+                        modem.accept_incoming(call);
+                    }
+                }
                 let tx = cpm.modem_drain_tx();
                 let rx = modem.service(tx).await;
                 if !rx.is_empty() {
