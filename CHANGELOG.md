@@ -171,6 +171,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reminder examples on entry, and a failing `COPY`/`MOVE` (e.g. "File not
   found." after the operands were swapped) echoes the correct form
   (`e.g. COPY dst src (dest first)`) so the mistake is self-correcting.
+- **CP/M settings are named where they live, and the way out is spelled out.**
+  The GUI frame + its "More" popup and the web card + its modal that hold the
+  CP/M enable toggle, runaway ceiling, and virtual-modem port are now titled
+  "AI Chat, Browser, Weather & CP/M" (and "… & CP/M — More"), so the CP/M
+  settings are discoverable rather than hidden behind an AI/Browser/Weather
+  label. The emulator's entry banner now shows a prominent "Type EXIT to return
+  to the gateway." line beside the "Press ESC twice to stop a program." hint.
+- **The CP/M virtual modem is documented as polled-only.** The emulated UART is
+  polled (the guest reads the status register for RX/TX readiness); the core
+  never raises a serial interrupt in any Z80 interrupt mode. This holds for
+  every port profile — the family (Z80 SIO / 6850 ACIA / 8080 88-SIO) only
+  selects the I/O port address and status-bit layout, not interrupt support —
+  so polled comms software works on any profile while interrupt-driven serial
+  software is unsupported. Noted in the manual and the `uart` module.
 
 ### Fixed
 - **Kermit server no longer retains every uploaded file in memory for the
@@ -181,6 +195,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contents in memory across an unbounded number of transfers. Filenames and
   metadata are still returned for the post-session summary; no behavior change
   for callers (all committing already went through `on_file`).
+- **CP/M emulator — correctness/stability fixes from a full review of the new
+  emulator.** None affect a released version (the emulator is new in 1.0.0):
+  - **Interactive programs no longer hang on console-status polling.** BDOS 11
+    (console status) and BDOS 6 sub-function `0xFE` reported "no key ready"
+    even when a keystroke was already buffered, so the standard
+    `LD C,11 / CALL 5 / OR A / JR Z` poll idiom spun until the instruction
+    ceiling — hanging full-screen / interactive `.COM`s. They now report a
+    buffered key, and BDOS 6 direct console input (`E=0xFF`) is non-blocking
+    per CP/M 2.2.
+  - **A single `ESC` at a program's line prompt no longer drops the session.**
+    BDOS 10 (read-console-buffer) is now read through the same console path as
+    the other calls: `CR` terminates, backspace edits, and a double-`ESC`
+    aborts the program back to `A>` (a lone `ESC` was previously mistaken for a
+    disconnect, and the "ESC twice to stop" promise did nothing mid-line).
+  - **A BDOS call made via the `0x0006` entry-address pointer is now serviced.**
+    Only the `0x0005` entry was trapped, so a program that called the BDOS
+    address read from `0x0006` ran off into uninitialised memory.
+  - **The CP/M inbound-call request is cancel-safe.** A `request_cpm_call`
+    cancelled mid-wait (the slave announcer aborted on shell exit, or a dial
+    racing shutdown) no longer leaves a stale call in the endpoint slot — which,
+    with two or more concurrent CP/M sessions, could spuriously report BUSY to
+    real callers or "answer" a dead call. Reclaimed via an RAII guard mirroring
+    the A/B peer slot.
+  - **Existing files resolve case-insensitively.** An operator-placed lowercase
+    host file (`foo.txt`) that appeared in `DIR` can now actually be opened /
+    `TYPE`d / renamed, not just listed — CP/M's uppercase 8.3 name is matched
+    case-insensitively (new files are still created uppercase).
+  - **`+++` escape guard time.** The online `+++` escape now requires a
+    preceding idle gap (S12), so a `+++` inside a binary data stream is treated
+    as data instead of dropping the guest to command mode mid-transfer.
+  - **Altair 88-SIO honours transmit-not-ready.** The `altair_sio` profile now
+    clears its TX-ready bit when the transmit ring is full, so the no-byte-loss
+    flow-control guarantee holds for it as it already did for the SIO / ACIA
+    profiles.
 
 ## [0.7.0] - 2026-07-17
 
