@@ -64,14 +64,12 @@ impl UartFamily {
                     | (if tx_ready { 0x02 } else { 0 })
                     | (if carrier { 0x04 } else { 0 })
             }
-            // Active-low: bit0 SET means "no RX"; clear means a byte waits.
-            // (No DCD bit surfaced for this unusual layout.)
+            // Active-low: bit0 SET means "no RX"; bit7 SET means "TX not
+            // ready" (bit7 clear = TX ready).  No DCD bit for this layout.
+            // TX-ready is honoured here too so the flow-control invariant
+            // (transmit-not-ready when the ring is full) holds for 88-SIO.
             UartFamily::Sio88 => {
-                if rx_ready {
-                    0x00
-                } else {
-                    0x01
-                }
+                (if rx_ready { 0x00 } else { 0x01 }) | (if tx_ready { 0x00 } else { 0x80 })
             }
         }
     }
@@ -246,6 +244,9 @@ mod tests {
         // When the TX buffer can't accept a byte, the TX-ready bit is clear.
         assert_eq!(UartFamily::Sio.status(false, false, false), 0x00);
         assert_eq!(UartFamily::Acia.status(false, false, false), 0x00);
+        // 88-SIO is active-low: TX-not-ready SETS bit7 (idle 0x01 → 0x81).
+        assert_eq!(UartFamily::Sio88.status(false, false, false), 0x81);
+        assert_eq!(UartFamily::Sio88.status(true, false, false), 0x80); // RX ready + TX busy
     }
 
     #[test]
