@@ -32,10 +32,11 @@
 //!   multi-gigabyte sparse file.  All BDOS read helpers are length-bounded.
 //!
 //! The emulator services only BDOS — it has no path to execute host
-//! commands, and outbound I/O (a virtual modem) is deliberately absent
-//! (deferred B6+).  There is no per-drive file-*count* cap (a guest can
-//! create many small files); bounded by host disk and acceptable under the
-//! trusted-LAN model.
+//! commands.  Outbound/inbound networking goes only through the gated virtual
+//! modem (`cpm_modem`), which reuses the existing peer-dial/relay plumbing and
+//! is bound by `allow_peer_dial`.  There is no per-drive file-*count* cap (a
+//! guest can create many small files); bounded by host disk and acceptable
+//! under the trusted-LAN model.
 //!
 //! ## Status
 //! Entering the shell drops into our Rust CCP-lite `A>` prompt.  The full
@@ -46,8 +47,10 @@
 //! telnet/SSH.  The resident CP/M commands (DIR/ERA/REN/TYPE/SAVE/USER + the
 //! `d:` drive change) are built in.  Guest output is translated from the
 //! ADM-3A terminal to the connected client (ANSI/PETSCII/ASCII) and client
-//! cursor keys back to ADM-3A codes (see `cpm_term`).  Still to come (B6+):
-//! a concurrent out-of-band break-out reader and the virtual modem.
+//! cursor keys back to ADM-3A codes (see `cpm_term`).  A gated virtual modem
+//! (`cpm_modem`) lets the guest dial out (`ATD A`/`B`, `ATDT host:port`) and be
+//! dialed as `CPM@<ip>`.  Still to come: a concurrent out-of-band break-out
+//! reader.
 use super::*;
 use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
@@ -176,12 +179,14 @@ impl TelnetSession {
         let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
         cpm.set_modem_access(access);
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
-        // Register as the dialable `CPM@<ip>` peer endpoint while this
-        // modem-enabled shell is active (RAII-unregistered on any exit).  On a
-        // slave with peer-dial + a master, also announce `CPM` to the master so
-        // a remote `CPM@<this-slave-ip>` dial reaches us via the crossbar.
-        let _peer_reg = if modem.enabled() {
-            crate::serial::cpm_peer_register();
+        // Claim the single dialable `CPM@<ip>` peer endpoint for this session
+        // (RAII-released on any exit).  Only the owner receives inbound calls;
+        // a second concurrent modem session still dials out but isn't the
+        // inbound target.  On a slave with peer-dial + a master, the owner also
+        // announces `CPM` to the master so a remote `CPM@<this-slave-ip>` dial
+        // reaches us via the crossbar.
+        let owns_peer = modem.enabled() && crate::serial::cpm_peer_register();
+        let _peer_reg = if owns_peer {
             let cfg = config::get_config();
             let announce = if cfg.gateway_role == "slave"
                 && cfg.allow_peer_dial
@@ -245,7 +250,7 @@ impl TelnetSession {
                 "USER" => self.cpmemu_user(trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_hello(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, owns_peer, &Self::cpmemu_demo_hello(), "", fs).await? {
                         return Ok(());
                     }
                 }
@@ -257,14 +262,14 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_echo(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &mut modem, owns_peer, &Self::cpmemu_demo_echo(), "", fs).await? {
                         return Ok(());
                     }
                 }
                 other => {
                     // Not a built-in: try to load and run `<verb>.COM` from
                     // the drive.  `None` = no such file (CP/M prints VERB?).
-                    match self.cpmemu_try_run_com(&mut cpm, &mut modem, fs, &verb, trimmed).await? {
+                    match self.cpmemu_try_run_com(&mut cpm, &mut modem, owns_peer, fs, &verb, trimmed).await? {
                         Some(true) => {}                    // ran; back to A>
                         Some(false) => return Ok(()),       // session gone
                         None => {
@@ -543,6 +548,7 @@ impl TelnetSession {
         &mut self,
         cpm: &mut Cpm,
         modem: &mut CpmModem,
+        owns_peer: bool,
         program: &[u8],
         tail: &str,
         fs: &mut CpmFs,
@@ -680,8 +686,10 @@ impl TelnetSession {
             // synchronous UART/AUX rings cross into async I/O (dial + pump).
             if modem.enabled() {
                 // Pick up an inbound `CPM@<ip>` call when idle, so the guest
-                // sees RING and can answer (ATA / auto-answer).
-                if modem.can_answer() {
+                // sees RING and can answer (ATA / auto-answer).  Only the
+                // session that owns the CPM endpoint polls the shared slot, so
+                // a second concurrent modem session can't steal its calls.
+                if owns_peer && modem.can_answer() {
                     if let Some(call) = crate::serial::take_cpm_call_request() {
                         modem.accept_incoming(call);
                     }
@@ -714,6 +722,7 @@ impl TelnetSession {
         &mut self,
         cpm: &mut Cpm,
         modem: &mut CpmModem,
+        owns_peer: bool,
         fs: &mut CpmFs,
         verb: &str,
         line: &str,
@@ -744,7 +753,7 @@ impl TelnetSession {
             .split_once(char::is_whitespace)
             .map(|x| x.1)
             .unwrap_or("");
-        let cont = self.cpmemu_run_program(cpm, modem, &bytes, tail, fs).await?;
+        let cont = self.cpmemu_run_program(cpm, modem, owns_peer, &bytes, tail, fs).await?;
         Ok(Some(cont))
     }
 

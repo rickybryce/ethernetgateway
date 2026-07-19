@@ -294,9 +294,17 @@ pub struct CpmIncomingCall {
     pub progress: tokio::sync::mpsc::Sender<u8>,
 }
 
-/// Mark the CP/M peer endpoint available (a modem-enabled CP/M shell started).
-pub fn cpm_peer_register() {
-    CPM_PEER_LISTENING.store(true, Ordering::SeqCst);
+/// Claim the CP/M peer endpoint for a modem-enabled CP/M shell.  There is a
+/// single dialable `CPM` endpoint (like one physical port), so this is a
+/// compare-and-swap: it returns `true` to the first claimer (which becomes the
+/// dialable endpoint and must later `cpm_peer_unregister`), and `false` if
+/// another CP/M session already holds it (that session's modem still dials
+/// *out*, it just isn't the inbound `CPM@` target).  Prevents two concurrent
+/// sessions from fighting over the one global call slot / crossbar label.
+pub fn cpm_peer_register() -> bool {
+    CPM_PEER_LISTENING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 /// Mark it unavailable and drop any unclaimed call (the shell exited).

@@ -1,4 +1,4 @@
-//! Virtual-modem "brain" for the CP/M emulator (Flavor B) — Slice A: outbound.
+//! Virtual-modem "brain" for the CP/M emulator (Flavor B).
 //!
 //! The emulator's [`crate::cpm::CpmMachine`] exposes a byte channel (a TX ring
 //! the guest writes and an RX ring it reads, via UART ports or the BDOS `AUX:`
@@ -9,8 +9,11 @@
 //! runs in the emulator's async driver loop ([`super::cpm_emu`]), so unlike the
 //! blocking physical-serial modem it can simply `.await` a dial.
 //!
-//! Slice A covers **outbound** calls.  Being *dialable* as `CPM@<ip>` (inbound
-//! RING) is Slice B.
+//! Both directions work: **outbound** (`ATD A`/`B`, `ATDT host:port`) and
+//! **inbound** — the emulator is dialable as `CPM@<ip>`, ringing the guest
+//! (`RING`) which answers with `ATA` or `ATS0=`*n* auto-answer.  (Dialing a
+//! *remote* `A@host`/`B@host` out of CP/M is still deferred; a local `ATD A`/`B`
+//! reaches the gateway's own ports.)
 
 use crate::config::SerialPortId;
 use crate::serial::{request_peer_call, CpmIncomingCall, PeerCallOutcome};

@@ -2341,7 +2341,10 @@ wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 The emulator picks up an inbound call only while a program is running its modem
 (that's when it polls for the ring) — run your terminal/BBS software first,
 exactly as on real hardware. Set <code>ATS0=</code><em>n</em> to auto-answer, or
-answer manually with <code>ATA</code> when you see <code>RING</code>.
+answer manually with <code>ATA</code> when you see <code>RING</code>. There is a
+single dialable <code>CPM</code> endpoint at a time (as if there were one CP/M
+line): the first modem-enabled CP/M session becomes it; a second concurrent
+session can still dial <em>out</em> but isn't the inbound target.
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->
