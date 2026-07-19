@@ -2324,13 +2324,22 @@ the two machines are then joined transparently. Peer-dial must be enabled
 (<code>allow_peer_dial</code>).
 </p>
 
+<p>
+Reachability follows the same master/slave rules as Ports A/B: a device on a
+<strong>slave</strong> gateway dials <code>CPM@&lt;master‑ip&gt;</code> and the
+call is relayed to the master, which rings its own CP/M endpoint — so CP/M
+running on the master is reachable from every attached machine, local or via a
+slave. (Reaching a CP/M endpoint that lives on a <em>slave</em>, through the
+master crossbar, is the one remaining case — it needs registration of the
+slave's per‑session endpoint and isn't wired yet.)
+</p>
+
 <aside class="note">
 <span class="label">Answering requires a running comms program</span>
-The emulator can pick up an inbound call only while a program is running its
-modem (that's when it polls for the ring) — run your terminal/BBS software
-first, exactly as on real hardware. Reaching a CP/M endpoint on a
-<em>different</em> gateway over the master/slave relay (remote
-<code>CPM@&lt;ip&gt;</code>) is a further step; local dialling works now.
+The emulator picks up an inbound call only while a program is running its modem
+(that's when it polls for the ring) — run your terminal/BBS software first,
+exactly as on real hardware. Set <code>ATS0=</code><em>n</em> to auto-answer, or
+answer manually with <code>ATA</code> when you see <code>RING</code>.
 </aside>
 
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->

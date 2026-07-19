@@ -94,8 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with a parallel global call slot and a `CPM@host` dial parser — the A/B
     peer-dial slots and routing are untouched (208 serial tests still pass).
     Gated by `allow_peer_dial`; the endpoint answers while a comms program is
-    running (that's when the ring is polled). Reaching a CP/M endpoint on a
-    *remote* gateway over the master/slave relay is a further step.
+    running (that's when the ring is polled).
+  - **Virtual modem — reachable over the master/slave relay.** A device on a
+    slave gateway can dial `CPM@<master-ip>`: the slave relays the address to
+    the master, whose relay peer-dial handler resolves it to its own local
+    CP/M endpoint (the CP/M analog of resolving `A@`/`B@` to a local port), so
+    CP/M running on the master is reachable from every attached machine. Both
+    directions were verified end-to-end over a live gateway: a `.COM` dialing
+    a TCP host via `ATDT` (CONNECT + data round-trip), and an external modem
+    dialing `CPM@<ip>` (the CP/M program rang, auto-answered, and received the
+    caller's data). Reaching a CP/M endpoint that lives on a *slave* through
+    the crossbar (registering a per-session endpoint) is the remaining case.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

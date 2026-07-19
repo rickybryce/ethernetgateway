@@ -377,13 +377,25 @@ pub async fn request_cpm_call(
 /// Local host only for now (remote/relay reachability is a follow-up); gated
 /// by `allow_peer_dial`.
 fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
-    if !config::get_config().allow_peer_dial {
+    let cfg = config::get_config();
+    if !cfg.allow_peer_dial {
         send_result(state, "NO CARRIER");
         return;
     }
     if !host_is_local(host, &local_host_ips()) {
-        // Remote CP/M endpoints over the master/slave relay are not wired yet.
-        send_result(state, "NO CARRIER");
+        // A remote CP/M endpoint: a slave relays the address to its master
+        // (which resolves `CPM@<masterip>` to its own local endpoint, like an
+        // A/B port).  Standalone/master can't reach a remote CP/M (the
+        // crossbar has no ephemeral-endpoint registration yet) → NO CARRIER.
+        if cfg.gateway_role == "slave" {
+            dial_master_relay(
+                state,
+                crate::relay::RelayTarget::Peer { addr: format!("CPM@{host}") },
+                &cfg,
+            );
+        } else {
+            send_result(state, "NO CARRIER");
+        }
         return;
     }
     let answer_wait =
@@ -412,6 +424,16 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
             send_result(state, "NO CARRIER");
         }
     }
+}
+
+/// True if `addr` is `CPM@<host>` naming *this* gateway's CP/M endpoint.  The
+/// relay peer-dial handler uses it to resolve a relayed `CPM@<masterip>` to the
+/// master's own local endpoint (the CP/M analog of `resolve_local_peer_target`
+/// for A/B ports).
+pub fn is_local_cpm_peer(addr: &str) -> bool {
+    parse_cpm_peer_address(addr)
+        .map(|host| host_is_local(&host, &local_host_ips()))
+        .unwrap_or(false)
 }
 
 /// Parse an `ATD` target as the CP/M peer address `CPM@<host>`, returning the
@@ -7083,6 +7105,17 @@ mod tests {
         assert_eq!(parse_cpm_peer_address("bbs@example.com"), None);
         assert_eq!(parse_cpm_peer_address("CPM@"), None);
         assert_eq!(parse_cpm_peer_address("192.168.1.50"), None);
+    }
+
+    #[test]
+    fn test_is_local_cpm_peer() {
+        // Loopback / localhost name this gateway's CP/M endpoint.
+        assert!(is_local_cpm_peer("CPM@127.0.0.1"));
+        assert!(is_local_cpm_peer("cpm@localhost"));
+        // An A/B port address, an ordinary host, or a non-local IP are not it.
+        assert!(!is_local_cpm_peer("A@127.0.0.1"));
+        assert!(!is_local_cpm_peer("CPM@8.8.8.8"));
+        assert!(!is_local_cpm_peer("bbs@example.com"));
     }
 
     #[test]

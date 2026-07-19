@@ -188,6 +188,21 @@ where
         return;
     }
 
+    // The CP/M emulator endpoint on this master (`CPM@<masterip>`): ring the
+    // local virtual modem and bridge, just like a local A/B port.  Additive —
+    // sits ahead of the A/B resolution, which ignores the CPM label.
+    if crate::serial::is_local_cpm_peer(&addr) {
+        match crate::serial::request_cpm_call(RELAY_PEER_ANSWER_WAIT).await {
+            Ok(mut b) => {
+                glog!("Relay: peer-dial bridged to local CP/M endpoint");
+                let _ = tokio::io::copy_bidirectional(&mut relay, &mut b).await;
+            }
+            Err(o) => glog!("Relay: peer-dial to CP/M endpoint failed: {:?}", o),
+        }
+        let _ = relay.shutdown().await;
+        return;
+    }
+
     // A LOCAL target — a port on this master (2a): ring (modem) or connect
     // (console) it and bridge.
     if let Some(target) = crate::serial::resolve_local_peer_target(&addr) {

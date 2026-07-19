@@ -109,14 +109,12 @@ impl CpmModem {
         if self.incoming.is_some() && self.mode == Mode::Command {
             self.service_ring(&mut out).await;
         }
-        match self.mode {
-            Mode::Command => {
-                for b in guest_tx {
-                    self.feed_command_byte(b, &mut out).await;
-                }
-            }
-            Mode::Online => {
-                self.feed_online(&guest_tx, &mut out).await;
+        // Dispatch per byte so a mode change mid-batch (an `ATD…` that dials
+        // and flips to online) routes the remaining bytes correctly.
+        for b in guest_tx {
+            match self.mode {
+                Mode::Command => self.feed_command_byte(b, &mut out).await,
+                Mode::Online => self.feed_online_byte(b, &mut out).await,
             }
         }
         // Drain anything the peer has sent us while online.
@@ -229,25 +227,26 @@ impl CpmModem {
         self.result(out, "NO CARRIER");
     }
 
-    /// Online mode: watch for the `+++` escape, else forward to the peer.
-    async fn feed_online(&mut self, guest_tx: &[u8], out: &mut Vec<u8>) {
-        for &b in guest_tx {
-            if b == b'+' {
-                self.plus_run += 1;
-                if self.plus_run >= 3 {
-                    self.plus_run = 0;
-                    self.mode = Mode::Command;
-                    self.result(out, "OK"); // back to command mode, call held
-                    return;
-                }
-            } else {
-                self.plus_run = 0;
-            }
+    /// Online mode: forward one byte to the peer, tracking the (simplified)
+    /// `+++` escape — three consecutive `+` returns to command mode with the
+    /// call held.  Bytes are forwarded as they arrive (including `+`), so data
+    /// containing a stray `+` isn't dropped.
+    async fn feed_online_byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        if b == b'+' {
+            self.plus_run += 1;
+        } else {
+            self.plus_run = 0;
         }
         if let Some(conn) = self.conn.as_mut() {
-            if conn.write_all(guest_tx).await.is_err() {
+            if conn.write_all(&[b]).await.is_err() {
                 self.hangup(out, true);
+                return;
             }
+        }
+        if self.plus_run >= 3 {
+            self.plus_run = 0;
+            self.mode = Mode::Command;
+            self.result(out, "OK"); // escaped to command mode, call held
         }
     }
 
