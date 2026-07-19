@@ -724,6 +724,9 @@ impl TelnetSession {
     }
 
     /// After an `ESC`, briefly peek for a CSI arrow sequence (`[ A..D`).
+    /// Consumes a *complete* CSI so a longer sequence (a function key like
+    /// `ESC [ 1 5 ~`, or a modified arrow `ESC [ 1 ; 5 A`) is swallowed whole
+    /// rather than leaking its tail to the guest as stray keystrokes.
     async fn cpmemu_peek_arrow(&mut self) -> Result<ArrowPeek, std::io::Error> {
         // Byte 1: the '[' introducer, if it arrives promptly.
         match self.cpmemu_peek_byte().await? {
@@ -734,14 +737,26 @@ impl TelnetSession {
             }
             None => return Ok(ArrowPeek::NotCsi), // lone ESC
         }
-        // Byte 2: the final byte. A recognised arrow maps; anything else is
-        // an unrecognised CSI (consumed whole).
-        match self.cpmemu_peek_byte().await? {
-            Some(f) => Ok(cpm_term::csi_arrow_to_adm3a(f)
-                .map(ArrowPeek::Arrow)
-                .unwrap_or(ArrowPeek::UnknownCsi)),
-            None => Ok(ArrowPeek::UnknownCsi),
+        // CSI body: parameter / intermediate bytes (0x20..=0x3F) then a final
+        // byte (0x40..=0x7E).  A bare final letter with no parameters may be a
+        // plain arrow; anything with parameters is swallowed as UnknownCsi.
+        // Bounded so a malformed stream can't loop.
+        let mut had_params = false;
+        for _ in 0..16 {
+            match self.cpmemu_peek_byte().await? {
+                Some(b) if (0x20..=0x3F).contains(&b) => had_params = true,
+                Some(b) if (0x40..=0x7E).contains(&b) => {
+                    if !had_params {
+                        if let Some(code) = cpm_term::csi_arrow_to_adm3a(b) {
+                            return Ok(ArrowPeek::Arrow(code));
+                        }
+                    }
+                    return Ok(ArrowPeek::UnknownCsi);
+                }
+                _ => return Ok(ArrowPeek::UnknownCsi), // truncated / malformed
+            }
         }
+        Ok(ArrowPeek::UnknownCsi)
     }
 
     /// Read one byte with a short timeout, for CSI-arrow lookahead — fast

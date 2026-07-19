@@ -1558,7 +1558,7 @@ fn test_security_help_screen_row_count() {
 /// Other settings menu row count:
 /// header(3) + blank + 5 values + blank + 9 items + blank + Q/H + prompt = 22
 /// (Verbose+GUI and Gateway-debug+CP/M each share a value row, folding 7
-/// statuses into 5 lines; the new `E` "Toggle CP/M emulator" is the 9th item.)
+/// statuses into 5 lines; the `E` "CP/M settings" submenu entry is the 9th item.)
 #[test]
 fn test_other_settings_menu_row_count() {
     let rows = 3 + 1 + 5 + 1 + 9 + 1 + 1 + 1; // 22
