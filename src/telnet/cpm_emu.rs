@@ -680,17 +680,22 @@ impl TelnetSession {
                             // Direct console I/O: E=0xFF non-blocking read (no
                             // echo), E=0xFE status, else output E.
                             let e = cpm.arg_e();
-                            let is_petscii = self.terminal_type == TerminalType::Petscii;
                             match e {
-                                // CP/M 2.2 direct-console-input is NON-blocking:
-                                // return a ready key (from the OOB-drain buffer)
-                                // or 0 if none.  Break-out is handled by the
-                                // between-batch drain, so no wire wait here.
-                                0xFF => {
-                                    let b = Self::cpmemu_pending_key(&mut pending_input, is_petscii)
-                                        .unwrap_or(0);
-                                    cpm.bdos_return(b);
-                                }
+                                // Direct console input.  A single `E=0xFF` call
+                                // reads a key, blocking until one arrives — the
+                                // common CP/M idiom for a keypress / Y-N prompt
+                                // (a program that wants to poll uses the E=0xFE
+                                // status call or BDOS 11 CONST, both non-blocking
+                                // below).  Break-out + disconnect handled as for
+                                // BDOS 1.
+                                0xFF => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
+                                    ConIn::Byte(b) => cpm.bdos_return(b),
+                                    ConIn::BreakOut => {
+                                        self.cpmemu_break_notice().await?;
+                                        return Ok(true);
+                                    }
+                                    ConIn::Disconnect => return Ok(false),
+                                },
                                 // Status: 0xFF if a key is buffered, else 0.
                                 0xFE => {
                                     cpm.bdos_return(if pending_input.is_empty() { 0x00 } else { 0xFF });

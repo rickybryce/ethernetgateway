@@ -532,11 +532,17 @@ impl TelnetSession {
         self.flush().await
     }
 
-    /// Consume up to `max` immediately-queued CR/LF bytes left behind by a
-    /// linemode telnet client (e.g. the `\n` of a CRLF pair after a menu
-    /// selection or line submit). Uses a short read timeout so nothing is
-    /// eaten in char-at-a-time mode. Any non-CR/LF byte seen is pushed back
-    /// for the next real input call, so no keystrokes are lost.
+    /// Consume up to `max` immediately-queued CR/LF/NUL bytes left behind by a
+    /// linemode telnet client (e.g. the `\n` of a CRLF pair, or the `\0` of the
+    /// NVT `CR NUL` that a telnet client sends for a bare Enter, after a menu
+    /// selection or line submit). Uses a short read timeout so nothing is eaten
+    /// in char-at-a-time mode. Any other byte seen is pushed back for the next
+    /// real input call, so no keystrokes are lost.
+    ///
+    /// The NUL matters for the CP/M emulator: without draining it, the `\0` of
+    /// a `CR NUL` Enter lingered as `pushback` past the command-line read and
+    /// was then consumed by the launched program's first console read (e.g. a
+    /// `Y/N` prompt read via BDOS 1/6), skipping the prompt.
     pub(in crate::telnet) async fn drain_trailing_eol(&mut self, max: usize) {
         if self.pushback.is_some() {
             return;
@@ -548,7 +554,7 @@ impl TelnetSession {
             )
             .await;
             match res {
-                Ok(Ok(Some(b))) if b == b'\r' || b == b'\n' => continue,
+                Ok(Ok(Some(b))) if b == b'\r' || b == b'\n' || b == 0 => continue,
                 Ok(Ok(Some(b))) => {
                     self.pushback = Some(b);
                     return;

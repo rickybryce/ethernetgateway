@@ -202,8 +202,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     even when a keystroke was already buffered, so the standard
     `LD C,11 / CALL 5 / OR A / JR Z` poll idiom spun until the instruction
     ceiling — hanging full-screen / interactive `.COM`s. They now report a
-    buffered key, and BDOS 6 direct console input (`E=0xFF`) is non-blocking
-    per CP/M 2.2.
+    buffered key (both are non-blocking); BDOS 6 direct console *input*
+    (`E=0xFF`) stays blocking (the common single-key / `Y-N` idiom), with the
+    non-blocking poll served by the `0xFE` status call and BDOS 11.
+  - **A telnet `CR NUL` Enter no longer skips a launched program's first
+    prompt.** A telnet client transmits a bare Enter as the NVT pair `CR NUL`;
+    the command-line reader consumed the `CR` but left the `NUL` queued, so a
+    `.COM` launched from that line (e.g. `CLRDIR B:`) had its first console
+    read — often a `Y/N` confirmation — satisfied by the stray `NUL` and never
+    waited for the user. The line reader now also drains the trailing `NUL`
+    (and `LF`), so no terminator byte leaks to the next read.
   - **A single `ESC` at a program's line prompt no longer drops the session.**
     BDOS 10 (read-console-buffer) is now read through the same console path as
     the other calls: `CR` terminates, backspace edits, and a double-`ESC`

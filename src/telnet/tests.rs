@@ -5668,3 +5668,34 @@ fn test_cpm_real_components_case_insensitive() {
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// A command-line submit must not leave a stray byte queued for the next read.
+// Every common line ending — CRLF, the NVT `CR NUL` a telnet client sends for
+// a bare Enter, lone CR, lone LF — must be fully consumed by the line read, so
+// a program launched right after (e.g. a CP/M `.COM` whose first act is a Y/N
+// console read) isn't handed a leftover terminator that skips its prompt.
+#[tokio::test]
+async fn test_command_line_leaves_no_stray_terminator() {
+    use tokio::io::AsyncWriteExt;
+    for (label, cmdline) in [
+        ("CRLF", &b"ECHO\r\n"[..]),
+        ("CRNUL", &b"ECHO\r\0"[..]),
+        ("CR", &b"ECHO\r"[..]),
+        ("LF", &b"ECHO\n"[..]),
+    ] {
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        peer.write_all(cmdline).await.unwrap();
+        let cmd = sess.get_line_input().await.unwrap();
+        assert_eq!(cmd.as_deref(), Some("ECHO"), "{label}: command read");
+        // No byte should be immediately available now.
+        let stray = tokio::time::timeout(
+            std::time::Duration::from_millis(60),
+            sess.session_read_byte(),
+        )
+        .await;
+        assert!(
+            stray.is_err(),
+            "{label}: a stray terminator byte leaked to the next read: {stray:?}"
+        );
+    }
+}
