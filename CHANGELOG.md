@@ -103,8 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     directions were verified end-to-end over a live gateway: a `.COM` dialing
     a TCP host via `ATDT` (CONNECT + data round-trip), and an external modem
     dialing `CPM@<ip>` (the CP/M program rang, auto-answered, and received the
-    caller's data). Reaching a CP/M endpoint that lives on a *slave* through
-    the crossbar (registering a per-session endpoint) is the remaining case.
+    caller's data).
+  - **Virtual modem — slave-hosted CP/M reachable via the crossbar.** CP/M
+    running on a *slave* is now dialable as `CPM@<slave-ip>` from the master
+    (or another slave) exactly as its A/B ports are: while a modem CP/M shell
+    is active the slave registers the label `CPM` with the master
+    (`serial-register CPM`) and, on a peer-dial claim, rings its own local
+    endpoint and bridges. `parse_remote_peer_addr` accepts the `CPM` label; a
+    master/standalone `ATD CPM@<slave-ip>` claims it through the crossbar; and
+    an async slave-side announcer (the CP/M analog of the physical-port
+    `modem_slave_announce_tick`, tied to the shell's lifetime) does the
+    registration. So `CPM@<ip>` now works wherever `A@<ip>`/`B@<ip>` do.
+    Additive — A/B and the existing relay are unchanged.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

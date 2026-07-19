@@ -806,11 +806,11 @@ pub fn remove_remote_port_gen(
 /// Parse a peer-dial address `<Port>@<host>` into `(ip, LABEL)` when the
 /// host is an IP literal, for looking a *remote* registered port up in
 /// [`REMOTE_PORTS`] (keyed by the slave's peer IP + uppercase label).
-/// `None` if the label isn't `A`/`B` or the host isn't an IP.
+/// `None` if the label isn't `A`/`B`/`CPM` or the host isn't an IP.
 pub fn parse_remote_peer_addr(addr: &str) -> Option<(IpAddr, String)> {
     let (label, host) = addr.split_once('@')?;
     let label = label.trim().to_ascii_uppercase();
-    if label != "A" && label != "B" {
+    if label != "A" && label != "B" && label != "CPM" {
         return None;
     }
     let ip: IpAddr = host.trim().trim_start_matches('[').trim_end_matches(']').parse().ok()?;

@@ -2325,13 +2325,15 @@ the two machines are then joined transparently. Peer-dial must be enabled
 </p>
 
 <p>
-Reachability follows the same master/slave rules as Ports A/B: a device on a
-<strong>slave</strong> gateway dials <code>CPM@&lt;master‑ip&gt;</code> and the
-call is relayed to the master, which rings its own CP/M endpoint — so CP/M
-running on the master is reachable from every attached machine, local or via a
-slave. (Reaching a CP/M endpoint that lives on a <em>slave</em>, through the
-master crossbar, is the one remaining case — it needs registration of the
-slave's per‑session endpoint and isn't wired yet.)
+Reachability follows the same master/slave rules as Ports A/B. CP/M running on
+the <strong>master</strong> is reachable from every attached machine: a device
+on a slave dials <code>CPM@&lt;master‑ip&gt;</code> and the call is relayed to
+the master, which rings its own endpoint. CP/M running on a <strong>slave</strong>
+is reachable through the master crossbar the same way A/B ports are: while a
+modem CP/M shell is active, the slave registers <code>CPM</code> with the
+master, so <code>CPM@&lt;slave‑ip&gt;</code> dialed on the master (or another
+slave) rings that slave's endpoint. In short, <code>CPM@&lt;ip&gt;</code> works
+wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 </p>
 
 <aside class="note">

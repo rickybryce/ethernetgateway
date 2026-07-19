@@ -383,16 +383,29 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
         return;
     }
     if !host_is_local(host, &local_host_ips()) {
-        // A remote CP/M endpoint: a slave relays the address to its master
-        // (which resolves `CPM@<masterip>` to its own local endpoint, like an
-        // A/B port).  Standalone/master can't reach a remote CP/M (the
-        // crossbar has no ephemeral-endpoint registration yet) → NO CARRIER.
+        // A remote CP/M endpoint.  On a slave, relay the address to the master
+        // (which resolves `CPM@<masterip>` to its own local endpoint, or
+        // crossbars it to another slave).  On a master/standalone, a remote
+        // `CPM@<slave-ip>` is a CP/M endpoint a slave registered with us —
+        // claim it via the crossbar and bridge (mirrors `handle_peer_dial`).
         if cfg.gateway_role == "slave" {
             dial_master_relay(
                 state,
                 crate::relay::RelayTarget::Peer { addr: format!("CPM@{host}") },
                 &cfg,
             );
+        } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match state.handle.block_on(crate::relay::claim_remote_peer(ip, "CPM")) {
+                Some(stream) => bridge_duplex_online(state, stream),
+                None => {
+                    glog!(
+                        "Serial modem (Port {}): remote CP/M endpoint CPM@{} not registered here",
+                        state.port_id.label(),
+                        host
+                    );
+                    send_result(state, "NO CARRIER");
+                }
+            }
         } else {
             send_result(state, "NO CARRIER");
         }
@@ -1683,6 +1696,113 @@ where
 async fn wait_for_serial_abort(shutdown: &Arc<AtomicBool>, idx: usize) {
     while !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Outcome of waiting for the master's activate signal on the CP/M
+/// registration channel (async analog of [`ActivateOutcome`]).
+enum CpmActivate {
+    Activated,
+    Closed,
+    Aborted,
+}
+
+async fn cpm_wait_activate<S>(stream: &mut S, stop: &Arc<AtomicBool>) -> CpmActivate
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut b = [0u8; 1];
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return CpmActivate::Aborted;
+        }
+        match tokio::time::timeout(Duration::from_millis(250), stream.read(&mut b)).await {
+            Ok(Ok(0)) => return CpmActivate::Closed,
+            Ok(Ok(_)) => return CpmActivate::Activated,
+            Ok(Err(_)) => return CpmActivate::Closed,
+            Err(_) => {} // idle timeout — re-check stop and keep waiting
+        }
+    }
+}
+
+async fn cpm_wait_stop(stop: &Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
+    let mut waited = Duration::ZERO;
+    let step = Duration::from_millis(200);
+    while waited < dur && !stop.load(Ordering::SeqCst) {
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+}
+
+/// Slave-side announcer for the CP/M-emulator endpoint (Flavor B).  While a
+/// modem-enabled CP/M shell runs on a **slave** gateway, this registers the
+/// label `CPM` with the master (`serial-register CPM`, like a physical port)
+/// so a remote `CPM@<this-slave-ip>` dial reaches it through the master
+/// crossbar.  On activation it rings the *local* CP/M endpoint
+/// (`request_cpm_call`) and bridges the master's channel to the answered
+/// duplex.  The async analog of [`modem_slave_announce_tick`], but for a
+/// per-session endpoint rather than a fixed port — spawned by the CP/M driver
+/// (already on the tokio runtime) and stopped via `stop` when the shell exits.
+pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let cfg = config::get_config();
+        if cfg.gateway_role != "slave" || !cfg.allow_peer_dial || cfg.slave_master_host.is_empty() {
+            return; // config no longer makes this applicable
+        }
+        let host = cfg.slave_master_host.clone();
+        let mport = cfg.slave_master_port;
+        let user = cfg.slave_master_username.clone();
+        let pass = cfg.slave_master_password.clone();
+
+        match crate::relay::connect_master_register(&host, mport, &user, &pass, "CPM").await {
+            Ok(crate::relay::MasterRelay { _session, mut stream }) => {
+                glog!("CP/M emulator: announced to master {}:{} for peer-dial (CPM@)", host, mport);
+                match cpm_wait_activate(&mut stream, &stop).await {
+                    CpmActivate::Activated => {
+                        glog!("CP/M emulator: remote peer-dial in — ringing local endpoint");
+                        tokio::select! {
+                            biased;
+                            _ = cpm_wait_stop(&stop) => {}
+                            _ = async {
+                                match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
+                                    Ok(mut caller) => {
+                                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
+                                    }
+                                    Err(o) => glog!(
+                                        "CP/M emulator: remote peer-dial ring not answered: {:?}",
+                                        o
+                                    ),
+                                }
+                            } => {}
+                        }
+                        drop(stream);
+                        drop(_session);
+                    }
+                    CpmActivate::Closed => {
+                        drop(stream);
+                        drop(_session);
+                    }
+                    CpmActivate::Aborted => {
+                        drop(stream);
+                        drop(_session);
+                        return;
+                    }
+                }
+            }
+            Err(_) => {
+                cpm_announce_backoff(&stop, RECONNECT_BACKOFF_MIN).await;
+            }
+        }
     }
 }
 

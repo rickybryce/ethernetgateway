@@ -398,6 +398,15 @@ fn test_parse_remote_peer_addr() {
         parse_remote_peer_addr("B@[::1]"),
         Some(("::1".parse::<IpAddr>().unwrap(), "B".to_string()))
     );
+    // The CP/M emulator endpoint is a valid crossbar label too.
+    assert_eq!(
+        parse_remote_peer_addr("CPM@10.0.0.9"),
+        Some(("10.0.0.9".parse::<IpAddr>().unwrap(), "CPM".to_string()))
+    );
+    assert_eq!(
+        parse_remote_peer_addr("cpm@192.168.1.7"),
+        Some(("192.168.1.7".parse::<IpAddr>().unwrap(), "CPM".to_string()))
+    );
     // A hostname (not an IP) can't be a registry key; a bad/absent label.
     assert_eq!(parse_remote_peer_addr("B@example.com"), None);
     assert_eq!(parse_remote_peer_addr("C@10.0.0.1"), None);

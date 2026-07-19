@@ -74,11 +74,19 @@ enum ConIn {
 
 /// RAII registration of the CP/M emulator as the dialable `CPM@<ip>` peer
 /// endpoint: registered while a modem-enabled shell is active, unregistered
-/// (dropping any unclaimed call) on every exit path.
-struct CpmPeerReg;
+/// (dropping any unclaimed call) on every exit path.  On a slave gateway it
+/// also owns the crossbar announcer task (registering `CPM` with the master),
+/// which it stops + aborts on drop.
+struct CpmPeerReg {
+    announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
+}
 impl Drop for CpmPeerReg {
     fn drop(&mut self) {
         crate::serial::cpm_peer_unregister();
+        if let Some((stop, jh)) = self.announce.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            jh.abort();
+        }
     }
 }
 
@@ -169,10 +177,23 @@ impl TelnetSession {
         cpm.set_modem_access(access);
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
         // Register as the dialable `CPM@<ip>` peer endpoint while this
-        // modem-enabled shell is active (RAII-unregistered on any exit).
+        // modem-enabled shell is active (RAII-unregistered on any exit).  On a
+        // slave with peer-dial + a master, also announce `CPM` to the master so
+        // a remote `CPM@<this-slave-ip>` dial reaches us via the crossbar.
         let _peer_reg = if modem.enabled() {
             crate::serial::cpm_peer_register();
-            Some(CpmPeerReg)
+            let cfg = config::get_config();
+            let announce = if cfg.gateway_role == "slave"
+                && cfg.allow_peer_dial
+                && !cfg.slave_master_host.is_empty()
+            {
+                let stop = std::sync::Arc::new(AtomicBool::new(false));
+                let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone()));
+                Some((stop, jh))
+            } else {
+                None
+            };
+            Some(CpmPeerReg { announce })
         } else {
             None
         };
