@@ -50,8 +50,13 @@ pub(in crate::telnet) struct CpmModem {
     /// The live connection while online.
     conn: Option<Box<dyn ModemStream>>,
     echo: bool,
-    /// Consecutive `+` count for the (simplified) `+++` escape.
+    /// Consecutive `+` count for the `+++` escape.
     plus_run: u8,
+    /// Time of the last byte the guest sent while online, for the `+++`
+    /// escape guard time (S12): the first `+` only starts an escape run if it
+    /// was preceded by an idle gap, so a `+++` embedded in a data stream
+    /// (e.g. binary file bytes) is not mistaken for the escape.
+    last_online_at: Option<Instant>,
     /// An inbound call being rung (dialed as `CPM@<ip>`), pending answer.
     incoming: Option<CpmIncomingCall>,
     /// When to emit the next RING for `incoming`.
@@ -86,6 +91,7 @@ impl CpmModem {
             conn: None,
             echo: true,
             plus_run: 0,
+            last_online_at: None,
             incoming: None,
             ring_at: None,
             rings: 0,
@@ -374,10 +380,27 @@ impl CpmModem {
     /// Online mode: forward one byte to the peer, tracking the (simplified)
     /// `+++` escape — three consecutive `+` returns to command mode with the
     /// call held.  Bytes are forwarded as they arrive (including `+`), so data
-    /// containing a stray `+` isn't dropped.
+    /// containing a stray `+` isn't dropped.  The first `+` only starts an
+    /// escape run if it was preceded by at least the S12 guard time of idle
+    /// (default 1 s), so a `+++` inside a continuous data stream (e.g. a binary
+    /// file transfer) is treated as data, not the escape.  (The trailing guard
+    /// and holding the `+++` back from the peer are not modelled.)
     async fn feed_online_byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        let now = Instant::now();
         if b == b'+' {
-            self.plus_run += 1;
+            if self.plus_run == 0 {
+                // Candidate first '+': require a preceding idle gap (guard).
+                let idle = self
+                    .last_online_at
+                    .map(|t| now.duration_since(t) >= self.escape_guard())
+                    .unwrap_or(true);
+                if idle {
+                    self.plus_run = 1;
+                }
+                // else: mid-stream '+', leave plus_run at 0 (it's data).
+            } else {
+                self.plus_run += 1;
+            }
         } else {
             self.plus_run = 0;
         }
@@ -387,11 +410,18 @@ impl CpmModem {
                 return;
             }
         }
+        self.last_online_at = Some(now);
         if self.plus_run >= 3 {
             self.plus_run = 0;
             self.mode = Mode::Command;
             self.result(out, "OK"); // escaped to command mode, call held
         }
+    }
+
+    /// The `+++` escape guard time from S12 (in 1/50-second units; default
+    /// 50 = 1 s).  `S12=0` disables the guard (any `+++` escapes).
+    fn escape_guard(&self) -> Duration {
+        Duration::from_millis(self.s_regs[12] as u64 * 20)
     }
 
     /// Non-blocking-ish poll of the connection for received bytes, reading at
@@ -668,6 +698,37 @@ mod tests {
         // Once room frees up, the same byte is delivered (still in the duplex).
         let out = m.service(vec![], 65536).await;
         assert!(out.windows(4).any(|w| w == b"data"));
+    }
+
+    #[tokio::test]
+    async fn test_plus_escape_guarded_against_data_stream() {
+        use tokio::io::AsyncReadExt;
+        let (mut near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536).await; // ring
+        let _ = m.service(b"ATA\r".to_vec(), 65536).await; // answer → online
+        // A `+++` right after data must NOT escape (no preceding guard idle).
+        let out = m.service(b"hi+++".to_vec(), 65536).await;
+        assert!(!String::from_utf8_lossy(&out).contains("OK")); // still online
+        // …and the `+++` reached the peer as ordinary data.
+        let mut buf = [0u8; 5];
+        near.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi+++");
+    }
+
+    #[tokio::test]
+    async fn test_plus_escape_after_idle_returns_to_command() {
+        let (_near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536).await;
+        let _ = m.service(b"ATA\r".to_vec(), 65536).await; // online, no prior data
+        // `+++` with the guard satisfied (no preceding online data) escapes.
+        let out = m.service(b"+++".to_vec(), 65536).await;
+        assert!(String::from_utf8_lossy(&out).contains("OK"));
     }
 
     #[tokio::test]
