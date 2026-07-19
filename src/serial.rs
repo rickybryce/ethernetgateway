@@ -364,7 +364,12 @@ pub async fn request_cpm_call(
     if try_place_cpm_call(PeerCall { bridge: target_end, progress: tx }).is_err() {
         return Err(PeerCallOutcome::Busy);
     }
-    let mut armed = true;
+    // Drop guard: if this await is cancelled (the announcer task is aborted on
+    // shell exit, or the dial races a shutdown) rather than running to an
+    // outcome, reclaim the slot so a stale PeerCall doesn't linger — a pool
+    // member would otherwise "answer" a dead call and real callers would see
+    // spurious BUSY.  Mirrors `PeerSlotGuard` for the single CP/M slot.
+    let mut slot_guard = CpmSlotGuard { armed: true };
     let start = tokio::time::Instant::now();
     let answer_deadline = start + answer_wait;
     let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
@@ -386,17 +391,27 @@ pub async fn request_cpm_call(
         }
     };
     if outcome == PeerCallOutcome::Answered {
-        armed = false;
-    }
-    // Reclaim an unclaimed slot on any non-answer outcome (the emulator never
-    // took it), mirroring PeerSlotGuard for the global slot.
-    if armed {
-        CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
-    }
-    if outcome == PeerCallOutcome::Answered {
+        // The emulator claimed the slot and is bridging; leave it be.
+        slot_guard.armed = false;
         Ok(caller_end)
     } else {
+        // The guard's drop reclaims the placed-but-unclaimed request.
         Err(outcome)
+    }
+}
+
+/// Drop guard mirroring [`PeerSlotGuard`] for the single `CPM_CALL_REQUEST`
+/// slot: reclaims a placed-but-unclaimed CP/M call if [`request_cpm_call`] is
+/// cancelled or exits without the emulator having taken it.
+struct CpmSlotGuard {
+    armed: bool,
+}
+
+impl Drop for CpmSlotGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
     }
 }
 
