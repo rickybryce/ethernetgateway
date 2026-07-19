@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     CP/M), so `SAVE n file` dumps the image a previous program (e.g. `DDT`)
     left in memory. Low-memory vectors are reinstalled on each program load so
     a program that trashes page zero can't corrupt the next one.
+  - **Virtual-modem UART port selection.** A new config key `cpm_emu_uart`
+    (wired into the telnet, web, and GUI config UIs, each showing a description
+    beside every choice) selects which machine/port address the emulated CP/M's
+    modem answers at — `off` (default), the RC2014/RomWBW Z80 SIO/2 channels
+    (`rc2014_1a`…`rc2014_2b`, 0x80–0x87), or the Altair 88‑2SIO / 88‑SIO
+    (`altair_2sio1`/`altair_2sio2`/`altair_sio`). Addresses and status-bit
+    conventions are taken from the RomWBW SIO driver and David Hansel's Altair
+    simulator. With a profile selected, `CpmMachine`'s port I/O answers at those
+    addresses with a valid idle UART (transmit ready, nothing received) so
+    comms software can probe and initialise the port. Bridging the data channel
+    to the gateway's outbound dial is the next step.
   - **ADM-3A terminal translation.** The emulator presents CP/M programs with
     a Lear Siegler ADM-3A terminal and translates its screen-control stream to
     the connected client: ANSI cursor sequences for a modern terminal, native

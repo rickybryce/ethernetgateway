@@ -877,6 +877,23 @@ impl App {
                 70.0,
             );
         });
+        // Virtual-modem UART port: which machine/port address the emulated
+        // CP/M's modem answers at.
+        ui.horizontal(|ui| {
+            ui.label("CP/M virtual modem:");
+            egui::ComboBox::from_id_salt("cpm_emu_uart_combo")
+                .width(320.0)
+                .selected_text(crate::cpm::uart::uart_description(&self.cfg.cpm_emu_uart))
+                .show_ui(ui, |ui| {
+                    for c in crate::cpm::uart::UART_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_emu_uart,
+                            c.key.to_string(),
+                            c.description,
+                        );
+                    }
+                });
+        });
     }
 
     /// Render the Server frame's advanced options — outbound Telnet and

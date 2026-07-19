@@ -856,7 +856,7 @@ fn collect_form_updates(
         "punter_block_size", "punter_negotiation_timeout",
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
-        "cpm_emu_max_minstr",
+        "cpm_emu_max_minstr", "cpm_emu_uart",
         "ssh_gateway_auth",
         "gateway_role", "slave_master_host", "slave_master_port",
         "slave_master_username", "slave_master_password",
@@ -1539,6 +1539,17 @@ fn render_more_popups(cfg: &Config) -> String {
     // primary frame so it stays at three rows, mirroring the GUI).  The API
     // key + homepage remain on the main frame, so they are NOT repeated here
     // (a duplicate name= in this single form would clobber the value).
+    let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
+        .iter()
+        .map(|c| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                c.key,
+                if c.key == cfg.cpm_emu_uart { " selected" } else { "" },
+                html_escape(c.description),
+            )
+        })
+        .collect();
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">AI, Browser &amp; Weather \u{2014} More</span>\
@@ -1554,6 +1565,7 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <div class=\"row\">{cpm}</div>\
          <div class=\"row\">{cpmmax}</div>\
+         <div class=\"row\">{cpmuart}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         loc = html_escape(&cfg.weather_location),
@@ -1569,6 +1581,10 @@ fn render_more_popups(cfg: &Config) -> String {
             "cpm_emu_max_minstr",
             "CP/M runaway ceiling (M-instr)",
             cfg.cpm_emu_max_minstr,
+        ),
+        cpmuart = format_args!(
+            "<span class=\"label\">CP/M virtual modem port:</span>\
+             <select name=\"cpm_emu_uart\">{cpm_uart_options}</select>"
         ),
         save = save_button("save", "Save", "secondary"),
     ));

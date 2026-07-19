@@ -31,10 +31,12 @@
 mod fcb;
 mod fs;
 mod machine;
+pub mod uart;
 
 pub use fcb::{parse_afn, parse_command_fcb, split_8_3, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
+pub use uart::{resolve_uart, UartProfile};
 
 use iz80::{Cpu, Machine, Reg8, Reg16};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -306,6 +308,13 @@ impl Cpm {
                 self.mem.poke(at + off, 0); // cr, r0, r1, r2
             }
         }
+    }
+
+    /// Select (or clear) the virtual-modem UART placement for this machine.
+    /// A CP/M comms program's `IN`/`OUT` to the profile's ports then reach the
+    /// emulated modem.  `None` leaves the ports inert.
+    pub fn set_uart(&mut self, uart: Option<UartProfile>) {
+        self.mem.set_uart(uart);
     }
 
     /// Total instructions executed since the last `load_com` (diagnostics).

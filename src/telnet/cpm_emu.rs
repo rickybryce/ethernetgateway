@@ -150,6 +150,9 @@ impl TelnetSession {
         // place — which is what makes SAVE authentic (dump the TPA a prior
         // program, e.g. DDT, left behind).
         let mut cpm = Cpm::new();
+        // Wire the virtual-modem UART (if the operator selected one) so a CP/M
+        // comms program finds its modem at the configured machine ports.
+        cpm.set_uart(crate::cpm::resolve_uart(&config::get_config().cpm_emu_uart));
         loop {
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;

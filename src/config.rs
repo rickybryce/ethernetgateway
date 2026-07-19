@@ -658,6 +658,10 @@ pub struct Config {
     /// never performs console I/O is aborted once it reaches this count, so
     /// the user always regains the `A>` prompt.
     pub cpm_emu_max_minstr: u32,
+    /// Virtual-modem UART profile for the CP/M emulator — which machine/port
+    /// (`rc2014_1b`, `altair_2sio1`, …) the emulated modem answers at, or
+    /// `off`.  Validated against `crate::cpm::uart::UART_CHOICES`.
+    pub cpm_emu_uart: String,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
     /// on first read.
@@ -763,6 +767,7 @@ impl Default for Config {
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
+            cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
@@ -1251,6 +1256,11 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u32| v >= 1)
             .unwrap_or(DEFAULT_CPM_EMU_MAX_MINSTR),
+        cpm_emu_uart: map
+            .get("cpm_emu_uart")
+            .filter(|v| crate::cpm::uart::is_valid_uart_key(v))
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
         serial_a: read_serial_port_config(&map, "serial_a", true),
         serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
@@ -1851,9 +1861,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.
+# cpm_emu_uart: virtual-modem UART port the emulated CP/M sees.  off (default)
+#   = no modem; otherwise a machine/port profile, e.g. rc2014_1b (RC2014 SIO/2
+#   0x82/0x83), altair_2sio1 (Altair 88-2SIO 0x10/0x11).
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
+    write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
     content.push('\n');
 
     content.push_str("\
@@ -2329,6 +2343,11 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "cpm_emu_max_minstr" => {
             if let Ok(v) = value.parse::<u32>() && v >= 1 {
                 cfg.cpm_emu_max_minstr = v;
+            }
+        }
+        "cpm_emu_uart" => {
+            if crate::cpm::uart::is_valid_uart_key(value) {
+                cfg.cpm_emu_uart = value.to_string();
             }
         }
         "web_port" => {
@@ -2913,6 +2932,7 @@ mod tests {
             web_port: 9090,
             cpm_emu_enabled: true,
             cpm_emu_max_minstr: 500,
+            cpm_emu_uart: "rc2014_1b".to_string(),
             serial_a: SerialPortConfig {
                 enabled: true,
                 mode: "console".into(),
@@ -3193,6 +3213,7 @@ mod tests {
             "web_port",
             "cpm_emu_enabled",
             "cpm_emu_max_minstr",
+            "cpm_emu_uart",
             "serial_a_enabled",
             "serial_a_mode",
             "serial_a_port",
@@ -3790,6 +3811,20 @@ mod tests {
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
         apply_config_key(&mut cfg, "cpm_emu_max_minstr", "abc");
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
+    }
+
+    #[test]
+    fn test_apply_config_key_cpm_emu_uart() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.cpm_emu_uart, "off"); // default
+
+        apply_config_key(&mut cfg, "cpm_emu_uart", "rc2014_1b");
+        assert_eq!(cfg.cpm_emu_uart, "rc2014_1b");
+        apply_config_key(&mut cfg, "cpm_emu_uart", "altair_sio");
+        assert_eq!(cfg.cpm_emu_uart, "altair_sio");
+        // An unknown profile is rejected; the value is unchanged.
+        apply_config_key(&mut cfg, "cpm_emu_uart", "bogus");
+        assert_eq!(cfg.cpm_emu_uart, "altair_sio");
     }
 
     #[test]

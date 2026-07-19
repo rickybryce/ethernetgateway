@@ -527,6 +527,16 @@ impl TelnetSession {
                 self.amber(&cfg.cpm_emu_max_minstr.to_string())
             ))
             .await?;
+            // Virtual-modem port, description truncated to the screen width.
+            let modem_w = if self.terminal_type == TerminalType::Petscii { 26 } else { 62 };
+            self.send_line(&format!(
+                "  Modem:     {}",
+                self.amber(&truncate_to_width(
+                    crate::cpm::uart::uart_description(&cfg.cpm_emu_uart),
+                    modem_w
+                ))
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -537,6 +547,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Set runaway ceiling (M-instr)",
                 self.cyan("C")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Cycle virtual-modem port",
+                self.cyan("U")
             ))
             .await?;
             self.send_line("").await?;
@@ -574,9 +589,24 @@ impl TelnetSession {
                     )
                     .await?;
                 }
+                "u" => {
+                    // Cycle to the next virtual-modem port profile.
+                    let keys: Vec<&str> =
+                        crate::cpm::uart::UART_CHOICES.iter().map(|c| c.key).collect();
+                    let idx = keys
+                        .iter()
+                        .position(|k| *k == cfg.cpm_emu_uart)
+                        .unwrap_or(0);
+                    let next = keys[(idx + 1) % keys.len()].to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_emu_uart", &next);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press E, C, or Q.").await?;
+                    self.show_error("Press E, C, U, or Q.").await?;
                 }
             }
         }
