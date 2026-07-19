@@ -237,6 +237,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     clears its TX-ready bit when the transmit ring is full, so the no-byte-loss
     flow-control guarantee holds for it as it already did for the SIO / ACIA
     profiles.
+  - **`STAT` now reports real free space instead of 0 bytes.** The disk-info
+    BDOS calls `STAT` uses — 31 (Get Addr(DPB)) and 27 (Get Addr(Alloc)) —
+    were unimplemented and returned 0, so `STAT` read a garbage disk-parameter
+    block / allocation vector from address 0 and reported "0 bytes remaining"
+    on every drive. The emulator now synthesizes a fixed 8 MB / 4 KB-block DPB
+    and an allocation vector whose used bits reflect the drive's actual file
+    usage, so free space is reported correctly.
 
 ## [0.7.0] - 2026-07-17
 

@@ -759,11 +759,18 @@ impl TelnetSession {
                             // Disk-system / FCB file BDOS calls (drive
                             // select, DMA, open/read/write/search/delete/
                             // rename/size) need no session I/O, so the core
-                            // services them directly.  Truly-unknown funcs
-                            // return 0.
-                            let code = crate::cpm::service_disk_bdos(cpm, fs, func)
-                                .unwrap_or(0);
-                            cpm.bdos_return(code);
+                            // services them directly.  The disk-info "Get
+                            // Addr(...)" calls (DPB / alloc vector, used by
+                            // STAT for free space) return an address in HL;
+                            // everything else returns a byte code (unknown
+                            // funcs → 0).
+                            if let Some(hl) = crate::cpm::disk_info_bdos(cpm, fs, func) {
+                                cpm.bdos_return_hl(hl);
+                            } else {
+                                let code = crate::cpm::service_disk_bdos(cpm, fs, func)
+                                    .unwrap_or(0);
+                                cpm.bdos_return(code);
+                            }
                         }
                     }
                 }

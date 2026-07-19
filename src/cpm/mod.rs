@@ -174,6 +174,23 @@ impl Cpm {
         self.cpu.registers().set_pc(ret);
     }
 
+    /// Return from a BDOS call that yields an address in `HL` (the "Get
+    /// Addr(...)" group — e.g. Get DPB / Get Alloc).  Sets `HL` to the address
+    /// (with `A`/`B` mirroring `L`/`H`, the CP/M register convention) and
+    /// `RET`s, unlike [`Cpm::bdos_return`] which forces `H=0` for a byte code.
+    pub fn bdos_return_hl(&mut self, hl: u16) {
+        let lo = (hl & 0xFF) as u8;
+        let hi = (hl >> 8) as u8;
+        self.cpu.registers().set8(Reg8::A, lo);
+        self.cpu.registers().set8(Reg8::L, lo);
+        self.cpu.registers().set8(Reg8::B, hi);
+        self.cpu.registers().set8(Reg8::H, hi);
+        let sp = self.cpu.registers().get16(Reg16::SP);
+        let ret = self.mem.peek16(sp);
+        self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
+        self.cpu.registers().set_pc(ret);
+    }
+
     /// Read an 8-bit register (for the host to fetch BDOS arguments).
     pub fn reg8(&mut self, r: Reg8) -> u8 {
         self.cpu.registers().get8(r)
@@ -380,6 +397,75 @@ fn write_dir_record(cpm: &mut Cpm, dma: u16, entry: &[u8; 32]) {
 /// Service the "disk system" BDOS calls that need only guest memory + the
 /// filesystem (drive select, DMA, and the FCB file operations) — i.e. every
 /// BDOS call that performs **no** console/session I/O.  Returns
+// Synthesized virtual-disk geometry for the BDOS disk-info queries STAT uses
+// to report "bytes remaining".  An 8 MB drive with 4 KB allocation blocks:
+// 2048 blocks, 1024 directory entries.  The geometry is fixed for every drive
+// (all drives are host folders of effectively the same capacity); only the
+// allocation vector varies, reflecting each drive's actual usage.
+const VD_BLS: u64 = 4096; // allocation block size
+const VD_BSH: u8 = 5; // block shift (128 << 5 = 4096)
+const VD_BLM: u8 = 31; // block mask (4096/128 - 1)
+const VD_EXM: u8 = 1; // extent mask (BLS=4096, DSM>255)
+const VD_DSM: u16 = 2047; // highest block number (2048 blocks × 4 KB = 8 MB)
+const VD_DRM: u16 = 1023; // highest directory entry (1024 entries)
+const VD_AL0: u8 = 0xFF; // 8 directory blocks reserved (32 KB / 4 KB)
+const VD_AL1: u8 = 0x00;
+const VD_DIR_BLOCKS: u64 = 8; // blocks the directory occupies (per AL0/AL1)
+const VD_CKS: u16 = 0; // fixed disk: no directory-checksum vector
+const VD_OFF: u16 = 0; // no reserved (system) tracks
+const VD_SPT: u16 = 128; // 128-byte sectors per track (cosmetic for STAT)
+
+// Reserved-RAM scratch (in the 0xFE00..0xFFFF system area, above the TPA and
+// the downward-growing stack, which a well-behaved program never touches)
+// where the synthesized DPB + allocation vector are materialized for the guest
+// to read via the address the query returns.
+const DPB_ADDR: u16 = 0xFE80;
+const ALLOC_ADDR: u16 = 0xFE90; // 15-byte DPB fits before this
+
+/// The fixed 15-byte CP/M 2.2 Disk Parameter Block for the virtual drive.
+fn build_dpb() -> [u8; 15] {
+    let mut d = [0u8; 15];
+    d[0..2].copy_from_slice(&VD_SPT.to_le_bytes());
+    d[2] = VD_BSH;
+    d[3] = VD_BLM;
+    d[4] = VD_EXM;
+    d[5..7].copy_from_slice(&VD_DSM.to_le_bytes());
+    d[7..9].copy_from_slice(&VD_DRM.to_le_bytes());
+    d[9] = VD_AL0;
+    d[10] = VD_AL1;
+    d[11..13].copy_from_slice(&VD_CKS.to_le_bytes());
+    d[13..15].copy_from_slice(&VD_OFF.to_le_bytes());
+    d
+}
+
+/// Handle the disk-info "Get Addr(...)" BDOS calls STAT uses for free space:
+/// 31 = Get Addr(DPB), 27 = Get Addr(Alloc).  Materializes a synthesized DPB /
+/// allocation vector in reserved guest RAM and returns its address (to be put
+/// in `HL`).  `None` for any other function.
+pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
+    match func {
+        31 => {
+            cpm.write_block(DPB_ADDR, &build_dpb());
+            Some(DPB_ADDR)
+        }
+        27 => {
+            // Allocation vector: a set bit marks a used block — the reserved
+            // directory blocks plus the blocks this drive's files occupy — so
+            // STAT's free count (zero bits × block size) reflects real usage.
+            let total = VD_DSM as u64 + 1; // 2048 blocks
+            let used = (VD_DIR_BLOCKS + fs.current_drive_used_blocks(VD_BLS)).min(total);
+            let nbytes = (VD_DSM as usize / 8) + 1; // 256 bytes = exactly 2048 bits
+            let mut vec = vec![0u8; nbytes];
+            for b in 0..used as usize {
+                vec[b / 8] |= 0x80 >> (b % 8); // MSB-first, matching AL0/AL1
+            }
+            cpm.write_block(ALLOC_ADDR, &vec);
+            Some(ALLOC_ADDR)
+        }
+        _ => None,
+    }
+}
+
 /// `Some(return_code)` when `func` is one of these, or `None` for a
 /// console-group call the async driver must handle itself.
 ///
@@ -756,6 +842,42 @@ mod tests {
         // The file really exists on disk with our bytes.
         let disk = std::fs::read(base.join("A").join("IO.TXT")).unwrap();
         assert_eq!(&disk[..8], b"DISK OK!");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_disk_info_bdos_dpb_and_free_space() {
+        let base = std::env::temp_dir().join("xmodem_cpm_diskinfo");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        // BDOS 31 (Get DPB): address returned, DPB fields match the geometry.
+        let dpb_addr = disk_info_bdos(&mut cpm, &fs, 31).unwrap();
+        let d = cpm.read_block(dpb_addr, 15);
+        assert_eq!(d[2], VD_BSH);
+        assert_eq!(d[3], VD_BLM);
+        assert_eq!(u16::from_le_bytes([d[5], d[6]]), VD_DSM);
+        assert_eq!(u16::from_le_bytes([d[7], d[8]]), VD_DRM);
+        assert_eq!(d[9], VD_AL0);
+
+        // Count free (zero) bits in the allocation vector.
+        let free_blocks = |cpm: &mut Cpm| -> u64 {
+            let addr = disk_info_bdos(cpm, &fs, 27).unwrap();
+            let nbytes = (VD_DSM as usize / 8) + 1;
+            let v = cpm.read_block(addr, nbytes);
+            v.iter().map(|b| b.count_zeros() as u64).sum()
+        };
+
+        // Empty drive: only the directory's 8 reserved blocks are used.
+        let total = VD_DSM as u64 + 1;
+        assert_eq!(free_blocks(&mut cpm), total - VD_DIR_BLOCKS);
+
+        // A ~5000-byte file occupies 2 of the 4096-byte blocks; free drops by 2.
+        std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 5000]).unwrap();
+        assert_eq!(free_blocks(&mut cpm), total - VD_DIR_BLOCKS - 2);
+
         let _ = std::fs::remove_dir_all(&base);
     }
 

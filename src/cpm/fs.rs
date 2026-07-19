@@ -350,6 +350,30 @@ impl CpmFs {
         names
     }
 
+    /// Number of `block_size`-byte allocation blocks the CP/M-visible files on
+    /// the current drive occupy — each file's byte length rounded up to a whole
+    /// block (as CP/M allocates), summed.  Used to synthesize the allocation
+    /// vector for BDOS "get free space" queries (STAT's "bytes remaining").
+    /// Only valid 8.3 files count, matching what the directory shows.
+    pub fn current_drive_used_blocks(&self, block_size: u64) -> u64 {
+        let dir = self.drive_dir(self.drive);
+        let mut blocks: u64 = 0;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if split_8_3(&fname).is_none() {
+                    continue; // not a CP/M-visible name
+                }
+                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                blocks += len.div_ceil(block_size); // 0-byte file → 0 data blocks
+            }
+        }
+        blocks
+    }
+
     /// BDOS "delete file" (19): remove every host file on the FCB's drive
     /// matching the (possibly wildcarded) FCB.  Returns the count deleted.
     pub fn delete(&self, fcb: &Fcb) -> usize {
