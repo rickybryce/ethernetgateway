@@ -1280,7 +1280,7 @@ fn frame_ai_browser(cfg: &Config) -> String {
     // (render_more_popups) so this frame stays compact, mirroring the GUI.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
-         <span class=\"title\">AI Chat, Browser, and Weather</span>\
+         <span class=\"title\">AI Chat, Browser, Weather &amp; CP/M</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\"><span class=\"label\">API Key:</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\"></div>\
@@ -1552,7 +1552,7 @@ fn render_more_popups(cfg: &Config) -> String {
         .collect();
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body\">\
-         <div class=\"modal-head\"><span class=\"title\">AI, Browser &amp; Weather \u{2014} More</span>\
+         <div class=\"modal-head\"><span class=\"title\">AI, Browser, Weather &amp; CP/M \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-ai\">\u{00d7}</button></div>\
          <div class=\"row\"><span class=\"label\">Location:</span>\
          <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
