@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     into the default FCBs at 0x005C / 0x006C. The program image is loaded
     jailed under `transfer_dir` (canonical-prefix + symlink checks) and bounded
     by the per-file size cap.
+  - **Full CP/M resident command set.** The `A>` prompt now implements all
+    six authentic CP/M 2.2 resident commands — `DIR`, `ERA`, `REN`, `TYPE`,
+    `SAVE`, `USER` (plus the `d:` drive change) — so no upload is needed for
+    everyday file work. `REN` renames (no clobber); `TYPE` streams a text file
+    and stops at the `^Z` end-of-file marker (binary files refused); `USER`
+    selects an area (only area 0 exists — one flat area per drive). To make
+    `SAVE` authentic, the emulated machine now stays resident across commands:
+    the transient program area survives a warm boot back to `A>` (as on real
+    CP/M), so `SAVE n file` dumps the image a previous program (e.g. `DDT`)
+    left in memory. Low-memory vectors are reinstalled on each program load so
+    a program that trashes page zero can't corrupt the next one.
   - **Configurable runaway ceiling.** A new config key `cpm_emu_max_minstr`
     (millions of Z80 instructions per program run, default 2000 = 2 billion;
     wired into the telnet, web, and GUI config UIs) bounds a compute-bound

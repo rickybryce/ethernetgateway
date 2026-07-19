@@ -2177,6 +2177,10 @@ are gateway conveniences.
         <tr><td><code>A:</code> &hellip; <code>H:</code></td><td>&#10003;</td><td>Change the current drive (the CP/M <code>d:</code> resident command).</td></tr>
         <tr><td><code>DIR</code></td><td>&#10003;</td><td>List the files on the current drive.</td></tr>
         <tr><td><code>ERA name</code> (<code>DEL</code>)</td><td>&#10003;</td><td>Erase file(s), wildcards allowed (<code>*.*</code> confirms first).</td></tr>
+        <tr><td><code>REN new=old</code></td><td>&#10003;</td><td>Rename a file (also accepts <code>REN new old</code>). Refuses to overwrite an existing name.</td></tr>
+        <tr><td><code>TYPE file</code></td><td>&#10003;</td><td>Stream a text file to the console, stopping at the <code>^Z</code> end-of-file marker. Binary files are refused.</td></tr>
+        <tr><td><code>SAVE n file</code></td><td>&#10003;</td><td>Write <code>n</code> 256-byte pages of the TPA (from <code>0100h</code>) to a file &mdash; captures the image a prior program (e.g. <code>DDT</code>) left in memory.</td></tr>
+        <tr><td><code>USER n</code></td><td>&#10003;</td><td>Select user area 0&ndash;15. Only area&nbsp;0 exists (each drive is one flat area); a higher number reports that.</td></tr>
         <tr><td><code>VER</code> (<code>VERSION</code>)</td><td>&mdash;</td><td>Show the emulator identity (CP/M&nbsp;2.2, iz80 core).</td></tr>
         <tr><td><code>HELP</code> (<code>?</code>)</td><td>&mdash;</td><td>Show the built-in command list.</td></tr>
         <tr><td><code>HELLO</code></td><td>&mdash;</td><td>Demo: print a banner via BDOS, then warm-boot.</td></tr>
@@ -2186,17 +2190,16 @@ are gateway conveniences.
     </tbody>
 </table>
 
-<aside class="note">
-<span class="label">Stock CP/M resident commands not built in</span>
-CP/M&nbsp;2.2&rsquo;s command processor also resides <code>REN</code> (rename),
-<code>TYPE</code> (show a text file), <code>SAVE</code> (save memory to a file),
-and <code>USER</code> (select a user area). These are <strong>not</strong> built
-into the emulator&rsquo;s prompt &mdash; typing them looks for a <code>.COM</code>
-of that name instead. For everyday file management (rename, view, copy, erase
-across directories) use the Gateway Shell (chapter&nbsp;8.10) on the staging
-side, and upload <code>PIP.COM</code>&nbsp;/&nbsp;<code>STAT.COM</code> for the
-in-CP/M equivalents. User areas are not modelled (each drive is one flat area).
-</aside>
+<p>
+All six authentic CP/M&nbsp;2.2 resident commands (<code>DIR</code>,
+<code>ERA</code>, <code>REN</code>, <code>TYPE</code>, <code>SAVE</code>,
+<code>USER</code>) &mdash; plus the <code>d:</code> drive change &mdash; are
+built in, so nothing needs uploading for everyday file work. Because the machine stays resident between commands
+(the transient program area survives a warm boot back to <code>A&gt;</code>,
+as on real CP/M), <code>SAVE</code> can dump the memory image a previous
+program left behind. User areas beyond&nbsp;0 aren&rsquo;t modelled &mdash; each
+drive is a single flat area.
+</p>
 
 <h3>Breaking out &amp; the runaway ceiling</h3>
 

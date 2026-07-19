@@ -32,7 +32,7 @@ mod fcb;
 mod fs;
 mod machine;
 
-pub use fcb::{parse_afn, parse_command_fcb, Fcb, FCB_SIZE};
+pub use fcb::{parse_afn, parse_command_fcb, split_8_3, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
 
@@ -90,15 +90,22 @@ impl Cpm {
             mem: CpmMachine::new(),
             instructions: 0,
         };
-        // Warm-boot vector at 0x0000 and BDOS entry at 0x0005 as real CP/M
-        // lays them out (JP <addr>), so a guest that inspects address 6 to
-        // find the top of the TPA sees a sane value.  We intercept both by
-        // program counter, so the jump targets themselves are never run.
-        cpm.mem.poke(0x0000, 0xC3); // JP WBOOT handler
-        cpm.mem.poke16(0x0001, STACK_TOP);
-        cpm.mem.poke(0x0005, 0xC3); // JP BDOS
-        cpm.mem.poke16(0x0006, STACK_TOP);
+        cpm.install_low_memory();
         cpm
+    }
+
+    /// Install the CP/M low-memory vectors: the warm-boot vector at 0x0000
+    /// and the BDOS entry at 0x0005 as real CP/M lays them out (`JP <addr>`),
+    /// so a guest that inspects address 6 to find the top of the TPA sees a
+    /// sane value.  We intercept both by program counter, so the jump targets
+    /// themselves are never run.  Re-run on every `load_com` so a program
+    /// that trashed page zero can't corrupt the next program's vectors —
+    /// mirrors real CP/M reloading the system on a warm boot.
+    fn install_low_memory(&mut self) {
+        self.mem.poke(0x0000, 0xC3); // JP WBOOT handler
+        self.mem.poke16(0x0001, STACK_TOP);
+        self.mem.poke(0x0005, 0xC3); // JP BDOS
+        self.mem.poke16(0x0006, STACK_TOP);
     }
 
     /// Load a `.COM` image into the TPA and prepare to run it: the stack is
@@ -107,6 +114,7 @@ impl Cpm {
     /// the PC is set to the TPA base.  Bytes past the usable TPA are
     /// silently dropped (a `.COM` never legitimately exceeds it).
     pub fn load_com(&mut self, program: &[u8]) {
+        self.install_low_memory();
         let max = (STACK_TOP - TPA_BASE) as usize;
         for (i, b) in program.iter().take(max).enumerate() {
             self.mem.poke(TPA_BASE + i as u16, *b);
@@ -780,6 +788,32 @@ mod tests {
         }
         assert_eq!(out, b"OK!");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_load_com_reinstalls_low_vectors() {
+        // A program can trash page zero; the next load_com must restore the
+        // warm-boot (0x0000) and BDOS (0x0005) JP vectors so the following
+        // program's CALL 5 / warm boot still behave — mirrors CP/M reloading
+        // the system on a warm boot.
+        let mut cpm = Cpm::new();
+        cpm.write_block(0x0000, &[0xFF; 8]); // clobber both vectors
+        cpm.load_com(&[0xC9]); // RET
+        assert_eq!(cpm.read_block(0x0000, 1)[0], 0xC3); // JP restored
+        assert_eq!(cpm.read_block(0x0005, 1)[0], 0xC3);
+    }
+
+    #[test]
+    fn test_tpa_persists_across_loads() {
+        // The machine persists across program runs: memory a prior program
+        // left in the TPA (above the next program) survives the next
+        // load_com. This is what lets SAVE dump a previous program's image.
+        let mut cpm = Cpm::new();
+        cpm.write_block(0x0100, &[0xC9]); // a tiny "program"
+        cpm.write_block(0x4000, &[0x42, 0x43, 0x44]); // marker left in the TPA
+        cpm.load_com(&[0xC9]); // load a new program at 0x0100
+        // The marker well above the loaded region is untouched.
+        assert_eq!(cpm.read_block(0x4000, 3), &[0x42, 0x43, 0x44]);
     }
 
     #[test]

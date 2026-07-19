@@ -46,7 +46,7 @@
 //! over telnet/SSH.  Still to come (B4b+): richer terminal translation
 //! (ADM-3A/VT52/VT100) and a concurrent out-of-band break-out reader.
 use super::*;
-use crate::cpm::{parse_afn, parse_command_fcb, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
+use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -130,6 +130,12 @@ impl TelnetSession {
     /// transient program, falling back to CP/M's bad-verb error (`VERB?`)
     /// when no such file exists.
     async fn cpmemu_repl(&mut self, fs: &mut CpmFs) -> Result<(), std::io::Error> {
+        // One machine persists for the whole session: the TPA (and the low
+        // vectors, reinstalled each load) survive across program runs, so a
+        // warm-boot back to `A>` leaves the last program's memory image in
+        // place — which is what makes SAVE authentic (dump the TPA a prior
+        // program, e.g. DDT, left behind).
+        let mut cpm = Cpm::new();
         loop {
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;
@@ -172,9 +178,13 @@ impl TelnetSession {
                 }
                 "DIR" => self.cpmemu_dir(fs).await?,
                 "ERA" | "DEL" => self.cpmemu_era(fs, trimmed).await?,
+                "REN" | "RENAME" => self.cpmemu_ren(fs, trimmed).await?,
+                "TYPE" => self.cpmemu_type(fs, trimmed).await?,
+                "SAVE" => self.cpmemu_save(&mut cpm, fs, trimmed).await?,
+                "USER" => self.cpmemu_user(trimmed).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_hello(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &Self::cpmemu_demo_hello(), "", fs).await? {
                         return Ok(());
                     }
                 }
@@ -186,14 +196,14 @@ impl TelnetSession {
                         self.dim("Echoing keys; '.' ends, ESC ESC aborts.")
                     ))
                     .await?;
-                    if !self.cpmemu_run_program(&Self::cpmemu_demo_echo(), "", fs).await? {
+                    if !self.cpmemu_run_program(&mut cpm, &Self::cpmemu_demo_echo(), "", fs).await? {
                         return Ok(());
                     }
                 }
                 other => {
                     // Not a built-in: try to load and run `<verb>.COM` from
                     // the drive.  `None` = no such file (CP/M prints VERB?).
-                    match self.cpmemu_try_run_com(fs, &verb, trimmed).await? {
+                    match self.cpmemu_try_run_com(&mut cpm, fs, &verb, trimmed).await? {
                         Some(true) => {}                    // ran; back to A>
                         Some(false) => return Ok(()),       // session gone
                         None => {
@@ -272,18 +282,190 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Build a default-drive FCB (drive byte 0 = current drive) from a
+    /// concrete 8.3 name/ext, for the resident file commands.
+    fn cpmemu_fcb(name: &[u8; 8], ext: &[u8; 3]) -> Fcb {
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(name);
+        raw[9..12].copy_from_slice(ext);
+        Fcb::from_bytes(&raw)
+    }
+
+    /// Built-in `REN` (CP/M resident): rename a file on the current drive.
+    /// Accepts the authentic `REN new=old` and, for convenience, `REN new
+    /// old`.  Silent on success (as CP/M is); reports if the source is
+    /// missing or the destination already exists (no silent clobber).
+    async fn cpmemu_ren(&mut self, fs: &mut CpmFs, line: &str) -> Result<(), std::io::Error> {
+        // Everything after the verb, with the '=' form normalized to a space
+        // so both `new=old` and `new old` split the same way.
+        let operand = line
+            .split_once(char::is_whitespace)
+            .map(|x| x.1.trim())
+            .unwrap_or("");
+        if operand.is_empty() {
+            self.send_line("  REN new=old").await?;
+            return Ok(());
+        }
+        let operand = operand.replace('=', " ");
+        let mut parts = operand.split_whitespace();
+        let new_spec = parts.next().unwrap_or("");
+        let old_spec = parts.next().unwrap_or("");
+        let (Some((nn, ne)), Some((on, oe))) = (split_8_3(new_spec), split_8_3(old_spec)) else {
+            self.send_line("  REN new=old").await?;
+            return Ok(());
+        };
+        let old = Self::cpmemu_fcb(&on, &oe);
+        if fs.rename(&old, &nn, &ne) {
+            return Ok(()); // success is silent, as in CP/M
+        }
+        // Distinguish the two refusal cases for a helpful message.
+        if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)).is_some() {
+            self.send_line("  File exists").await?;
+        } else {
+            self.send_line("  No file").await?;
+        }
+        Ok(())
+    }
+
+    /// Built-in `TYPE` (CP/M resident): stream a text file on the current
+    /// drive to the console, stopping at the CP/M end-of-file marker
+    /// (`^Z`, 0x1A) as CP/M does.  A binary file is refused (our safety
+    /// addition) so it can't spray terminal-hostile bytes at a vintage
+    /// screen, and the streamed portion is capped so a huge file can't tie
+    /// up the link indefinitely (there is no break-out during a built-in).
+    async fn cpmemu_type(&mut self, fs: &mut CpmFs, line: &str) -> Result<(), std::io::Error> {
+        let arg = match line.split_whitespace().nth(1) {
+            Some(a) => a,
+            None => {
+                self.send_line("  TYPE what?").await?;
+                return Ok(());
+            }
+        };
+        let (name, ext) = match split_8_3(arg) {
+            Some(pair) => pair,
+            None => {
+                self.send_line(&format!("  {}?", self.red(&arg.to_ascii_uppercase())))
+                    .await?;
+                return Ok(());
+            }
+        };
+        let bytes = match fs.read_whole_file(&Self::cpmemu_fcb(&name, &ext)) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                self.send_line("  No file").await?;
+                return Ok(());
+            }
+            Err(_) => {
+                self.send_line(&format!("  {}", self.red("[read error]"))).await?;
+                return Ok(());
+            }
+        };
+        // Text ends at the first ^Z (CP/M EOF filler), if any.
+        let text = match bytes.iter().position(|&b| b == 0x1A) {
+            Some(i) => &bytes[..i],
+            None => &bytes[..],
+        };
+        // Binary guard: any NUL, or a heavy run of control bytes (excluding
+        // the usual TAB/LF/FF/CR), means "don't stream this".
+        const TYPE_MAX: usize = 256 * 1024;
+        let controls = text
+            .iter()
+            .filter(|&&b| b < 0x20 && !matches!(b, 0x09 | 0x0A | 0x0C | 0x0D))
+            .count();
+        if text.contains(&0) || (text.len() >= 16 && controls * 100 / text.len() > 30) {
+            self.send_line("  Cannot TYPE a binary file.").await?;
+            return Ok(());
+        }
+        let (shown, truncated) = if text.len() > TYPE_MAX {
+            (&text[..TYPE_MAX], true)
+        } else {
+            (text, false)
+        };
+        self.cpmemu_conout(shown).await?;
+        self.send_line("").await?;
+        if truncated {
+            self.send_line(&format!("  {}", self.dim("[truncated]"))).await?;
+        }
+        Ok(())
+    }
+
+    /// Built-in `SAVE` (CP/M resident): write `n` 256-byte pages of the TPA
+    /// (from 0x0100) to a file on the current drive, exactly as CP/M's
+    /// `SAVE n file`.  Because the machine persists across commands, this
+    /// captures the memory image a prior program (e.g. `DDT`) left behind.
+    async fn cpmemu_save(
+        &mut self,
+        cpm: &mut Cpm,
+        fs: &mut CpmFs,
+        line: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut args = line.split_whitespace().skip(1);
+        let pages = match args.next().and_then(|s| s.parse::<u16>().ok()) {
+            Some(n) if n <= 255 => n,
+            _ => {
+                self.send_line("  SAVE n file  (n = 0..255 pages)").await?;
+                return Ok(());
+            }
+        };
+        let (name, ext) = match args.next().and_then(split_8_3) {
+            Some(pair) => pair,
+            None => {
+                self.send_line("  SAVE n file  (n = 0..255 pages)").await?;
+                return Ok(());
+            }
+        };
+        let fcb = Self::cpmemu_fcb(&name, &ext);
+        if fs.make(&fcb).is_none() {
+            self.send_line(&format!("  {}", self.red("[cannot create file]"))).await?;
+            return Ok(());
+        }
+        // n pages = n*256 bytes = n*2 records of 128 bytes, read from the TPA.
+        let data = cpm.read_block(0x0100, pages as usize * 256);
+        for (i, chunk) in data.chunks(128).enumerate() {
+            let mut rec = [0u8; 128];
+            rec[..chunk.len()].copy_from_slice(chunk);
+            if fs.write_record(&fcb, i as u32, &rec).is_err() {
+                self.send_line(&format!("  {}", self.red("[write error]"))).await?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Built-in `USER` (CP/M resident): select a user area 0–15.  The
+    /// emulator models each drive as a single flat area, so only area 0
+    /// exists; a valid `USER 0` is accepted silently and any other valid
+    /// number reports the single-area limitation rather than silently
+    /// hiding files.  Recognized (not passed through to a `.COM`).
+    async fn cpmemu_user(&mut self, line: &str) -> Result<(), std::io::Error> {
+        match line.split_whitespace().nth(1).and_then(|s| s.parse::<u8>().ok()) {
+            Some(0) => {}
+            Some(n) if n <= 15 => {
+                self.send_line("  Only user area 0 (single flat area).").await?;
+            }
+            _ => {
+                self.send_line("  USER 0..15").await?;
+            }
+        }
+        Ok(())
+    }
+
     /// One-screen help for the CCP-lite built-ins.
     async fn cpmemu_help(&mut self) -> Result<(), std::io::Error> {
         for line in [
             "  Built-in commands:",
-            "  HELP / ?   this help",
-            "  VER        emulator version",
             "  DIR        list files on this drive",
             "  ERA name   erase file(s) (wildcards)",
+            "  REN new=old  rename a file",
+            "  TYPE file  show a text file",
+            "  SAVE n file  save n TPA pages",
+            "  USER n     select user area (0)",
             "  A: .. H:   change drive",
+            "  VER        emulator version",
             "  HELLO      BDOS print-string demo",
             "  ECHO       interactive console demo",
             "  name       run name.COM from the drive",
+            "  HELP / ?   this help",
             "  EXIT/BYE/QUIT  leave CP/M",
         ] {
             self.send_line(line).await?;
@@ -298,11 +480,11 @@ impl TelnetSession {
     /// `Ok(true)` (return to the `A>` prompt).
     async fn cpmemu_run_program(
         &mut self,
+        cpm: &mut Cpm,
         program: &[u8],
         tail: &str,
         fs: &mut CpmFs,
     ) -> Result<bool, std::io::Error> {
-        let mut cpm = Cpm::new();
         cpm.load_com(program);
         // Lay down page zero (command tail + default FCBs) so a real `.COM`
         // finds its arguments where CP/M puts them.  Built-in demos pass an
@@ -402,7 +584,7 @@ impl TelnetSession {
                             // rename/size) need no session I/O, so the core
                             // services them directly.  Truly-unknown funcs
                             // return 0.
-                            let code = crate::cpm::service_disk_bdos(&mut cpm, fs, func)
+                            let code = crate::cpm::service_disk_bdos(cpm, fs, func)
                                 .unwrap_or(0);
                             cpm.bdos_return(code);
                         }
@@ -431,6 +613,7 @@ impl TelnetSession {
     /// session disconnected mid-run (leave the emulator).
     async fn cpmemu_try_run_com(
         &mut self,
+        cpm: &mut Cpm,
         fs: &mut CpmFs,
         verb: &str,
         line: &str,
@@ -461,7 +644,7 @@ impl TelnetSession {
             .split_once(char::is_whitespace)
             .map(|x| x.1)
             .unwrap_or("");
-        let cont = self.cpmemu_run_program(&bytes, tail, fs).await?;
+        let cont = self.cpmemu_run_program(cpm, &bytes, tail, fs).await?;
         Ok(Some(cont))
     }
 
