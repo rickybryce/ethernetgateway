@@ -122,7 +122,13 @@ impl CpmFs {
         // "..", so joining it onto a fixed single-letter drive directory
         // cannot traverse out of the container.
         split_8_3(&filename)?;
-        let path = self.drive_dir(drive0).join(&filename);
+        let dir = self.drive_dir(drive0);
+        // CP/M names are uppercase 8.3; host files may be any case.  Prefer an
+        // existing file that matches case-insensitively (so a lowercase
+        // `foo.txt` placed by the operator is openable, not just listed) and
+        // fall back to the canonical uppercased name for a to-be-created file.
+        // Matches Flavor A's case-insensitive resolution [[project_session_bookmark_2026-07-15]].
+        let path = Self::existing_ci(&dir, &filename).unwrap_or_else(|| dir.join(&filename));
         if !Self::is_within(&self.base, &path) {
             return None;
         }
@@ -133,6 +139,13 @@ impl CpmFs {
         // itself can't be canonicalized we fall back to canonicalizing its
         // parent (the drive directory) — that closes the gap where a *drive
         // directory* symlink could redirect a `make`/create outside the jail.
+        //
+        // Residual TOCTOU (accepted under the trusted-LAN threat model): the
+        // caller opens the returned path in a separate step, so a symlink
+        // swapped into `CPM/<drive>` between this check and the open could
+        // redirect the op.  The guest can't create symlinks through this FS
+        // (`make` = `File::create`), so this needs a *separate* local writer
+        // to the container — out of scope for the trusted operator model.
         if let Ok(canon_base) = std::fs::canonicalize(&self.base) {
             match std::fs::canonicalize(&path) {
                 Ok(canon_target) => {
@@ -162,6 +175,29 @@ impl CpmFs {
     /// `..` that climbs out — our names never do, but check anyway).
     fn is_within(base: &Path, path: &Path) -> bool {
         path.starts_with(base) && !path.components().any(|c| c.as_os_str() == "..")
+    }
+
+    /// Find an existing regular file in `dir` whose name equals `filename`
+    /// case-insensitively (the exact-case name first, then a scan).  Skips
+    /// symlinks (via `DirEntry::file_type`, which does not follow them), so a
+    /// planted link is never resolved — matching the enumeration paths.
+    /// Returns `None` for a to-be-created file so the caller uses the
+    /// canonical uppercased name.
+    fn existing_ci(dir: &Path, filename: &str) -> Option<PathBuf> {
+        let exact = dir.join(filename);
+        if exact.is_file() {
+            return Some(exact);
+        }
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if let Some(nm) = entry.file_name().to_str() {
+                    if nm.eq_ignore_ascii_case(filename) {
+                        return Some(entry.path());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// BDOS "open file" (15): does the FCB name an existing file on its
@@ -541,6 +577,28 @@ mod tests {
         assert_eq!(&got1[..5], b"WORLD");
         // Reading past EOF yields None.
         assert!(fs.read_record(&fcb, 2).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_resolve_is_case_insensitive_for_existing_files() {
+        let base = temp_base("ci");
+        // A lowercase host file (operator-placed / externally copied).
+        std::fs::write(base.join("A").join("readme.txt"), b"hello there").unwrap();
+        let fs = CpmFs::new(base.clone());
+        let fcb = fcb_named(1, "README", "TXT"); // CP/M sees uppercase 8.3
+
+        // It resolves to the real lowercase path and opens/reads.
+        assert!(fs.open_existing(&fcb).is_some(), "lowercase host file must be openable");
+        let rec = fs.read_record(&fcb, 0).unwrap().unwrap();
+        assert_eq!(&rec[..11], b"hello there");
+
+        // A genuinely-absent file still resolves to the canonical uppercase
+        // path (for creation) and does not open.
+        let missing = fcb_named(1, "NOPE", "TXT");
+        assert!(fs.open_existing(&missing).is_none());
+        assert!(fs.resolve(&missing).unwrap().ends_with("A/NOPE.TXT"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
