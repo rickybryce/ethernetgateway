@@ -114,6 +114,13 @@ impl CpmModem {
         self.enabled
     }
 
+    /// Whether carrier (DCD) is asserted for the guest.  A live connection
+    /// asserts it; `AT&C0` forces it always on (DCD ignored), matching the
+    /// physical modem's `&C` handling.
+    pub(in crate::telnet) fn carrier_asserted(&self) -> bool {
+        self.dcd_mode == 0 || self.conn.is_some()
+    }
+
     /// True when the modem is idle enough to accept a new inbound call
     /// (command mode, not already ringing or connected).
     pub(in crate::telnet) fn can_answer(&self) -> bool {

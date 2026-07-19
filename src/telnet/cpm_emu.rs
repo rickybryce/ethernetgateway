@@ -745,6 +745,8 @@ impl TelnetSession {
                 if !rx.is_empty() {
                     cpm.modem_queue_rx(&rx);
                 }
+                // Reflect carrier (DCD) into the UART status the guest polls.
+                cpm.set_carrier(modem.carrier_asserted());
             }
             // Out-of-band break-out reader: drain any wire bytes waiting right
             // now (non-blocking) so a double-`ESC` aborts even a program that

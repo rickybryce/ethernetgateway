@@ -39,19 +39,42 @@ pub enum UartFamily {
 
 impl UartFamily {
     /// The status byte the guest reads, given whether a received byte is
-    /// waiting.  Transmit is always reported ready (we can always buffer an
-    /// outbound byte).
-    pub fn status(self, rx_ready: bool) -> u8 {
+    /// waiting and whether TX can accept a byte (transmit-ready / buffer empty)
+    /// and whether carrier (DCD) is present.
+    ///
+    /// DCD is surfaced **active-high** (bit set = carrier up) so that the
+    /// no-carrier idle byte is identical to what this UART presented before a
+    /// carrier bit existed — polled software that only masks the RX/TX bits is
+    /// unaffected; only software that specifically tests DCD sees the new bit.
+    /// On the Z80 SIO that matches real RR0 (bit3 = DCD asserted); on the 6850
+    /// the real polarity is carrier-*loss*-active, but active-high keeps the
+    /// idle byte stable and is what the few CP/M ACIA programs that read DCD
+    /// expect from our modem.
+    pub fn status(self, rx_ready: bool, tx_ready: bool, carrier: bool) -> u8 {
         match self {
-            // TX empty (bit2) always; RX available (bit0) when a byte waits.
-            UartFamily::Sio => 0x04 | if rx_ready { 0x01 } else { 0x00 },
-            // TDRE (bit1) always; RDRF (bit0) when a byte waits.
-            UartFamily::Acia => 0x02 | if rx_ready { 0x01 } else { 0x00 },
+            // SIO RR0: bit0 RX available, bit2 TX buffer empty, bit3 DCD.
+            UartFamily::Sio => {
+                (if rx_ready { 0x01 } else { 0 })
+                    | (if tx_ready { 0x04 } else { 0 })
+                    | (if carrier { 0x08 } else { 0 })
+            }
+            // 6850: bit0 RDRF (RX), bit1 TDRE (TX ready), bit2 DCD.
+            UartFamily::Acia => {
+                (if rx_ready { 0x01 } else { 0 })
+                    | (if tx_ready { 0x02 } else { 0 })
+                    | (if carrier { 0x04 } else { 0 })
+            }
             // Active-low: bit0 SET means "no RX"; clear means a byte waits.
-            UartFamily::Sio88 => if rx_ready { 0x00 } else { 0x01 },
+            // (No DCD bit surfaced for this unusual layout.)
+            UartFamily::Sio88 => {
+                if rx_ready {
+                    0x00
+                } else {
+                    0x01
+                }
+            }
         }
     }
-
 }
 
 /// A resolved UART placement: where the two registers live and how status is
@@ -199,14 +222,30 @@ mod tests {
 
     #[test]
     fn test_status_bytes() {
-        // Idle (no RX): TX ready only.
-        assert_eq!(UartFamily::Sio.status(false), 0x04);
-        assert_eq!(UartFamily::Acia.status(false), 0x02);
-        assert_eq!(UartFamily::Sio88.status(false), 0x01);
+        // Idle (no RX, TX ready, no carrier): unchanged from the pre-DCD bytes.
+        assert_eq!(UartFamily::Sio.status(false, true, false), 0x04);
+        assert_eq!(UartFamily::Acia.status(false, true, false), 0x02);
+        assert_eq!(UartFamily::Sio88.status(false, true, false), 0x01);
         // A received byte waiting sets the RX-available bit.
-        assert_eq!(UartFamily::Sio.status(true), 0x05); // TX empty + RX avail
-        assert_eq!(UartFamily::Acia.status(true), 0x03); // TDRE + RDRF
-        assert_eq!(UartFamily::Sio88.status(true), 0x00); // active-low: RX ready
+        assert_eq!(UartFamily::Sio.status(true, true, false), 0x05); // TX empty + RX avail
+        assert_eq!(UartFamily::Acia.status(true, true, false), 0x03); // TDRE + RDRF
+        assert_eq!(UartFamily::Sio88.status(true, true, false), 0x00); // active-low: RX ready
+    }
+
+    #[test]
+    fn test_carrier_bit() {
+        // DCD (carrier) is active-high and additive to the idle byte.
+        assert_eq!(UartFamily::Sio.status(false, true, true), 0x0C); // TX + DCD(bit3)
+        assert_eq!(UartFamily::Acia.status(false, true, true), 0x06); // TDRE + DCD(bit2)
+        // Sio88 surfaces no DCD bit.
+        assert_eq!(UartFamily::Sio88.status(false, true, true), 0x01);
+    }
+
+    #[test]
+    fn test_tx_not_ready_clears_tx_bit() {
+        // When the TX buffer can't accept a byte, the TX-ready bit is clear.
+        assert_eq!(UartFamily::Sio.status(false, false, false), 0x00);
+        assert_eq!(UartFamily::Acia.status(false, false, false), 0x00);
     }
 
     #[test]

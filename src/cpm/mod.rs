@@ -329,6 +329,11 @@ impl Cpm {
         self.mem.modem_queue_rx(data);
     }
 
+    /// Reflect the modem's carrier (DCD) state into the UART status register.
+    pub fn set_carrier(&mut self, carrier: bool) {
+        self.mem.set_carrier(carrier);
+    }
+
     /// Pop one received byte for the BDOS `AUX:`-input path (function 3).
     pub fn modem_rx_pop(&mut self) -> Option<u8> {
         self.mem.modem_rx_pop()

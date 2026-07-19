@@ -28,6 +28,9 @@ pub struct CpmMachine {
     tx: VecDeque<u8>,
     /// Peer → guest bytes (filled by the driver, drained by `IN`/AUX-in).
     rx: VecDeque<u8>,
+    /// Whether the modem currently has a carrier (surfaced as DCD in status).
+    /// Set by the driver each pump cycle from the modem's online state.
+    carrier: bool,
 }
 
 impl CpmMachine {
@@ -38,12 +41,19 @@ impl CpmMachine {
             access: ModemAccess::Off,
             tx: VecDeque::new(),
             rx: VecDeque::new(),
+            carrier: false,
         }
     }
 
     /// Select how the guest reaches the virtual modem.
     pub fn set_access(&mut self, access: ModemAccess) {
         self.access = access;
+    }
+
+    /// Set the carrier (DCD) state the status register reflects.  Called by
+    /// the driver each pump cycle from the modem's online state.
+    pub fn set_carrier(&mut self, carrier: bool) {
+        self.carrier = carrier;
     }
 
     /// Drain everything the guest wrote toward the peer.
@@ -93,8 +103,9 @@ impl Machine for CpmMachine {
         let port = address as u8;
         if let ModemAccess::Ports(u) = self.access {
             if port == u.status_port {
-                // Live status: transmit ready; RX-available if a byte waits.
-                return u.family.status(!self.rx.is_empty());
+                // Live status: RX-available if a byte waits; TX always ready
+                // (the ring is drained between batches); DCD from carrier.
+                return u.family.status(!self.rx.is_empty(), true, self.carrier);
             }
             if port == u.data_port {
                 return self.rx.pop_front().unwrap_or(0);
@@ -149,6 +160,17 @@ mod tests {
         m.port_out(0x83, b'Y');
         assert_eq!(m.modem_drain_tx(), b"XY");
         assert!(m.modem_drain_tx().is_empty());
+    }
+
+    #[test]
+    fn test_carrier_surfaced_in_status() {
+        let mut m = CpmMachine::new();
+        m.set_access(resolve_access("rc2014_1b")); // Z80 SIO, DCD = bit3
+        assert_eq!(m.port_in(0x82), 0x04); // no carrier: TX empty only
+        m.set_carrier(true);
+        assert_eq!(m.port_in(0x82), 0x0C); // TX empty + DCD
+        m.set_carrier(false);
+        assert_eq!(m.port_in(0x82), 0x04); // carrier dropped
     }
 
     #[test]
