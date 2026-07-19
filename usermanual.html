@@ -2301,6 +2301,22 @@ doesn&rsquo;t implement, so a direct ASCI <em>port</em> profile can&rsquo;t work
 &mdash; use <code>aux</code> instead).
 </p>
 
+<aside class="note">
+<span class="label">The virtual modem is polled, not interrupt&#8209;driven</span>
+The emulated UART is <strong>polled&#8209;only</strong>: the guest reads the
+status register to see when a byte is ready or the transmitter is free. The
+emulator never raises a serial interrupt, in any Z80 interrupt mode. This is
+true of <em>every</em> profile above &mdash; it is not a property of one chip.
+Comms software that polls the UART (the norm for CP/M terminal programs, and
+the standard RC2014/RomWBW and Altair/AltairDuino console paths) works on any
+profile; software that installs a serial <em>interrupt</em> handler and waits
+for the UART to interrupt will not receive one and will stall. Choose a profile
+to match the I/O&nbsp;port address and status&#8209;bit convention your software
+expects &mdash; not for interrupt support, which none of them provide. (The
+choice of chip family here &mdash; Z80&nbsp;SIO, 6850&nbsp;ACIA, 8080&nbsp;SIO
+&mdash; only affects the port addresses and how the status bits are laid out.)
+</aside>
+
 <h3>Dialling out</h3>
 
 <p>

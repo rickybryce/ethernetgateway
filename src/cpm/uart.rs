@@ -14,6 +14,17 @@
 //!   `IN0`/`OUT0` instructions the ASCI needs).
 //! - `Off` — no virtual modem.
 //!
+//! **Polled-only.**  Every profile is a *polled* UART: the guest reads the
+//! status register to learn when a byte is ready / the transmitter is free
+//! (`CpmMachine::port_in`).  The emulator never raises a serial interrupt in
+//! any Z80 interrupt mode (nothing in the core asserts `/INT`; the iz80 core
+//! only implements IM 1 anyway).  So the choice of family (SIO / ACIA / 88-SIO)
+//! only selects port addresses and status-bit layout — none of them provide
+//! interrupt-driven serial.  Polled comms software works on any profile;
+//! interrupt-driven serial software receives no interrupt and stalls.  (A Z180
+//! ASCI *port* profile is not offered at all — the core NOPs the Z180
+//! `IN0`/`OUT0` the ASCI needs — so SC126/RomWBW software uses the `Aux` path.)
+//!
 //! Addresses are sourced from real firmware/drivers:
 //! - **RC2014 / RomWBW Z80 SIO/2**: RomWBW `HDIAG/sio.asm` — command/status at
 //!   the even base, data at base+1; RR0 status bit0 = RX char available, bit2 =
