@@ -129,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     modem, none of which change the working polled path: (A) the AT command
     layer parses a chained init string (`ATE0Q0V1X4S0=1`) and applies each
     clause — echo, quiet, verbose/numeric and `X`-level result codes,
-    S-register set/query (`S0` auto-answer, `S7` carrier wait), `&C`/`&D`,
+    S-register set/query (`S0` auto-answer, `S7` peer-dial carrier wait), `&C`/`&D`,
     `ATZ`/`AT&F` reset, `ATI` — instead of matching a few fixed strings; (B)
     carrier is surfaced to the guest as the UART's DCD bit (SIO RR0 bit3, 6850
     bit2), active-high so the idle status byte is unchanged; (C) flow control

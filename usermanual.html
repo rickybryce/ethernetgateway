@@ -2320,7 +2320,8 @@ The command layer understands a chained Hayes init string
 (<code>ATE0Q0V1X4S0=1</code> applies each clause): <code>E</code> echo,
 <code>Q</code> quiet, <code>V</code> verbose vs numeric result codes,
 <code>X</code> result-code level, <code>S</code><em>n</em><code>=</code>/<code>?</code>
-S-register set/query (<code>S0</code> auto-answer, <code>S7</code> carrier wait),
+S-register set/query (<code>S0</code> auto-answer, <code>S7</code> peer-dial
+carrier wait),
 <code>&amp;C</code>/<code>&amp;D</code> DCD/DTR, <code>ATZ</code> / <code>AT&amp;F</code>
 reset, and <code>ATI</code> identify. Carrier is surfaced to the guest as the
 UART&rsquo;s DCD bit, and flow control is honoured both ways (the UART reports

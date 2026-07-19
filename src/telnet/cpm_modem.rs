@@ -269,8 +269,10 @@ impl CpmModem {
 
     /// Dial an outbound call: a local serial Port A/B (peer-dial) or a TCP
     /// `host:port`.
-    /// Carrier-wait timeout for a dial, from S7 (seconds); falls back to the
-    /// default when S7 is 0.
+    /// Carrier-wait timeout for a local serial-port peer-dial, from S7
+    /// (seconds; power-on default 50).  `S7=0` selects the built-in
+    /// `ANSWER_WAIT` fallback.  Only the peer-dial path consults this; a TCP
+    /// `ATDT host:port` uses the OS connect timeout.
     fn carrier_wait(&self) -> Duration {
         match self.s_regs[7] {
             0 => ANSWER_WAIT,
