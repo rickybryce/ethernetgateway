@@ -43,6 +43,11 @@ pub struct CpmFs {
     search: Vec<DirEntry>,
     /// Cursor into `search` (index of the last entry returned).
     search_pos: usize,
+    /// Current CP/M user number (0–15).  Tracked so BDOS 32 get/set and the
+    /// `USER` command are self-consistent; the directory is *not* segregated
+    /// by user (all files share one flat namespace), a documented
+    /// simplification of this host-directory-backed filesystem.
+    user: u8,
 }
 
 impl CpmFs {
@@ -55,7 +60,18 @@ impl CpmFs {
             dma: DEFAULT_DMA,
             search: Vec::new(),
             search_pos: 0,
+            user: 0,
         }
+    }
+
+    /// Current CP/M user number (0–15).
+    pub fn current_user(&self) -> u8 {
+        self.user
+    }
+
+    /// Set the current CP/M user number, clamped to 0–15.
+    pub fn set_user(&mut self, user: u8) {
+        self.user = user & 0x0F;
     }
 
     /// Current drive, 0-based (0 = A:).

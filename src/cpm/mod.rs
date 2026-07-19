@@ -196,6 +196,19 @@ impl Cpm {
         self.cpu.registers().get8(r)
     }
 
+    /// Set an 8-bit register (test-only: stage BDOS arguments for a direct
+    /// `service_disk_bdos` call without assembling a program).
+    #[cfg(test)]
+    pub fn set_reg8(&mut self, r: Reg8, v: u8) {
+        self.cpu.registers().set8(r, v);
+    }
+
+    /// Set a 16-bit register (test-only, as [`Cpm::set_reg8`]).
+    #[cfg(test)]
+    pub fn set_reg16(&mut self, rr: Reg16, v: u16) {
+        self.cpu.registers().set16(rr, v);
+    }
+
     /// Read a 16-bit register (e.g. `DE` for BDOS 9's string pointer).
     pub fn reg16(&mut self, rr: Reg16) -> u16 {
         self.cpu.registers().get16(rr)
@@ -444,6 +457,11 @@ fn build_dpb() -> [u8; 15] {
 /// in `HL`).  `None` for any other function.
 pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
     match func {
+        // Return login vector: HL = bitmap of active drives (bit 0 = A:).
+        // Every drive A:–H: exists (its folder is auto-created), so all eight
+        // low bits are set.  Without this the call returned 0 (no drives),
+        // which confused drive-enumeration utilities.
+        24 => Some(0x00FF),
         31 => {
             cpm.write_block(DPB_ADDR, &build_dpb());
             Some(DPB_ADDR)
@@ -603,6 +621,15 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             fs.set_dma(de);
             Some(0)
         }
+        32 => {
+            // Get/Set user number: E=0xFF gets (returns current user in A),
+            // else sets it (0–15).  Returns the current user in A either way.
+            let e = cpm.reg8(Reg8::E);
+            if e != 0xFF {
+                fs.set_user(e);
+            }
+            Some(fs.current_user())
+        }
         33 => Some(with_fcb(cpm, |cpm, fcb| {
             let rr = fcb.random_record();
             match fs.read_record(fcb, rr) {
@@ -614,7 +641,12 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
                 Ok(None) | Err(_) => 0x01,
             }
         })),
-        34 => Some(with_fcb(cpm, |cpm, fcb| {
+        // 34 = write random; 40 = write random with zero-fill.  For our
+        // byte-exact host files the two are identical (a write past EOF is
+        // zero-filled by the OS either way), so 40 aliases 34 — without this
+        // it fell through to the "unknown" arm and returned 0 (fake success)
+        // while silently dropping the write.
+        34 | 40 => Some(with_fcb(cpm, |cpm, fcb| {
             let rr = fcb.random_record();
             let dma = cpm.read_block(fs.dma(), 128);
             let mut data = [0u8; 128];
@@ -842,6 +874,70 @@ mod tests {
         // The file really exists on disk with our bytes.
         let disk = std::fs::read(base.join("A").join("IO.TXT")).unwrap();
         assert_eq!(&disk[..8], b"DISK OK!");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_bdos_login_vector_lists_all_drives() {
+        let base = std::env::temp_dir().join("xmodem_cpm_login");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        // BDOS 24: HL bitmap with all eight drives A:–H: active.
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 24), Some(0x00FF));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_bdos_user_number_get_set() {
+        let base = std::env::temp_dir().join("xmodem_cpm_user");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        // Set user 3 (E=3), then get (E=0xFF) returns 3.
+        cpm.set_reg8(Reg8::E, 3);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 32), Some(3));
+        assert_eq!(fs.current_user(), 3);
+        cpm.set_reg8(Reg8::E, 0xFF);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 32), Some(3));
+        // Values clamp to 0–15.
+        cpm.set_reg8(Reg8::E, 20);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 32), Some(4)); // 20 & 0x0F
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_bdos_write_random_zero_fill_persists() {
+        let base = std::env::temp_dir().join("xmodem_cpm_wr40");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        // Make A:REC.DAT, FCB at 0x005C.
+        let mut fcb = [0u8; FCB_SIZE];
+        fcb[1..9].copy_from_slice(b"REC     ");
+        fcb[9..12].copy_from_slice(b"DAT");
+        cpm.write_block(0x005C, &fcb);
+        cpm.set_reg16(Reg16::DE, 0x005C);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 22), Some(0)); // make
+
+        // Put a payload at the DMA (0x0080) and write it as random record 0
+        // via function 40 (write random, zero fill) — must persist, not drop.
+        cpm.write_block(0x0080, b"FORTY-OK");
+        let mut fcb = cpm.read_block(0x005C, FCB_SIZE);
+        fcb[33] = 0; // r0
+        fcb[34] = 0; // r1
+        fcb[35] = 0; // r2
+        cpm.write_block(0x005C, &fcb);
+        cpm.set_reg16(Reg16::DE, 0x005C);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 40), Some(0));
+
+        // The bytes reached the host file (func 40 was NOT a silent no-op).
+        let disk = std::fs::read(base.join("A").join("REC.DAT")).unwrap();
+        assert_eq!(&disk[..8], b"FORTY-OK");
         let _ = std::fs::remove_dir_all(&base);
     }
 

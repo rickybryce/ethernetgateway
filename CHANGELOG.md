@@ -244,6 +244,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on every drive. The emulator now synthesizes a fixed 8 MB / 4 KB-block DPB
     and an allocation vector whose used bits reflect the drive's actual file
     usage, so free space is reported correctly.
+  - **More BDOS calls implemented (were silent no-ops returning 0).** Function
+    40 (write random with zero fill) now aliases function 34 instead of
+    returning fake success while dropping the write — a real data-loss fix for
+    any program that writes via 40. Function 24 (return login vector) reports
+    all eight drives A:–H: active. Function 5 (list / `LST:` output) routes to
+    the console so a program's printer output stays visible. Function 32
+    (get/set user number) is now tracked and shared with the `USER` command, so
+    a program's save/restore-user sequence is self-consistent (files remain a
+    single flat area, not segregated by user — a documented simplification).
 
 ## [0.7.0] - 2026-07-17
 

@@ -302,7 +302,7 @@ impl TelnetSession {
                 "REN" | "RENAME" => self.cpmemu_ren(fs, trimmed).await?,
                 "TYPE" => self.cpmemu_type(fs, trimmed).await?,
                 "SAVE" => self.cpmemu_save(&mut cpm, fs, trimmed).await?,
-                "USER" => self.cpmemu_user(trimmed).await?,
+                "USER" => self.cpmemu_user(trimmed, fs).await?,
                 "HELLO" => {
                     // Non-interactive BDOS print-string demo.
                     if !self.cpmemu_run_program(&mut cpm, &mut modem, &Self::cpmemu_demo_hello(), "", fs).await? {
@@ -553,16 +553,19 @@ impl TelnetSession {
         Ok(())
     }
 
-    /// Built-in `USER` (CP/M resident): select a user area 0–15.  The
-    /// emulator models each drive as a single flat area, so only area 0
-    /// exists; a valid `USER 0` is accepted silently and any other valid
-    /// number reports the single-area limitation rather than silently
-    /// hiding files.  Recognized (not passed through to a `.COM`).
-    async fn cpmemu_user(&mut self, line: &str) -> Result<(), std::io::Error> {
+    /// Built-in `USER` (CP/M resident): select a user area 0–15.  The number
+    /// is tracked (and shared with BDOS 32, so a program's get/set agrees), but
+    /// the emulator keeps a single flat file area — files are not segregated by
+    /// user, a documented simplification — so a non-zero area is accepted with
+    /// a one-line note rather than silently hiding files.  Recognized (not
+    /// passed through to a `.COM`).
+    async fn cpmemu_user(&mut self, line: &str, fs: &mut CpmFs) -> Result<(), std::io::Error> {
         match line.split_whitespace().nth(1).and_then(|s| s.parse::<u8>().ok()) {
-            Some(0) => {}
             Some(n) if n <= 15 => {
-                self.send_line("  Only user area 0 (single flat area).").await?;
+                fs.set_user(n);
+                if n != 0 {
+                    self.send_line("  (files share one flat area)").await?;
+                }
             }
             _ => {
                 self.send_line("  USER 0..15").await?;
@@ -673,6 +676,15 @@ impl TelnetSession {
                         }
                         2 => {
                             // Console output: char in E.
+                            self.cpmemu_emit(&mut term, &[cpm.arg_e()]).await?;
+                            cpm.bdos_return(0);
+                        }
+                        5 => {
+                            // List (printer / LST:) output, char in E.  There
+                            // is no physical printer, so route it to the console
+                            // — a program's printer output stays visible instead
+                            // of vanishing (previously the call returned 0 and
+                            // dropped the byte).
                             self.cpmemu_emit(&mut term, &[cpm.arg_e()]).await?;
                             cpm.bdos_return(0);
                         }
