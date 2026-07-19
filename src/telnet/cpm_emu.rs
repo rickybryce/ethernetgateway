@@ -78,6 +78,16 @@ enum ConIn {
     Disconnect,
 }
 
+/// Outcome of a BDOS-10 read-console-buffer line read.
+enum LineRead {
+    /// A completed input line (CR-terminated), edited bytes only.
+    Line(Vec<u8>),
+    /// The user pressed `ESC` twice mid-line — abort the program back to `A>`.
+    BreakOut,
+    /// The session closed (or idled out) — leave the emulator entirely.
+    Disconnect,
+}
+
 /// RAII registration of the CP/M emulator as the dialable `CPM@<ip>` peer
 /// endpoint: registered while a modem-enabled shell is active, unregistered
 /// (dropping any unclaimed call) on every exit path.  On a slave gateway it
@@ -663,19 +673,24 @@ impl TelnetSession {
                             cpm.bdos_return(0);
                         }
                         6 => {
-                            // Direct console I/O: E=0xFF read (no echo),
-                            // E=0xFE status, else output E.
+                            // Direct console I/O: E=0xFF non-blocking read (no
+                            // echo), E=0xFE status, else output E.
                             let e = cpm.arg_e();
+                            let is_petscii = self.terminal_type == TerminalType::Petscii;
                             match e {
-                                0xFF => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
-                                    ConIn::Byte(b) => cpm.bdos_return(b),
-                                    ConIn::BreakOut => {
-                                        self.cpmemu_break_notice().await?;
-                                        return Ok(true);
-                                    }
-                                    ConIn::Disconnect => return Ok(false),
-                                },
-                                0xFE => cpm.bdos_return(0), // no buffered char
+                                // CP/M 2.2 direct-console-input is NON-blocking:
+                                // return a ready key (from the OOB-drain buffer)
+                                // or 0 if none.  Break-out is handled by the
+                                // between-batch drain, so no wire wait here.
+                                0xFF => {
+                                    let b = Self::cpmemu_pending_key(&mut pending_input, is_petscii)
+                                        .unwrap_or(0);
+                                    cpm.bdos_return(b);
+                                }
+                                // Status: 0xFF if a key is buffered, else 0.
+                                0xFE => {
+                                    cpm.bdos_return(if pending_input.is_empty() { 0x00 } else { 0xFF });
+                                }
                                 _ => {
                                     self.cpmemu_emit(&mut term, &[e]).await?;
                                     cpm.bdos_return(0);
@@ -690,15 +705,23 @@ impl TelnetSession {
                             cpm.bdos_return(0);
                         }
                         10 => {
-                            // Read console buffer (line) into memory at DE.
-                            match self.get_line_input().await? {
-                                Some(line) => {
-                                    let bytes: Vec<u8> = line.bytes().collect();
-                                    let de = cpm.arg_de();
+                            // Read console buffer (line) into memory at DE,
+                            // via the break-out-aware console reader.
+                            let de = cpm.arg_de();
+                            let max = cpm.read_buffer_max(de);
+                            match self
+                                .cpmemu_read_line(&mut term, &mut pending_input, &mut last_esc, max)
+                                .await?
+                            {
+                                LineRead::Line(bytes) => {
                                     cpm.bdos_read_buffer(de, &bytes);
                                     cpm.bdos_return(0);
                                 }
-                                None => return Ok(false),
+                                LineRead::BreakOut => {
+                                    self.cpmemu_break_notice().await?;
+                                    return Ok(true);
+                                }
+                                LineRead::Disconnect => return Ok(false),
                             }
                         }
                         3 => {
@@ -715,7 +738,13 @@ impl TelnetSession {
                             cpm.modem_tx_push(e);
                             cpm.bdos_return(0);
                         }
-                        11 => cpm.bdos_return(0), // console status: none ready
+                        11 => {
+                            // Console status: 0xFF if a key is ready (buffered
+                            // by the out-of-band drain), else 0 — so the classic
+                            // `LD C,11 / CALL 5 / OR A / JR Z` poll idiom sees a
+                            // keypress instead of spinning to the budget ceiling.
+                            cpm.bdos_return(if pending_input.is_empty() { 0x00 } else { 0xFF });
+                        }
                         12 => cpm.bdos_return(0x22), // version: CP/M 2.2
                         _ => {
                             // Disk-system / FCB file BDOS calls (drive
@@ -822,6 +851,70 @@ impl TelnetSession {
         Ok(Some(cont))
     }
 
+    /// Read a console line for BDOS 10 (read-console-buffer) using
+    /// `cpmemu_conin`, so it shares the program-console break-out semantics:
+    /// CR terminates (echoing CR/LF), backspace / DEL edits, a double-`ESC`
+    /// aborts to `A>` (NOT a session drop — the bug when this used the shell's
+    /// line editor, where a lone `ESC` looked like a disconnect), and input is
+    /// capped at the caller's `max`.
+    async fn cpmemu_read_line(
+        &mut self,
+        term: &mut Adm3a,
+        pending: &mut VecDeque<u8>,
+        last_esc: &mut bool,
+        max: usize,
+    ) -> Result<LineRead, std::io::Error> {
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            match self.cpmemu_conin(pending, last_esc).await? {
+                ConIn::BreakOut => return Ok(LineRead::BreakOut),
+                ConIn::Disconnect => return Ok(LineRead::Disconnect),
+                ConIn::Byte(b) => match b {
+                    b'\r' => {
+                        self.cpmemu_emit(term, b"\r\n").await?;
+                        return Ok(LineRead::Line(buf));
+                    }
+                    b'\n' => {} // swallow a LF that trails a CR
+                    0x08 | 0x7F => {
+                        if buf.pop().is_some() {
+                            self.cpmemu_emit(term, b"\x08 \x08").await?; // erase
+                        }
+                    }
+                    _ => {
+                        if buf.len() < max {
+                            buf.push(b);
+                            self.cpmemu_emit(term, &[b]).await?; // echo
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    /// Pop and translate the next byte the out-of-band drain already buffered,
+    /// returning the ADM-3A / ASCII key code, or `None` if nothing is buffered.
+    /// Non-blocking — shared by `cpmemu_conin`'s fast path and by non-blocking
+    /// direct console input (BDOS 6, E=0xFF).  Does not touch `last_esc` (the
+    /// drain already escape-tracked these bytes and never buffers the 2nd `ESC`
+    /// of a break-out pair).
+    fn cpmemu_pending_key(pending: &mut VecDeque<u8>, is_petscii: bool) -> Option<u8> {
+        let b = pending.pop_front()?;
+        if is_petscii {
+            if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
+                return Some(code);
+            }
+            return Some(petscii_to_ascii_byte(b));
+        }
+        // ANSI: reassemble a buffered CSI arrow (`ESC [ A..D`, entirely in the
+        // buffer, so no wire lookahead is needed) to its ADM-3A code.
+        if b == 0x1B {
+            if let Some(code) = pending_csi_arrow(pending) {
+                return Some(code);
+            }
+        }
+        Some(b)
+    }
+
     /// Read one console byte for a running program, translating the client's
     /// keys into the ADM-3A codes the guest expects and detecting the
     /// double-`ESC` break-out.
@@ -844,21 +937,8 @@ impl TelnetSession {
         // them via the shared `last_esc` and never buffers the 2nd ESC of a
         // break-out pair, so don't retrack here (leave `last_esc` to the drain
         // / wire path) — just translate.
-        if let Some(b) = pending.pop_front() {
-            if is_petscii {
-                if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
-                    return Ok(ConIn::Byte(code));
-                }
-                return Ok(ConIn::Byte(petscii_to_ascii_byte(b)));
-            }
-            // ANSI: reassemble a buffered CSI arrow (the whole `ESC [ A..D` is
-            // in the buffer, so no wire lookahead is needed) to its ADM-3A code.
-            if b == 0x1B {
-                if let Some(code) = pending_csi_arrow(pending) {
-                    return Ok(ConIn::Byte(code));
-                }
-            }
-            return Ok(ConIn::Byte(b));
+        if let Some(code) = Self::cpmemu_pending_key(pending, is_petscii) {
+            return Ok(ConIn::Byte(code));
         }
         loop {
             let b = match self.read_byte_filtered().await {
@@ -947,6 +1027,16 @@ impl TelnetSession {
     /// escapable at once instead of only at the instruction ceiling.  It runs
     /// only *between* batches, and `cpmemu_conin` runs only *during* a console
     /// read, so the two escape trackers never overlap.
+    ///
+    /// Cancel-safety note: the zero-timeout read is resumable across the
+    /// `IAC`→command split (via `session_read_byte`'s `mid_iac_cmd`), which is
+    /// the common case.  It is *not* resumable deeper inside a telnet
+    /// negotiation (a subnegotiation payload, or between a `WILL/WONT/DO/DONT`
+    /// command and its option byte).  A negotiation split across TCP segments
+    /// that lands exactly on a between-batch drain could therefore desync the
+    /// telnet parser — rare (LAN, mid-run, segment-split) and non-fatal (no
+    /// panic/security impact); the resume point is intentionally shallow so
+    /// this hot path stays simple.
     async fn cpmemu_oob_drain(
         &mut self,
         pending: &mut VecDeque<u8>,

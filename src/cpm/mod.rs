@@ -138,7 +138,12 @@ impl Cpm {
                 return Stop::Aborted;
             }
             let pc = self.cpu.registers().pc();
-            if pc == BDOS_ENTRY {
+            // Trap a BDOS call whether the guest `CALL`s the 0x0005 entry
+            // (the JP there points at STACK_TOP) or reads the entry address
+            // from the 0x0006 word and calls STACK_TOP directly — both are a
+            // BDOS call; only 0x0005 was trapped before, so a 0x0006-pointer
+            // call ran off into uninitialised RAM.
+            if pc == BDOS_ENTRY || pc == STACK_TOP {
                 let func = self.cpu.registers().get8(Reg8::C);
                 if func == 0 {
                     return Stop::WarmBoot; // BDOS 0 = system reset
@@ -236,6 +241,12 @@ impl Cpm {
     /// caller-set maximum, byte 1 the count we filled in, and the
     /// characters follow.  The line is truncated to the maximum so a long
     /// paste can never overrun the guest's buffer.
+    /// The caller-set maximum length (byte 0) of a BDOS-10 read-console
+    /// buffer at `de` — so the driver can cap interactive input as it reads.
+    pub fn read_buffer_max(&mut self, de: u16) -> usize {
+        self.mem.peek(de) as usize
+    }
+
     pub fn bdos_read_buffer(&mut self, de: u16, line: &[u8]) {
         let max = self.mem.peek(de) as usize;
         let n = line.len().min(max);
