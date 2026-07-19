@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     CP/M), so `SAVE n file` dumps the image a previous program (e.g. `DDT`)
     left in memory. Low-memory vectors are reinstalled on each program load so
     a program that trashes page zero can't corrupt the next one.
+  - **ADM-3A terminal translation.** The emulator presents CP/M programs with
+    a Lear Siegler ADM-3A terminal and translates its screen-control stream to
+    the connected client: ANSI cursor sequences for a modern terminal, native
+    cursor codes for a Commodore 64 (PETSCII), best-effort for a dumb ASCII
+    TTY. Client arrow keys are translated the other way into the ADM-3A cursor
+    codes the program reads. This lets full-screen software (WordStar, Turbo
+    Pascal, editors) installed for an ADM-3A render correctly. The decoder and
+    per-terminal renderers are a self-contained, unit-tested module.
   - **Configurable runaway ceiling.** A new config key `cpm_emu_max_minstr`
     (millions of Z80 instructions per program run, default 2000 = 2 billion;
     wired into the telnet, web, and GUI config UIs) bounds a compute-bound

@@ -2201,6 +2201,28 @@ program left behind. User areas beyond&nbsp;0 aren&rsquo;t modelled &mdash; each
 drive is a single flat area.
 </p>
 
+<h3>Terminal &mdash; install for an ADM-3A</h3>
+
+<p>
+Full-screen CP/M software (WordStar, Turbo&nbsp;Pascal, dBASE, editors) is
+installed for a specific terminal and emits that terminal&rsquo;s cursor and
+screen-control codes. The emulator presents the guest with a <strong>Lear
+Siegler ADM-3A</strong> &mdash; the universal lowest-common-denominator CP/M
+terminal &mdash; so <strong>configure your software for an ADM-3A</strong> (many
+also list it as &ldquo;Lear Siegler,&rdquo; &ldquo;ADM-3A,&rdquo; or a
+compatible like Kaypro/Televideo in a pinch).
+</p>
+
+<p>
+The gateway translates the ADM-3A control stream into whatever <em>your</em>
+terminal speaks &mdash; ANSI cursor sequences for a modern terminal, native
+cursor codes for a Commodore&nbsp;64 (PETSCII), best-effort for a dumb ASCII
+TTY &mdash; and translates your arrow keys the other way, into the ADM-3A
+cursor codes the program reads. Line-oriented tools (PIP, STAT, MBASIC) need no
+terminal at all and work everywhere. (A C64&rsquo;s 40-column screen can&rsquo;t
+show an 80-column editor in full, but line-oriented use is fine.)
+</p>
+
 <h3>Breaking out &amp; the runaway ceiling</h3>
 
 <p>

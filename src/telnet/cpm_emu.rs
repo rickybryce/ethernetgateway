@@ -37,15 +37,19 @@
 //! create many small files); bounded by host disk and acceptable under the
 //! trusted-LAN model.
 //!
-//! ## Status: B4a (run a real `.COM` from a drive)
+//! ## Status
 //! Entering the shell drops into our Rust CCP-lite `A>` prompt.  The full
-//! console BDOS group (1/2/6/9/10/11/12) plus the disk/FCB group (B3) are
-//! wired, so a verb that isn't a built-in is looked up as `<verb>.COM` on
-//! the drive, loaded into the TPA with page zero set up (command tail +
-//! default FCBs), and run — actual CP/M software (PIP, STAT, ASM, …) runs
-//! over telnet/SSH.  Still to come (B4b+): richer terminal translation
-//! (ADM-3A/VT52/VT100) and a concurrent out-of-band break-out reader.
+//! console BDOS group (1/2/6/9/10/11/12) plus the disk/FCB group are wired,
+//! so a verb that isn't a built-in is looked up as `<verb>.COM` on the
+//! drive, loaded into the TPA with page zero set up (command tail + default
+//! FCBs), and run — actual CP/M software (PIP, STAT, ASM, …) runs over
+//! telnet/SSH.  The resident CP/M commands (DIR/ERA/REN/TYPE/SAVE/USER + the
+//! `d:` drive change) are built in.  Guest output is translated from the
+//! ADM-3A terminal to the connected client (ANSI/PETSCII/ASCII) and client
+//! cursor keys back to ADM-3A codes (see `cpm_term`).  Still to come (B6+):
+//! a concurrent out-of-band break-out reader and the virtual modem.
 use super::*;
+use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -65,6 +69,16 @@ enum ConIn {
     BreakOut,
     /// The session closed (or idled out) — leave the emulator entirely.
     Disconnect,
+}
+
+/// Result of peeking after an `ESC` for an ANSI CSI arrow sequence.
+enum ArrowPeek {
+    /// A recognised arrow → this ADM-3A key code.
+    Arrow(u8),
+    /// A full `ESC [ x` was consumed but isn't an arrow — swallow it.
+    UnknownCsi,
+    /// Not a CSI (lone `ESC`, or a non-`[` follower that was pushed back).
+    NotCsi,
 }
 
 impl TelnetSession {
@@ -381,7 +395,7 @@ impl TelnetSession {
         } else {
             (text, false)
         };
-        self.cpmemu_conout(shown).await?;
+        self.cpmemu_write_text(shown).await?;
         self.send_line("").await?;
         if truncated {
             self.send_line(&format!("  {}", self.dim("[truncated]"))).await?;
@@ -499,6 +513,11 @@ impl TelnetSession {
             config::get_config().cpm_emu_max_minstr as u64 * 1_000_000;
         let abort = AtomicBool::new(false);
         let mut last_esc = false;
+        // ADM-3A output decoder: the guest is told it's driving an ADM-3A,
+        // and its control codes are translated to the connected terminal.
+        // State persists across BDOS calls (a cursor-address sequence can
+        // straddle them).
+        let mut term = Adm3a::default();
 
         loop {
             // Runaway guard, checked every batch regardless of why run()
@@ -522,7 +541,7 @@ impl TelnetSession {
                             // Console input WITH echo.
                             match self.cpmemu_conin(&mut last_esc).await? {
                                 ConIn::Byte(b) => {
-                                    self.cpmemu_conout(&[b]).await?;
+                                    self.cpmemu_emit(&mut term, &[b]).await?;
                                     cpm.bdos_return(b);
                                 }
                                 ConIn::BreakOut => {
@@ -534,7 +553,7 @@ impl TelnetSession {
                         }
                         2 => {
                             // Console output: char in E.
-                            self.cpmemu_conout(&[cpm.arg_e()]).await?;
+                            self.cpmemu_emit(&mut term, &[cpm.arg_e()]).await?;
                             cpm.bdos_return(0);
                         }
                         6 => {
@@ -552,7 +571,7 @@ impl TelnetSession {
                                 },
                                 0xFE => cpm.bdos_return(0), // no buffered char
                                 _ => {
-                                    self.cpmemu_conout(&[e]).await?;
+                                    self.cpmemu_emit(&mut term, &[e]).await?;
                                     cpm.bdos_return(0);
                                 }
                             }
@@ -561,7 +580,7 @@ impl TelnetSession {
                             // Print $-terminated string at DE.
                             let de = cpm.arg_de();
                             let s = cpm.read_dollar_string(de, 8192);
-                            self.cpmemu_conout(&s).await?;
+                            self.cpmemu_emit(&mut term, &s).await?;
                             cpm.bdos_return(0);
                         }
                         10 => {
@@ -648,47 +667,126 @@ impl TelnetSession {
         Ok(Some(cont))
     }
 
-    /// Read one console byte for a running program, translating for the
-    /// terminal and detecting the double-`ESC` break-out.  A single `ESC`
-    /// is delivered to the guest (CP/M editors use it); a second `ESC`
-    /// immediately after aborts.
+    /// Read one console byte for a running program, translating the client's
+    /// keys into the ADM-3A codes the guest expects and detecting the
+    /// double-`ESC` break-out.
+    ///
+    /// - A C64 cursor key (a single PETSCII byte) maps straight to its ADM-3A
+    ///   code; other PETSCII bytes are folded to ASCII.
+    /// - On an ANSI terminal an arrow key arrives as a fast `ESC [ A..D`
+    ///   sequence; a short peek after `ESC` recognises it and returns the
+    ///   ADM-3A code.  A lone `ESC` (an editor command) has no fast follower,
+    ///   so the peek times out and the `ESC` is delivered to the guest; a
+    ///   second `ESC` on the next read is the break-out (unchanged behavior).
     async fn cpmemu_conin(&mut self, last_esc: &mut bool) -> Result<ConIn, std::io::Error> {
-        match self.read_byte_filtered().await {
-            Ok(Some(b)) => {
-                let is_petscii = self.terminal_type == TerminalType::Petscii;
-                if is_esc_key(b, is_petscii) {
-                    if *last_esc {
-                        *last_esc = false;
-                        return Ok(ConIn::BreakOut);
-                    }
-                    *last_esc = true;
-                    return Ok(ConIn::Byte(0x1B)); // deliver first ESC as ASCII
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        loop {
+            let b = match self.read_byte_filtered().await {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(ConIn::Disconnect),
+                // An idle timeout ends the program (and the session).
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    return Ok(ConIn::Disconnect)
                 }
-                *last_esc = false;
-                let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
-                Ok(ConIn::Byte(b))
+                Err(e) => return Err(e),
+            };
+
+            // A pending first ESC + another ESC = break-out (slow, human).
+            if is_esc_key(b, is_petscii) {
+                if *last_esc {
+                    *last_esc = false;
+                    return Ok(ConIn::BreakOut);
+                }
+                // Peek for a fast CSI arrow (ANSI terminals only).
+                if !is_petscii {
+                    match self.cpmemu_peek_arrow().await? {
+                        ArrowPeek::Arrow(code) => return Ok(ConIn::Byte(code)),
+                        // A non-arrow CSI was consumed whole; read the next key.
+                        ArrowPeek::UnknownCsi => continue,
+                        ArrowPeek::NotCsi => {} // fall through: deliver the ESC
+                    }
+                }
+                // Lone ESC: deliver it; a following ESC becomes the break-out.
+                *last_esc = true;
+                return Ok(ConIn::Byte(0x1B));
             }
-            Ok(None) => Ok(ConIn::Disconnect),
-            // An idle timeout ends the program (and the session).
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(ConIn::Disconnect),
-            Err(e) => Err(e),
+            *last_esc = false;
+
+            if is_petscii {
+                // A C64 cursor key becomes its ADM-3A code; else fold to ASCII.
+                if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
+                    return Ok(ConIn::Byte(code));
+                }
+                return Ok(ConIn::Byte(petscii_to_ascii_byte(b)));
+            }
+            return Ok(ConIn::Byte(b));
         }
     }
 
-    /// Write console-output bytes from a guest to the session.  On a
-    /// PETSCII (C64) terminal the guest's ASCII output is routed through the
-    /// gateway's normal text path (`send`, which case-swaps + Latin-1
-    /// encodes) so plain text renders correctly instead of showing lowercase
-    /// as graphics; on ANSI/ASCII the exact bytes go out (IAC-escaped for
-    /// telnet).  Full ADM-3A/VT52/VT100 terminal-emulation translation is a
-    /// later (B4) task; this makes ordinary text-mode output correct for a
-    /// C64 today.
-    async fn cpmemu_conout(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+    /// After an `ESC`, briefly peek for a CSI arrow sequence (`[ A..D`).
+    async fn cpmemu_peek_arrow(&mut self) -> Result<ArrowPeek, std::io::Error> {
+        // Byte 1: the '[' introducer, if it arrives promptly.
+        match self.cpmemu_peek_byte().await? {
+            Some(b'[') => {}
+            Some(other) => {
+                self.pushback = Some(other); // not a CSI; give the byte back
+                return Ok(ArrowPeek::NotCsi);
+            }
+            None => return Ok(ArrowPeek::NotCsi), // lone ESC
+        }
+        // Byte 2: the final byte. A recognised arrow maps; anything else is
+        // an unrecognised CSI (consumed whole).
+        match self.cpmemu_peek_byte().await? {
+            Some(f) => Ok(cpm_term::csi_arrow_to_adm3a(f)
+                .map(ArrowPeek::Arrow)
+                .unwrap_or(ArrowPeek::UnknownCsi)),
+            None => Ok(ArrowPeek::UnknownCsi),
+        }
+    }
+
+    /// Read one byte with a short timeout, for CSI-arrow lookahead — fast
+    /// terminal-generated sequences arrive back-to-back, while a human's lone
+    /// `ESC` has no follower and times out.
+    async fn cpmemu_peek_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            self.session_read_byte(),
+        )
+        .await
+        {
+            Ok(Ok(b)) => Ok(b),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Ok(None), // timed out — no fast follower
+        }
+    }
+
+    /// Write literal text (a `TYPE`d file, not program output) to the
+    /// session: on a C64 the ASCII text is case-swapped + Latin-1 encoded via
+    /// the normal `send` path so it renders correctly; elsewhere the bytes go
+    /// out raw.  Unlike [`Self::cpmemu_emit`], this does NOT run the ADM-3A
+    /// decoder — the bytes are file content, not a program's control stream.
+    async fn cpmemu_write_text(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
         if self.terminal_type == TerminalType::Petscii {
             let s = String::from_utf8_lossy(bytes);
             self.send(&s).await?;
         } else {
             self.send_raw(bytes).await?;
+        }
+        self.flush().await
+    }
+
+    /// Write guest output to the session, translating the ADM-3A control
+    /// stream to the connected terminal (ANSI CSI, PETSCII cursor codes, or
+    /// best-effort ASCII) through the persistent [`Adm3a`] decoder.
+    async fn cpmemu_emit(&mut self, term: &mut Adm3a, bytes: &[u8]) -> Result<(), std::io::Error> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            for op in term.feed(b) {
+                cpm_term::render_op(op, self.terminal_type, &mut out);
+            }
+        }
+        if !out.is_empty() {
+            self.send_raw(&out).await?;
         }
         self.flush().await
     }
