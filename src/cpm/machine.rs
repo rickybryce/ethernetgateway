@@ -12,7 +12,7 @@
 //! guest reaches the same rings through the BDOS `AUX:` device (funcs 3/4,
 //! handled in the driver).
 
-use crate::cpm::uart::ModemAccess;
+use crate::cpm::uart::{ModemAccess, UartFamily};
 use iz80::Machine;
 use std::collections::VecDeque;
 
@@ -31,6 +31,10 @@ pub struct CpmMachine {
     /// Whether the modem currently has a carrier (surfaced as DCD in status).
     /// Set by the driver each pump cycle from the modem's online state.
     carrier: bool,
+    /// Z80 SIO read-register pointer (0..7), set by a WR0 write and cleared
+    /// after the next status read.  0 (the default) selects RR0, so software
+    /// that never touches the pointer reads live status exactly as before.
+    sio_ptr: u8,
 }
 
 impl CpmMachine {
@@ -42,6 +46,7 @@ impl CpmMachine {
             tx: VecDeque::new(),
             rx: VecDeque::new(),
             carrier: false,
+            sio_ptr: 0,
         }
     }
 
@@ -116,7 +121,19 @@ impl Machine for CpmMachine {
                 // the driver waits instead of overflowing and losing bytes);
                 // DCD from carrier.
                 let tx_ready = self.tx.len() < MODEM_RING_CAP;
-                return u.family.status(!self.rx.is_empty(), tx_ready, self.carrier);
+                let rr0 = u.family.status(!self.rx.is_empty(), tx_ready, self.carrier);
+                if u.family == UartFamily::Sio {
+                    // Return the register the WR0 pointer selected, then the
+                    // pointer auto-resets to 0 (RR0) as the real SIO does.
+                    let ptr = self.sio_ptr;
+                    self.sio_ptr = 0;
+                    return match ptr {
+                        0 => rr0,
+                        1 => 0x01, // RR1: All Sent, no Rx errors (our ideal wire)
+                        _ => 0x00, // RR2 (vector) and unused registers: 0
+                    };
+                }
+                return rr0;
             }
             if port == u.data_port {
                 return self.rx.pop_front().unwrap_or(0);
@@ -130,10 +147,19 @@ impl Machine for CpmMachine {
         if let ModemAccess::Ports(u) = self.access {
             if port == u.data_port {
                 self.modem_tx_push(value);
+            } else if port == u.status_port && u.family == UartFamily::Sio {
+                // SIO command register (WR0): the low 3 bits select the read
+                // register for the next status IN.  A write while a non-zero
+                // pointer is set targets that WRn (config we don't model) and
+                // returns the pointer to 0, matching the SIO's behaviour.
+                if self.sio_ptr == 0 {
+                    self.sio_ptr = value & 0x07;
+                } else {
+                    self.sio_ptr = 0;
+                }
             }
-            // Writes to the status/command register (SIO register selects,
-            // ACIA control) are accepted and ignored — polled I/O doesn't
-            // need them, and we present a fixed idle UART.
+            // Other status/command writes (ACIA control, 88-SIO) are accepted
+            // and ignored — we present a fixed idle UART.
         }
     }
 }
@@ -194,6 +220,23 @@ mod tests {
         // Draining restores TX-ready.
         let _ = m.modem_drain_tx();
         assert_eq!(m.port_in(0x82) & 0x04, 0x04);
+    }
+
+    #[test]
+    fn test_sio_register_pointer() {
+        let mut m = CpmMachine::new();
+        m.set_access(resolve_access("rc2014_1b")); // Z80 SIO
+        // Default pointer (0): status reads return RR0 as before.
+        assert_eq!(m.port_in(0x82), 0x04);
+        // Select RR1 via WR0 (low 3 bits = 1); next status read is RR1.
+        m.port_out(0x82, 0x01);
+        assert_eq!(m.port_in(0x82), 0x01); // RR1: All Sent, no errors
+        // Pointer auto-reset: the following read is RR0 again.
+        assert_eq!(m.port_in(0x82), 0x04);
+        // A command byte with pointer bits 0 (e.g. a reset command 0x18)
+        // leaves the pointer at 0, so status stays RR0.
+        m.port_out(0x82, 0x18);
+        assert_eq!(m.port_in(0x82), 0x04);
     }
 
     #[test]
