@@ -153,11 +153,14 @@ fn render_petscii(op: TermOp, out: &mut Vec<u8>) {
         TermOp::Print(b) => out.push(swap_case_byte(b)),
         TermOp::CursorTo(r, c) => {
             // No absolute addressing on a C64: home, then step down/right.
+            // Clamp to the C64's real 40x25 screen (rows 0-24, cols 0-39) so
+            // an 80-column program's far-right positions land on the last
+            // column instead of wrapping onto the next physical line.
             out.push(PET_HOME);
             for _ in 0..r.min(24) {
                 out.push(PET_DOWN);
             }
-            for _ in 0..c.min(79) {
+            for _ in 0..c.min(39) {
                 out.push(PET_RIGHT);
             }
         }
@@ -273,6 +276,11 @@ mod tests {
             render_all(&[TermOp::CursorTo(1, 2)], TerminalType::Petscii),
             vec![PET_HOME, PET_DOWN, PET_RIGHT, PET_RIGHT]
         );
+        // Positions past the C64's 40x25 screen clamp (no wrap): row->24, col->39.
+        let clamped = render_all(&[TermOp::CursorTo(30, 60)], TerminalType::Petscii);
+        assert_eq!(clamped[0], PET_HOME);
+        assert_eq!(clamped.iter().filter(|&&b| b == PET_DOWN).count(), 24);
+        assert_eq!(clamped.iter().filter(|&&b| b == PET_RIGHT).count(), 39);
         assert_eq!(render_all(&[TermOp::ClearHome], TerminalType::Petscii), vec![PET_CLEAR]);
         assert_eq!(render_all(&[TermOp::Up], TerminalType::Petscii), vec![PET_UP]);
         // Case is swapped for the C64.

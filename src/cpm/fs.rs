@@ -127,16 +127,31 @@ impl CpmFs {
             return None;
         }
         // Belt-and-suspenders symlink defense (mirrors transfer.rs
-        // `verify_transfer_path`): when the base and the target's real path
-        // both canonicalize, the resolved real path must still live under
-        // the real base — so a symlink planted inside CPM/<drive>/ can't
-        // point a file operation outside the jail.  When a path can't be
-        // canonicalized (e.g. the target doesn't exist yet, as for
-        // make/create), the lexical guarantee above still holds.
+        // `verify_transfer_path`): the resolved real path must live under the
+        // real base, so a symlink can't point a file operation out of the
+        // jail.  A file being created doesn't exist yet, so when the target
+        // itself can't be canonicalized we fall back to canonicalizing its
+        // parent (the drive directory) — that closes the gap where a *drive
+        // directory* symlink could redirect a `make`/create outside the jail.
         if let Ok(canon_base) = std::fs::canonicalize(&self.base) {
-            if let Ok(canon_target) = std::fs::canonicalize(&path) {
-                if !canon_target.starts_with(&canon_base) {
-                    return None;
+            match std::fs::canonicalize(&path) {
+                Ok(canon_target) => {
+                    if !canon_target.starts_with(&canon_base) {
+                        return None;
+                    }
+                }
+                Err(_) => {
+                    // Target not created yet: verify the drive directory it
+                    // would be created in isn't itself a symlink escaping.
+                    if let Some(parent) = path.parent() {
+                        if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+                            if !canon_parent.starts_with(&canon_base) {
+                                return None;
+                            }
+                        }
+                        // If the parent can't canonicalize either, the lexical
+                        // `is_within` guarantee above still holds.
+                    }
                 }
             }
         }
@@ -646,6 +661,32 @@ mod tests {
         assert!(fs.open_existing(&fcb).is_none());
         assert!(fs.read_record(&fcb, 0).is_err());
         let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_rejects_symlinked_drive_dir_on_create() {
+        // A drive *directory* that is a symlink pointing outside the jail
+        // must not let a create (make) escape, even though the target file
+        // doesn't exist yet (so the target itself can't be canonicalized).
+        let base = temp_base("symdir");
+        let outside = base
+            .parent()
+            .unwrap()
+            .join("xmodem_cpm_outside_dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        // Drive B: is a symlink to the outside directory.
+        let drive_b = base.join("B");
+        std::os::unix::fs::symlink(&outside, &drive_b).unwrap();
+        let fs = CpmFs::new(base.clone());
+        let fcb = fcb_named(2, "PWNED", "TXT"); // drive B:
+        // resolve/make must refuse: the drive dir canonicalizes outside base.
+        assert!(fs.resolve(&fcb).is_none());
+        assert!(fs.make(&fcb).is_none());
+        assert!(!outside.join("PWNED.TXT").exists()); // nothing created outside
+        let _ = std::fs::remove_file(&drive_b);
+        let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&base);
     }
 

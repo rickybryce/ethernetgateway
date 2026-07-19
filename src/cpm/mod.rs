@@ -420,7 +420,10 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
                     fcb.advance_record();
                     0x00
                 }
-                Err(_) => 0xFF,
+                // Write sequential: 0 = OK, nonzero = error (0xFF is CP/M's
+                // "file not found", not a write code — a full/failed write is
+                // a generic 0x01 that every caller reads as failure).
+                Err(_) => 0x01,
             }
         })),
         22 => Some(with_fcb(cpm, |_cpm, fcb| {
@@ -481,7 +484,12 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
                     fcb.set_seq_record(rr);
                     0x00
                 }
-                Err(_) => 0xFF,
+                // Write random uses CP/M's documented error codes: 0x06 =
+                // "R/W past the physical end of disk" (our per-file size cap
+                // rejects the record as InvalidInput), else 0x05 = write /
+                // directory-overflow error.  (0xFF was never a write code.)
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => 0x06,
+                Err(_) => 0x05,
             }
         })),
         35 => {
