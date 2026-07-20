@@ -501,8 +501,17 @@ const VD_SPT: u16 = 128; // 128-byte sectors per track (cosmetic for STAT)
 // the downward-growing stack, which a well-behaved program never touches)
 // where the synthesized DPB + allocation vector are materialized for the guest
 // to read via the address the query returns.
-const DPB_ADDR: u16 = 0xFE80;
-const ALLOC_ADDR: u16 = 0xFE90; // 15-byte DPB fits before this
+//
+// The allocation vector is 256 bytes (2048 blocks / 8), so it fills the entire
+// 0xFE00..0xFF00 window below the BIOS jump table at [`BIOS_BASE`] (0xFF00);
+// the 15-byte DPB therefore lives ABOVE the table's trap range, at 0xFF60.
+// Keeping DPB and alloc at DISTINCT addresses also matters for STAT: it reads
+// the DPB, then the alloc vector, so a shared buffer would let Get-Alloc
+// clobber DPB fields STAT still needs.  `test_get_alloc_preserves_bios_table`
+// and `test_scratch_layout_clear_of_bios_table` pin this invariant — an
+// earlier ALLOC_ADDR of 0xFE90 overran straight through the BIOS table.
+const DPB_ADDR: u16 = 0xFF60;
+const ALLOC_ADDR: u16 = 0xFE00;
 
 /// The fixed 15-byte CP/M 2.2 Disk Parameter Block for the virtual drive.
 fn build_dpb() -> [u8; 15] {
@@ -1108,6 +1117,69 @@ mod tests {
         std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 5000]).unwrap();
         assert_eq!(free_blocks(&mut cpm), total - VD_DIR_BLOCKS - 2);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_scratch_layout_clear_of_bios_table() {
+        // Static invariant: the DPB and the 256-byte allocation vector must
+        // not overlap the BIOS jump table or its trap range, and must fit in
+        // memory.  An earlier ALLOC_ADDR (0xFE90) overran into the table at
+        // 0xFF00; this guards against a silent regression if the geometry
+        // (VD_DSM) or the table location ever changes.
+        let alloc = ALLOC_ADDR as usize;
+        let alloc_len = (VD_DSM as usize / 8) + 1;
+        let dpb = DPB_ADDR as usize;
+        let dpb_len = 15;
+        let table = BIOS_BASE as usize;
+        let table_end = BIOS_TRAP as usize + BIOS_VECTORS as usize; // through the trap range
+        // Everything stays inside the 64 KB space.
+        assert!(alloc + alloc_len <= 0x1_0000);
+        assert!(dpb + dpb_len <= 0x1_0000);
+        assert!(table_end <= 0x1_0000);
+        // The alloc vector clears the BIOS table+traps entirely.
+        assert!(
+            alloc + alloc_len <= table || alloc >= table_end,
+            "alloc vector [{alloc:#06x},{:#06x}) overlaps BIOS region [{table:#06x},{table_end:#06x})",
+            alloc + alloc_len
+        );
+        // The DPB clears the BIOS table+traps, the alloc vector, and the stack.
+        assert!(
+            dpb + dpb_len <= table || dpb >= table_end,
+            "DPB overlaps BIOS region"
+        );
+        assert!(
+            dpb + dpb_len <= alloc || dpb >= alloc + alloc_len,
+            "DPB overlaps alloc vector"
+        );
+    }
+
+    #[test]
+    fn test_get_alloc_preserves_bios_table() {
+        // Regression: servicing BDOS 27 (Get-Alloc) must not corrupt the BIOS
+        // jump table.  Before the scratch relocation, the 256-byte alloc
+        // vector written at 0xFE90 ran through the table at 0xFF00, zeroing
+        // the `JP <trap>` vectors that direct-console software (MBASIC,
+        // WordStar, Infocom) walks — so a program that called Get-Alloc and
+        // then reached console I/O via the table jumped into garbage.
+        let base = std::env::temp_dir().join("xmodem_cpm_allocguard");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]); // installs the low memory + BIOS table
+        // Snapshot the freshly-installed table, service Get-Alloc, compare.
+        for i in 0..BIOS_VECTORS {
+            let slot = BIOS_BASE + 3 * i;
+            assert_eq!(cpm.mem.peek(slot), 0xC3);
+            assert_eq!(cpm.mem.peek16(slot + 1), BIOS_TRAP + i);
+        }
+        let _ = disk_info_bdos(&mut cpm, &fs, 27).unwrap();
+        for i in 0..BIOS_VECTORS {
+            let slot = BIOS_BASE + 3 * i;
+            assert_eq!(cpm.mem.peek(slot), 0xC3, "vector {i} JP clobbered by Get-Alloc");
+            assert_eq!(cpm.mem.peek16(slot + 1), BIOS_TRAP + i, "vector {i} operand clobbered");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -257,7 +257,18 @@ impl TelnetSession {
         } else {
             None
         };
+        // The CCP-lite's own default drive (real CP/M's `CDISK`).  A transient
+        // may SELECT another drive (BDOS 14) while it runs — STAT does exactly
+        // this for `STAT B:`, to read B:'s free space — but the real CCP
+        // re-selects its own default at the top of every command cycle, so
+        // that change never sticks to the prompt.  Only a bare `d:` command
+        // (below) moves the CCP default.  Without this, `A>STAT B:` left the
+        // user stranded at `B>`.
+        let mut ccp_drive = fs.current_drive();
         loop {
+            // Re-establish the CCP default each cycle, undoing any drive a
+            // just-finished transient selected for its own use.
+            fs.select(ccp_drive);
             let prompt = self.cyan(&format!("{}>", fs.current_drive_letter()));
             self.send(&prompt).await?;
             self.flush().await?;
@@ -281,6 +292,7 @@ impl TelnetSession {
                 let d = verb.as_bytes()[0];
                 if (b'A'..=b'H').contains(&d) {
                     fs.select(d - b'A');
+                    ccp_drive = d - b'A'; // a bare `d:` moves the CCP default
                 } else {
                     self.send_line(&format!("  {}?", self.red(&verb))).await?;
                 }
@@ -795,8 +807,15 @@ impl TelnetSession {
                     // since file I/O flows through the BDOS FCB path, not
                     // raw sectors.
                     match vector {
-                        // WBOOT: the guest asked to reboot to the CCP.
-                        1 => return Ok(true),
+                        // WBOOT: the guest asked to reboot to the CCP.  Emit
+                        // the same fresh line as the `Stop::WarmBoot` path
+                        // (below) so a program that exits via the BIOS WBOOT
+                        // vector without a trailing newline doesn't jam the
+                        // next `A>` prompt onto its last output line.
+                        1 => {
+                            self.send_line("").await?;
+                            return Ok(true);
+                        }
                         // CONST: 0xFF if a key is buffered (out-of-band
                         // drain), else 0 — the non-blocking status poll.
                         2 => cpm.bios_return(if pending_input.is_empty() { 0x00 } else { 0xFF }),

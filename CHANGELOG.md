@@ -253,6 +253,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (get/set user number) is now tracked and shared with the `USER` command, so
     a program's save/restore-user sequence is self-consistent (files remain a
     single flat area, not segregated by user — a documented simplification).
+  - **BIOS jump table for direct-console software.** Programs that bypass BDOS
+    and do console I/O straight through the BIOS jump table (MBASIC, WordStar,
+    Turbo Pascal, Infocom games) now work: a real 17-entry CP/M 2.2 BIOS jump
+    table is laid in high memory, the warm-boot pointer at 0x0001 points at its
+    WBOOT entry, and each vector traps to the host, which services the console
+    group (CONST/CONIN/CONOUT/LIST/PUNCH/READER/LISTST) against the live
+    session. Also fixed: `STAT B:` no longer strands you at the `B>` prompt —
+    a transient's internal drive select is now undone when it exits (the CCP
+    re-selects its own default each command cycle, as real CP/M does), so only
+    a bare `d:` command changes drives; and `STAT`'s allocation vector no
+    longer overran the new BIOS jump table.
 
 ## [0.7.0] - 2026-07-17
 
