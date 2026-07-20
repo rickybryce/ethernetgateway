@@ -5,7 +5,7 @@
 //! (`kernel.rs`, "Flavor A", a pure-Rust CP/M-*flavored* file manager with
 //! no CPU emulation).  Flavor B runs actual user-supplied `.COM` software
 //! in an emulated CP/M 2.2 machine, sandboxed to a `CPM/` directory under
-//! `transfer_dir` (one folder per drive A:–H:).  See `kernelplan.md` §13
+//! `transfer_dir` (one folder per drive A:–P:).  See `kernelplan.md` §13
 //! for the full design and the phased plan.
 //!
 //! ## Naming
@@ -21,7 +21,7 @@
 //!   `CPM/` container in `transfer_dir`: 8.3-name validation (no separators
 //!   or `..`), a lexical `starts_with` check, and a canonical-path +
 //!   symlink check (a symlink planted in a drive folder can't point out).
-//!   Drive indices are clamped to A:–H:.
+//!   Drive indices are clamped to A:–P:.
 //! - **CPU.** A runaway is bounded by the configurable instruction ceiling
 //!   (`cpm_emu_max_minstr`); the run loop yields every batch, and a
 //!   double-`ESC` breaks out at any time — at a console prompt (in-band) and,
@@ -65,8 +65,8 @@ use std::sync::atomic::AtomicBool;
 /// yield to the async runtime.
 const CPM_RUN_BATCH: u64 = 200_000;
 
-/// Highest emulated drive letter (A:–H:, 8 drives).
-const CPM_LAST_DRIVE: u8 = b'H';
+/// Highest emulated drive letter (A:–P:, the 16 drives CP/M 2.2 allows).
+const CPM_LAST_DRIVE: u8 = b'P';
 
 /// Outcome of a single console-input read while a program runs.
 enum ConIn {
@@ -194,10 +194,13 @@ impl TelnetSession {
         self.cpmemu_repl(&mut fs).await
     }
 
-    /// Ensure `CPM/` and each drive folder `CPM/A`..`CPM/H` exist under
+    /// Ensure `CPM/` and each drive folder `CPM/A`..`CPM/P` exist under
     /// `transfer_dir`, creating any that are missing.  Idempotent and run
-    /// on every launch, so a program can select any of the 8 drives without
-    /// hitting a "drive does not exist" error.  Jailed by construction —
+    /// on every launch, so a program can select any of the 16 drives without
+    /// hitting a "drive does not exist" error.  An empty folder *is* a
+    /// formatted, ready-to-use drive here — the CP/M directory is synthesized
+    /// from the folder's real files, so there is nothing to `CLRDIR`/format.
+    /// Jailed by construction —
     /// the paths are built under the configured `transfer_dir`.
     async fn cpmemu_ensure_drives(&mut self) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
@@ -290,7 +293,7 @@ impl TelnetSession {
             // Drive change: "A:".."H:" selects that drive (CCP convention).
             if verb.len() == 2 && verb.ends_with(':') {
                 let d = verb.as_bytes()[0];
-                if (b'A'..=b'H').contains(&d) {
+                if (b'A'..=CPM_LAST_DRIVE).contains(&d) {
                     fs.select(d - b'A');
                     ccp_drive = d - b'A'; // a bare `d:` moves the CCP default
                 } else {

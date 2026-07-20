@@ -2137,12 +2137,14 @@ to the gateway. The prompt tracks the current drive
 <h3>Drives &amp; staging a program</h3>
 
 <p>
-The emulator has eight drives, <strong>A:&ndash;H:</strong>, each mapped to a
-folder under a dedicated <code>CPM/</code> container inside
-<code>transfer_dir</code> (<code>CPM/A</code>&hellip;<code>CPM/H</code>, all
-created on launch). This is a <em>separate</em> sandbox from the Gateway
-Shell&rsquo;s drive&nbsp;A: (which is the whole transfer directory). To run a
-program:
+The emulator has sixteen drives, <strong>A:&ndash;P:</strong> (the maximum
+CP/M&nbsp;2.2 allows), each mapped to a folder under a dedicated
+<code>CPM/</code> container inside <code>transfer_dir</code>
+(<code>CPM/A</code>&hellip;<code>CPM/P</code>, all created on launch). Each is
+ready to use the moment it exists&mdash;an empty folder is a formatted, empty
+drive, so there is nothing to format or <code>CLRDIR</code>. This is a
+<em>separate</em> sandbox from the Gateway Shell&rsquo;s drive&nbsp;A: (which
+is the whole transfer directory). To run a program:
 </p>
 
 <ol>

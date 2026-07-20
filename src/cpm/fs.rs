@@ -2,7 +2,7 @@
 //! transfer address, and resolution of an FCB to a **jailed** host path
 //! under `CPM/<drive>/`.
 //!
-//! Each emulated drive A:–H: is a folder inside the `CPM/` container under
+//! Each emulated drive A:–P: is a folder inside the `CPM/` container under
 //! `transfer_dir` (created on launch — see `telnet/cpm_emu.rs`).  Because a
 //! resolved filename is always a validated 8.3 name (no separators, no
 //! `..`) joined onto a fixed single-letter drive directory beneath the
@@ -12,8 +12,10 @@
 use super::fcb::{format_8_3, split_8_3, Fcb};
 use std::path::{Path, PathBuf};
 
-/// Number of emulated drives (A: through H:).
-pub const NUM_DRIVES: u8 = 8;
+/// Number of emulated drives.  CP/M 2.2's FCB drive field is 4 bits, so the
+/// architectural maximum is 16 (A: through P:); we expose all of them, each a
+/// folder auto-created under `CPM/`.
+pub const NUM_DRIVES: u8 = 16;
 
 /// Default DMA (disk transfer) address in the guest — the CP/M default
 /// buffer at 0x0080 (the second half of the zero page).
@@ -106,7 +108,7 @@ impl CpmFs {
     }
 
     /// Map an FCB's drive byte (0 = current, 1 = A:, …) to a 0-based drive
-    /// index, or `None` if it names a drive beyond H:.
+    /// index, or `None` if it names a drive beyond P:.
     pub fn drive_index_for(&self, fcb_drive: u8) -> Option<u8> {
         match fcb_drive {
             0 => Some(self.drive),
@@ -542,8 +544,10 @@ mod tests {
         assert_eq!(fs.current_drive_letter(), 'A');
         assert!(fs.select(1));
         assert_eq!(fs.current_drive_letter(), 'B');
-        assert!(!fs.select(8)); // I: is beyond H:
-        assert_eq!(fs.current_drive_letter(), 'B'); // unchanged
+        assert!(fs.select(15)); // P: is the last drive
+        assert_eq!(fs.current_drive_letter(), 'P');
+        assert!(!fs.select(16)); // Q: is beyond P:
+        assert_eq!(fs.current_drive_letter(), 'P'); // unchanged
     }
 
     #[test]
@@ -552,7 +556,8 @@ mod tests {
         assert_eq!(fs.drive_index_for(0), Some(0)); // default = current (A)
         assert_eq!(fs.drive_index_for(1), Some(0)); // A:
         assert_eq!(fs.drive_index_for(8), Some(7)); // H:
-        assert_eq!(fs.drive_index_for(9), None); // I: unsupported
+        assert_eq!(fs.drive_index_for(16), Some(15)); // P:
+        assert_eq!(fs.drive_index_for(17), None); // beyond P: unsupported
     }
 
     #[test]
@@ -577,8 +582,8 @@ mod tests {
     #[test]
     fn test_resolve_rejects_bad_drive_and_wildcards() {
         let fs = CpmFs::new(PathBuf::from("/tmp/cpm"));
-        // Drive beyond H:.
-        assert!(fs.resolve(&fcb_named(9, "A", "TXT")).is_none());
+        // Drive beyond P:.
+        assert!(fs.resolve(&fcb_named(17, "A", "TXT")).is_none());
         // Wildcard name is not a concrete file.
         assert!(fs.resolve(&fcb_named(1, "??", "COM")).is_none());
     }

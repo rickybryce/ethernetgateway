@@ -264,6 +264,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     re-selects its own default each command cycle, as real CP/M does), so only
     a bare `d:` command changes drives; and `STAT`'s allocation vector no
     longer overran the new BIOS jump table.
+  - **All sixteen CP/M drives A:–P: now available** (was A:–H:). CP/M 2.2's
+    architectural maximum is 16 drives; the emulator now auto-creates a folder
+    for each under `CPM/` and reports all sixteen in the login vector. Each is
+    a formatted, empty drive the instant its folder exists — the CP/M directory
+    is synthesized from the folder's real files, so there is no format/`CLRDIR`
+    step.
 
 ## [0.7.0] - 2026-07-17
 

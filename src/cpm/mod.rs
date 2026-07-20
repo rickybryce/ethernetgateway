@@ -536,10 +536,10 @@ fn build_dpb() -> [u8; 15] {
 pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
     match func {
         // Return login vector: HL = bitmap of active drives (bit 0 = A:).
-        // Every drive A:–H: exists (its folder is auto-created), so all eight
-        // low bits are set.  Without this the call returned 0 (no drives),
-        // which confused drive-enumeration utilities.
-        24 => Some(0x00FF),
+        // Every drive A:–P: exists (its folder is auto-created), so all
+        // sixteen bits are set.  Without this the call returned 0 (no
+        // drives), which confused drive-enumeration utilities.
+        24 => Some(0xFFFF),
         31 => {
             cpm.write_block(DPB_ADDR, &build_dpb());
             Some(DPB_ADDR)
@@ -1027,8 +1027,8 @@ mod tests {
         std::fs::create_dir_all(base.join("A")).unwrap();
         let fs = CpmFs::new(base.clone());
         let mut cpm = Cpm::new();
-        // BDOS 24: HL bitmap with all eight drives A:–H: active.
-        assert_eq!(disk_info_bdos(&mut cpm, &fs, 24), Some(0x00FF));
+        // BDOS 24: HL bitmap with all sixteen drives A:–P: active.
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 24), Some(0xFFFF));
         let _ = std::fs::remove_dir_all(&base);
     }
 
