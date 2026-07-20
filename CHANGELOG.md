@@ -274,6 +274,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a formatted, empty drive the instant its folder exists — the CP/M directory
     is synthesized from the folder's real files, so there is no format/`CLRDIR`
     step.
+  - **`TYPE` now paginates** in the emulator. It previously streamed the whole
+    file past the screen in one go; it now stops each screenful with the same
+    `--More-- (SPACE, RET, Q)` viewer the Gateway Shell uses (SPACE = next page,
+    RETURN = one line, Q/ESC = quit), expanding tabs and wrapping long lines to
+    the terminal width.
 
 ## [0.7.0] - 2026-07-17
 

@@ -517,12 +517,35 @@ impl TelnetSession {
         } else {
             (text, false)
         };
-        self.cpmemu_write_text(shown).await?;
-        self.send_line("").await?;
-        if truncated {
-            self.send_line(&format!("  {}", self.dim("[truncated]"))).await?;
+        // Break the text into terminal-width lines and page it with the shared
+        // `--More-- (SPACE, RET, Q)` viewer — the same one the Gateway Shell's
+        // TYPE uses.  Real CP/M's TYPE just streams (you freeze it with ^S/^Q),
+        // but a long file would otherwise blow straight past the screen; the
+        // paginated view stops each screenful and waits.  Tabs expand to four
+        // spaces and long lines wrap, matching the Gateway Shell exactly.
+        let width = if self.terminal_type == TerminalType::Petscii {
+            PETSCII_WIDTH - 2
+        } else {
+            78
+        };
+        let text_str = String::from_utf8_lossy(shown);
+        let mut lines: Vec<String> = Vec::new();
+        for raw in text_str.split('\n') {
+            let raw = raw.strip_suffix('\r').unwrap_or(raw);
+            let expanded = raw.replace('\t', "    ");
+            if expanded.is_empty() {
+                lines.push(String::new());
+                continue;
+            }
+            let chars: Vec<char> = expanded.chars().collect();
+            for chunk in chars.chunks(width) {
+                lines.push(chunk.iter().collect());
+            }
         }
-        Ok(())
+        if truncated {
+            lines.push(format!("  {}", self.dim("[truncated]")));
+        }
+        self.cpm_page_lines(&lines).await
     }
 
     /// Built-in `SAVE` (CP/M resident): write `n` 256-byte pages of the TPA
@@ -1190,21 +1213,6 @@ impl TelnetSession {
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(None), // timed out — no fast follower
         }
-    }
-
-    /// Write literal text (a `TYPE`d file, not program output) to the
-    /// session: on a C64 the ASCII text is case-swapped + Latin-1 encoded via
-    /// the normal `send` path so it renders correctly; elsewhere the bytes go
-    /// out raw.  Unlike [`Self::cpmemu_emit`], this does NOT run the ADM-3A
-    /// decoder — the bytes are file content, not a program's control stream.
-    async fn cpmemu_write_text(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
-        if self.terminal_type == TerminalType::Petscii {
-            let s = String::from_utf8_lossy(bytes);
-            self.send(&s).await?;
-        } else {
-            self.send_raw(bytes).await?;
-        }
-        self.flush().await
     }
 
     /// Write guest output to the session, translating the ADM-3A control

@@ -969,7 +969,7 @@ impl TelnetSession {
     /// Paginate a list of pre-formatted lines with a `--More--` pause.
     /// SPACE (or any non-special key) shows the next screenful, RETURN
     /// advances a single line, Q or ESC stops.
-    async fn cpm_page_lines(&mut self, lines: &[String]) -> Result<(), std::io::Error> {
+    pub(in crate::telnet) async fn cpm_page_lines(&mut self, lines: &[String]) -> Result<(), std::io::Error> {
         let full = if self.terminal_type == TerminalType::Petscii {
             20
         } else {
