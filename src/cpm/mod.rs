@@ -45,6 +45,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const BDOS_ENTRY: u16 = 0x0005;
 /// Warm-boot vector — programs `JP 0` (or `RET` to it) to reboot.
 pub const WBOOT: u16 = 0x0000;
+/// IOBYTE — the CP/M logical-device assignment byte, at its architectural
+/// page-zero home.  BDOS 7/8 (get/set I/O byte) read and write it here.
+const IOBYTE_ADDR: u16 = 0x0003;
 /// Transient Program Area base — where a `.COM` is loaded and starts.
 pub const TPA_BASE: u16 = 0x0100;
 /// Top of the usable TPA in our layout; the stack starts here and grows
@@ -586,6 +589,18 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
     }
 
     match func {
+        // 7 = Get I/O Byte, 8 = Set I/O Byte.  The IOBYTE lives at its
+        // architectural home, 0x0003 in page zero; backing get/set with that
+        // byte makes a program's set-then-get round-trip self-consistent.
+        // Logical-device redirection has no observable effect in the
+        // single-console model, but the value is now honestly stored and
+        // returned instead of being dropped (get → 0, set → no-op).
+        7 => Some(cpm.read_block(IOBYTE_ADDR, 1)[0]),
+        8 => {
+            let iobyte = cpm.reg8(Reg8::E);
+            cpm.write_block(IOBYTE_ADDR, &[iobyte]);
+            Some(0)
+        }
         13 => {
             // Reset disk system: default drive A:, DMA 0x0080.
             fs.select(0);
@@ -1048,6 +1063,28 @@ mod tests {
         // Values clamp to 0–15.
         cpm.set_reg8(Reg8::E, 20);
         assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 32), Some(4)); // 20 & 0x0F
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_bdos_iobyte_get_set_roundtrip() {
+        // BDOS 8 (Set I/O Byte) stores E at the IOBYTE address; BDOS 7 (Get
+        // I/O Byte) reads it back — a set-then-get round-trip is now
+        // self-consistent instead of get→0 / set→dropped.
+        let base = std::env::temp_dir().join("xmodem_cpm_iobyte");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]); // lays down page zero
+        // Default IOBYTE reads as 0.
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 7), Some(0x00));
+        // Set IOBYTE = 0x95 (a typical CON:/RDR:/PUN:/LST: assignment) via E.
+        cpm.set_reg8(Reg8::E, 0x95);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 8), Some(0));
+        // Get reads the same value back, and it physically lives at 0x0003.
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 7), Some(0x95));
+        assert_eq!(cpm.read_block(IOBYTE_ADDR, 1)[0], 0x95);
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -253,6 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (get/set user number) is now tracked and shared with the `USER` command, so
     a program's save/restore-user sequence is self-consistent (files remain a
     single flat area, not segregated by user — a documented simplification).
+    Functions 7/8 (get/set I/O byte) now read and write the IOBYTE at its
+    page-zero home (0x0003) so a set-then-get round-trip is consistent (device
+    redirection has no effect in the single-console model, but the value is no
+    longer silently dropped).
   - **BIOS jump table for direct-console software.** Programs that bypass BDOS
     and do console I/O straight through the BIOS jump table (MBASIC, WordStar,
     Turbo Pascal, Infocom games) now work: a real 17-entry CP/M 2.2 BIOS jump
