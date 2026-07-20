@@ -786,7 +786,64 @@ impl TelnetSession {
                         }
                     }
                 }
-                Stop::WarmBoot | Stop::Aborted => return Ok(true),
+                Stop::Bios(vector) => {
+                    // A direct BIOS jump-table call (software that bypasses
+                    // BDOS for console I/O: MBASIC, WordStar, Infocom, …).
+                    // We service the console group against the live session
+                    // exactly like their BDOS equivalents; the low-level
+                    // disk vectors (SELDSK/READ/WRITE/…) are stubbed to 0
+                    // since file I/O flows through the BDOS FCB path, not
+                    // raw sectors.
+                    match vector {
+                        // WBOOT: the guest asked to reboot to the CCP.
+                        1 => return Ok(true),
+                        // CONST: 0xFF if a key is buffered (out-of-band
+                        // drain), else 0 — the non-blocking status poll.
+                        2 => cpm.bios_return(if pending_input.is_empty() { 0x00 } else { 0xFF }),
+                        // CONIN: blocking keyboard read (no echo).
+                        3 => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
+                            ConIn::Byte(b) => cpm.bios_return(b),
+                            ConIn::BreakOut => {
+                                self.cpmemu_break_notice().await?;
+                                return Ok(true);
+                            }
+                            ConIn::Disconnect => return Ok(false),
+                        },
+                        // CONOUT / LIST: character in C to the console.
+                        4 | 5 => {
+                            let c = cpm.arg_c();
+                            self.cpmemu_emit(&mut term, &[c]).await?;
+                            cpm.bios_return(0);
+                        }
+                        // PUNCH (AUX out): character in C to the virtual modem.
+                        6 => {
+                            let c = cpm.arg_c();
+                            cpm.modem_tx_push(c);
+                            cpm.bios_return(0);
+                        }
+                        // READER (AUX in): next modem byte, or ^Z if none.
+                        7 => {
+                            let b = cpm.modem_rx_pop().unwrap_or(0x1A);
+                            cpm.bios_return(b);
+                        }
+                        // LISTST: list device always ready.
+                        15 => cpm.bios_return(0xFF),
+                        // BOOT/HOME/SELDSK/SETTRK/SETSEC/SETDMA/READ/WRITE/
+                        // SECTRAN: no raw-sector disk emulation — stub to 0.
+                        _ => cpm.bios_return(0),
+                    }
+                }
+                Stop::WarmBoot => {
+                    // Real CP/M's CCP emits CR/LF before redrawing the
+                    // prompt.  Many transients (STAT, and utilities in
+                    // general) exit without a trailing newline, relying on
+                    // that; without it the `A>` prompt lands jammed onto the
+                    // program's last output line.  One `send_line("")`
+                    // guarantees the prompt starts on a fresh line.
+                    self.send_line("").await?;
+                    return Ok(true);
+                }
+                Stop::Aborted => return Ok(true),
                 Stop::BudgetExhausted => {}
             }
             // Service the virtual modem at the batch seam: hand it whatever the

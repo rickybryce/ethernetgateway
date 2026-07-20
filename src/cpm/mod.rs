@@ -51,6 +51,27 @@ pub const TPA_BASE: u16 = 0x0100;
 /// down, leaving the region above for the (pretend, for now) BDOS/BIOS.
 const STACK_TOP: u16 = 0xFE00;
 
+/// BIOS jump-table base (the `BOOT` entry).  Real CP/M software that does
+/// direct console I/O — MBASIC, WordStar, Turbo Pascal, Infocom games —
+/// finds the console routines by reading the warm-boot pointer at 0x0001
+/// (which points at this table's `WBOOT` entry) and walking the `JP`
+/// vectors.  We lay a real 17-entry table here whose `JP` operands are
+/// unique trap addresses [`BIOS_TRAP`]`+i`; `run` recognises a PC in that
+/// range as a BIOS call and returns [`Stop::Bios`] so the host can service
+/// it, exactly as it does for the BDOS entry.  The table sits above the
+/// TPA top (0x0001/0x0006 report `STACK_TOP`) so a guest never overwrites
+/// it.  Kept clear of the DPB/alloc scratch at 0xFE80/0xFE90.
+const BIOS_BASE: u16 = 0xFF00;
+/// Per-vector trap addresses the BIOS jump table's `JP`s point at.  A guest
+/// either jumps through the table (`CALL BIOS_BASE+3*i` → `JP BIOS_TRAP+i`)
+/// or, like MBASIC, extracts the operand and calls `BIOS_TRAP+i` directly;
+/// both land on the trap PC.
+const BIOS_TRAP: u16 = 0xFF40;
+/// CP/M 2.2 BIOS jump-table length: BOOT, WBOOT, CONST, CONIN, CONOUT,
+/// LIST, PUNCH, READER, HOME, SELDSK, SETTRK, SETSEC, SETDMA, READ, WRITE,
+/// LISTST, SECTRAN.
+const BIOS_VECTORS: u16 = 17;
+
 /// Why a [`Cpm::run`] batch returned control to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -58,6 +79,12 @@ pub enum Stop {
     /// The host services it (reading further arguments from the registers
     /// / memory) and then calls [`Cpm::bdos_return`].
     Bdos(u8),
+    /// The guest called a BIOS jump-table vector directly (this is the
+    /// vector index: 1=WBOOT, 2=CONST, 3=CONIN, 4=CONOUT, 5=LIST, …).  The
+    /// host services the console group against the live session and calls
+    /// [`Cpm::bios_return`]; used by software that bypasses BDOS for
+    /// console I/O (MBASIC, WordStar, Infocom, …).
+    Bios(u8),
     /// System reset / warm boot (BDOS function 0, `JP 0`, or `RET` to the
     /// warm-boot vector).  The run is over.
     WarmBoot,
@@ -104,10 +131,28 @@ impl Cpm {
     /// that trashed page zero can't corrupt the next program's vectors —
     /// mirrors real CP/M reloading the system on a warm boot.
     fn install_low_memory(&mut self) {
-        self.mem.poke(0x0000, 0xC3); // JP WBOOT handler
-        self.mem.poke16(0x0001, STACK_TOP);
+        // Warm-boot vector at 0x0000 points at the BIOS `WBOOT` entry (the
+        // 2nd table slot), as real CP/M lays it out, so a guest that reads
+        // 0x0001 to find the BIOS jump table walks a real table.
+        self.mem.poke(0x0000, 0xC3); // JP WBOOT (BIOS entry+3)
+        self.mem.poke16(0x0001, BIOS_BASE + 3);
         self.mem.poke(0x0005, 0xC3); // JP BDOS
         self.mem.poke16(0x0006, STACK_TOP);
+        self.install_bios_table();
+    }
+
+    /// Lay a real 17-entry CP/M 2.2 BIOS jump table at [`BIOS_BASE`].  Each
+    /// slot is a `JP BIOS_TRAP+i`; `run` traps a PC in the `BIOS_TRAP`
+    /// range and returns [`Stop::Bios`]`(i)`.  A guest reaches a vector
+    /// either by `CALL`ing the table slot (the `JP` lands on the trap) or,
+    /// like MBASIC, by extracting the `JP` operand and calling the trap
+    /// address directly — both work because the operand *is* the trap PC.
+    fn install_bios_table(&mut self) {
+        for i in 0..BIOS_VECTORS {
+            let slot = BIOS_BASE + 3 * i;
+            self.mem.poke(slot, 0xC3); // JP
+            self.mem.poke16(slot + 1, BIOS_TRAP + i);
+        }
     }
 
     /// Load a `.COM` image into the TPA and prepare to run it: the stack is
@@ -153,6 +198,11 @@ impl Cpm {
             if pc == WBOOT && self.instructions > 0 {
                 return Stop::WarmBoot;
             }
+            // A direct BIOS jump-table call: PC landed on one of the trap
+            // addresses the table's `JP`s point at.  Vector index = offset.
+            if (BIOS_TRAP..BIOS_TRAP + BIOS_VECTORS).contains(&pc) {
+                return Stop::Bios((pc - BIOS_TRAP) as u8);
+            }
             self.cpu.execute_instruction(&mut self.mem);
             self.instructions += 1;
             executed += 1;
@@ -189,6 +239,25 @@ impl Cpm {
         let ret = self.mem.peek16(sp);
         self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
         self.cpu.registers().set_pc(ret);
+    }
+
+    /// Return from a serviced BIOS console call: CP/M BIOS routines pass
+    /// their byte result in `A` (CONST status, CONIN/READER character); we
+    /// mirror it in `L` for the occasional caller that reads the low word,
+    /// then `RET` to the address the guest's `CALL` pushed.  Output vectors
+    /// (CONOUT/LIST/PUNCH) that return nothing just pass 0.
+    pub fn bios_return(&mut self, value: u8) {
+        self.cpu.registers().set8(Reg8::A, value);
+        self.cpu.registers().set8(Reg8::L, value);
+        let sp = self.cpu.registers().get16(Reg16::SP);
+        let ret = self.mem.peek16(sp);
+        self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
+        self.cpu.registers().set_pc(ret);
+    }
+
+    /// BIOS "console/list/punch output" argument: the character in `C`.
+    pub fn arg_c(&mut self) -> u8 {
+        self.reg8(Reg8::C)
     }
 
     /// Read an 8-bit register (for the host to fetch BDOS arguments).
@@ -725,6 +794,71 @@ mod tests {
                 other => return (out, other),
             }
         }
+    }
+
+    #[test]
+    fn test_bios_jump_table_installed() {
+        // load_com lays a real 17-entry BIOS jump table; the warm-boot
+        // pointer at 0x0001 points at its WBOOT entry (the 2nd slot) so a
+        // guest that reads 0x0001 walks a real table, and each slot is a
+        // `JP <trap>` whose operand is the per-vector trap address.
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]); // trivial RET program
+        assert_eq!(cpm.mem.peek16(0x0001), BIOS_BASE + 3);
+        assert_eq!(cpm.mem.peek(0x0000), 0xC3); // JP at 0x0000
+        for i in 0..BIOS_VECTORS {
+            let slot = BIOS_BASE + 3 * i;
+            assert_eq!(cpm.mem.peek(slot), 0xC3, "vector {i} is a JP");
+            assert_eq!(cpm.mem.peek16(slot + 1), BIOS_TRAP + i, "vector {i} operand");
+        }
+    }
+
+    #[test]
+    fn test_bios_conout_through_table_and_direct() {
+        // Both ways a guest reaches CONOUT (vector 4) must trap: CALLing the
+        // jump-table slot (`JP` lands on the trap) and — like MBASIC —
+        // CALLing the extracted operand address directly.
+        let abort = AtomicBool::new(false);
+        // CALL through the table slot: CALL 0xFF0C (BIOS_BASE + 3*4).
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xCD, 0x0C, 0xFF, 0x76 /*HALT-ish filler*/]);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(4));
+        // CALL the trap operand directly: CALL 0xFF44 (BIOS_TRAP + 4).
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xCD, 0x44, 0xFF, 0x76]);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(4));
+    }
+
+    #[test]
+    fn test_bios_conin_returns_value_and_rets() {
+        // CALL CONIN (vector 3), host supplies a byte via bios_return, and
+        // the guest stores A to a buffer then warm-boots — proving the
+        // BIOS call returns the value in A and RETs to the caller.
+        // 0100: CD 09 FF   CALL 0xFF09 (CONIN table slot)
+        // 0103: 32 20 01   LD (0x0120),A
+        // 0106: C3 00 00   JP 0 (warm boot)
+        let prog = [0xCD, 0x09, 0xFF, 0x32, 0x20, 0x01, 0xC3, 0x00, 0x00];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(3));
+        cpm.bios_return(b'X');
+        assert_eq!(cpm.run(100, &abort), Stop::WarmBoot);
+        assert_eq!(cpm.mem.peek(0x0120), b'X');
+    }
+
+    #[test]
+    fn test_bios_conout_arg_in_c() {
+        // CONOUT takes its character in C (arg_c), unlike BDOS 2's E.
+        // 0100: 0E 41      LD C,'A'
+        // 0102: CD 0C FF   CALL CONOUT
+        // 0105: C3 00 00   JP 0
+        let prog = [0x0E, b'A', 0xCD, 0x0C, 0xFF, 0xC3, 0x00, 0x00];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(4));
+        assert_eq!(cpm.arg_c(), b'A');
     }
 
     #[test]
