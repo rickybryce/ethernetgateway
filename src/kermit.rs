@@ -4479,6 +4479,35 @@ pub(crate) fn is_safe_relative_subdir(s: &str) -> bool {
     true
 }
 
+/// Resolve a `remote cd` argument against the current session subdir
+/// using standard `cd` semantics: a bare name descends from the current
+/// subdir, a leading `/` resets from the transfer root, `.` is a no-op,
+/// and `..` pops one component (that's what `remote cdup` sends).
+/// Popping stops at the root, so no argument — however many `..` it
+/// stacks — can climb above the sandbox; a `../escape` from root simply
+/// resolves to `escape` inside the transfer dir.  The returned path
+/// still has to clear `is_safe_relative_subdir` (character / hidden-file
+/// validation) before the caller trusts it.
+fn resolve_cwd_target(current: &str, arg: &str) -> String {
+    // A leading '/' means "from the transfer root"; otherwise the arg is
+    // relative to where the session currently sits.
+    let mut components: Vec<&str> = if arg.starts_with('/') {
+        Vec::new()
+    } else {
+        current.split('/').filter(|c| !c.is_empty()).collect()
+    };
+    for part in arg.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components.join("/")
+}
+
 /// Resolve `cfg.transfer_dir` + `subdir` into a single path.  Caller
 /// has already validated `subdir` via `is_safe_relative_subdir`.
 fn effective_transfer_path(cfg: &config::Config, subdir: &str) -> std::path::PathBuf {
@@ -5026,23 +5055,21 @@ async fn kermit_server_dispatch(
                         let raw_arg = parse_g_field_argument(&raw[1..])
                             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
                             .unwrap_or_default();
-                        // CDUP: real C-Kermit's `remote cdup` sends
-                        // `setgen('C', "..", ...)` (ckuus7.c:7762), so
-                        // `..` must mean "go up one component" rather
-                        // than fail the path-traversal check.  We resolve
-                        // it locally by popping the last component from
-                        // the current subdir; popping at root stays at
-                        // root rather than escaping the sandbox.  This
-                        // is the only relative-path special case — any
-                        // other `..` (e.g. `foo/..`, `../etc`) still hits
-                        // is_safe_relative_subdir and gets refused.
-                        let new_subdir = if raw_arg == ".." {
-                            match subdir.rsplit_once('/') {
-                                Some((rest, _last)) => rest.to_string(),
-                                None => String::new(),
-                            }
+                        // `remote cd` follows standard `cd` semantics,
+                        // *relative to the current subdir*: `remote cd
+                        // CPM` then `remote cd B` descends into `CPM/B`,
+                        // matching a real C-Kermit / FTP server and a
+                        // shell.  `..` pops one component — that's what
+                        // `remote cdup` sends (`setgen('C', "..", ...)`,
+                        // ckuus7.c:7762) — and popping stops at the root,
+                        // so no argument can escape the sandbox.  A
+                        // leading `/` resets from the transfer root.  An
+                        // empty argument is the spec's "reset to home"
+                        // (§6.7) and returns to the root.
+                        let new_subdir = if raw_arg.is_empty() {
+                            String::new()
                         } else {
-                            raw_arg
+                            resolve_cwd_target(&subdir, &raw_arg)
                         };
                         if !is_safe_relative_subdir(&new_subdir) {
                             send_error(
@@ -8062,6 +8089,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_cwd_target_semantics() {
+        // Relative descent from the current subdir (the reported bug).
+        assert_eq!(resolve_cwd_target("CPM", "B"), "CPM/B");
+        assert_eq!(resolve_cwd_target("", "CPM"), "CPM");
+        assert_eq!(resolve_cwd_target("a", "b/c"), "a/b/c");
+        // `..` pops one component; multiple `..` pop several.
+        assert_eq!(resolve_cwd_target("a/b", ".."), "a");
+        assert_eq!(resolve_cwd_target("a/b/c", "../.."), "a");
+        // Popping clamps at the root — can't climb above the sandbox.
+        assert_eq!(resolve_cwd_target("", ".."), "");
+        assert_eq!(resolve_cwd_target("a", "../../.."), "");
+        assert_eq!(resolve_cwd_target("", "../../../etc"), "etc");
+        // A leading '/' resets from the transfer root.
+        assert_eq!(resolve_cwd_target("a/b", "/c"), "c");
+        assert_eq!(resolve_cwd_target("a/b", "/"), "");
+        // `.` and empty components are no-ops.
+        assert_eq!(resolve_cwd_target("a", "./b"), "a/b");
+        assert_eq!(resolve_cwd_target("a", "b//c"), "a/b/c");
+        // Sibling navigation: up one, into another.
+        assert_eq!(resolve_cwd_target("a/b", "../c"), "a/c");
+    }
+
+    #[tokio::test]
     async fn test_filename_and_subdir_length_caps() {
         // Resume-filename cap.  64-char name accepted, 65-char rejected.
         let at_cap: String = "a".repeat(MAX_KERMIT_FILENAME_LEN);
@@ -8735,17 +8785,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_server_g_cwd_unsafe_path_refused() {
-        // Path-traversal in CWD argument: server emits E-packet and
-        // stays idle without modifying the subdir.  Server keeps
-        // running per spec §6.7 so a peer can retry with a valid path.
-        let ((), result) = run_server_with_client(async |w, r| {
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"../etc"))).await.unwrap();
+    async fn test_server_g_cwd_traversal_stays_in_sandbox() {
+        // A `..`-stacked argument must NOT escape the transfer dir.
+        // With relative `cd` semantics the server resolves `..` by
+        // popping components, clamping at the root — so `../../../etc`
+        // from the root lands in `<transfer_dir>/etc`, never the host's
+        // real /etc.  Proven by cd'ing there and DIR'ing: we see our
+        // own sentinel file, not /etc/passwd.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_cwd_traversal_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc").join("sentinel.bin"), b"safe").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"../../../etc")))
+                .await
+                .unwrap();
             let resp = read_server_packet(r).await;
-            assert_eq!(resp.kind, TYPE_ERROR, "expected E for CWD ../etc");
+            assert_eq!(resp.kind, TYPE_ACK,
+                "../../../etc must clamp to the sandbox etc/ and ACK");
+            let listing = run_g_text_command(w, r, b'D', &[]).await;
+            assert!(listing.contains("sentinel.bin"),
+                "should list the sandbox etc/, got {:?}", listing);
+            assert!(!listing.contains("passwd"),
+                "must NOT reach the host /etc, got {:?}", listing);
             close_server_session(w, r).await;
         })
         .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_cwd_relative_descends_from_current() {
+        // The reported bug: `remote cd CPM` then `remote cd B` must
+        // descend into CPM/B (relative to where the session already
+        // sits), not look for `B` at the transfer root.  Verified by
+        // GET'ing a file that only exists under CPM/B.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_cwd_rel_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("CPM").join("B")).unwrap();
+        std::fs::write(dir.join("CPM").join("B").join("deep.txt"), b"deep-mark").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            // cd CPM
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"CPM"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK, "cd CPM should ACK");
+            // cd B — relative, so this is CPM/B, not <root>/B
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"B"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK,
+                "cd B after cd CPM must descend into CPM/B");
+            // GET a file that only lives under CPM/B.
+            w.write_all(&wire_packet(TYPE_R, 0, b"deep.txt")).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK, "GET in CPM/B should succeed");
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received[0].data, b"deep-mark");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
 
@@ -10259,13 +10373,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_cwd_unsafe_path_returns_error() {
-        // Path traversal in CWD argument: server emits E-packet, the
-        // client's send_g_simple surfaces it as Err.
+        // An illegal CWD argument (a name with characters
+        // is_safe_relative_subdir rejects): server emits E-packet, the
+        // client's send_g_simple surfaces it as Err.  (`..` on its own
+        // is no longer refused — it's resolved by popping within the
+        // sandbox — so we use an outright-invalid name here.)
         let (client_result, _) = run_client_against_server(async |r, w| {
-            kermit_client_cwd(r, w, "../etc", false, false, false).await
+            kermit_client_cwd(r, w, "bad name", false, false, false).await
         })
         .await;
-        let err = client_result.expect_err("CWD ../etc must fail");
+        let err = client_result.expect_err("CWD 'bad name' must fail");
         let lower = err.to_ascii_lowercase();
         assert!(
             lower.contains("invalid") || lower.contains("refused"),
