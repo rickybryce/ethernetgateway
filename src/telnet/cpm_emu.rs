@@ -653,6 +653,13 @@ impl TelnetSession {
         // finds its arguments where CP/M puts them.  Built-in demos pass an
         // empty tail.
         cpm.setup_command_line(tail);
+        // Seed the page-zero CDISK byte (0x0004) with the drive/user the
+        // program is launched under.  A transient that reads 0x0004 directly
+        // to find its login drive (e.g. Infocom's interpreter locating its
+        // story file) must see the real drive — otherwise a game run from B:
+        // looks for its data on A: and hangs.  `load_com` reinstalls the low
+        // vectors, so this has to come after it.
+        cpm.set_current_disk(fs.current_drive(), fs.current_user());
         // Runaway ceiling for this run, from config (millions of Z80
         // instructions) — the last-resort backstop.  Interactively, a
         // double-`ESC` breaks out: at a console prompt via `cpmemu_conin`, and

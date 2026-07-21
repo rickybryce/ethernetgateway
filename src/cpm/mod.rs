@@ -48,6 +48,14 @@ pub const WBOOT: u16 = 0x0000;
 /// IOBYTE — the CP/M logical-device assignment byte, at its architectural
 /// page-zero home.  BDOS 7/8 (get/set I/O byte) read and write it here.
 const IOBYTE_ADDR: u16 = 0x0003;
+/// CDISK — the current-drive / current-user byte at its architectural
+/// page-zero home: low nibble = current drive (0 = A:), high nibble =
+/// current user (0–15).  Real CP/M's CCP/BDOS maintains this so a
+/// transient can read the drive it was loaded from directly from page
+/// zero (Infocom's CP/M interpreter does exactly this to locate its
+/// story file — without it, a game run from B: looks on A:, fails to
+/// open its data, and hangs).
+const CDISK_ADDR: u16 = 0x0004;
 /// Transient Program Area base — where a `.COM` is loaded and starts.
 pub const TPA_BASE: u16 = 0x0100;
 /// Top of the usable TPA in our layout; the stack starts here and grows
@@ -423,6 +431,14 @@ impl Cpm {
         }
     }
 
+    /// Write the CP/M CDISK byte at page-zero 0x0004 from a 0-based drive
+    /// (0 = A:) and user number (0–15): low nibble = drive, high nibble =
+    /// user.  Real CP/M maintains this so a transient can read its login
+    /// drive directly from page zero.
+    pub fn set_current_disk(&mut self, drive: u8, user: u8) {
+        self.mem.poke(CDISK_ADDR, ((user & 0x0F) << 4) | (drive & 0x0F));
+    }
+
     /// Select how the guest reaches the virtual modem (direct UART ports, the
     /// BDOS `AUX:` device, or off).  For `Ports`, a comms program's `IN`/`OUT`
     /// at the profile's addresses reach the modem's byte rings.
@@ -605,12 +621,16 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             // Reset disk system: default drive A:, DMA 0x0080.
             fs.select(0);
             fs.set_dma(fs::DEFAULT_DMA);
+            cpm.set_current_disk(fs.current_drive(), fs.current_user());
             Some(0)
         }
         14 => {
-            // Select disk: E = drive (0 = A:).
+            // Select disk: E = drive (0 = A:).  Keep the page-zero CDISK
+            // byte in step so a program that reads 0x0004 after selecting
+            // sees the drive it just chose.
             let e = cpm.reg8(Reg8::E);
             fs.select(e);
+            cpm.set_current_disk(fs.current_drive(), fs.current_user());
             Some(0)
         }
         15 => Some(with_fcb(cpm, |_cpm, fcb| {
@@ -720,6 +740,7 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             let e = cpm.reg8(Reg8::E);
             if e != 0xFF {
                 fs.set_user(e);
+                cpm.set_current_disk(fs.current_drive(), fs.current_user());
             }
             Some(fs.current_user())
         }
@@ -1085,6 +1106,44 @@ mod tests {
         // Get reads the same value back, and it physically lives at 0x0003.
         assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 7), Some(0x95));
         assert_eq!(cpm.read_block(IOBYTE_ADDR, 1)[0], 0x95);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_cdisk_byte_tracks_drive_and_user() {
+        // Page-zero CDISK (0x0004): low nibble = drive, high nibble = user.
+        // A program that reads it directly (Infocom's interpreter, to find
+        // its story file) must see the real login drive — the bug that hung
+        // witness.com on B:.
+        let base = std::env::temp_dir().join("xmodem_cpm_cdisk");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]); // lays down page zero
+
+        // Launched on B: (drive 1), user 0 → 0x0004 == 0x01.
+        fs.select(1);
+        cpm.set_current_disk(fs.current_drive(), fs.current_user());
+        assert_eq!(cpm.read_block(CDISK_ADDR, 1)[0], 0x01);
+
+        // A guest BDOS 14 select of A: pulls CDISK back to 0x00.
+        cpm.set_reg8(Reg8::E, 0);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 14), Some(0));
+        assert_eq!(cpm.read_block(CDISK_ADDR, 1)[0], 0x00);
+
+        // Select C: (drive 2) with user 5 set → high nibble 5, low nibble 2.
+        cpm.set_reg8(Reg8::E, 5);
+        service_disk_bdos(&mut cpm, &mut fs, 32); // set user 5
+        cpm.set_reg8(Reg8::E, 2);
+        service_disk_bdos(&mut cpm, &mut fs, 14); // select C:
+        assert_eq!(cpm.read_block(CDISK_ADDR, 1)[0], 0x52);
+
+        // BDOS 13 (reset disk system) returns to A:, preserving the user.
+        service_disk_bdos(&mut cpm, &mut fs, 13);
+        assert_eq!(cpm.read_block(CDISK_ADDR, 1)[0], 0x50);
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
