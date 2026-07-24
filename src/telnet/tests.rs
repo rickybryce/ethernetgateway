@@ -5699,3 +5699,20 @@ async fn test_command_line_leaves_no_stray_terminator() {
         );
     }
 }
+
+/// The CP/M emulator's free-TPA report (boot banner + `VER`) must state the
+/// memory the emulator actually hands a program, and must fit a C64 row with
+/// the two-space indent every banner/`VER` line carries.
+#[test]
+fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
+    let line = TelnetSession::cpmemu_tpa_line();
+    // 0x0100..0xFE00 is 64768 bytes => 63K, bounds 0100-FDFF.
+    assert_eq!(crate::cpm::TPA_BYTES, 0xFD00);
+    assert_eq!(line, "63K TPA free (0100-FDFF)");
+    assert!(
+        line.len() + 2 <= PETSCII_WIDTH,
+        "TPA line '{}' exceeds {} cols with the indent",
+        line,
+        PETSCII_WIDTH
+    );
+}

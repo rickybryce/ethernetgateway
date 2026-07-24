@@ -61,6 +61,13 @@ pub const TPA_BASE: u16 = 0x0100;
 /// Top of the usable TPA in our layout; the stack starts here and grows
 /// down, leaving the region above for the (pretend, for now) BDOS/BIOS.
 const STACK_TOP: u16 = 0xFE00;
+/// Top of the usable TPA, exposed so the shell can report the same figure a
+/// real CP/M system prints (`STACK_TOP` itself stays private — callers have
+/// no business knowing where our stack lives, only how big the TPA is).
+pub const TPA_TOP: u16 = STACK_TOP;
+/// Size of the usable TPA in bytes — the largest `.COM` [`Cpm::load_com`]
+/// will accept without truncation.
+pub const TPA_BYTES: u16 = TPA_TOP - TPA_BASE;
 
 /// BIOS jump-table base (the `BOOT` entry).  Real CP/M software that does
 /// direct console I/O — MBASIC, WordStar, Turbo Pascal, Infocom games —
@@ -173,7 +180,7 @@ impl Cpm {
     /// silently dropped (a `.COM` never legitimately exceeds it).
     pub fn load_com(&mut self, program: &[u8]) {
         self.install_low_memory();
-        let max = (STACK_TOP - TPA_BASE) as usize;
+        let max = TPA_BYTES as usize;
         for (i, b) in program.iter().take(max).enumerate() {
             self.mem.poke(TPA_BASE + i as u16, *b);
         }

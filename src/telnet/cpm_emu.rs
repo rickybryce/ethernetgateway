@@ -56,7 +56,7 @@
 use super::*;
 use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
-use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE};
+use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -168,6 +168,9 @@ impl TelnetSession {
             self.dim("CP/M 2.2 (iz80).  Type HELP.")
         ))
         .await?;
+        // Boot-banner memory report, as a real CP/M system prints on cold start.
+        self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
+            .await?;
         // The two things a user needs before running arbitrary software: how to
         // leave the emulator, and how to stop a running program.
         self.send_line(&format!(
@@ -311,6 +314,8 @@ impl TelnetSession {
                         self.green("CP/M 2.2 emulator (iz80 Z80 core)")
                     ))
                     .await?;
+                    self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
+                        .await?;
                 }
                 "DIR" => self.cpmemu_dir(fs).await?,
                 "ERA" | "DEL" => self.cpmemu_era(fs, trimmed).await?,
@@ -610,6 +615,22 @@ impl TelnetSession {
             }
         }
         Ok(())
+    }
+
+    /// The free-TPA report a real CP/M system prints in its boot banner
+    /// ("62K CP/M VERS 2.2"): the size of the region a `.COM` is loaded into,
+    /// in whole K, plus its hex bounds.  Nothing else lives in the TPA at the
+    /// `A>` prompt — a program is loaded on demand and its space reclaimed on
+    /// return — so the whole TPA is free whenever this is shown.  Derived from
+    /// the [`TPA_BASE`]/[`TPA_TOP`] constants so it can never drift from the
+    /// memory the emulator actually gives a program.
+    pub(in crate::telnet) fn cpmemu_tpa_line() -> String {
+        format!(
+            "{}K TPA free ({:04X}-{:04X})",
+            TPA_BYTES / 1024,
+            TPA_BASE,
+            TPA_TOP - 1
+        )
     }
 
     /// One-screen help for the CCP-lite built-ins.
