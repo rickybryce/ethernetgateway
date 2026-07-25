@@ -12,15 +12,17 @@ the pairing wrong and the program is simply silent.
 EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-**Status: phase 1** — working terminal. Title screen, main menu, settings, help,
-terminal mode with an escape-key menu, the ANSI/ASCII filter, and the Z80 SIO/2
-driver. Verified in the gateway's CP/M emulator: `AT` → `OK` and
-`ATDT host:port` → `CONNECT` through the SIO driver at 0x82/0x83, and the ASCII
-filter reduces a colour ANSI menu to clean readable text (18 escape sequences in,
-0 out, all text intact).
+**Status: phase 2** — a usable terminal with all five port families and settings
+that survive a restart. Only file transfer is still to come (phase 3).
 
-The remaining four drivers (6850 ACIA, RomWBW HBIOS, Z180 ASCI, BDOS AUX), the
-saved settings patch area, and XMODEM follow in phases 2–3.
+Verified in the gateway's CP/M emulator, each family against the matching
+`cpm_emu_uart` profile: `AT` → `OK` and `ATI4` identifying the modem through
+Z80 SIO/2 (`rc2014_1b`), 6850 ACIA (`altair_2sio1`), RomWBW HBIOS
+(`hbios_1`) and CP/M AUX (`aux`); settings saved, EGT80 exited and re-run,
+picking the saved port and filter mode back up; a deliberately corrupted
+settings block falling back to defaults with a message; HBIOS refused with an
+explanation on a machine with no `RST 8` vector; and the ASCII filter reducing a
+colour ANSI menu to clean text (18 escape sequences in, 0 out, all text intact).
 
 ## Building
 
@@ -74,30 +76,52 @@ affordable on a Z80.
 
 Planned drivers:
 
-| Driver | Ports | Testable in the emulator? |
-|--------|-------|---------------------------|
-| Z80 SIO/2 **(done)** | 0x80–0x87, channel selectable | yes — `rc2014_1a`…`rc2014_2b` |
-| 6850 ACIA | 0x10/0x12 (88-2SIO) and user base | yes — `altair_2sio1`/`2sio2` |
-| RomWBW HBIOS | `RST 8`, units 0–3 | yes — `hbios_1`/`hbios_2` |
-| Z180 ASCI | SC126 channels 0/1, `IN0`/`OUT0` | **no** — real hardware only |
-| CP/M BDOS AUX | funcs 3/4 | yes — `aux` |
+| Driver | Selection | Verified |
+|--------|-----------|----------|
+| Z80 SIO/2 | four channels (0x80/0x82/0x84/0x86) or any address | yes — `rc2014_1b` |
+| 6850 ACIA | 88-2SIO 0x10 / 0x12, or any address | yes — `altair_2sio1` |
+| RomWBW HBIOS | unit 0–3, via `RST 8` | yes — `hbios_1` |
+| Z180 ASCI | channel 0/1, internal I/O base settable | **not here** — needs real iron |
+| CP/M BDOS AUX | no parameters (funcs 3/4) | yes — `aux` |
 
-The ASCI driver is written from the Z180 register spec and can only be verified
-on real iron: the emulator's Z80 core does not implement `IN0`/`OUT0`, which is
-exactly why the QTERM `h` builds needed HBIOS. The BDOS AUX driver carries its
-own caveat — CP/M 2.2 has no AUX status call, so a read can block on real 2.2
-hardware; it is the portable fallback, not the first choice.
+Two of these carry caveats the menus and help state plainly:
+
+**Z180 ASCI** can only be verified on real hardware — the emulator's Z80 core
+does not implement `IN0`/`OUT0`, which is exactly why the QTERM `h` builds needed
+HBIOS. Those instructions can't be encoded by a Z80 assembler either, so the four
+routines lay them down as `DB ED,38,port` / `DB ED,39,port` and patch the operand
+byte when the port is selected — the same self-patching the vectors use, one level
+down. If a system has moved the Z180 internal I/O base off 0x00, set that base
+first from the ASCI menu.
+
+**CP/M AUX** has no status call in CP/M 2.2 — the operating system simply offers
+none. The driver therefore reads one byte ahead and holds it, treating the `^Z`
+the gateway returns for "nothing waiting" as not-ready. Two consequences, both
+documented in the program's own help: this family cannot receive a literal `^Z`,
+and on real CP/M 2.2 hardware (where the read blocks) the status call waits
+rather than returning. It works well against the gateway; on real hardware prefer
+the family that matches the serial chip.
+
+**RomWBW HBIOS** is checked before it is accepted: a RomWBW system puts a `JP` at
+the `RST 8` vector, so the absence of one is a reliable "not a RomWBW machine".
+Better to say so than to hang on the first keystroke — on a bare CP/M machine
+that instruction lands in unused memory.
 
 **Console I/O is chosen once at startup.** BDOS 12 reports the version: on
 CP/M 2.2 the BIOS console vectors are called directly (far cheaper per byte than
 a BDOS call, and the terminal loop is the hot path); on CP/M 3, BDOS 6. One test
 at init, vectors thereafter — no per-byte version checks.
 
-**Settings live in the `.COM`.** A patch area with a signature holds the port
-choice, base address, ANSI-vs-ASCII, echo, CR/LF and XMODEM options; "save
-settings" rewrites the image. No second file to carry around, and a corrupt or
-missing signature falls back to defaults so a copied `.COM` never boots into
-garbage.
+**Settings live in the `.COM`.** The block sits at a fixed, 128-byte-aligned
+address (`0180H`, file record 1) that the first instruction jumps over, so
+saving rewrites one record holding settings and nothing else — no risk of writing
+a half-open FCB or a live variable back into the image. `V` at the menu writes
+that record with a random-record write, pointing the DMA address straight at the
+image so nothing is copied. CP/M never tells a program its own name, so
+`EGT80.COM` is hard-coded in one FCB: a renamed or off-drive copy makes the save
+fail with a message instead of writing to the wrong file. At startup the block is
+validated — signature plus a range check on every field — and anything wrong
+falls back to defaults with a message, so a damaged copy still starts usable.
 
 **ANSI or ASCII** selects what happens to the byte stream: ANSI passes escape
 sequences through to your terminal, ASCII strips CSI sequences and

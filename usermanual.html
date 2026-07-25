@@ -2484,16 +2484,25 @@ target machine.
 </p>
 
 <p>
-It is still being built out. Today it offers the menus, help, terminal mode with
-an escape-key menu, an ANSI/ASCII output filter (pass escape sequences through
-for a real terminal, or strip them and the high bit for a printing terminal), and
-the <strong>Z80 SIO/2</strong> driver &mdash; so it pairs with the
-<code>rc2014_*</code> profiles here and with an RC2014-class machine on real
-iron. The 6850&nbsp;ACIA, RomWBW&nbsp;HBIOS, Z180&nbsp;ASCI and BDOS&nbsp;AUX
-drivers, saved settings and XMODEM transfers are still to come; see
-<code>EGT80/README.md</code>. Unlike the period terminals, a wrong port
-selection is <em>diagnosed</em> rather than silently hung: it names the port and
-says what to do.
+It drives <strong>all five port families</strong> &mdash; Z80&nbsp;SIO/2,
+6850&nbsp;ACIA, RomWBW&nbsp;HBIOS (<code>RST&nbsp;8</code>), Z180&nbsp;ASCI and
+the CP/M <code>AUX:</code> device &mdash; each picked from a menu, with a
+free-form address entry for boards at unusual ports, so it pairs with every
+profile in the table above. Settings (port, filter mode, echo, menu key) are
+saved into <code>EGT80.COM</code> itself, so a copy carries them to another disk.
+File transfer is the one thing still to come; see <code>EGT80/README.md</code>.
+</p>
+
+<p>
+Unlike the period terminals, a wrong choice is <em>diagnosed</em> rather than
+silently hung: a port that never accepts a byte is named and explained, and
+HBIOS is refused outright on a machine whose <code>RST&nbsp;8</code> vector is
+absent (i.e. one not running RomWBW) instead of jumping into unused memory. Two
+families carry caveats the program states in its own help: Z180&nbsp;ASCI cannot
+be exercised in this emulator (our Z80 core doesn&rsquo;t implement the
+Z180&rsquo;s <code>IN0</code>/<code>OUT0</code>), and CP/M&nbsp;2.2 offers no way
+to poll the <code>AUX:</code> device, so that family reads a byte ahead and
+cannot receive a literal <code>^Z</code>.
 </p>
 
 <aside class="note">
