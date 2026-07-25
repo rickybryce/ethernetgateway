@@ -39,6 +39,7 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::aichat::sanitize_for_terminal;
 use crate::config;
 use crate::logger::glog;
 use crate::telnet::is_esc_key;
@@ -4052,6 +4053,26 @@ pub(crate) async fn kermit_receive_with_init(
                         a.record_format.map(|c| c as char),
                     );
                 }
+                // File type ('"' tag, spec §5.1): 'A' = ASCII/text, 'B' =
+                // binary.  A text-mode upload of a binary file is the
+                // classic CP/M-side mistake — the sender stops at the
+                // first ^Z and translates line ends, so what lands is
+                // corrupt even though every packet checked out.  Warn
+                // unconditionally (not just under `verbose`): this is the
+                // one attribute that predicts a bad file, and the fix is
+                // one command on the peer.  The length check at Z is what
+                // actually refuses the truncated result.
+                if let Some(ft) = a.file_type
+                    && ft.eq_ignore_ascii_case(&b'A')
+                {
+                    glog!(
+                        "Kermit recv: peer declares TEXT mode for '{}' — binary files (.COM, game data) will be corrupted; set the peer to binary (kermit: SET FILE TYPE BINARY)",
+                        received
+                            .last()
+                            .map(|f| sanitize_for_terminal(&f.filename))
+                            .unwrap_or_default()
+                    );
+                }
                 let Some(last) = received.last_mut() else {
                     // Spec §5.6 says A-packets are per-file metadata
                     // attached to the just-arrived F-packet.  Receiving
@@ -4299,6 +4320,80 @@ pub(crate) async fn kermit_receive_with_init(
                         d_packets_received,
                         received.last().map(|f| f.data.len()).unwrap_or(0)
                     );
+                }
+                // Spec §4.7: a Z-packet carrying "D" in its data field means
+                // the SENDER abandoned this file part-way (its user cancelled,
+                // its read failed, …) — the bytes we hold are an incomplete
+                // prefix and the receiver is required to discard them.  We
+                // used to ACK and keep them, so an interrupted upload was
+                // committed to disk as if complete: a silently truncated file.
+                // Drop the record (nothing downstream can commit what isn't
+                // in `received`), then ACK through the shared path below and
+                // stay in the session — the sender is free to go on to the
+                // next file in the batch.
+                let discarded = decode_data(&pkt.payload, recv_q)
+                    .ok()
+                    .and_then(|raw| raw.first().copied())
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&b'D'));
+                if discarded {
+                    if let Some(dropped) = received.pop() {
+                        glog!(
+                            "Kermit recv: sender DISCARDED '{}' at {}B (Z-packet 'D') — file not saved",
+                            sanitize_for_terminal(&dropped.filename),
+                            dropped.data.len()
+                        );
+                    }
+                }
+                // Length verification against the A-packet's declared size.
+                // A file that arrives SHORT is corrupt — the commonest cause
+                // is a peer sending a binary file in text mode (CP/M Kermit
+                // defaults to it), which stops at the first ^Z (0x1A) — and
+                // nothing else in the protocol catches it: every packet's
+                // CRC was fine, the sender said EOF, and we'd write the
+                // truncated prefix to disk as a complete file.  Refuse it
+                // in-band so the peer's user sees a failure instead of a
+                // file that won't run.
+                //
+                // Only SHORT is an error: arriving LONGER than declared is
+                // legitimate (a text-mode sender declares its on-disk size
+                // and then expands LF → CRLF on the wire), so that case
+                // warns and is kept.
+                // Skipped after a discard: `received.last()` is then the
+                // PREVIOUS file in the batch, already verified at its own Z.
+                if let Some(last) = received.last().filter(|_| !discarded) {
+                    let got = last.data.len() as u64;
+                    if let Some(declared) = last.declared_size {
+                        if got < declared {
+                            let name = sanitize_for_terminal(&last.filename);
+                            glog!(
+                                "Kermit recv: '{}' TRUNCATED — got {}B of declared {}B; refusing (peer sending a binary file in text mode stops at the first ^Z — try SET FILE TYPE BINARY)",
+                                name, got, declared
+                            );
+                            send_error(
+                                writer,
+                                pkt.seq,
+                                &format!("Short file: got {} of {} bytes", got, declared),
+                                session.chkt,
+                                session.npad,
+                                session.padc,
+                                session.eol,
+                                is_tcp,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "Kermit recv: '{}' truncated — {} of {} declared bytes",
+                                name, got, declared
+                            ));
+                        }
+                        if got > declared {
+                            glog!(
+                                "Kermit recv: '{}' is {}B but peer declared {}B — keeping (text-mode senders expand on the wire)",
+                                sanitize_for_terminal(&last.filename),
+                                got,
+                                declared
+                            );
+                        }
+                    }
                 }
                 send_ack(
                     writer,
@@ -11003,6 +11098,259 @@ mod tests {
         peer_task.await.ok();
         let err = result.expect_err("D-before-F should error");
         assert!(err.contains("D-packet before F-packet"), "got: {}", err);
+    }
+
+    /// Drive the receiver against a hand-built wire stream, returning both
+    /// its result and everything it wrote back.  Shared by the truncation /
+    /// discard tests below, which all need "feed these exact packets, then
+    /// look at what came back".
+    async fn receive_hand_built_wire(
+        wire: Vec<u8>,
+    ) -> (Result<Vec<KermitReceive>, String>, Vec<u8>) {
+        let (peer_to_gw, gw_in) = tokio::io::duplex(65536);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(65536);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) = (
+            tokio::io::split(peer_from_gw).0,
+            tokio::io::split(peer_to_gw).1,
+        );
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            peer_w.write_all(&wire).await.ok();
+            let mut buf = Vec::new();
+            let mut tmp = vec![0u8; 4096];
+            while let Ok(n) = peer_r.read(&mut tmp).await {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            buf
+        });
+        let result = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+        drop(gw_w);
+        let output = peer_task.await.expect("peer task panicked");
+        (result, output)
+    }
+
+    /// The quoting a `Capabilities::default()` peer negotiates with us:
+    /// QCTL `#`, no 8-bit prefix, no REPT (both sides must offer it).
+    fn plain_peer_quoting() -> Quoting {
+        Quoting {
+            qctl: b'#',
+            qbin: None,
+            rept: None,
+            locking_shifts: false,
+        }
+    }
+
+    /// Send-Init + the packets for one plain-quoting file, ready to extend.
+    fn wire_with_send_init() -> Vec<u8> {
+        let peer_caps = Capabilities {
+            chkt: b'1',
+            maxl: 80,
+            ..Capabilities::default()
+        };
+        build_packet(
+            TYPE_SEND_INIT,
+            0,
+            &build_send_init_payload(&peer_caps),
+            b'1',
+            0,
+            0,
+            CR,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_receive_discards_file_on_z_discard_flag() {
+        // Spec §4.7: a Z-packet whose data field is "D" means the sender
+        // abandoned the file mid-transfer.  The prefix we hold is NOT a
+        // file — keeping it (as we used to) commits a silently truncated
+        // upload to disk.  The session must survive: a following file in
+        // the same batch still arrives normally.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"gone.com", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            2,
+            &encode_data(b"partial bytes", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        // The abandoned-file EOF.
+        wire.extend_from_slice(&build_packet(
+            TYPE_EOF,
+            3,
+            &encode_data(b"D", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        // A second, complete file after it.
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 4, b"kept.com", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            5,
+            &encode_data(b"all here", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 6, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 7, b"", b'1', 0, 0, CR));
+
+        let (result, _out) = receive_hand_built_wire(wire).await;
+        let received = result.expect("discarded file must not fail the session");
+        assert_eq!(
+            received.len(),
+            1,
+            "only the complete file should survive, got {:?}",
+            received.iter().map(|f| &f.filename).collect::<Vec<_>>()
+        );
+        assert_eq!(received[0].filename, "kept.com");
+        assert_eq!(received[0].data, b"all here");
+    }
+
+    #[tokio::test]
+    async fn test_receive_refuses_file_shorter_than_declared_length() {
+        // The silent-corruption case this check exists for: every packet
+        // passes its block check, the sender says EOF, but the bytes stop
+        // early (the classic cause is a peer sending a binary file in text
+        // mode, which stops at the first ^Z).  Without the length check we
+        // wrote the truncated prefix out as a complete file.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            length: Some(4096),
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"witness.com", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"only a few bytes", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, output) = receive_hand_built_wire(wire).await;
+        let err = result.expect_err("a short file must be refused, not saved");
+        assert!(
+            err.contains("truncated") && err.contains("4096"),
+            "expected a truncation error naming the declared size, got: {}",
+            err
+        );
+        // The peer's user has to see why — an E-packet must hit the wire.
+        assert!(
+            output.windows(4).any(|w| w[0] == 0x01 && w[3] == b'E'),
+            "expected an E-packet in the receiver's output"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_keeps_file_longer_than_declared_length() {
+        // Only SHORT is an error.  A text-mode sender legitimately declares
+        // its on-disk size and then expands line ends on the wire, so more
+        // bytes than declared must still be accepted.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            length: Some(4),
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"notes.txt", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"a\r\nb\r\n", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, _out) = receive_hand_built_wire(wire).await;
+        let received = result.expect("a longer-than-declared file must be kept");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].data, b"a\r\nb\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_receive_accepts_text_declared_file_type() {
+        // The text-mode file-type attribute is a warning, not a refusal —
+        // a peer that really is sending text must still get its file.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            length: Some(5),
+            file_type: Some(b'A'),
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"readme.txt", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"plain", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, _out) = receive_hand_built_wire(wire).await;
+        let received = result.expect("text-mode declaration must not refuse the file");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].data, b"plain");
     }
 
     // ---------- HIGH-priority: round-trip with non-default settings ----------

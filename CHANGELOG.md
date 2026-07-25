@@ -157,6 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     into the "AI, Browser & Weather — More" panel to keep the main screen
     uncluttered; in the telnet UI they live in a CP/M submenu under Other
     Settings → `E`.
+  - **Free-TPA report.** The boot banner and `VER` now print the size of the
+    transient program area (`63K TPA free (0100-FDFF)`), the way a real CP/M
+    system reports its memory on cold start, so a user can see how much room a
+    `.COM` actually gets. Derived from the emulator's own TPA constants.
 - **Gateway Shell: three new commands.** `CLS` / `CLEAR` clears the screen;
   `VER` / `VERSION` prints the shell identity and gateway version; and
   `FIND <pattern>` / `WHERE` recursively searches all of drive A: (not just the
@@ -187,6 +191,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   software is unsupported. Noted in the manual and the `uart` module.
 
 ### Fixed
+- **Kermit uploads that arrive incomplete are no longer saved as if whole.**
+  Three gaps let a corrupt upload reach disk silently — every packet's block
+  check passed, the sender said "end of file", and we wrote what we had:
+  - **Truncated files are now refused.** The receiver compares the byte count
+    it collected against the length the sender declared in its attribute
+    packet; a short file gets an E-packet (so the peer's user sees the failure)
+    and is never committed. Arriving *longer* than declared stays legal — a
+    text-mode sender declares its on-disk size and then expands line ends on
+    the wire — and is logged, not refused.
+  - **A sender-abandoned file is now discarded, per spec §4.7.** An EOF packet
+    carrying `D` means the sender gave up part-way through; we previously ACKed
+    it and kept the partial bytes, committing a truncated file. The record is
+    now dropped and the session continues, so the rest of a batch still lands.
+  - **A peer uploading in text mode is now called out in the log.** When the
+    attribute packet declares ASCII/text file type, the receiver warns that
+    binary files (`.COM`, game data) will be corrupted and names the one-line
+    fix on the peer (`SET FILE TYPE BINARY`) — CP/M Kermit defaults to text
+    mode, where the sender stops at the first `^Z`.
 - **Kermit server no longer retains every uploaded file in memory for the
   whole session.** The server-mode dispatch loop now frees each received
   file's payload as soon as the `on_file` hook has committed it to disk, so a
