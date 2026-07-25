@@ -1,0 +1,8 @@
+# Build staging: the assembler, its logs, and the intermediate REL/HEX
+# files it produces.  EGT80.COM itself IS committed (one binary you can
+# copy straight to a CP/M drive without owning a toolchain).
+build/
+
+# zxcc is copied in from the RomWBW distribution by `make tools`; it is
+# third-party GPL software with its own upstream, not part of EGT80.
+tools/

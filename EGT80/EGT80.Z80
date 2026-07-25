@@ -1,0 +1,150 @@
+;=======================================================================
+; EGT80 - "Ethernet Gateway Terminal"
+;
+; A CP/M terminal program for the Ethernet Gateway, written for real Z80
+; hardware as well as the gateway's own CP/M emulator.  Unlike the period
+; terminals it replaces, the serial port is chosen at RUN TIME from a menu
+; instead of being fixed when the program is assembled - one EGT80.COM
+; serves an RC2014, an Altair, an SC126, or the emulator.
+;
+; Ricky Bryce.  Part of the Ethernet Gateway project.
+;
+;-----------------------------------------------------------------------
+; ASSEMBLER COMPATIBILITY
+;
+; This source is written to assemble with PERIOD tooling - SLR Z80ASM
+; (Z80ASM EGT80/A), Microsoft M80, and ZSM - so it can be rebuilt on a
+; real CP/M machine, not just cross-assembled.  That imposes rules;
+; please keep to them when editing:
+;
+;   - No macros, no conditional assembly, no local/temporary labels.
+;   - Upper-case Zilog mnemonics, one statement per line.
+;   - Labels unique within their first SIX characters.
+;   - Directives limited to EQU, ORG, DB, DW, DS, END.
+;   - Expressions limited to + - * / AND OR SHL SHR and '$'.
+;   - Plain 7-bit ASCII, no tabs inside quoted strings, <= 80 columns.
+;
+;-----------------------------------------------------------------------
+; PHASE 0: toolchain proof - paints the title screen and exits.  The
+; menu framework, port drivers, settings and XMODEM follow in phases
+; 1-3; the structure below is laid out to receive them.
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; CP/M system equates
+;-----------------------------------------------------------------------
+BDOS    EQU     0005H           ; BDOS entry point
+WBOOT   EQU     0000H           ; warm boot (exit to CCP)
+BCONIN  EQU     1               ; console input, echoed
+BCONOU  EQU     2               ; console output
+BPRINT  EQU     9               ; print '$'-terminated string
+BVERS   EQU     12              ; return CP/M version
+
+;-----------------------------------------------------------------------
+; Character equates
+;-----------------------------------------------------------------------
+CR      EQU     0DH
+LF      EQU     0AH
+
+;-----------------------------------------------------------------------
+; Build identity.  Keep VERMAJ/VERMIN in step with the strings below;
+; they are separate so code can report the version numerically later.
+;-----------------------------------------------------------------------
+VERMAJ  EQU     0
+VERMIN  EQU     1
+
+        ORG     0100H
+
+;=======================================================================
+; ENTRY
+;
+; CP/M hands us the machine with SP pointing at its own stack; we take
+; our own so the depth is ours to reason about, then paint the title.
+;=======================================================================
+START:  LD      SP,STKTOP       ; our stack, not the CCP's
+        CALL    SYSVER          ; record which CP/M we are on
+        CALL    TITLE           ; the opening screen
+        CALL    PROMPT          ; phase 0: acknowledge and leave
+        JP      WBOOT           ; warm boot: back to the CCP
+
+;=======================================================================
+; SYSVER - read the CP/M version and keep it.
+;
+; The console I/O path is chosen from this in phase 1: on CP/M 2.2 we
+; will call the BIOS console vectors directly (far cheaper per byte than
+; a BDOS call, which matters in the terminal loop), and on CP/M 3 we
+; will use BDOS 6.  Recording it once here is what lets the hot loop
+; stay free of version tests.
+;=======================================================================
+SYSVER: LD      C,BVERS
+        CALL    BDOS
+        LD      (CPMVER),A      ; 20H+ = CP/M 2.x, 30H+ = CP/M 3
+        RET
+
+;=======================================================================
+; TITLE - paint the opening screen.
+;
+; Deliberately plain text: at this point we do not yet know whether the
+; user's console understands ANSI, so nothing here emits an escape
+; sequence.  Screen clearing arrives with the ANSI/ASCII handling in
+; phase 1, once the user has told us which kind of terminal this is.
+;=======================================================================
+TITLE:  LD      DE,MTITLE
+        CALL    PSTR
+        LD      DE,MRULE
+        CALL    PSTR
+        LD      DE,MVER
+        CALL    PSTR
+        LD      DE,MBLANK
+        CALL    PSTR
+        LD      DE,MPHASE
+        CALL    PSTR
+        RET
+
+;=======================================================================
+; PROMPT - wait for one key, so the screen is readable when EGT80 is
+; started from a menu or a submit file rather than by hand.
+;=======================================================================
+PROMPT: LD      DE,MKEY
+        CALL    PSTR
+        LD      C,BCONIN
+        CALL    BDOS
+        LD      DE,MCRLF
+        CALL    PSTR
+        RET
+
+;=======================================================================
+; PSTR - print the '$'-terminated string at DE.
+;
+; One BDOS call per string rather than per character: fewer calls, and
+; it keeps the string tables as the only place text lives.
+;=======================================================================
+PSTR:   LD      C,BPRINT
+        CALL    BDOS
+        RET
+
+;=======================================================================
+; Strings.  All user-visible text lives here in one block - it is the
+; largest part of a program this size, so keeping it together makes the
+; cost visible and the wording easy to review.
+;=======================================================================
+MTITLE: DB      CR,LF,'Ethernet Gateway Terminal',CR,LF,'$'
+MRULE:  DB      '-------------------------',CR,LF,'$'
+MVER:   DB      'EGT80 v0.1 for CP/M 2.2 and CP/M 3',CR,LF,'$'
+MBLANK: DB      CR,LF,'$'
+MPHASE: DB      'Phase 0 build: toolchain proof only.',CR,LF
+        DB      'Menus, port selection and XMODEM follow.',CR,LF,'$'
+MKEY:   DB      CR,LF,'Press any key to return to CP/M. $'
+MCRLF:  DB      CR,LF,'$'
+
+;=======================================================================
+; Data.  Buffers stay fixed-size on purpose: a terminal has no need to
+; claim whatever memory happens to be free, and a known size is a known
+; worst case on a machine with a small TPA.
+;=======================================================================
+CPMVER: DB      0               ; BDOS version from SYSVER
+
+        DS      64              ; stack: 32 levels, ample for this program
+STKTOP  EQU     $
+
+        END     START
