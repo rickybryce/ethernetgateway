@@ -94,11 +94,34 @@ Two of these carry caveats the menus and help state plainly:
 
 **Z180 ASCI** can only be verified on real hardware — the emulator's Z80 core
 does not implement `IN0`/`OUT0`, which is exactly why the QTERM `h` builds needed
-HBIOS. Those instructions can't be encoded by a Z80 assembler either, so the four
+HBIOS. Those instructions can't be encoded by a Z80 assembler either, so the
 routines lay them down as `DB ED,38,port` / `DB ED,39,port` and patch the operand
 byte when the port is selected — the same self-patching the vectors use, one level
-down. If a system has moved the Z180 internal I/O base off 0x00, set that base
-first from the ASCI menu.
+down. Since no test here can reach that code, it was hardened by reading rather
+than by running:
+
+- **The CPU is checked before the family is accepted.** The ASCI is inside the
+  Z180, so on a plain Z80 those opcodes are undefined and the driver would read
+  whatever they leave behind. `MLT` tells the two apart — on a Z180 `ED 4C`
+  multiplies `B` by `C`, on a Z80 it is a two-byte no-op — so `2 × 2 = 4`
+  identifies the processor with no side effects either way. This half *is*
+  testable here: the emulator has no `MLT`, and EGT80 duly refuses ASCI and
+  keeps the previous port.
+- **Latched receive errors are cleared.** `STAT` carries OVRN/PE/FE, and on the
+  Z180 an overrun stops the receiver until the error is reset via CNTLA's `EFR`
+  bit — so one burst of line noise would otherwise leave the port deaf for the
+  rest of the session with nothing to show why. The status routine now resets the
+  flags (read-modify-write, so baud and framing are untouched) and discards the
+  byte that arrived with the error: a protocol is better served by a missing byte
+  it will ask for again than by a corrupt one it must detect.
+- **The I/O base has its own setting.** It used to share `PBASE` with the port
+  address of the SIO/ACIA families, so selecting ASCI inherited whatever the last
+  family used and addressed registers that don't exist. It is now a separate byte,
+  range-checked so `base+9` can't run off the end of the I/O space.
+
+Register offsets and status bits were taken from the Z180 register documentation
+in RomWBW's own ASCI driver (facts, not code): `CNTLA` at base+0, `STAT` +4,
+`TDR` +6, `RDR` +8, channel 1 the same +1; `RDRF` bit 7, `TDRE` bit 1.
 
 **CP/M AUX** has no status call in CP/M 2.2 — the operating system simply offers
 none. The driver therefore reads one byte ahead and holds it, treating the `^Z`

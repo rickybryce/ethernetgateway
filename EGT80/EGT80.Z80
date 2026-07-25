@@ -137,11 +137,8 @@ PKHBIO  EQU     3               ; RomWBW HBIOS     (phase 2)
 PKASCI  EQU     4               ; Z180 ASCI        (phase 2)
 PKAUX   EQU     5               ; CP/M BDOS AUX    (phase 2)
 
-;-----------------------------------------------------------------------
-; Build identity
-;-----------------------------------------------------------------------
-VERMAJ  EQU     0
-VERMIN  EQU     4
+; Build identity lives in MVER, in the strings, and nowhere else - a
+; second copy in an equate only invites the two to drift apart.
 
         ORG     0100H
 
@@ -169,6 +166,13 @@ CFGSIG: DB      'EGT80CFG'      ; must match CFGREF or the block is ignored
 PKIND:  DB      PKSIO           ; selected port kind
 PBASE:  DB      82H             ; SIO/2 ch B, ACIA base, or HBIOS unit
 PCHAN:  DB      0               ; Z180 ASCI channel (0 or 1); unused elsewhere
+PABASE: DB      0               ; Z180 internal I/O base for the ASCI family.
+                                ; Its own byte, NOT shared with PBASE: PBASE
+                                ; holds a port address for SIO/ACIA and a unit
+                                ; number for HBIOS, and selecting ASCI does not
+                                ; otherwise set it - so sharing meant ASCI
+                                ; inherited whatever the last family used and
+                                ; addressed registers that do not exist.
 FLTMOD: DB      0               ; 0 = ANSI pass, 1 = ASCII strip
 ECHOFL: DB      0               ; local echo off (the remote echoes)
 CRLFFL: DB      0               ; do not add LF to a typed CR
@@ -554,6 +558,7 @@ HBOUT:  LD      E,A             ; the byte goes out in E
         RST     8
         RET
 
+
 ;-----------------------------------------------------------------------
 ; Z180 ASCI driver (SC126 and other Z180 boards).
 ;
@@ -562,42 +567,113 @@ HBOUT:  LD      E,A             ; the byte goes out in E
 ; DB ED,38,port (IN0 A,(port)) and DB ED,39,port (OUT0 (port),A).  The
 ; operand is an immediate byte, so ASCPAT writes the addresses into these
 ; instructions when the port is selected: the same self-patching the
-; vectors use, one level down.
+; vectors use, one level down.  Every such instruction is labelled so the
+; patcher names what it is writing to rather than counting offsets.
 ;
-; STAT0: bit 7 = receive data register full, bit 1 = transmit data
-; register empty.  Register addresses are the internal I/O base (ICR,
-; PBASE here) plus 4/6/8 for channel 0, 5/7/9 for channel 1.
+; Register layout, relative to the internal I/O base (PABASE, 00H unless
+; the system has moved it) - channel 1 is the same +1:
+;
+;   CNTLA0 = base+0    STAT0 = base+4    TDR0 = base+6    RDR0 = base+8
+;
+; STAT: bit 7 RDRF, bit 6 OVRN, bit 5 PE, bit 4 FE, bit 1 TDRE.
+; CNTLA: bit 3 EFR - writing a 0 there resets the three error flags.
+;
+; Baud rate and framing are deliberately left alone: they live in CNTLA
+; and CNTLB, the system set them, and a terminal has no business
+; re-timing a port that is already working.  The only write to CNTLA here
+; is the error reset, and it is read-modify-write so nothing else changes.
 ;-----------------------------------------------------------------------
-ASCST:  DB      0EDH,38H,00H    ; IN0 A,(STATn) - operand patched
+ASCST:  DB      0EDH,38H
+ASCS1:  DB      00H             ; IN0 A,(STATn)  - operand patched
+        LD      E,A
+        AND     70H             ; OVRN, PE or FE latched?
+        JR      NZ,ASCERR
+        LD      A,E
         AND     80H             ; RDRF
         RET
-ASCIN:  DB      0EDH,38H,00H    ; IN0 A,(RDRn)
+ASCIN:  DB      0EDH,38H
+ASCR1:  DB      00H             ; IN0 A,(RDRn)
         RET
-ASCOST: DB      0EDH,38H,00H    ; IN0 A,(STATn)
+ASCOST: DB      0EDH,38H
+ASCS2:  DB      00H             ; IN0 A,(STATn)
         AND     02H             ; TDRE
         RET
-ASCOUT: DB      0EDH,39H,00H    ; OUT0 (TDRn),A
+ASCOUT: DB      0EDH,39H
+ASCT1:  DB      00H             ; OUT0 (TDRn),A
         RET
 
 ;-----------------------------------------------------------------------
-; ASCPAT - write the register addresses into the four ASCI routines.
+; ASCERR - a receive error is latched.  This matters more than it looks:
+; on the Z180 an overrun stops the receiver until the error is reset, so
+; a single burst of line noise would otherwise leave the port deaf for
+; the rest of the session with no indication of why.
+;
+; The byte that arrived with the error is discarded rather than handed up
+; - it is known bad, and a protocol is better served by a missing byte it
+; will ask for again than by a corrupt one it has to detect.  Then the
+; flags are reset and "nothing to read" is reported.
+;-----------------------------------------------------------------------
+ASCERR: LD      A,E
+        AND     80H             ; did a byte arrive with the error?
+        JR      Z,ASCER1
+        DB      0EDH,38H
+ASCR2:  DB      00H             ; IN0 A,(RDRn) - discard the suspect byte
+ASCER1: DB      0EDH,38H
+ASCC1:  DB      00H             ; IN0 A,(CNTLAn)
+        AND     0F7H            ; EFR = 0 resets OVRN/PE/FE
+        DB      0EDH,39H
+ASCC2:  DB      00H             ; OUT0 (CNTLAn),A
+        XOR     A               ; report: nothing readable this time
+        RET
+
+;-----------------------------------------------------------------------
+; ASCPAT - write the register addresses into the ASCI routines.
 ;-----------------------------------------------------------------------
 ASCPAT: LD      A,(PCHAN)
         AND     01H             ; channel 0 or 1
         LD      E,A
-        LD      A,(PBASE)       ; internal I/O base (00H unless moved)
-        ADD     A,04H
-        ADD     A,E             ; STATn = base + 4 (+1 for channel 1)
-        LD      (ASCST+2),A
-        LD      (ASCOST+2),A
-        LD      A,(PBASE)
-        ADD     A,08H
-        ADD     A,E             ; RDRn = base + 8 (+1)
-        LD      (ASCIN+2),A
-        LD      A,(PBASE)
-        ADD     A,06H
-        ADD     A,E             ; TDRn = base + 6 (+1)
-        LD      (ASCOUT+2),A
+        LD      A,(PABASE)      ; internal I/O base (00H unless moved)
+        ADD     A,E
+        LD      D,A             ; D = base + channel
+        LD      A,D
+        ADD     A,04H           ; STATn
+        LD      (ASCS1),A
+        LD      (ASCS2),A
+        LD      A,D
+        ADD     A,08H           ; RDRn
+        LD      (ASCR1),A
+        LD      (ASCR2),A
+        LD      A,D
+        ADD     A,06H           ; TDRn
+        LD      (ASCT1),A
+        LD      A,D             ; CNTLAn is the base itself
+        LD      (ASCC1),A
+        LD      (ASCC2),A
+        RET
+
+;-----------------------------------------------------------------------
+; ISZ180 - is this processor a Z180?  Carry set if it is not.
+;
+; The ASCI lives inside the CPU, so selecting it on a plain Z80 does not
+; just fail - IN0/OUT0 are undefined there, and the driver would read
+; whatever an undefined opcode leaves behind.  Better to know first.
+;
+; MLT is the convenient test: on a Z180, ED 4C multiplies B by C into BC;
+; on a Z80 that opcode is undefined and behaves as a two-byte no-op, so
+; BC comes back untouched.  2 x 2 = 4 separates the two with no side
+; effects on either.
+;-----------------------------------------------------------------------
+ISZ180: LD      BC,0202H
+        DB      0EDH,4CH        ; MLT BC on a Z180; no-op on a Z80
+        LD      A,B
+        OR      A
+        JR      NZ,ISZNOT       ; B still 2: not a Z180
+        LD      A,C
+        CP      04H             ; 2 x 2
+        JR      NZ,ISZNOT
+        XOR     A               ; carry clear: this is a Z180
+        RET
+ISZNOT: SCF
         RET
 
 ;-----------------------------------------------------------------------
@@ -1197,7 +1273,9 @@ XRECV1: LD      DE,XFCB
         LD      HL,MXNOMK       ; directory full, or a bad name
         CALL    PSTR
         RET
-XRECV2: LD      A,XNOISE
+XRECV2: LD      A,1
+        LD      (XRXACT),A      ; from here a partial file exists on disk
+        LD      A,XNOISE
         LD      (XNCNT),A
         LD      A,1
         LD      (XCRCM),A       ; ask for CRC mode first
@@ -1344,6 +1422,8 @@ XRBAD:  LD      A,'?'
 ;--- EOT: acknowledge, close, done ---
 XRDONE: LD      A,ACK
         CALL    PSEND
+        XOR     A
+        LD      (XRXACT),A      ; complete: it is a real file now
         LD      DE,XFCB
         LD      C,BCLOSE
         CALL    BDOS
@@ -1358,7 +1438,7 @@ XRDISK: CALL    XCANC
         CALL    CRLF
         LD      HL,MXDISK
         CALL    PSTR
-        RET
+        JP      XSCRAP           ; deleting it also gives the space back
 
 ;-----------------------------------------------------------------------
 ; XACCUM - fold the byte in A into both the CRC and the checksum, so the
@@ -1462,17 +1542,40 @@ XCANC:  LD      A,CAN
         CALL    PSEND
         LD      A,CAN
         JP      PSEND
+
+;-----------------------------------------------------------------------
+; XSCRAP - throw away a partly received file.
+;
+; A download that stops early has written real records to a real file:
+; the directory entry exists and its contents are a prefix of the truth.
+; Leaving that on disk is the worst outcome, because it looks like a
+; file - the same silent-truncation trap the gateway's own Kermit
+; receiver refuses.  So an incomplete download is deleted, and the user
+; is told.  XRXACT marks the window in which an output file exists;
+; nothing is deleted outside it, so a failed *upload* never touches the
+; file it was reading.
+;-----------------------------------------------------------------------
+XSCRAP: LD      A,(XRXACT)
+        OR      A
+        RET     Z               ; no download in progress: nothing to undo
+        XOR     A
+        LD      (XRXACT),A
+        LD      DE,XFCB
+        LD      C,BDELET
+        CALL    BDOS
+        LD      HL,MXSCRAP
+        JP      PSTR
 XABORT: CALL    RSTDMA
         CALL    CRLF
         LD      HL,MXCAN
         CALL    PSTR
-        RET
+        JP      XSCRAP
 XFAIL:  CALL    XCANC
         CALL    RSTDMA
         CALL    CRLF
         LD      HL,MXFAIL
         CALL    PSTR
-        RET
+        JP      XSCRAP
 
 ;-----------------------------------------------------------------------
 ; XFNAME - prompt for a filename and build an FCB from it.
@@ -1531,6 +1634,8 @@ XFN3:   LD      A,B
         LD      A,(HL)
         CP      '.'
         JR      Z,XFN4
+        CALL    XWILD           ; one file, named exactly
+        JP      C,XFNBAD
         CALL    UPCASE
         LD      (DE),A
         INC     DE
@@ -1557,6 +1662,8 @@ XFN6:   LD      A,B
         OR      A
         JR      Z,XFNOK
         LD      A,(HL)
+        CALL    XWILD
+        JP      C,XFNBAD
         CALL    UPCASE
         LD      (DE),A
         INC     DE
@@ -1573,6 +1680,22 @@ XFNBAD: CALL    CRLF
         LD      HL,MXNONAM
         CALL    PSTR
         SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XWILD - carry set if the character in A is a wildcard.
+;
+; XMODEM moves one file with no name of its own, so '*' and '?' have
+; nothing to match against: passed into an FCB they would open some
+; arbitrary file to send, or create a file literally called '?' on a
+; receive.  Refusing them is kinder than either.
+;-----------------------------------------------------------------------
+XWILD:  CP      '*'
+        JR      Z,XWILD1
+        CP      '?'
+        JR      Z,XWILD1
+        RET                     ; carry clear from CP with no match
+XWILD1: SCF
         RET
 
 ;=======================================================================
@@ -1664,10 +1787,15 @@ CFGCH1: LD      A,(DE)
         LD      A,(CRLFFL)
         CP      2
         JR      NC,CFGBAD
+        LD      A,(PABASE)      ; an ASCI base whose registers would run off
+        CP      0F0H            ; the end of the I/O space is not usable
+        JR      NC,CFGBAD
         RET
 CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ANSI
         LD      (PKIND),A
         XOR     A
+        LD      (PABASE),A
+        LD      (PCHAN),A
         LD      (FLTMOD),A
         LD      (ECHOFL),A
         LD      (CRLFFL),A
@@ -1753,7 +1881,7 @@ SHPASC: LD      HL,MPASCI
         CALL    COUT
         LD      HL,MPBASE
         CALL    PSTR
-        LD      A,(PBASE)
+        LD      A,(PABASE)
         CALL    PHEX
         JP      CRLF
 SHPAUX: LD      HL,MPAUX
@@ -1945,7 +2073,13 @@ SCPHBS: LD      (PBASE),A
 ; SCPASC - Z180 ASCI: a channel, and the internal I/O base if the system
 ; has moved it (RomWBW does on some boards).
 ;-----------------------------------------------------------------------
-SCPASC: CALL    CRLF
+SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
+        JR      NC,SCPAS2
+        CALL    CRLF
+        LD      HL,MNOZ180
+        CALL    PSTR
+        RET
+SCPAS2: CALL    CRLF
         LD      HL,MPASCM
         CALL    PSTR
 SCPAS1: CALL    CIN
@@ -1967,8 +2101,10 @@ SCPASA: LD      A,1
         JR      SCPASS
 SCPASB: CALL    HEXASK          ; internal I/O base
         RET     C
-        LD      (PBASE),A
-        JR      SCPASC          ; then still ask for the channel
+        CP      0F0H            ; base+9 must not run off the top of the
+        JR      NC,SCPASB       ; I/O space: ask again
+        LD      (PABASE),A
+        JR      SCPAS2          ; then still ask for the channel
 SCPASS: LD      (PCHAN),A
         LD      A,PKASCI
         LD      (PKIND),A
@@ -2178,6 +2314,8 @@ MPHBM:  DB      'RomWBW HBIOS serial unit (0-3), Q to go back: ',0
 MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
         DB      'running RomWBW - HBIOS is not available here.',CR,LF
         DB      'Pick the chip your board uses instead.',CR,LF,0
+MNOZ180: DB     'This processor is not a Z180, so it has no ASCI',CR,LF
+        DB      'ports.  Pick the serial chip your board uses.',CR,LF,0
 MPASCM: DB      'Z180 ASCI channel',CR,LF
         DB      '  0  channel 0',CR,LF
         DB      '  1  channel 1',CR,LF
@@ -2221,16 +2359,17 @@ MXSFIL: DB      CR,LF,'Send which file? ',0
 MXRFIL: DB      CR,LF,'Receive as which file? ',0
 MXNONAM: DB     'No filename given - nothing done.',CR,LF,0
 MXNOFIL: DB     CR,LF,'No such file on that drive.',CR,LF,0
-MXEXIST: DB     CR,LF,'That file already exists.  Overwrite (Y/N)? ',0
+MXEXIST: DB     CR,LF,'That file exists.  Replace it (Y/N)?  The old',CR,LF
+        DB      'one is deleted before the transfer starts. ',0
 MXKEEP: DB      'Kept the existing file - nothing done.',CR,LF,0
 MXNOMK: DB      CR,LF,'Could not create the file (directory full?).',CR,LF,0
 MXWAIT: DB      CR,LF,'Waiting for the other end to start receiving...',CR,LF,0
 MXGO:   DB      CR,LF,'Transferring ( . = block, ? = retry )',CR,LF,0
 MXSENT: DB      'Sent.',CR,LF,0
 MXRECVD: DB     'Received.',CR,LF,0
-MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF
-        DB      'Nothing was saved from an incomplete download.',CR,LF,0
+MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF,0
 MXCAN:  DB      'The other end cancelled the transfer.',CR,LF,0
+MXSCRAP: DB     'The incomplete file has been deleted.',CR,LF,0
 MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
 MSAVED: DB      'Settings saved into EGT80.COM.',CR,LF,0
@@ -2341,6 +2480,7 @@ XCRC:   DW      0               ; CRC-16 accumulator
 XSUM:   DB      0               ; checksum accumulator
 XCNT:   DB      0               ; retries left
 XNCNT:  DB      0               ; junk bytes still tolerated
+XRXACT: DB      0               ; non-zero while a download's file exists
 XTMO:   DB      0               ; XGETB timeout, in 65536-poll passes
 XTMOC:  DB      0               ; ...and its working copy
 XLINE:  DS      24              ; console line buffer for a filename
