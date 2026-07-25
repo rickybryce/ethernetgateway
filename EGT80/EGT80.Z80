@@ -1,8 +1,13 @@
 ;=======================================================================
+; For God so loved the world, that he gave his only begotten Son, that
+; whosoever believeth in him should not perish, but have everlasting
+; life.
+;                                              - John 3:16, KJV
+;=======================================================================
 ; EGT80 - "Ethernet Gateway Terminal"
 ;
 ; A CP/M terminal program for the Ethernet Gateway, written for real Z80
-; hardware as well as the gateway's own CP/M emulator.  Unlike the period
+; hardware as much as the gateway's own CP/M emulator.  Unlike the period
 ; terminals it replaces, the serial port is chosen at RUN TIME from a menu
 ; instead of being fixed when the program is assembled - one EGT80.COM
 ; serves an RC2014, an Altair, an SC126, or the emulator.
@@ -13,7 +18,7 @@
 ; ASSEMBLER COMPATIBILITY
 ;
 ; This source is written to assemble with PERIOD tooling - SLR Z80ASM
-; (Z80ASM EGT80/A), Microsoft M80, and ZSM - so it can be rebuilt on a
+; (Z80ASM EGT80/A), Microsoft M80, and ZMAC - so it can be rebuilt on a
 ; real CP/M machine, not just cross-assembled.  That imposes rules;
 ; please keep to them when editing:
 ;
@@ -23,11 +28,33 @@
 ;   - Directives limited to EQU, ORG, DB, DW, DS, END.
 ;   - Expressions limited to + - * / AND OR SHL SHR and '$'.
 ;   - Plain 7-bit ASCII, no tabs inside quoted strings, <= 80 columns.
+;   - CRLF line endings (the Makefile stages them; an LF-only file makes
+;     M80 and ZMAC assemble almost nothing while reporting success).
 ;
 ;-----------------------------------------------------------------------
-; PHASE 0: toolchain proof - paints the title screen and exits.  The
-; menu framework, port drivers, settings and XMODEM follow in phases
-; 1-3; the structure below is laid out to receive them.
+; PHASE 1: console layer, menu framework, terminal mode, ANSI/ASCII
+; filter, and the Z80 SIO/2 driver (one real driver so the terminal loop
+; is testable).  The remaining drivers, the settings patch area and
+; XMODEM follow in phases 2-3.
+;
+;-----------------------------------------------------------------------
+; HOW THE HOT PATH IS KEPT CHEAP
+;
+; Two indirections, both resolved before the loop runs:
+;
+;   Port    - four RAM vectors (VPST/VPIN/VPOST/VPOUT) are rewritten when
+;             the user picks a port, so selecting a port costs nothing per
+;             byte.  This is the shape QTERM's overlays use, except ours
+;             is chosen at run time rather than at assembly time.
+;   Console - three RAM vectors (VCST/VCIN/VCOUT) are pointed either at
+;             the BIOS console entries (CP/M 2.2, far cheaper per byte
+;             than a BDOS call) or at BDOS-6 wrappers (CP/M 3), decided
+;             once at startup.  The loop never tests the version.
+;
+; The terminal loop deliberately keeps NO state in registers across those
+; calls: everything it needs is in A or in memory.  That removes any need
+; for the vectors to preserve registers - which matters because on CP/M 3
+; they land in the BDOS, which preserves nothing.
 ;=======================================================================
 
 ;-----------------------------------------------------------------------
@@ -35,116 +62,889 @@
 ;-----------------------------------------------------------------------
 BDOS    EQU     0005H           ; BDOS entry point
 WBOOT   EQU     0000H           ; warm boot (exit to CCP)
-BCONIN  EQU     1               ; console input, echoed
-BCONOU  EQU     2               ; console output
-BPRINT  EQU     9               ; print '$'-terminated string
+BIOSPT  EQU     0001H           ; word: address of the BIOS WBOOT entry
+BCONIO  EQU     6               ; direct console I/O (CP/M 2.2 and 3)
 BVERS   EQU     12              ; return CP/M version
+
+; Direct-console-I/O sub-codes used on CP/M 3
+DCIRD   EQU     0FFH            ; read a character
+DCIST   EQU     0FEH            ; console status
 
 ;-----------------------------------------------------------------------
 ; Character equates
 ;-----------------------------------------------------------------------
-CR      EQU     0DH
+BEL     EQU     07H
+BS      EQU     08H
+TAB     EQU     09H
 LF      EQU     0AH
+CR      EQU     0DH
+ESC     EQU     1BH
+DEL     EQU     7FH
 
 ;-----------------------------------------------------------------------
-; Build identity.  Keep VERMAJ/VERMIN in step with the strings below;
-; they are separate so code can report the version numerically later.
+; Port kinds.  Only SIO is implemented in phase 1; the rest are listed
+; here because the settings block records the kind numerically and the
+; numbering must not shift when they arrive.
+;-----------------------------------------------------------------------
+PKNONE  EQU     0               ; nothing selected
+PKSIO   EQU     1               ; Z80 SIO/2
+PKACIA  EQU     2               ; 6850 ACIA        (phase 2)
+PKHBIO  EQU     3               ; RomWBW HBIOS     (phase 2)
+PKASCI  EQU     4               ; Z180 ASCI        (phase 2)
+PKAUX   EQU     5               ; CP/M BDOS AUX    (phase 2)
+
+;-----------------------------------------------------------------------
+; Build identity
 ;-----------------------------------------------------------------------
 VERMAJ  EQU     0
-VERMIN  EQU     1
+VERMIN  EQU     2
 
         ORG     0100H
 
 ;=======================================================================
 ; ENTRY
-;
-; CP/M hands us the machine with SP pointing at its own stack; we take
-; our own so the depth is ours to reason about, then paint the title.
 ;=======================================================================
 START:  LD      SP,STKTOP       ; our stack, not the CCP's
-        CALL    SYSVER          ; record which CP/M we are on
-        CALL    TITLE           ; the opening screen
-        CALL    PROMPT          ; phase 0: acknowledge and leave
-        JP      WBOOT           ; warm boot: back to the CCP
+        CALL    CONSET          ; choose the console I/O path
+        CALL    PORTST          ; point the port vectors at the default
+        CALL    SCTTL           ; title screen
+        JP      MAINLP          ; main menu
 
 ;=======================================================================
-; SYSVER - read the CP/M version and keep it.
+; CONSET - decide how console I/O is done, once.
 ;
-; The console I/O path is chosen from this in phase 1: on CP/M 2.2 we
-; will call the BIOS console vectors directly (far cheaper per byte than
-; a BDOS call, which matters in the terminal loop), and on CP/M 3 we
-; will use BDOS 6.  Recording it once here is what lets the hot loop
-; stay free of version tests.
-;=======================================================================
-SYSVER: LD      C,BVERS
-        CALL    BDOS
-        LD      (CPMVER),A      ; 20H+ = CP/M 2.x, 30H+ = CP/M 3
-        RET
-
-;=======================================================================
-; TITLE - paint the opening screen.
+; CP/M 2.2: take the BIOS console entries from page zero.  The word at
+; 0001H points at the BIOS WBOOT entry, which is the SECOND slot of the
+; jump table, so the console entries sit at fixed offsets from it:
+; CONST = +3, CONIN = +6, CONOUT = +9.
 ;
-; Deliberately plain text: at this point we do not yet know whether the
-; user's console understands ANSI, so nothing here emits an escape
-; sequence.  Screen clearing arrives with the ANSI/ASCII handling in
-; phase 1, once the user has told us which kind of terminal this is.
+; CP/M 3: the BIOS is banked and must not be called directly, so use
+; BDOS 6 (direct console I/O), which exists on both systems.
 ;=======================================================================
-TITLE:  LD      DE,MTITLE
-        CALL    PSTR
-        LD      DE,MRULE
-        CALL    PSTR
-        LD      DE,MVER
-        CALL    PSTR
-        LD      DE,MBLANK
-        CALL    PSTR
-        LD      DE,MPHASE
-        CALL    PSTR
-        RET
-
-;=======================================================================
-; PROMPT - wait for one key, so the screen is readable when EGT80 is
-; started from a menu or a submit file rather than by hand.
-;=======================================================================
-PROMPT: LD      DE,MKEY
-        CALL    PSTR
-        LD      C,BCONIN
+CONSET: LD      C,BVERS
         CALL    BDOS
-        LD      DE,MCRLF
-        CALL    PSTR
+        LD      (CPMVER),A
+        CP      30H             ; CP/M 3.0 or later?
+        JR      NC,CON3
+        LD      HL,(BIOSPT)     ; BIOS WBOOT entry
+        INC     HL
+        INC     HL
+        INC     HL              ; CONST
+        LD      (VCST+1),HL
+        INC     HL
+        INC     HL
+        INC     HL              ; CONIN
+        LD      (VCIN+1),HL
+        INC     HL
+        INC     HL
+        INC     HL              ; CONOUT
+        LD      (VCOUT+1),HL
+        RET
+CON3:   LD      HL,B6ST
+        LD      (VCST+1),HL
+        LD      HL,B6IN
+        LD      (VCIN+1),HL
+        LD      HL,B6OUT
+        LD      (VCOUT+1),HL
         RET
 
 ;=======================================================================
-; PSTR - print the '$'-terminated string at DE.
+; BDOS-6 console wrappers (the CP/M 3 path).
 ;
-; One BDOS call per string rather than per character: fewer calls, and
-; it keeps the string tables as the only place text lives.
+; They present the BIOS calling convention the rest of the program uses:
+; status returns A=0 for "no key", input returns the byte in A, output
+; takes the byte in C.
 ;=======================================================================
-PSTR:   LD      C,BPRINT
+B6ST:   LD      C,BCONIO
+        LD      E,DCIST
         CALL    BDOS
+        OR      A
+        RET
+B6IN:   LD      C,BCONIO
+        LD      E,DCIRD
+        CALL    BDOS
+        OR      A
+        JR      Z,B6IN          ; no key yet: ask again
+        RET
+B6OUT:  LD      A,C
+        LD      E,A
+        LD      C,BCONIO
+        JP      BDOS
+
+;=======================================================================
+; Console helpers.  COUT takes the byte in A (the rest of the program
+; thinks in A; the BIOS wants C).
+;
+; These preserve BC, DE and HL because what they call does not: a CP/M
+; BIOS is free to destroy any register, and the BDOS certainly does.
+; Assuming otherwise cost an afternoon - printing a string through an
+; unprotected wrapper emitted its first character forever, because the
+; console call had left the string pointer pointing at itself.
+;
+; The cost is 66 T-states on a path that is already waiting on a UART at
+; a millisecond per byte, which is the right trade: the terminal loop is
+; made cheap by holding no state across calls at all, not by shaving
+; pushes off the one routine every screen depends on.
+;
+; CST also normalises the flags, since neither a BIOS console-status
+; routine nor the BDOS promises that Z reflects the value it returns.
+;=======================================================================
+CST:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VCST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A
+        RET
+CIN:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VCIN
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+COUT:   PUSH    AF
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        LD      C,A
+        CALL    VCOUT
+        POP     HL
+        POP     DE
+        POP     BC
+        POP     AF
         RET
 
 ;=======================================================================
-; Strings.  All user-visible text lives here in one block - it is the
-; largest part of a program this size, so keeping it together makes the
-; cost visible and the wording easy to review.
+; CRLF - end a line.
 ;=======================================================================
-MTITLE: DB      CR,LF,'Ethernet Gateway Terminal',CR,LF,'$'
-MRULE:  DB      '-------------------------',CR,LF,'$'
-MVER:   DB      'EGT80 v0.1 for CP/M 2.2 and CP/M 3',CR,LF,'$'
-MBLANK: DB      CR,LF,'$'
-MPHASE: DB      'Phase 0 build: toolchain proof only.',CR,LF
-        DB      'Menus, port selection and XMODEM follow.',CR,LF,'$'
-MKEY:   DB      CR,LF,'Press any key to return to CP/M. $'
-MCRLF:  DB      CR,LF,'$'
+CRLF:   LD      A,CR
+        CALL    COUT
+        LD      A,LF
+        JP      COUT
 
 ;=======================================================================
-; Data.  Buffers stay fixed-size on purpose: a terminal has no need to
-; claim whatever memory happens to be free, and a known size is a known
-; worst case on a machine with a small TPA.
+; PSTR - print the zero-terminated string at HL.
+;
+; Zero-terminated rather than '$'-terminated so that '$' can appear in
+; text, and so printing does not depend on the BDOS being reachable.
 ;=======================================================================
-CPMVER: DB      0               ; BDOS version from SYSVER
+PSTR:   LD      A,(HL)
+        OR      A
+        RET     Z
+        CALL    COUT
+        INC     HL
+        JR      PSTR
 
-        DS      64              ; stack: 32 levels, ample for this program
+;=======================================================================
+; PHEX - print A as two hex digits.  Used for port addresses, which the
+; user needs to see in the same form the hardware documentation uses.
+;=======================================================================
+PHEX:   PUSH    AF
+        RRCA
+        RRCA
+        RRCA
+        RRCA
+        CALL    PHEXD
+        POP     AF
+        CALL    PHEXD
+        RET
+PHEXD:  AND     0FH
+        ADD     A,90H
+        DAA
+        ADC     A,40H
+        DAA
+        JP      COUT
+
+;=======================================================================
+; UPCASE - fold the character in A to upper case, so menus accept either.
+;=======================================================================
+UPCASE: CP      'a'
+        RET     C
+        CP      'z'+1
+        RET     NC
+        SUB     20H
+        RET
+
+;=======================================================================
+; PORT LAYER
+;
+; PORTST points the four port vectors at the driver for the selected
+; kind.  It runs at startup and whenever the user changes the port, so
+; the vectors are always consistent with the settings block.
+;=======================================================================
+PORTST: LD      A,(PKIND)
+        CP      PKSIO
+        JR      Z,PSSIO
+        LD      HL,PNULL        ; nothing selected: safe stubs
+        LD      (VPST+1),HL
+        LD      (VPIN+1),HL
+        LD      (VPOST+1),HL
+        LD      (VPOUT+1),HL
+        RET
+PSSIO:  LD      HL,SIOST
+        LD      (VPST+1),HL
+        LD      HL,SIOIN
+        LD      (VPIN+1),HL
+        LD      HL,SIOOST
+        LD      (VPOST+1),HL
+        LD      HL,SIOOUT
+        LD      (VPOUT+1),HL
+        RET
+
+;-----------------------------------------------------------------------
+; PNULL - the no-port-selected stub.  Reports "never ready, never sends"
+; rather than reading a port that may not exist: on real hardware an IN
+; from an unpopulated address returns floating bus noise, which would
+; look like incoming data.
+;-----------------------------------------------------------------------
+PNULL:  XOR     A
+        RET
+
+;-----------------------------------------------------------------------
+; Z80 SIO/2 driver.  PBASE holds the control/status port; data is the
+; next address up, which is how every RC2014-class SIO/2 board is wired.
+; RR0: bit 0 = receive character available, bit 2 = transmit buffer
+; empty.  B is cleared before IN A,(C) because the Z80 puts BC on the
+; address bus and stray high bits confuse partially-decoded boards.
+;-----------------------------------------------------------------------
+SIOST:  LD      A,(PBASE)
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        AND     01H
+        RET
+SIOIN:  LD      A,(PBASE)
+        INC     A
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        RET
+SIOOST: LD      A,(PBASE)
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        AND     04H
+        RET
+SIOOUT: LD      E,A             ; hold the byte; A is needed for the port
+        LD      A,(PBASE)
+        INC     A
+        LD      C,A
+        LD      B,0
+        LD      A,E
+        OUT     (C),A
+        RET
+
+;-----------------------------------------------------------------------
+; Port vector call sites.
+;-----------------------------------------------------------------------
+PST:    JP      VPST
+PIN:    JP      VPIN
+POST:   JP      VPOST
+POUT:   JP      VPOUT
+
+;=======================================================================
+; PSEND - send the byte in A out the port, waiting for room.
+;
+; The wait is BOUNDED, and that matters more than it sounds.  If the user
+; has picked the wrong port, the transmitter is never ready - an absent
+; chip answers every read the same way forever - so an unbounded wait
+; hangs the program at the first keystroke, with the menu key dead
+; because the loop never gets back to reading the keyboard.  That is the
+; exact moment a user needs the menu, so instead the send gives up, sets
+; PDEAD, and terminal mode reports what happened and hands back control.
+;
+; The bound is deliberately generous - four passes of a 65536-poll loop,
+; several seconds on a 4 MHz Z80 - because a *working* port can legally
+; stall for a long time when hardware flow control is holding it off.
+; Diagnosing a dead port must not misfire on a slow peer.
+;
+; The counter lives in BC and is saved around the status call, because
+; the port drivers use BC for the I/O address.
+;=======================================================================
+PSEND:  LD      (SENDCH),A
+        LD      A,4
+        LD      (PTRIES),A
+PSNDO:  LD      BC,0            ; 65536 polls per pass
+PSEND1: PUSH    BC
+        CALL    POST
+        POP     BC
+        JR      NZ,PSEND2
+        DEC     BC
+        LD      A,B
+        OR      C
+        JR      NZ,PSEND1
+        LD      A,(PTRIES)
+        DEC     A
+        LD      (PTRIES),A
+        JR      NZ,PSNDO
+        LD      A,1
+        LD      (PDEAD),A       ; transmitter never came free
+        RET
+PSEND2: LD      A,(SENDCH)
+        JP      POUT
+
+;=======================================================================
+; MAIN MENU
+;=======================================================================
+MAINLP: CALL    SCMENU
+        CALL    CIN
+        CALL    UPCASE
+        CP      'T'
+        JR      Z,DOTERM
+        CP      'P'
+        JR      Z,DOPORT
+        CP      'S'
+        JR      Z,DOSETT
+        CP      'H'
+        JR      Z,DOHELP
+        CP      'X'
+        JR      Z,DOEXIT
+        LD      A,BEL           ; unknown key: a beep, no scolding
+        CALL    COUT
+        JR      MAINLP
+DOTERM: CALL    TERM
+        JR      MAINLP
+DOPORT: CALL    SCPORT
+        JR      MAINLP
+DOSETT: CALL    SCSETT
+        JR      MAINLP
+DOHELP: CALL    SCHELP
+        JR      MAINLP
+DOEXIT: CALL    CRLF
+        LD      HL,MBYE
+        CALL    PSTR
+        JP      WBOOT
+
+;=======================================================================
+; TERMINAL MODE
+;
+; The hot loop.  Port first, then console: incoming data is the side that
+; loses bytes if it is left waiting, while a human's keystroke can spare
+; the microseconds.
+;=======================================================================
+TERM:   LD      A,(PKIND)
+        OR      A
+        JR      NZ,TERM1
+        LD      HL,MNOPRT       ; refuse rather than read a dead port
+        CALL    PSTR
+        JP      TWAIT
+TERM1:  CALL    CRLF
+        LD      HL,MTERM
+        CALL    PSTR
+        CALL    SHESC           ; name the escape key in the banner
+        LD      HL,MTERM2
+        CALL    PSTR
+        XOR     A
+        LD      (FSTATE),A      ; no half-finished escape sequence
+        LD      (PDEAD),A       ; and no diagnosis pending
+TLOOP:  CALL    PST             ; anything from the port?
+        JR      Z,TL1
+        CALL    PIN
+        CALL    FILT            ; filter, then to the console
+TL1:    CALL    CST             ; anything from the keyboard?
+        JR      Z,TLOOP
+        CALL    CIN
+        LD      HL,ESCCH
+        CP      (HL)            ; the escape key?
+        JR      Z,TESC
+        CALL    TSEND
+        LD      A,(PDEAD)
+        OR      A
+        JR      NZ,TDEAD
+        JP      TLOOP
+
+;-----------------------------------------------------------------------
+; TDEAD - the port never accepted the byte.  Name the port, say what it
+; means, and leave terminal mode so the menu is reachable again.  This is
+; the failure every other terminal here presents as a silent hang.
+;-----------------------------------------------------------------------
+TDEAD:  CALL    CRLF
+        LD      HL,MDEAD
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MDEAD2
+        CALL    PSTR
+        JP      TWAIT
+
+;-----------------------------------------------------------------------
+; TSEND - send a typed character, honouring local echo and CR handling.
+;-----------------------------------------------------------------------
+TSEND:  LD      (TYPECH),A
+        LD      A,(ECHOFL)
+        OR      A
+        JR      Z,TSEND1
+        LD      A,(TYPECH)
+        CALL    FILT            ; echo through the same filter
+TSEND1: LD      A,(TYPECH)
+        CALL    PSEND
+        LD      A,(TYPECH)
+        CP      CR
+        RET     NZ
+        LD      A,(CRLFFL)      ; append LF to a typed CR?
+        OR      A
+        RET     Z
+        LD      A,LF
+        JP      PSEND
+
+;-----------------------------------------------------------------------
+; TESC - the escape key was pressed in terminal mode.
+;
+; One keystroke decides: leave, get help, or send the escape character
+; itself (pressing it twice), so the key is never trapped away from the
+; remote end.
+;-----------------------------------------------------------------------
+TESC:   CALL    CRLF
+        LD      HL,MESCMN
+        CALL    PSTR
+        CALL    CIN
+        CALL    UPCASE
+        LD      HL,ESCCH        ; escape twice: send it literally
+        CP      (HL)
+        JR      Z,TESCLI
+        CP      'E'
+        JR      Z,TESCEX
+        CP      'H'
+        JR      Z,TESCHL
+        CP      'S'
+        JR      Z,TESCST
+        CALL    CRLF            ; anything else: back to the session
+        JP      TLOOP
+TESCLI: LD      A,(ESCCH)
+        CALL    PSEND
+        JP      TLOOP
+TESCHL: CALL    SCHELP
+        JP      TLOOP
+TESCST: CALL    SCSETT
+        JP      TLOOP
+TESCEX: CALL    CRLF
+        LD      HL,MTEXIT
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; TWAIT - "press a key" pause, for screens reached from a menu.
+;-----------------------------------------------------------------------
+TWAIT:  LD      HL,MKEY
+        CALL    PSTR
+        CALL    CIN
+        CALL    CRLF
+        RET
+
+;=======================================================================
+; FILT - inbound filter: byte in A, to the console.
+;
+; ANSI mode passes everything through, for a terminal that understands
+; escape sequences.  ASCII mode swallows CSI sequences and control codes
+; a dumb console would render as litter, keeping CR, LF, TAB, BS and BEL
+; because those do useful work on any terminal.
+;
+; FSTATE: 0 = normal, 1 = an ESC was seen, 2 = inside a CSI sequence.
+;=======================================================================
+FILT:   LD      E,A             ; hold the byte
+        LD      A,(FSTATE)
+        OR      A
+        JR      NZ,FILT2
+        LD      A,(FLTMOD)
+        OR      A
+        LD      A,E
+        JP      Z,COUT          ; ANSI: straight through
+        CP      ESC
+        JR      Z,FSESC
+        CP      20H
+        JR      NC,FPRIN        ; printable, and DEL passes as before
+        CP      CR
+        JR      Z,FPRIN
+        CP      LF
+        JR      Z,FPRIN
+        CP      TAB
+        JR      Z,FPRIN
+        CP      BS
+        JR      Z,FPRIN
+        CP      BEL
+        JR      Z,FPRIN
+        RET                     ; other control code: drop it
+FPRIN:  JP      COUT
+FSESC:  LD      A,1
+        LD      (FSTATE),A
+        RET
+
+;-----------------------------------------------------------------------
+; FILT2 - mid-sequence.  After ESC, '[' opens a CSI (swallow until its
+; final byte, 40H-7EH); anything else is a two-character sequence, so it
+; and the ESC are both gone.
+;-----------------------------------------------------------------------
+FILT2:  DEC     A
+        JR      NZ,FCSI         ; state 2: already inside a CSI
+        LD      A,E
+        CP      '['
+        JR      Z,FCSIST
+        XOR     A               ; two-character escape: done
+        LD      (FSTATE),A
+        RET
+FCSIST: LD      A,2
+        LD      (FSTATE),A
+        RET
+FCSI:   LD      A,E
+        CP      40H
+        RET     C               ; parameter byte: keep swallowing
+        CP      7FH
+        RET     NC
+        XOR     A               ; final byte: sequence complete
+        LD      (FSTATE),A
+        RET
+
+;=======================================================================
+; SCREENS
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; SCTTL - the opening screen.
+;
+; Plain text on purpose: the user has not yet told us whether this
+; console understands ANSI, and a title screen that sprays escape
+; sequences at a dumb terminal is a poor first impression.
+;-----------------------------------------------------------------------
+SCTTL:  CALL    CRLF
+        LD      HL,MTITLE
+        CALL    PSTR
+        LD      HL,MRULE
+        CALL    PSTR
+        LD      HL,MVER
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; SCMENU - the main menu, with the current settings above it.
+;
+; The port and the filter mode are shown every time because they are the
+; two settings that decide whether the program appears to work at all.
+;-----------------------------------------------------------------------
+SCMENU: CALL    CRLF
+        LD      HL,MPORT
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MMODE
+        CALL    PSTR
+        CALL    SHMODE
+        CALL    CRLF
+        LD      HL,MMENU
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; SHPORT - describe the selected port in the words the board's own
+; documentation uses, followed by the actual addresses.
+;-----------------------------------------------------------------------
+SHPORT: LD      A,(PKIND)
+        CP      PKSIO
+        JR      Z,SHPSIO
+        LD      HL,MPNONE
+        CALL    PSTR
+        JP      CRLF
+SHPSIO: LD      HL,MPSIO
+        CALL    PSTR
+        LD      A,(PBASE)
+        CALL    PHEX
+        LD      A,'/'
+        CALL    COUT
+        LD      A,(PBASE)
+        INC     A
+        CALL    PHEX
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHMODE - the filter mode, plus the two toggles that surprise people
+; when they are set the other way.
+;-----------------------------------------------------------------------
+SHMODE: LD      A,(FLTMOD)
+        OR      A
+        LD      HL,MMANSI
+        JR      Z,SHMOD1
+        LD      HL,MMASC
+SHMOD1: CALL    PSTR
+        LD      A,(ECHOFL)
+        OR      A
+        JR      Z,SHMOD2
+        LD      HL,MMECHO
+        CALL    PSTR
+SHMOD2: LD      A,(CRLFFL)
+        OR      A
+        JR      Z,SHMOD3
+        LD      HL,MMCRLF
+        CALL    PSTR
+SHMOD3: JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHESC - name the escape key as a caret pair, e.g. ^Y.
+;-----------------------------------------------------------------------
+SHESC:  LD      A,'^'
+        CALL    COUT
+        LD      A,(ESCCH)
+        ADD     A,40H           ; control code to its printable letter
+        JP      COUT
+
+;-----------------------------------------------------------------------
+; SCPORT - port selection.  Phase 1 offers the four SIO/2 channels an
+; RC2014-class machine can have; the other families arrive in phase 2.
+;-----------------------------------------------------------------------
+SCPORT: CALL    CRLF
+        LD      HL,MPORTS
+        CALL    PSTR
+SCPOR1: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JR      Z,SCPO80
+        CP      '2'
+        JR      Z,SCPO82
+        CP      '3'
+        JR      Z,SCPO84
+        CP      '4'
+        JR      Z,SCPO86
+        CP      'N'
+        JR      Z,SCPONO
+        CP      'Q'
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JR      SCPOR1
+SCPO80: LD      A,80H
+        JR      SCPOSE
+SCPO82: LD      A,82H
+        JR      SCPOSE
+SCPO84: LD      A,84H
+        JR      SCPOSE
+SCPO86: LD      A,86H
+SCPOSE: LD      (PBASE),A
+        LD      A,PKSIO
+        LD      (PKIND),A
+        CALL    PORTST          ; re-point the vectors at once
+        CALL    CRLF
+        LD      HL,MPSET
+        CALL    PSTR
+        CALL    SHPORT
+        RET
+SCPONO: XOR     A
+        LD      (PKIND),A
+        CALL    PORTST
+        CALL    CRLF
+        LD      HL,MPSET
+        CALL    PSTR
+        CALL    SHPORT
+        RET
+
+;-----------------------------------------------------------------------
+; SCSETT - settings.  Each key toggles and the screen redraws, so the
+; effect of a keypress is always visible.
+;-----------------------------------------------------------------------
+SCSETT: CALL    CRLF
+        LD      HL,MSETT
+        CALL    PSTR
+        CALL    SHMODE
+        LD      HL,MSETT2
+        CALL    PSTR
+SCSET1: CALL    CIN
+        CALL    UPCASE
+        CP      'A'
+        JR      Z,TOGANS
+        CP      'E'
+        JR      Z,TOGECH
+        CP      'L'
+        JR      Z,TOGCRL
+        CP      'K'
+        JR      Z,CYCESC
+        CP      'Q'
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JR      SCSET1
+TOGANS: LD      HL,FLTMOD
+        CALL    TOGGLE
+        JR      SCSETT
+TOGECH: LD      HL,ECHOFL
+        CALL    TOGGLE
+        JR      SCSETT
+TOGCRL: LD      HL,CRLFFL
+        CALL    TOGGLE
+        JR      SCSETT
+TOGGLE: LD      A,(HL)
+        XOR     1
+        LD      (HL),A
+        RET
+
+;-----------------------------------------------------------------------
+; CYCESC - step the escape key through the three characters period
+; terminals use for it, so it can be moved off a key the remote system
+; wants (^Y is WordStar's delete-line, for instance).
+;-----------------------------------------------------------------------
+CYCESC: LD      A,(ESCCH)
+        CP      19H             ; ^Y
+        JR      Z,CYCE1
+        CP      1DH             ; ^]
+        JR      Z,CYCE2
+        LD      A,19H           ; anything else: back to ^Y
+        JR      CYCE3
+CYCE1:  LD      A,1DH
+        JR      CYCE3
+CYCE2:  LD      A,1CH           ; ^\
+CYCE3:  LD      (ESCCH),A
+        CALL    CRLF
+        LD      HL,MESCIS
+        CALL    PSTR
+        CALL    SHESC
+        CALL    CRLF
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; SCHELP - help.  The port choice is the one thing that decides whether
+; this program works, so the help says so plainly and in the same terms
+; the hardware documentation uses.
+;-----------------------------------------------------------------------
+SCHELP: CALL    CRLF
+        LD      HL,MHELP
+        CALL    PSTR
+        CALL    TWAIT
+        LD      HL,MHELP2
+        CALL    PSTR
+        JP      TWAIT
+
+;=======================================================================
+; TEXT
+;
+; All user-visible text lives here.  In a program this size the strings
+; are the largest single part, so keeping them together makes that cost
+; visible and the wording easy to review.
+;=======================================================================
+MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
+MRULE:  DB      '-------------------------',CR,LF,0
+MVER:   DB      'EGT80 v0.2  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
+
+MPORT:  DB      'Port: ',0
+MMODE:  DB      'Mode: ',0
+MPNONE: DB      'none selected - press P',0
+MPSIO:  DB      'Z80 SIO/2 at ',0
+MMANSI: DB      'ANSI (pass escape sequences)',0
+MMASC:  DB      'ASCII (strip escape sequences)',0
+MMECHO: DB      ' +echo',0
+MMCRLF: DB      ' +CR/LF',0
+
+MMENU:  DB      CR,LF
+        DB      '  T  Terminal mode',CR,LF
+        DB      '  P  Select serial port',CR,LF
+        DB      '  S  Settings',CR,LF
+        DB      '  H  Help',CR,LF
+        DB      '  X  Exit to CP/M',CR,LF
+        DB      CR,LF,'Choice: ',0
+
+MPORTS: DB      'Select serial port',CR,LF
+        DB      '------------------',CR,LF
+        DB      '  1  Z80 SIO/2 board 1 channel A - 80/81',CR,LF
+        DB      '  2  Z80 SIO/2 board 1 channel B - 82/83',CR,LF
+        DB      '  3  Z80 SIO/2 board 2 channel A - 84/85',CR,LF
+        DB      '  4  Z80 SIO/2 board 2 channel B - 86/87',CR,LF
+        DB      '  N  None',CR,LF
+        DB      '  Q  Leave unchanged',CR,LF
+        DB      CR,LF,'More port types arrive in the next build.',CR,LF
+        DB      CR,LF,'Choice: ',0
+MPSET:  DB      'Port is now: ',0
+
+MSETT:  DB      'Settings',CR,LF
+        DB      '--------',CR,LF
+        DB      'Now: ',0
+MSETT2: DB      CR,LF
+        DB      '  A  ANSI / ASCII output',CR,LF
+        DB      '  E  Local echo on / off',CR,LF
+        DB      '  L  Send LF after a typed CR',CR,LF
+        DB      '  K  Change the menu key',CR,LF
+        DB      '  Q  Back',CR,LF
+        DB      CR,LF,'Choice: ',0
+MESCIS: DB      'Menu key is now ',0
+
+MTERM:  DB      'Terminal mode.  Press ',0
+MTERM2: DB      ' for the menu.',CR,LF,CR,LF,0
+MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
+MESCMN: DB      'E)xit  H)elp  S)ettings  (again to send the key): ',0
+MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
+        DB      'Press P at the menu and pick the one your',CR,LF
+        DB      'machine uses.',CR,LF,0
+
+MDEAD:  DB      'Nothing was sent: the port did not accept the',CR,LF
+        DB      'character.  Selected port is ',0
+MDEAD2: DB      'Either no serial chip answers at that address,',CR,LF
+        DB      'or it is held off by flow control.  Press P at',CR,LF
+        DB      'the menu to pick a different port.',CR,LF,0
+
+MKEY:   DB      CR,LF,'Press any key. ',0
+MBYE:   DB      'EGT80 done.',CR,LF,0
+
+MHELP:  DB      'Help - EGT80',CR,LF
+        DB      '------------',CR,LF,CR,LF
+        DB      'Choosing the port is the one setting that',CR,LF
+        DB      'decides whether this program works.  A CP/M',CR,LF
+        DB      'machine reaches its modem through a serial',CR,LF
+        DB      'chip at a fixed I/O address, and that address',CR,LF
+        DB      'differs from board to board.  Pick the entry',CR,LF
+        DB      'that matches yours.  If the wrong one is set,',CR,LF
+        DB      'nothing arrives and nothing is sent - there is',CR,LF
+        DB      'no error, only silence.',CR,LF,CR,LF
+        DB      'On an RC2014 or RomWBW machine the second',CR,LF
+        DB      'SIO/2 channel (82/83) is the usual choice.',CR,LF,0
+MHELP2: DB      CR,LF
+        DB      'Terminal mode passes what you type to the',CR,LF
+        DB      'port and what arrives to your screen.  The',CR,LF
+        DB      'menu key interrupts it; pressing that key',CR,LF
+        DB      'twice sends it to the remote end instead.',CR,LF,CR,LF
+        DB      'ANSI mode passes escape sequences through to',CR,LF
+        DB      'your terminal.  ASCII mode strips them, which',CR,LF
+        DB      'suits a printing terminal or a console with no',CR,LF
+        DB      'cursor addressing: menus drawn with graphics',CR,LF
+        DB      'still read as text instead of as litter.',CR,LF,CR,LF
+        DB      'File transfer arrives in a later build.  Until',CR,LF
+        DB      'then use the gateway.',CR,LF,0
+
+;=======================================================================
+; SETTINGS
+;
+; These become the saved patch area in phase 2, which is why they sit
+; together with a signature ahead of them.  The defaults are the values
+; that suit the most machines: an RC2014/RomWBW second SIO/2 channel, and
+; ANSI pass-through, which is what the gateway offers a terminal that
+; asks for colour.
+;=======================================================================
+CFGSIG: DB      'EGT80CFG'      ; phase 2 will look for this
+PKIND:  DB      PKSIO           ; selected port kind
+PBASE:  DB      82H             ; SIO/2 board 1 channel B
+FLTMOD: DB      0               ; 0 = ANSI pass, 1 = ASCII strip
+ECHOFL: DB      0               ; local echo off (the remote echoes)
+CRLFFL: DB      0               ; do not add LF to a typed CR
+ESCCH:  DB      19H             ; ^Y, as the QTERM builds here use
+
+;=======================================================================
+; VECTORS AND VARIABLES
+;
+; The vectors are JP instructions rewritten at run time; the 0 operands
+; below are placeholders that CONSET and PORTST fill in before anything
+; can call them.
+;=======================================================================
+VCST:   JP      0               ; console status
+VCIN:   JP      0               ; console input
+VCOUT:  JP      0               ; console output
+VPST:   JP      0               ; port receive status
+VPIN:   JP      0               ; port input
+VPOST:  JP      0               ; port transmit status
+VPOUT:  JP      0               ; port output
+
+CPMVER: DB      0               ; BDOS version, from CONSET
+FSTATE: DB      0               ; inbound escape-sequence state
+SENDCH: DB      0               ; byte in flight in PSEND
+PTRIES: DB      0               ; PSEND give-up counter
+PDEAD:  DB      0               ; set when the transmitter never freed
+TYPECH: DB      0               ; byte in flight in TSEND
+
+        DS      64              ; stack: 32 levels, ample here
 STKTOP  EQU     $
 
         END     START

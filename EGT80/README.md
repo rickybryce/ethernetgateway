@@ -12,8 +12,15 @@ the pairing wrong and the program is simply silent.
 EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-**Status: phase 0** — the toolchain is proven end to end and the program paints
-its title screen and exits. Menus, drivers, settings and XMODEM follow.
+**Status: phase 1** — working terminal. Title screen, main menu, settings, help,
+terminal mode with an escape-key menu, the ANSI/ASCII filter, and the Z80 SIO/2
+driver. Verified in the gateway's CP/M emulator: `AT` → `OK` and
+`ATDT host:port` → `CONNECT` through the SIO driver at 0x82/0x83, and the ASCII
+filter reduces a colour ANSI menu to clean readable text (18 escape sequences in,
+0 out, all text intact).
+
+The remaining four drivers (6850 ACIA, RomWBW HBIOS, Z180 ASCI, BDOS AUX), the
+saved settings patch area, and XMODEM follow in phases 2–3.
 
 ## Building
 
@@ -69,7 +76,7 @@ Planned drivers:
 
 | Driver | Ports | Testable in the emulator? |
 |--------|-------|---------------------------|
-| Z80 SIO/2 | 0x80–0x87, channel selectable | yes — `rc2014_1a`…`rc2014_2b` |
+| Z80 SIO/2 **(done)** | 0x80–0x87, channel selectable | yes — `rc2014_1a`…`rc2014_2b` |
 | 6850 ACIA | 0x10/0x12 (88-2SIO) and user base | yes — `altair_2sio1`/`2sio2` |
 | RomWBW HBIOS | `RST 8`, units 0–3 | yes — `hbios_1`/`hbios_2` |
 | Z180 ASCI | SC126 channels 0/1, `IN0`/`OUT0` | **no** — real hardware only |
@@ -100,6 +107,25 @@ Buffers are deliberately fixed (256-byte receive ring, one 128-byte XMODEM
 sector, one 128-byte disk record) rather than "whatever memory is free". A
 terminal does not need to claim the TPA, and a known size is a known worst case
 on a machine that may only have 32 KB of it.
+
+## Two things learned the hard way
+
+Both are worth knowing before touching this code.
+
+**A CP/M console call may destroy any register.** `CONOUT` is not required to
+preserve HL, and our own emulator's BIOS return even mirrors its result into `L`.
+An early `PSTR` printed its first character forever, because the console call had
+left the string pointer pointing at itself. `CST`/`CIN`/`COUT` therefore preserve
+BC, DE and HL. The terminal loop is kept cheap by holding no state across calls
+at all — not by shaving pushes off the routine every screen depends on.
+
+**A send wait must be bounded.** If the selected port is wrong, the transmitter
+is never ready — an absent chip answers identically forever — so an unbounded
+wait hangs at the first keystroke with the menu key dead, which is precisely when
+the user needs the menu. `PSEND` gives up after four passes of a 65536-poll loop
+(several seconds on a 4 MHz Z80, generous enough that hardware flow control
+holding a *working* port off cannot trigger it), and terminal mode then names the
+port and says what it means. That turns the classic silent hang into a diagnosis.
 
 ## Testing
 
