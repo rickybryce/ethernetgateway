@@ -858,7 +858,7 @@ TERM:   LD      A,(PKIND)
         JR      NZ,TERM1
         LD      HL,MNOPRT       ; refuse rather than read a dead port
         CALL    PSTR
-        JP      TWAIT
+        JP      TCWAIT          ; ...and they may already be typing
 TERM1:  CALL    CRLF
         LD      HL,MTERM
         CALL    PSTR
@@ -896,7 +896,7 @@ TDEAD:  CALL    CRLF
         CALL    SHPORT
         LD      HL,MDEAD2
         CALL    PSTR
-        JP      TWAIT
+        JP      TCWAIT          ; the user is mid-sentence: only ^C leaves
 
 ;-----------------------------------------------------------------------
 ; TSEND - send a typed character, honouring local echo and CR handling.
@@ -969,7 +969,29 @@ TESCEX: CALL    CRLF
         RET
 
 ;-----------------------------------------------------------------------
-; TWAIT - "press a key" pause, for screens reached from a menu.
+; TCWAIT - wait for Ctrl-C, swallowing everything else.
+;
+; For a message that appears while the user is TYPING rather than reading.
+; A wrong port stops the very first keystroke, but the rest of the
+; sentence is already on its way: with a "press any key" pause, one of
+; those characters dismisses the notice and the remainder land in the main
+; menu as commands - so the user's half-typed sentence gets *executed*.
+;
+; Only ^C leaves.  Every other byte is read and dropped, so a user who
+; keeps typing sees the notice stay put instead of watching their words
+; run a menu.
+;-----------------------------------------------------------------------
+TCWAIT: LD      HL,MCTRLC
+        CALL    PSTR
+TCWAI1: CALL    CIN
+        CP      03H             ; ^C
+        JR      NZ,TCWAI1       ; anything else: swallow it
+        CALL    CRLF
+        RET
+
+;-----------------------------------------------------------------------
+; TWAIT - "press a key" pause, for screens the user chose to read
+; (help, a finished transfer) where a stray keystroke costs nothing.
 ;-----------------------------------------------------------------------
 TWAIT:  LD      HL,MKEY
         CALL    PSTR
@@ -1632,6 +1654,8 @@ XFAILP: LD      HL,MDEAD        ; then give the port diagnosis, not a vague
 XCHKAB: CALL    CST
         RET     Z               ; nothing typed: carry clear
         CALL    CIN
+        CP      03H             ; ^C - what a user reaches for to back out
+        JR      Z,XCHKA1
         CP      ESC
         JR      Z,XCHKA1
         LD      HL,ESCCH
@@ -1668,7 +1692,20 @@ XFNAME: LD      A,20            ; room for drive + 8.3 + slack
         CALL    CRLF
         LD      A,(XLINE+1)     ; how many characters were typed
         OR      A
+        JP      Z,XFNBAD        ; bare RETURN: never mind
+        LD      B,A
+        LD      HL,XLINE+2
+        ; ^C anywhere in the line cancels as well.  A user who has thought
+        ; better of a transfer reaches for ^C, not RETURN, and without this the
+        ; 03H is taken as part of a filename - opening some other file, or
+        ; creating one with a control character in its name.
+XFNCC:  LD      A,(HL)
+        CP      03H
         JP      Z,XFNBAD
+        INC     HL
+        DEC     B
+        JR      NZ,XFNCC
+        LD      A,(XLINE+1)     ; rewind for the parse proper
         LD      B,A
         LD      HL,XLINE+2
         XOR     A               ; clear the FCB: drive 0, spaces, no extent
@@ -1774,6 +1811,21 @@ XWILD:  CP      '*'
 XWILD1: SCF
         RET
 
+;-----------------------------------------------------------------------
+; XDIRTS / XDIRTC - mark and clear "changed but not saved".
+;
+; Every setting takes effect the moment it is chosen, which is what makes
+; the menus feel right - but nothing is written to disk until V.  Without
+; a marker that is easy to misread as "my settings are not being saved",
+; so the menu says so plainly while a change is pending.
+;-----------------------------------------------------------------------
+XDIRTS: LD      A,1
+        LD      (XDIRTY),A
+        RET
+XDIRTC: XOR     A
+        LD      (XDIRTY),A
+        RET
+
 ;=======================================================================
 ; SETTINGS PERSISTENCE
 ;
@@ -1813,6 +1865,7 @@ SAVCFG: LD      DE,CFGFCB
         LD      C,BCLOSE
         CALL    BDOS
         CALL    RSTDMA
+        CALL    XDIRTC          ; what is on disk now matches what is in RAM
         CALL    CRLF
         LD      HL,MSAVED
         CALL    PSTR
@@ -1918,6 +1971,11 @@ SCMENU: CALL    CRLF
         CALL    CRLF
         LD      HL,MMENU
         CALL    PSTR
+        LD      A,(XDIRTY)      ; say so while a change is only in memory
+        OR      A
+        RET     Z
+        LD      HL,MUNSAVE
+        CALL    PSTR
         RET
 
 ;-----------------------------------------------------------------------
@@ -2018,10 +2076,16 @@ SHESC:  LD      A,'^'
 ; and the menu names real machines.
 ;-----------------------------------------------------------------------
 SCPORT: CALL    CRLF
+        LD      HL,MPNOW        ; what is in force right now
+        CALL    PSTR
+        CALL    SHPORT
+        CALL    CRLF
         LD      HL,MPORTS
         CALL    PSTR
 SCPOR1: CALL    CIN
         CALL    UPCASE
+        CP      'D'
+        JP      Z,SCPDEF
         CP      '1'
         JP      Z,SCPSIO
         CP      '2'
@@ -2041,6 +2105,27 @@ SCPOR1: CALL    CIN
         JR      SCPOR1
 SCPONO: XOR     A
         LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPDEF - the default port: Z80 SIO/2 board 1 channel B, 82/83.
+;
+; This is the pairing that works with the Ethernet Gateway out of the box
+; (its own default virtual-modem port is the same one), so it is the answer
+; to "I changed something and now nothing connects".  It resets the whole
+; port group - kind, address, ASCI channel and I/O base - so no leftover
+; from another family can be left pointing somewhere odd.
+;-----------------------------------------------------------------------
+SCPDEF: LD      A,PKSIO
+        LD      (PKIND),A
+        LD      A,82H
+        LD      (PBASE),A
+        XOR     A
+        LD      (PCHAN),A
+        LD      (PABASE),A
+        CALL    CRLF
+        LD      HL,MPDEF
+        CALL    PSTR
         JP      PDONE
 
 ;-----------------------------------------------------------------------
@@ -2199,7 +2284,8 @@ SCPAUX: LD      A,PKAUX
 ;-----------------------------------------------------------------------
 ; PDONE - re-point the vectors at the new selection and show it.
 ;-----------------------------------------------------------------------
-PDONE:  CALL    PORTST
+PDONE:  CALL    XDIRTS          ; the port changed but is not on disk yet
+        CALL    PORTST
         CALL    CRLF
         LD      HL,MPSET
         CALL    PSTR
@@ -2285,7 +2371,7 @@ TOGCRL: LD      HL,CRLFFL
 TOGGLE: LD      A,(HL)
         XOR     1
         LD      (HL),A
-        RET
+        JP      XDIRTS          ; a toggle is a change too
 
 ;-----------------------------------------------------------------------
 ; CYCESC - step the escape key through the three characters period
@@ -2303,6 +2389,7 @@ CYCE1:  LD      A,1DH
         JR      CYCE3
 CYCE2:  LD      A,1CH           ; ^\
 CYCE3:  LD      (ESCCH),A
+        CALL    XDIRTS
         CALL    CRLF
         LD      HL,MESCIS
         CALL    PSTR
@@ -2335,7 +2422,7 @@ SCHELP: CALL    CRLF
 ;=======================================================================
 MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
 MRULE:  DB      '-------------------------',CR,LF,0
-MVER:   DB      'EGT80 v0.4  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
+MVER:   DB      'EGT80 v0.6  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
 
 MPORT:  DB      'Port: ',0
 MMODE:  DB      'Mode: ',0
@@ -2369,9 +2456,12 @@ MPORTS: DB      'Select serial port',CR,LF
         DB      '  3  RomWBW HBIOS  - any RomWBW machine (RST 8)',CR,LF
         DB      '  4  Z180 ASCI     - SC126 and other Z180 boards',CR,LF
         DB      '  5  CP/M AUX:     - portable fallback, see Help',CR,LF
+        DB      '  D  Default - Z80 SIO/2 board 1 ch B, 82/83',CR,LF
         DB      '  N  None',CR,LF
         DB      '  Q  Leave unchanged',CR,LF
         DB      CR,LF,'Choice: ',0
+MPDEF:  DB      'Back to the default port.',CR,LF,0
+MPNOW:  DB      'Currently selected: ',0
 MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
         DB      '  1  board 1 channel A - 80/81',CR,LF
         DB      '  2  board 1 channel B - 82/83  (usual AUX: port)',CR,LF
@@ -2440,7 +2530,7 @@ MXEXIST: DB     CR,LF,'That file exists.  Replace it (Y/N)?  The old',CR,LF
 MXKEEP: DB      'Kept the existing file - nothing done.',CR,LF,0
 MXNOMK: DB      CR,LF,'Could not create the file (directory full?).',CR,LF,0
 MXWAIT: DB      CR,LF,'Waiting for the other end to start receiving...',CR,LF,0
-MXGO:   DB      CR,LF,'Transferring ( . = block, ? = retry )',CR,LF,0
+MXGO:   DB      CR,LF,'Transferring ( . = block, ? = retry, ^C aborts )',CR,LF,0
 MXSENT: DB      'Sent.',CR,LF,0
 MXRECVD: DB     'Received.',CR,LF,0
 MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF,0
@@ -2449,6 +2539,8 @@ MXSCRAP: DB     'The incomplete file has been deleted.',CR,LF,0
 MXUSER: DB      'Stopped at this end.',CR,LF,0
 MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
+MUNSAVE: DB    CR,LF,'  (changed - press V to keep it for next time)',CR,LF
+        DB      CR,LF,'Choice: ',0
 MSAVED: DB      'Settings saved into EGT80.COM.',CR,LF,0
 MSAVERR: DB     'Could not save: EGT80.COM must be on the current',CR,LF
         DB      'drive under its own name.  Settings still apply',CR,LF
@@ -2472,6 +2564,9 @@ CFGFCB: DB      0
         DB      0,0,0           ; r0/r1/r2 - the random record number
 
 MKEY:   DB      CR,LF,'Press any key. ',0
+MCTRLC: DB      CR,LF,'Press Ctrl-C for the menu.  Anything else you',CR,LF
+        DB      'type here is ignored, so a half-typed line cannot',CR,LF
+        DB      'run a menu command by accident. ',0
 MBYE:   DB      'EGT80 done.',CR,LF,0
 
 MHELP:  DB      'Help - the serial port',CR,LF
@@ -2525,7 +2620,10 @@ MHELP3: DB      'Help - two things to know',CR,LF
         DB      'with the checksum fallback an older peer may want.',CR,LF
         DB      'Start the far end first, then press U or D - from',CR,LF
         DB      'the menu or from the terminal-mode menu key, which',CR,LF
-        DB      'does not hang up.  A dot is a block, a ? a retry.',CR,LF,0
+        DB      'does not hang up.  A dot is a block, a ? a retry.',CR,LF
+        DB      '^C stops a transfer at any point, and stops it at',CR,LF
+        DB      'the filename prompt too; an incomplete download is',CR,LF
+        DB      'deleted rather than left looking like a file.',CR,LF,0
 
 ;=======================================================================
 ; VECTORS AND VARIABLES
@@ -2558,6 +2656,7 @@ XSUM:   DB      0               ; checksum accumulator
 XCNT:   DB      0               ; retries left
 XNCNT:  DB      0               ; junk bytes still tolerated
 XRXACT: DB      0               ; non-zero while a download's file exists
+XDIRTY: DB      0               ; non-zero when settings differ from the file
 XTMO:   DB      0               ; XGETB timeout, in 65536-poll passes
 XTMOC:  DB      0               ; ...and its working copy
 XLINE:  DS      24              ; console line buffer for a filename

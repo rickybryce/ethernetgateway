@@ -554,6 +554,11 @@ impl TelnetSession {
                 self.cyan("U")
             ))
             .await?;
+            self.send_line(&format!(
+                "  {}  Default modem port (pairs with EGT80)",
+                self.cyan("D")
+            ))
+            .await?;
             self.send_line("").await?;
             self.send_line(&format!(
                 "  {}",
@@ -588,6 +593,17 @@ impl TelnetSession {
                         false,
                     )
                     .await?;
+                }
+                "d" => {
+                    // Back to the shipped default, which is also the port EGT80
+                    // defaults to — the one-key answer to "I changed something
+                    // and now nothing connects".
+                    let def = crate::cpm::uart::DEFAULT_UART.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_emu_uart", &def);
+                    })
+                    .await
+                    .ok();
                 }
                 "u" => {
                     // Cycle to the next virtual-modem port profile.
@@ -633,6 +649,20 @@ impl TelnetSession {
             };
             self.send_line(&format!("  Require login: {}", login_status))
                 .await?;
+            // The gateway-address rule sits with Require login because both
+            // decide who may connect at all, and an operator reading this
+            // screen after being refused needs to see it here rather than
+            // hunting through the network panel.
+            let gw_status = if cfg.disable_gateway_connections {
+                self.red("BLOCKED")
+            } else {
+                self.green("Allowed")
+            };
+            self.send_line(&format!(
+                "  Connections from gateway: {}",
+                gw_status
+            ))
+            .await?;
             self.send_line("").await?;
 
             // One credential pair now covers telnet, SSH, and the web
@@ -653,6 +683,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle require login",
                 self.cyan("L")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle blocking connections from gateway",
+                self.cyan("G")
             ))
             .await?;
             self.send_line(&format!(
@@ -688,6 +723,18 @@ impl TelnetSession {
             };
 
             match input.as_str() {
+                "g" => {
+                    // Applies to the next inbound connection with no restart:
+                    // the listeners read this flag per accept, exactly as they
+                    // do `security_enabled` and `disable_ip_safety`.
+                    let new_val = if cfg.disable_gateway_connections { "false" } else { "true" };
+                    let v = new_val.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("disable_gateway_connections", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "l" => {
                     let new_val = if cfg.security_enabled { "false" } else { "true" };
                     let v = new_val.to_string();

@@ -219,13 +219,14 @@ impl SaveAction {
 fn web_ip_rejection(
     security_enabled: bool,
     disable_ip_safety: bool,
+    block_gateway: bool,
     peer_ip: IpAddr,
 ) -> Option<&'static str> {
     let _ = security_enabled; // deliberately not consulted — see doc comment
     if disable_ip_safety {
         None
     } else {
-        telnet::reject_insecure_ip(peer_ip)
+        telnet::reject_insecure_ip(peer_ip, block_gateway)
     }
 }
 
@@ -258,8 +259,10 @@ async fn handle_connection(
     // path where "enable auth to expose it" is a legitimate deployment,
     // whereas this page renders the password + API key. See the matching note
     // there.
-    let (live_security, live_disable_safety) = config::get_security_flags();
-    if let Some(reason) = web_ip_rejection(live_security, live_disable_safety, peer_ip) {
+    let (live_security, live_disable_safety, live_block_gw) = config::get_security_flags();
+    if let Some(reason) =
+        web_ip_rejection(live_security, live_disable_safety, live_block_gw, peer_ip)
+    {
         glog!("Web: rejected {} ({})", peer_ip, reason);
         let body = format!("403 Forbidden\n{}\n", reason);
         write_response(&mut stream, 403, "Forbidden", "text/plain; charset=utf-8", body.as_bytes(), false).await?;
@@ -790,7 +793,26 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     }
     let action = SaveAction::from_form(fields.get("action").map(String::as_str));
     let old_cfg = config::get_config();
-    let (updates, notice) = collect_form_updates(&fields, &old_cfg);
+    let (mut updates, mut notice) = collect_form_updates(&fields, &old_cfg);
+
+    // "Default port" resets the CP/M virtual-modem port whatever the select
+    // was showing, so it works as a one-click recovery rather than needing the
+    // operator to first find the right entry in the list.  It is the same port
+    // EGT80 defaults to, which is the point: the pair works together again.
+    if fields.get("action").map(String::as_str) == Some("cpm_port_default") {
+        let def = crate::cpm::uart::DEFAULT_UART;
+        updates.retain(|(k, _)| k != "cpm_emu_uart");
+        updates.push(("cpm_emu_uart".to_string(), def.to_string()));
+        // Appended, not assigned: `collect_form_updates` may have produced a
+        // warning about another field in the same submission (a port out of
+        // range, say), and replacing the notice would throw that away silently.
+        let msg = format!("CP/M virtual modem port reset to the default ({def}).");
+        notice = if notice.is_empty() {
+            msg
+        } else {
+            format!("{notice} {msg}")
+        };
+    }
 
     let pairs: Vec<(&str, &str)> = updates
         .iter()
@@ -879,7 +901,8 @@ fn collect_form_updates(
     // saves are not supported (the full form is always submitted).
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
-        "security_enabled", "disable_ip_safety", "enable_console", "verbose",
+        "security_enabled", "disable_ip_safety", "disable_gateway_connections",
+        "enable_console", "verbose",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "cpm_emu_enabled",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
@@ -1182,6 +1205,7 @@ fn frame_security(cfg: &Config) -> String {
          <span class=\"title\">Security</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{sec_chk} {ipsafe_chk}</div>\
+         <div class=\"row\">{gwblock_chk}</div>\
          <div class=\"row\"><span class=\"label-dim\">Login</span> {user} {pass}</div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
@@ -1191,6 +1215,11 @@ fn frame_security(cfg: &Config) -> String {
             "Disable IP Safety",
             cfg.disable_ip_safety,
             "onchange=\"warnOnEnable(this, 'warn-ip-safety')\"",
+        ),
+        gwblock_chk = checkbox(
+            "disable_gateway_connections",
+            "Block connections from gateway",
+            cfg.disable_gateway_connections,
         ),
         user = textfield("username", "User", &cfg.username, false, 12),
         pass = textfield("password", "Pass", &cfg.password, true, 12),
@@ -1584,7 +1613,8 @@ fn render_more_popups(cfg: &Config) -> String {
         ),
         cpmuart = format_args!(
             "<span class=\"label\">CP/M virtual modem port:</span>\
-             <select name=\"cpm_emu_uart\">{cpm_uart_options}</select>"
+             <select name=\"cpm_emu_uart\">{cpm_uart_options}</select> {reset}",
+            reset = save_button("cpm_port_default", "Default port", "secondary"),
         ),
         save = save_button("save", "Save", "secondary"),
     ));
@@ -3143,17 +3173,17 @@ mod tests {
         let private: IpAddr = "192.168.1.10".parse().unwrap();
 
         // Public IP is rejected whether or not login is required.
-        assert!(web_ip_rejection(false, false, public).is_some());
-        assert!(web_ip_rejection(true, false, public).is_some());
+        assert!(web_ip_rejection(false, false, false, public).is_some());
+        assert!(web_ip_rejection(true, false, false, public).is_some());
         assert_eq!(
-            web_ip_rejection(false, false, public),
-            web_ip_rejection(true, false, public),
+            web_ip_rejection(false, false, false, public),
+            web_ip_rejection(true, false, false, public),
             "security_enabled must not affect the web IP decision"
         );
 
         // Private IP is allowed whether or not login is required.
-        assert!(web_ip_rejection(false, false, private).is_none());
-        assert!(web_ip_rejection(true, false, private).is_none());
+        assert!(web_ip_rejection(false, false, false, private).is_none());
+        assert!(web_ip_rejection(true, false, false, private).is_none());
     }
 
     #[test]
@@ -3161,7 +3191,7 @@ mod tests {
         // With the IP safety toggle off, even a public peer is allowed
         // (operator opt-out), and `security_enabled` still doesn't matter.
         let public: IpAddr = "8.8.8.8".parse().unwrap();
-        assert!(web_ip_rejection(false, true, public).is_none());
-        assert!(web_ip_rejection(true, true, public).is_none());
+        assert!(web_ip_rejection(false, true, false, public).is_none());
+        assert!(web_ip_rejection(true, true, false, public).is_none());
     }
 }

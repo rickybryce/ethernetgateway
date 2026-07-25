@@ -14,9 +14,13 @@
 //! two unambiguous.
 //!
 //! ## Security (finalized B5)
-//! The feature runs arbitrary Z80 code, so it is gated behind
-//! `cpm_emu_enabled` (default-off): when disabled the menu item is hidden
-//! and `K` is rejected.  The trusted-LAN posture is bounded on three axes:
+//! The feature runs arbitrary Z80 code, so it stays gated behind
+//! `cpm_emu_enabled` — now **on by default**, since the bounds below hold and
+//! it ships with its own terminal (EGT80) on drive A:.  When disabled the menu
+//! item is hidden and `K` is rejected.  The guest's route off the machine is the
+//! virtual modem, which now also defaults on (to the port EGT80 expects), so a
+//! fresh install can dial out from guest code; `cpm_emu_uart = off` closes that
+//! without disabling the emulator.  The trusted-LAN posture is bounded on three axes:
 //! - **Jail.** Every BDOS file call resolves through `CpmFs` under the
 //!   `CPM/` container in `transfer_dir`: 8.3-name validation (no separators
 //!   or `..`), a lexical `starts_with` check, and a canonical-path +
@@ -1463,6 +1467,44 @@ mod egt80_tests {
             b"EGT80CFG",
             "settings signature must sit at file offset 0x80 (record 1)"
         );
+    }
+
+    #[test]
+    fn test_egt80_default_port_matches_the_gateway_default() {
+        // "They work together out of the box" rests on two constants in two
+        // different languages agreeing: the gateway's DEFAULT_UART and the
+        // PBASE/PKIND defaults compiled into EGT80.  Nothing in either build
+        // would notice them drifting apart — the symptom would be a fresh
+        // install where the bundled terminal cannot reach the modem, which is
+        // exactly the confusion this pairing exists to prevent.
+        let src = include_str!("../../EGT80/EGT80.Z80");
+        let field = |name: &str| -> String {
+            src.lines()
+                .find(|l| l.trim_start().starts_with(&format!("{name}:")))
+                .unwrap_or_else(|| panic!("EGT80.Z80 should declare {name}"))
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or_else(|| panic!("{name} should have a DB value"))
+                .to_string()
+        };
+
+        // EGT80's port kind default must be the SIO family (PKSIO = 1).
+        assert_eq!(field("PKIND"), "PKSIO", "EGT80 should default to the SIO family");
+
+        // ...and its base address must be the status port DEFAULT_UART resolves
+        // to.  EGT80 writes it as a Z80 hex literal, e.g. 82H.
+        let base = field("PBASE");
+        let base = u8::from_str_radix(base.trim_end_matches('H'), 16)
+            .unwrap_or_else(|_| panic!("PBASE should be a hex literal, got {base}"));
+        match crate::cpm::resolve_access(crate::cpm::uart::DEFAULT_UART) {
+            crate::cpm::ModemAccess::Ports(p) => assert_eq!(
+                p.status_port, base,
+                "EGT80 defaults to port {base:#04x} but the gateway's default \
+                 profile ({}) answers at {:#04x}",
+                crate::cpm::uart::DEFAULT_UART, p.status_port
+            ),
+            other => panic!("the default UART profile should be a port profile, got {other:?}"),
+        }
     }
 
     #[test]

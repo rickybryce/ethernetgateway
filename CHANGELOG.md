@@ -111,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings live inside it; deleting it restores the shipped copy. Release
   archives also carry the loose `EGT80.COM` for sending to real hardware.
 
+  The port screen names the port in force and offers **`D` — the default port**
+  (the one the gateway also defaults to, so the pair works together again in one
+  keystroke), and the menu says `(changed — press V to keep it for next time)`
+  while a setting is live but not yet written to the file. **`^C`** leaves the
+  wrong-port notice — which swallows everything else you type, so a half-typed
+  line can no longer run menu commands by accident — aborts a transfer in
+  progress, and cancels at the filename prompt.
+
   Built by running the real period assembler (SLR `Z80ASM`) under `zxcc`, so
   SLR80 compatibility is structural rather than hoped for, with M80+L80 and ZMAC
   as portability gates. Wrong choices are diagnosed rather than left to hang: a
@@ -250,8 +258,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selects the I/O port address and status-bit layout, not interrupt support —
   so polled comms software works on any profile while interrupt-driven serial
   software is unsupported. Noted in the manual and the `uart` module.
+- **The CP/M emulator and its virtual modem are on by default.**
+  `cpm_emu_enabled` was default-off while the emulator was being built out; it is
+  on now because the feature is bounded (guest jailed to `transfer_dir/CPM`,
+  runaway stopped by `cpm_emu_max_minstr`, always escapable with a double-`ESC`,
+  no path to a host command) and it ships with a terminal of its own. The
+  virtual modem now defaults to `rc2014_1b` — the port EGT80 expects — so the
+  emulator and its terminal work together untouched. Both remain settable:
+  `cpm_emu_enabled = false` for no guest code at all, `cpm_emu_uart = off` for an
+  emulator with no modem (guest code can dial out when a port is selected).
+- **A one-click “Default port” for the CP/M virtual modem** in all three UIs
+  (telnet `D` in the CP/M panel, a button in the web CP/M section, a button
+  beside the GUI combo): resets `cpm_emu_uart` to the default whatever it was
+  showing — the answer to “I changed something and now the terminal cannot
+  connect”. Guarded by a test that fails if EGT80's own default port and the
+  gateway's default profile ever drift apart, since that pairing is the whole
+  point and neither build would otherwise notice.
+- **“Block connections from gateway” (`disable_gateway_connections`)** in all
+  three UIs, on the row under the login checkmarks. Off by default, which
+  **changes behaviour**: a connection whose source address ends in `.1` — usually
+  the local router — is now allowed while the IP allowlist stays in force. It
+  used to be refused outright, which left `disable_ip_safety` (dropping the
+  allowlist entirely) as an operator's only way in; the narrow rule is now the
+  opt-in. Loopback is exempt either way, public addresses are still refused, and
+  the toggle applies on the next connection with no restart.
 
 ### Fixed
+- **The CP/M virtual modem no longer chokes on `CR NUL` line endings.** An NVT
+  telnet client writes a bare Return as `CR NUL` (RFC 854). The `CR` ended the
+  command correctly, but the `NUL` stayed in the modem's line buffer and became
+  the first character of the *next* command — so it no longer began with `AT` and
+  came back `ERROR`. The first command of a session worked and every one after it
+  failed, which made a parsing bug look like a dialling problem: a correct
+  `ATDT host:port` was refused while the identical first attempt had been
+  accepted. `NUL` is now ignored exactly as `LF` already was, which is what a
+  real modem does with padding. Found from a user's screen, not from the tests —
+  the test driver sent a bare `CR`, so nothing exercised the case; the CR-NUL
+  sequence is now a regression test.
 - **Kermit refuses a binary file declared as text, even with no length given.**
   The length check added earlier can only fire when the peer declares a size,
   and the two CP/M clients that hit this in practice do not: kercpm3 sends the

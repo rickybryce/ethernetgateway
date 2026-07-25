@@ -181,8 +181,21 @@ pub const UART_CHOICES: &[UartChoice] = &[
     },
 ];
 
-/// The default selection (`off`) config value.
-pub const DEFAULT_UART: &str = "off";
+/// The default selection.
+///
+/// `rc2014_1b` — the second SIO/2 channel, 0x82/0x83 — rather than `off`,
+/// because it is the port most CP/M software here expects: it is the usual
+/// `AUX:` port on an RC2014 or RomWBW machine, and it is what the bundled
+/// EGT80 terminal defaults to, so the emulator and its terminal agree out of
+/// the box instead of presenting a working program that cannot reach anything.
+///
+/// This is a deliberate widening: with a port selected, guest code can dial out
+/// (`ATDT host:port`), which is network access from software the operator did
+/// not write.  It stays bounded — peer dialling still needs `allow_peer_dial`,
+/// and the guest reaches nothing else — but an operator who does not want a
+/// program able to open a socket sets `cpm_emu_uart = off`, and one who does not
+/// want guest code at all sets `cpm_emu_enabled = false`.
+pub const DEFAULT_UART: &str = "rc2014_1b";
 
 /// Is `key` a recognised profile value?
 pub fn is_valid_uart_key(key: &str) -> bool {
@@ -214,8 +227,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_off_is_default() {
-        assert_eq!(DEFAULT_UART, "off");
+    fn test_default_is_the_port_egt80_expects() {
+        // The default must stay in step with EGT80's own default port, or a
+        // fresh install offers a terminal that cannot reach the modem.
+        assert_eq!(DEFAULT_UART, "rc2014_1b");
+        assert_eq!(
+            resolve_access(DEFAULT_UART),
+            ports(0x82, 0x83, UartFamily::Sio),
+            "rc2014_1b is the second SIO/2 channel at 0x82/0x83"
+        );
+        assert!(is_valid_uart_key(DEFAULT_UART));
+        // `off` remains available, and remains the first choice offered.
         assert_eq!(resolve_access("off"), ModemAccess::Off);
         assert_eq!(UART_CHOICES[0].key, "off");
     }

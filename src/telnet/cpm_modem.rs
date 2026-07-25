@@ -186,7 +186,15 @@ impl CpmModem {
                 let line = std::mem::take(&mut self.line);
                 self.dispatch(&line, out).await;
             }
-            b'\n' => {} // ignore LF; CR terminates
+            // Ignore LF and NUL; CR alone terminates a command.  NUL matters
+            // as much as LF: an NVT telnet client writes a bare Return as
+            // `CR NUL` (RFC 854), and that NUL used to land in this buffer and
+            // prefix the *next* command, so every command after the first was
+            // refused with ERROR because the line no longer began with "AT".
+            // The first command in a session worked, which made it look like a
+            // dialling problem rather than a parsing one.  A real modem ignores
+            // NUL padding; so do we.
+            b'\n' | 0x00 => {}
             0x08 | 0x7F => {
                 self.line.pop();
             }
@@ -637,6 +645,32 @@ mod tests {
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("ATQ0")); // not echoed
         assert!(s.contains("OK"));
+    }
+
+    #[tokio::test]
+    async fn test_nvt_cr_nul_line_endings_do_not_break_the_next_command() {
+        // An NVT telnet client sends Return as CR NUL.  Every command after the
+        // first used to fail: the NUL sat in the line buffer and prefixed the
+        // next line, so it no longer started with "AT" and came back ERROR —
+        // reported from a real session, where a correct `ATDT host:port` was
+        // refused while the identical first command had been accepted.
+        let mut m = CpmModem::new(true);
+        // First command: a dial with no port fails, leaving us in command mode.
+        let out = m.service(b"ATDT nowhere\r\0".to_vec(), 65536).await;
+        let first = String::from_utf8_lossy(&out).to_string();
+        assert!(first.contains("NO CARRIER"), "first command: {first}");
+        // Second command must be parsed, not refused because of the NUL.
+        let out = m.service(b"ATI4\r\0".to_vec(), 65536).await;
+        let second = String::from_utf8_lossy(&out).to_string();
+        assert!(
+            !second.contains("ERROR"),
+            "a CR NUL line ending must not poison the next command: {second}"
+        );
+        assert!(second.contains("OK"), "second command should succeed: {second}");
+        // And a third, to prove nothing accumulates.
+        let out = m.service(b"AT\r\0".to_vec(), 65536).await;
+        let third = String::from_utf8_lossy(&out).to_string();
+        assert!(third.contains("OK") && !third.contains("ERROR"), "third: {third}");
     }
 
     #[tokio::test]

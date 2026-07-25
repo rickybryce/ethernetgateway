@@ -12,7 +12,7 @@ the pairing wrong and the program is simply silent.
 EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-**Status: complete (v0.4)** — a working terminal with all five port families,
+**Status: complete (v0.6)** — a working terminal with all five port families,
 settings that survive a restart, and XMODEM file transfer in both directions.
 
 Verified in the gateway's CP/M emulator, each family against the matching
@@ -187,6 +187,26 @@ Buffers are deliberately fixed (256-byte receive ring, one 128-byte XMODEM
 sector, one 128-byte disk record) rather than "whatever memory is free". A
 terminal does not need to claim the TPA, and a known size is a known worst case
 on a machine that may only have 32 KB of it.
+
+## Getting unstuck
+
+Two things exist because the alternative was confusing rather than because the
+code needed them:
+
+**`D` on the port screen** selects the default — Z80 SIO/2 board 1 channel B,
+82/83 — which is also the gateway's default virtual-modem port. It resets the
+whole port group, so no leftover from another family can be left pointing
+somewhere odd. The screen also names the port currently in force, since "which
+port am I on?" is why most people open that menu. A Rust test fails the build if
+this default and the gateway's ever drift apart.
+
+**`^C`** gets you out. Settings and port changes take effect immediately, but
+they are only written to the file on `V`, and until then the menu says
+`(changed — press V to keep it for next time)` — without that, "my settings
+aren't saving" is the obvious conclusion. And where a message appears *while you
+are typing* — the wrong-port notice — everything else you type is swallowed, so
+a half-typed line cannot run menu commands by accident; only `^C` leaves. `^C`
+also aborts a transfer in progress and cancels at the filename prompt.
 
 ## Transfers
 

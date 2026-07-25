@@ -274,10 +274,37 @@ const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 const DEFAULT_WEB_ENABLED: bool = false;
 const DEFAULT_WEB_PORT: u16 = 8080;
 /// CP/M emulator (Flavor B) — a real CP/M 2.2 Z80 environment reachable from
-/// the main menu.  Default-off (matches the cautious posture of every other
-/// feature): once built out it runs arbitrary user-supplied `.COM` software in
-/// an emulated Z80, sandboxed to a `CPM/` directory under `transfer_dir`.
-const DEFAULT_CPM_EMU_ENABLED: bool = false;
+/// the main menu.  **On by default.**
+///
+/// It was default-off while it was being built out, on the same cautious
+/// footing as every other feature.  It is on now because the balance changed:
+/// the emulator is bounded on three axes (every file call jailed under
+/// `transfer_dir/CPM`, a runaway stopped by `cpm_emu_max_minstr`, a double-`ESC`
+/// always returning to `A>`), it services BDOS/BIOS only and has no path to a
+/// host command, and it now ships with a terminal of its own (EGT80) that lands
+/// on drive A: by itself — so the feature is useful the moment someone opens it
+/// rather than something they have to discover and enable.
+///
+/// What it does still run is arbitrary *guest* code, which is why the gate
+/// remains: an operator who does not want that sets `cpm_emu_enabled = false`.
+/// The guest's way off the machine is the virtual modem, and that is now on by
+/// default too (see [`crate::cpm::uart::DEFAULT_UART`]) — so a fresh install can
+/// dial out from guest code.  `cpm_emu_uart = off` closes that door while
+/// leaving the emulator itself usable.
+const DEFAULT_CPM_EMU_ENABLED: bool = true;
+/// Refuse connections whose source address ends in `.1` — typically the router
+/// on the local subnet — while the IP allowlist is in force.
+///
+/// **Off by default**, so such a connection is allowed.  It used to be refused
+/// unconditionally, on the reasoning that traffic appearing to come *from* the
+/// router may have been forwarded from outside the network.  That is a real
+/// case, but it is not the common one: on plenty of networks the router's
+/// address is simply where an administrator sits, or where hairpinned traffic
+/// from inside the LAN appears to originate, and refusing it left an operator
+/// with only the blunt `disable_ip_safety` — which drops the allowlist
+/// entirely — as a way in.  Now the narrow behaviour is the opt-in and the rest
+/// of the allowlist stays intact either way.
+const DEFAULT_DISABLE_GATEWAY_CONNECTIONS: bool = false;
 /// Runaway ceiling for the CP/M emulator, in millions of Z80 instructions
 /// per program run (2000 = 2 billion).  Generous enough for real utilities
 /// (an assembler pass, a BASIC run) yet finite so a compute-bound `.COM`
@@ -653,6 +680,10 @@ pub struct Config {
     /// 2.2 environment, sandboxed to a `CPM/` directory under `transfer_dir`.
     /// When false the main-menu item is hidden and the `K` key is rejected.
     pub cpm_emu_enabled: bool,
+    /// Refuse connections from `*.*.*.1` (the local router, typically) while
+    /// the IP allowlist applies.  Off by default; see
+    /// [`DEFAULT_DISABLE_GATEWAY_CONNECTIONS`].  Loopback is never affected.
+    pub disable_gateway_connections: bool,
     /// Runaway ceiling for a single CP/M-emulator program run, in millions
     /// of Z80 instructions (2000 = 2 billion).  A compute-bound `.COM` that
     /// never performs console I/O is aborted once it reaches this count, so
@@ -768,6 +799,7 @@ impl Default for Config {
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
+            disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
             serial_a: SerialPortConfig::default(),
@@ -835,11 +867,19 @@ pub fn get_config() -> Config {
 /// ~20 owned Strings per call).  Returned as a `(security_enabled,
 /// disable_ip_safety)` tuple so the gating expression in the listener
 /// stays a single live read under one Mutex acquisition.
-pub fn get_security_flags() -> (bool, bool) {
+pub fn get_security_flags() -> (bool, bool, bool) {
     let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_ref() {
-        Some(cfg) => (cfg.security_enabled, cfg.disable_ip_safety),
-        None => (DEFAULT_SECURITY_ENABLED, DEFAULT_DISABLE_IP_SAFETY),
+        Some(cfg) => (
+            cfg.security_enabled,
+            cfg.disable_ip_safety,
+            cfg.disable_gateway_connections,
+        ),
+        None => (
+            DEFAULT_SECURITY_ENABLED,
+            DEFAULT_DISABLE_IP_SAFETY,
+            DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
+        ),
     }
 }
 
@@ -1253,6 +1293,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_emu_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_EMU_ENABLED),
+        disable_gateway_connections: map
+            .get("disable_gateway_connections")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_DISABLE_GATEWAY_CONNECTIONS),
         cpm_emu_max_minstr: map
             .get("cpm_emu_max_minstr")
             .and_then(|v| v.parse().ok())
@@ -1618,8 +1662,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # from a non-private IP.  Toggleable from the GUI Security frame and the
 # telnet Server Configuration menu — both gate the off→on transition
 # behind a security-warning confirmation.
+# disable_gateway_connections: refuse connections whose source address ends
+#   in .1 -- usually the router on this subnet -- while the allowlist applies.
+#   Off by default, so those connections are allowed; loopback (127.0.0.1) is
+#   never affected either way.  This is the narrow alternative to
+#   disable_ip_safety, which drops the allowlist altogether.
 ");
     write_kv(&mut content, "disable_ip_safety", cfg.disable_ip_safety);
+    write_kv(&mut content, "disable_gateway_connections", cfg.disable_gateway_connections);
     content.push('\n');
 
     content.push_str("# Credentials (only used when security_enabled = true)\n");
@@ -1859,7 +1909,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # executing arbitrary user-supplied .COM software sandboxed to a CPM/
 # directory under transfer_dir.  Default-off (it runs arbitrary code); when
 # off the menu item is hidden and the key is rejected.
-# cpm_emu_enabled: enable the CP/M emulator main-menu item.
+# cpm_emu_enabled: the CP/M emulator main-menu item (on by default).  It runs
+#   arbitrary guest Z80 software, jailed to the CPM/ directory under
+#   transfer_dir and bounded by cpm_emu_max_minstr; set false to hide the menu
+#   item and reject the key.  The guest reaches the network only through
+#   cpm_emu_uart, which now defaults to rc2014_1b (the port the bundled EGT80
+#   terminal expects); set it to off to leave the emulator with no modem.
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.
@@ -2345,6 +2400,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
+        "disable_gateway_connections" => {
+            cfg.disable_gateway_connections = value.eq_ignore_ascii_case("true")
+        }
         "cpm_emu_max_minstr" => {
             if let Ok(v) = value.parse::<u32>() && v >= 1 {
                 cfg.cpm_emu_max_minstr = v;
@@ -2936,6 +2994,7 @@ mod tests {
             web_enabled: true,
             web_port: 9090,
             cpm_emu_enabled: true,
+            disable_gateway_connections: true,
             cpm_emu_max_minstr: 500,
             cpm_emu_uart: "rc2014_1b".to_string(),
             serial_a: SerialPortConfig {
@@ -3795,8 +3854,9 @@ mod tests {
     #[test]
     fn test_apply_config_key_cpm_emu_enabled() {
         let mut cfg = Config::default();
-        // Default-off (runs arbitrary Z80 code).
-        assert!(!cfg.cpm_emu_enabled);
+        // On by default; the key still has to turn it off cleanly, which is
+        // what an operator who does not want guest code will use.
+        assert!(cfg.cpm_emu_enabled);
 
         apply_config_key(&mut cfg, "cpm_emu_enabled", "true");
         assert!(cfg.cpm_emu_enabled);
@@ -3821,7 +3881,7 @@ mod tests {
     #[test]
     fn test_apply_config_key_cpm_emu_uart() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.cpm_emu_uart, "off"); // default
+        assert_eq!(cfg.cpm_emu_uart, "rc2014_1b"); // default: EGT80's port
 
         apply_config_key(&mut cfg, "cpm_emu_uart", "rc2014_1b");
         assert_eq!(cfg.cpm_emu_uart, "rc2014_1b");

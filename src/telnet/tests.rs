@@ -272,93 +272,127 @@ fn test_known_host_fingerprint_is_stable() {
 #[test]
 fn test_reject_insecure_ip_private_allowed() {
     let ip: IpAddr = "192.168.1.100".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_loopback_allowed() {
     let ip: IpAddr = "127.0.0.2".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_ten_network_allowed() {
     let ip: IpAddr = "10.0.5.42".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_172_private_allowed() {
     let ip: IpAddr = "172.16.0.50".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
     let ip2: IpAddr = "172.31.255.254".parse().unwrap();
-    assert!(reject_insecure_ip(ip2).is_none());
+    assert!(reject_insecure_ip(ip2, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_public_rejected() {
     let ip: IpAddr = "8.8.8.8".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+    assert!(reject_insecure_ip(ip, false).is_some());
 }
 
 #[test]
 fn test_reject_insecure_ip_172_public_rejected() {
     // 172.32.x.x is NOT private (private is 172.16-31.x.x)
     let ip: IpAddr = "172.32.0.5".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+    assert!(reject_insecure_ip(ip, false).is_some());
 }
 
 #[test]
-fn test_reject_insecure_ip_gateway_rejected() {
-    let ip: IpAddr = "192.168.1.1".parse().unwrap();
-    let reason = reject_insecure_ip(ip);
-    assert!(reason.is_some());
-    assert!(reason.unwrap().contains("gateway"));
+fn test_reject_insecure_ip_gateway_allowed_by_default() {
+    // The router's own address is allowed unless the operator asks otherwise:
+    // it is as often an administrator's machine, or hairpinned LAN traffic, as
+    // it is something forwarded in from outside.
+    for addr in ["192.168.1.1", "10.0.0.1", "172.16.5.1"] {
+        let ip: IpAddr = addr.parse().unwrap();
+        assert!(
+            reject_insecure_ip(ip, false).is_none(),
+            "{addr} should be allowed with disable_gateway_connections off"
+        );
+    }
 }
 
 #[test]
-fn test_reject_insecure_ip_gateway_ten_rejected() {
-    let ip: IpAddr = "10.0.0.1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+fn test_reject_insecure_ip_gateway_rejected_when_blocked() {
+    // ...and refused when it is asked for, with a reason naming the rule.
+    for addr in ["192.168.1.1", "10.0.0.1", "172.16.5.1"] {
+        let ip: IpAddr = addr.parse().unwrap();
+        let reason = reject_insecure_ip(ip, true);
+        assert!(reason.is_some(), "{addr} should be refused when blocking");
+        assert!(reason.unwrap().contains("gateway"));
+    }
+}
+
+#[test]
+fn test_blocking_the_gateway_does_not_widen_anything_else() {
+    // Turning the rule on must not accidentally admit a public address, and
+    // must not shut out the rest of the private space.
+    let public: IpAddr = "8.8.8.8".parse().unwrap();
+    assert!(reject_insecure_ip(public, true).is_some());
+    assert!(reject_insecure_ip(public, false).is_some());
+    let ordinary: IpAddr = "192.168.1.50".parse().unwrap();
+    assert!(reject_insecure_ip(ordinary, true).is_none());
+    assert!(reject_insecure_ip(ordinary, false).is_none());
+}
+
+#[test]
+fn test_loopback_dot_one_allowed_even_when_blocking() {
+    // 127.0.0.1 is this machine, not a router: the rule must never touch it,
+    // or the operator locks themselves out of their own console.
+    let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    assert!(reject_insecure_ip(ip, true).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_loopback_dot_one_allowed() {
     // 127.0.0.1 is loopback — exempt from the .1 gateway filter
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_ipv6_loopback_allowed() {
     let ip: IpAddr = "::1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_ipv6_public_rejected() {
     let ip: IpAddr = "2001:db8::1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+    assert!(reject_insecure_ip(ip, false).is_some());
 }
 
 #[test]
 fn test_reject_insecure_ip_ipv4_mapped_ipv6_private_allowed() {
     // ::ffff:192.168.1.100 is IPv4-mapped, should apply IPv4 rules
     let ip: IpAddr = "::ffff:192.168.1.100".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_ipv4_mapped_ipv6_public_rejected() {
     let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+    assert!(reject_insecure_ip(ip, false).is_some());
 }
 
 #[test]
-fn test_reject_insecure_ip_ipv4_mapped_ipv6_gateway_rejected() {
-    // ::ffff:10.0.0.1 ends in .1, should be rejected
+fn test_reject_insecure_ip_ipv4_mapped_ipv6_gateway_follows_the_flag() {
+    // An IPv4-mapped address must obey the same rule as the bare IPv4 one, or
+    // the policy would depend on which socket family the peer happened to use.
     let ip: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
-    let reason = reject_insecure_ip(ip);
+    assert!(reject_insecure_ip(ip, false).is_none());
+    let reason = reject_insecure_ip(ip, true);
     assert!(reason.is_some());
     assert!(reason.unwrap().contains("gateway"));
 }
@@ -366,25 +400,28 @@ fn test_reject_insecure_ip_ipv4_mapped_ipv6_gateway_rejected() {
 #[test]
 fn test_reject_insecure_ip_ipv6_link_local_allowed() {
     let ip: IpAddr = "fe80::1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_ipv6_unique_local_allowed() {
     let ip: IpAddr = "fd12:3456:789a::1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
 fn test_reject_insecure_ip_link_local_ipv4_allowed() {
     let ip: IpAddr = "169.254.1.100".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_none());
+    assert!(reject_insecure_ip(ip, false).is_none());
 }
 
 #[test]
-fn test_reject_insecure_ip_link_local_ipv4_gateway_rejected() {
+fn test_reject_insecure_ip_link_local_dot_one_follows_the_flag() {
+    // A link-local .1 is still a .1: allowed by default like any other
+    // gateway address, refused when the operator asks for the strict rule.
     let ip: IpAddr = "169.254.0.1".parse().unwrap();
-    assert!(reject_insecure_ip(ip).is_some());
+    assert!(reject_insecure_ip(ip, false).is_none());
+    assert!(reject_insecure_ip(ip, true).is_some());
 }
 
 // ─── Menu ────────────────────────────────────────────

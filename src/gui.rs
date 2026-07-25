@@ -893,6 +893,23 @@ impl App {
                         );
                     }
                 });
+            // One click back to the port EGT80 also defaults to: the answer to
+            // "I changed something and now the CP/M terminal cannot connect".
+            if ui
+                .small_button("Default port")
+                .on_hover_text(
+                    "Reset the CP/M virtual modem to the port EGT80 expects                      (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
+                )
+                .clicked()
+            {
+                self.cfg.cpm_emu_uart = crate::cpm::uart::DEFAULT_UART.to_string();
+                self.last_synced_cfg.cpm_emu_uart = self.cfg.cpm_emu_uart.clone();
+                config::update_config_value("cpm_emu_uart", crate::cpm::uart::DEFAULT_UART);
+                logger::log(format!(
+                    "CP/M virtual modem port reset to the default ({}).",
+                    crate::cpm::uart::DEFAULT_UART
+                ));
+            }
         });
     }
 
@@ -2238,6 +2255,41 @@ impl eframe::App for App {
                                     }
                                     if right_aligned_small_button(ui, "Save") {
                                         self.save_config_now();
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    // The gateway-address rule gets its own row
+                                    // under the two headline checkmarks: it is a
+                                    // narrower decision than either of them, and
+                                    // the label has to spell out what `.1` means
+                                    // to be any use to someone who has just been
+                                    // refused a connection.
+                                    //
+                                    // No confirmation popup, unlike Disable IP
+                                    // Safety: this direction *tightens* the
+                                    // allowlist, and the off state is the
+                                    // default rather than a widening.
+                                    if ui
+                                        .checkbox(
+                                            &mut self.cfg.disable_gateway_connections,
+                                            "Block connections from gateway",
+                                        )
+                                        .changed()
+                                    {
+                                        let v = self.cfg.disable_gateway_connections.to_string();
+                                        config::update_config_value(
+                                            "disable_gateway_connections",
+                                            &v,
+                                        );
+                                        self.last_synced_cfg.disable_gateway_connections =
+                                            self.cfg.disable_gateway_connections;
+                                        logger::log(
+                                            if self.cfg.disable_gateway_connections {
+                                                "Connections from *.*.*.1 are now blocked.".into()
+                                            } else {
+                                                "Connections from *.*.*.1 are now allowed.".into()
+                                            },
+                                        );
                                     }
                                 });
                                 ui.horizontal(|ui| {

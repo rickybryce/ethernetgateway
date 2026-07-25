@@ -322,7 +322,7 @@ pub(crate) const AUTH_MAX_ATTEMPTS: u32 = MAX_AUTH_ATTEMPTS;
 
 /// Check an IPv4 address against private/loopback/link-local ranges and the
 /// gateway (.1) restriction. Returns the rejection reason, or None if allowed.
-fn reject_insecure_ipv4(octets: [u8; 4]) -> Option<&'static str> {
+fn reject_insecure_ipv4(octets: [u8; 4], block_gateway: bool) -> Option<&'static str> {
     let is_private = octets[0] == 10
         || (octets[0] == 172 && (16..=31).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 168)
@@ -331,23 +331,33 @@ fn reject_insecure_ipv4(octets: [u8; 4]) -> Option<&'static str> {
     if !is_private {
         return Some("Connection refused: security is disabled, only private IP addresses are allowed.");
     }
-    if octets[3] == 1 && octets[0] != 127 {
-        return Some("Connection refused: gateway addresses (*.*.*.1) are not allowed when security is disabled.");
+    // A source address ending in .1 is usually this subnet's router.  Traffic
+    // that appears to come from there *may* have been forwarded in from
+    // outside, which is why this was once refused outright — but it is just as
+    // often an administrator's own machine, or hairpinned traffic from inside
+    // the LAN.  Refusing it left `disable_ip_safety`, which drops the whole
+    // allowlist, as the only way in.  So it is allowed unless the operator
+    // asks for the strict behaviour.  Loopback keeps its exemption: 127.0.0.1
+    // is this machine, not a router.
+    if block_gateway && octets[3] == 1 && octets[0] != 127 {
+        return Some("Connection refused: gateway addresses (*.*.*.1) are not allowed by this gateway's settings.");
     }
     None
 }
 
-/// When security is disabled, only allow connections from private/loopback IPs,
-/// and reject any address ending in .1 (typically a gateway), except for
-/// loopback addresses (127.x.x.x). Returns the rejection reason, or None
-/// if the address is allowed.
-pub(crate) fn reject_insecure_ip(ip: IpAddr) -> Option<&'static str> {
+/// When security is disabled, only allow connections from private/loopback IPs.
+///
+/// `block_gateway` (the `disable_gateway_connections` setting, **off** by
+/// default) additionally refuses any address ending in `.1` — typically this
+/// subnet's router — except loopback, which is always allowed.  Returns the
+/// rejection reason, or `None` if the address is allowed.
+pub(crate) fn reject_insecure_ip(ip: IpAddr, block_gateway: bool) -> Option<&'static str> {
     match ip {
-        IpAddr::V4(v4) => reject_insecure_ipv4(v4.octets()),
+        IpAddr::V4(v4) => reject_insecure_ipv4(v4.octets(), block_gateway),
         IpAddr::V6(v6) => {
             // IPv4-mapped IPv6 (::ffff:x.x.x.x) — apply IPv4 rules
             if let Some(mapped) = v6.to_ipv4_mapped() {
-                return reject_insecure_ipv4(mapped.octets());
+                return reject_insecure_ipv4(mapped.octets(), block_gateway);
             }
             if v6.is_loopback() {
                 return None;
@@ -1359,12 +1369,12 @@ pub fn start_server(
                             }
                             // Re-read each accept so toggles in the
                             // GUI / telnet menu apply immediately.
-                            // `get_security_flags` reads only the two
+                            // `get_security_flags` reads only the three
                             // booleans without cloning the full Config,
                             // keeping accept-flood cost down to a
                             // single Mutex acquisition with no String
                             // allocations.
-                            let (live_security, live_disable_safety) =
+                            let (live_security, live_disable_safety, live_block_gw) =
                                 config::get_security_flags();
                             // NOTE: telnet deliberately still couples the IP
                             // allowlist to `security_enabled` — enabling auth
@@ -1381,7 +1391,7 @@ pub fn start_server(
                             // remains the escape hatch for both.
                             if !live_security
                                 && !live_disable_safety
-                                && let Some(reason) = reject_insecure_ip(addr.ip())
+                                && let Some(reason) = reject_insecure_ip(addr.ip(), live_block_gw)
                             {
                                 session_count.fetch_sub(1, Ordering::SeqCst);
                                 glog!("Telnet: rejected {} ({})", addr, reason);
