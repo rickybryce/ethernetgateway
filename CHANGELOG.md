@@ -302,6 +302,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RETURN = one line, Q/ESC = quit), expanding tabs and wrapping long lines to
     the terminal width.
 
+### Documentation
+- **Documented that the Kermit *client* must be set to binary file mode before
+  transferring programs or data.** Vintage Kermit clients default to text
+  (ASCII) mode, and a binary file sent that way silently loses bytes: a CP/M
+  client reads the file in 128-byte records and in text mode treats `^Z` (0x1A,
+  the CP/M end-of-file pad) as padding rather than data, so a `^Z` that falls on
+  a record boundary is dropped and every following byte shifts down one
+  position. Nothing in the protocol catches it — every packet's block check
+  passes and the client reports success — so the file that lands is subtly wrong
+  rather than obviously truncated. Diagnosed from a real SC126 upload where an
+  8,704-byte `WITNESS.COM` and a 104,960-byte `WITNESS.DAT` arrived 1 and 8
+  bytes short: nine dropped bytes out of 113,664, enough to stop the game
+  running but far too few to notice by comparing file sizes casually.
+  Re-uploading after `SET FILE MODE BINARY` produced files byte-identical to the
+  originals. The gateway itself always transfers binary, byte-for-byte, in both
+  directions — it never translates line endings and never trims padding — so
+  this is purely a client-side setting, which is why a download can be perfect
+  while an upload of the very same file is damaged. Documented in four places
+  with the per-client commands (kercpm3 / CP/M Kermit `SET FILE MODE BINARY`,
+  C-Kermit `set file type binary` / `-i`, MS-DOS Kermit): a new aside in user
+  manual §8.8, a new user-manual troubleshooting entry §16.11 ("Transferred File
+  Won't Run (Wrong Size by a Few Bytes)") framed around the symptom as a user
+  meets it, and callouts on the `web/kermit.html` and `web/kermitreference.html`
+  reference pages. Each notes that the short-file refusal added earlier in this
+  release only fires when the client declares a length in its attribute packet —
+  many small clients send none, leaving the receiver nothing to check the
+  arriving size against — so binary mode is the habit to keep rather than
+  something to rely on the guard for.
+- **Documented that packet counts are not an integrity check.** The same pages
+  now warn against comparing the packet count of an upload against a download of
+  the same file: control bytes and high-bit bytes are quoted into two or three
+  wire characters each, so the expansion — and therefore the packet count —
+  legitimately differs with the negotiated packet length and with which side is
+  sending. A differing count is not evidence of data loss and a matching one is
+  not evidence of success; compare checksums instead.
+- Regenerated `usermanual.pdf` from the updated HTML per `versionchange.txt`
+  (WeasyPrint, `Producer` unchanged). The rebuild also picks up earlier HTML
+  edits that had never been rebuilt, so the PDF grows by more than the entries
+  above account for.
+
 ## [0.7.0] - 2026-07-17
 
 ### Added
