@@ -1805,6 +1805,53 @@ and serial Kermit Server Mode / <code>ATDT KERMIT</code> (&sect;9).
 </p>
 </aside>
 
+<aside class="note" id="ch8-binary-file-mode">
+<span class="label">Set <em>binary</em> file mode on the client before transferring programs or data</span>
+<p class="warn">
+Vintage Kermit clients default to <strong>text</strong> (ASCII) file mode.
+Sending a <code>.COM</code>, <code>.DAT</code>, disk image, or any other
+non-text file in text mode <strong>silently loses bytes</strong> &mdash; every
+packet&rsquo;s block check is valid, the transfer reports success, and the file
+that lands is subtly wrong.  Always switch the client to binary first:
+</p>
+<pre><code>  kercpm3 / CP/M Kermit    SET FILE MODE BINARY      (some builds: SET FILE TYPE BINARY)
+  C-Kermit / Kermit 95     set file type binary      (or the -i command-line flag)
+  MS-DOS Kermit            set file type binary</code></pre>
+<p>
+The gateway itself always transfers <strong>binary, byte-for-byte, in both
+directions</strong> &mdash; it never translates line endings and never trims
+padding.  This is purely a client-side setting, so a download can be perfect
+while an upload of the very same file is damaged.
+</p>
+<p>
+The damage is not a truncation you would notice at a glance.  A CP/M client
+reads the file in 128-byte records, and in text mode it treats a
+<code>^Z</code> (0x1A, the CP/M text end-of-file pad) as padding rather than
+data &mdash; so a <code>^Z</code> that happens to fall on a record boundary is
+<em>deleted</em> and every following byte shifts down one position.  A real
+example: an 8,704-byte <code>WITNESS.COM</code> and a 104,960-byte
+<code>WITNESS.DAT</code> uploaded from an SC126 in text mode arrived 1 and 8
+bytes short respectively &mdash; nine dropped bytes out of 113,664, enough to
+stop the program running but far too few to spot by comparing file sizes
+casually.  Re-uploading with <code>SET FILE MODE BINARY</code> produced files
+byte-identical to the originals.
+</p>
+<p>
+The gateway catches this <em>when the client tells it how big the file should
+be</em>: if an upload ends up shorter than the length declared in the
+attribute packet, the file is refused with an E-packet and never written
+(&sect;8.8, <code>kermit_attribute_packets</code>), and the log names binary
+mode as the fix.  Many small clients send no length attribute at all, in which
+case there is nothing for the receiver to check the arriving size against
+&mdash; so treat binary mode as a habit rather than relying on the guard.  To
+verify a transfer independently, compare checksums on both ends rather than
+comparing packet counts: the packet count legitimately differs between upload
+and download for the same file, because control and high-bit bytes are quoted
+into two or three wire characters each and the amount of that expansion
+depends on the negotiated packet length and on which direction is sending.
+</p>
+</aside>
+
 <h3>Capabilities advertised</h3>
 
 <p>
@@ -3738,6 +3785,47 @@ per-byte gaps mean the client sends each keystroke live (character mode,
 e.g. CCGMS), while a near-zero burst of bytes means a whole line was sent at
 once. This is verbose, per-byte output intended for troubleshooting &mdash;
 leave it disabled in normal operation.
+</p>
+
+<h2 id="ch16-textmode">16.11 Transferred File Won't Run (Wrong Size by a Few Bytes)</h2>
+
+<p>
+<strong>Symptom:</strong> a program or data file transfers with no reported
+errors &mdash; every block check passed, the client said the transfer
+completed &mdash; but the file won't run, or a game won't load its data.
+Comparing it against the original shows the size is off by a handful of bytes
+out of tens of thousands.
+</p>
+
+<p>
+<strong>Cause:</strong> the <em>client</em> was in text (ASCII) file mode.
+Vintage Kermit clients default to it, and in text mode a CP/M client treats
+<code>^Z</code> (0x1A, the CP/M text end-of-file pad) as padding rather than
+data &mdash; so a <code>^Z</code> landing on a 128-byte record boundary gets
+dropped and everything after it shifts down one byte.  Nothing in the protocol
+catches this: each packet is individually valid, so the corruption is
+completely silent.
+</p>
+
+<p>
+<strong>Fix:</strong> set binary file mode on the client and transfer again
+&mdash; <code>SET FILE MODE BINARY</code> on kercpm3 / CP/M Kermit (some builds
+spell it <code>SET FILE TYPE BINARY</code>), <code>set file type binary</code>
+or the <code>-i</code> flag on C-Kermit.  The gateway always transfers binary
+in both directions, so this is purely a client-side setting &mdash; which is
+why a download can be perfect while an upload of the same file is damaged.
+See the note in &sect;8.8 for a worked example.
+</p>
+
+<p>
+<strong>Verifying:</strong> compare a checksum (<code>md5sum</code>,
+<code>cmp</code>) of both copies.  Do <em>not</em> compare <em>packet
+counts</em> between an upload and a download of the same file &mdash; those
+legitimately differ, because control bytes and high-bit bytes are quoted into
+two or three wire characters each and how much that expands depends on the
+negotiated packet length and on which side is sending.  A differing packet
+count is not evidence of data loss, and a matching one is not evidence of
+success.
 </p>
 
 <!-- ═══════════════════ Appendix A ═══════════════════ -->
