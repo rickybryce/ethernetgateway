@@ -609,7 +609,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>weather_units</code></td><td>string</td><td><code>auto</code></td><td>Weather units: <code>auto</code>, <code>us</code>, or <code>metric</code>.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable the CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. Off by default; configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
-        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>off</code></td><td>Virtual-modem UART port the emulated CP/M sees. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); or <code>aux</code> (BDOS AUX: device, for SC126/RomWBW). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>off</code></td><td>How the emulated CP/M reaches the virtual modem. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the far-end sender/receiver to start. Shared by XMODEM, XMODEM-1K, and YMODEM (same protocol code path).</td></tr>
         <tr><td><code>xmodem_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block timeout.</td></tr>
@@ -2337,6 +2337,7 @@ each entry (in the same CP/M settings panel as the enable toggle):
         <tr><td><code>altair_2sio1</code> / <code>altair_2sio2</code></td><td>Altair 88‑2SIO (6850 ACIA)</td><td><code>0x10/0x11</code>, <code>0x12/0x13</code></td></tr>
         <tr><td><code>altair_sio</code></td><td>Altair 88‑SIO</td><td><code>0x00/0x01</code></td></tr>
         <tr><td><code>aux</code></td><td>BDOS <code>AUX:</code> device (funcs 3/4) &mdash; SC126 / RomWBW, hardware‑independent</td><td>&mdash;</td></tr>
+        <tr><td><code>hbios_1</code> / <code>hbios_2</code></td><td>RomWBW <strong>HBIOS</strong> serial unit 1 / 2, reached by <code>RST&nbsp;8</code> &mdash; for software built for RomWBW rather than for a bare UART</td><td>&mdash; (no port)</td></tr>
     </tbody>
 </table>
 
@@ -2347,7 +2348,10 @@ whatever your comms software was built for. The <code>aux</code> choice is the
 hardware‑independent path for SC126/RomWBW software (the SC126&rsquo;s Z180 ASCI
 is reached with Z180 <code>IN0</code>/<code>OUT0</code> instructions our Z80 core
 doesn&rsquo;t implement, so a direct ASCI <em>port</em> profile can&rsquo;t work
-&mdash; use <code>aux</code> instead).
+&mdash; use <code>aux</code> instead). Software that asks <em>RomWBW</em> to move
+the byte rather than touching a port at all needs neither: pick
+<code>hbios_1</code> or <code>hbios_2</code> and see &ldquo;RomWBW HBIOS&rdquo;
+below.
 </p>
 
 <aside class="note">
@@ -2364,6 +2368,132 @@ to match the I/O&nbsp;port address and status&#8209;bit convention your software
 expects &mdash; not for interrupt support, which none of them provide. (The
 choice of chip family here &mdash; Z80&nbsp;SIO, 6850&nbsp;ACIA, 8080&nbsp;SIO
 &mdash; only affects the port addresses and how the status bits are laid out.)
+</aside>
+
+<h3>RomWBW HBIOS (the <code>hbios_1</code> / <code>hbios_2</code> profiles)</h3>
+
+<p>
+Not all CP/M comms software drives a UART. Software built for
+<strong>RomWBW</strong> asks the firmware to move the byte instead: it issues an
+<code>RST&nbsp;8</code> with a function number in <code>B</code> and a serial
+unit number in <code>C</code>, and never reads an I/O port. On a port profile
+such a program hangs before it prints anything &mdash; its very first call goes
+nowhere &mdash; which no choice of port address can fix. The QTERM <code>h</code>
+builds (<code>QTERMH1.COM</code>, <code>QTERMH2.COM</code>) are exactly this
+kind of program.
+</p>
+
+<p>
+Selecting <code>hbios_1</code> or <code>hbios_2</code> makes the emulator answer
+that API for one unit &mdash; the virtual modem &mdash; so those builds run here
+as they do on real RomWBW hardware. The <code>RST&nbsp;8</code> vector is
+installed <em>only</em> for these profiles, so on any other setting the guest
+sees the untouched page zero of a plain CP/M&nbsp;2.2 machine and a program
+probing for RomWBW isn&rsquo;t told a system it can&rsquo;t have is present.
+Pick the profile whose unit number matches your build (unit&nbsp;1 for
+<code>qtermh1</code>, unit&nbsp;2 for <code>qtermh2</code>); a call for any other
+unit is refused, so a mismatch fails the same recognisable way a wrong port
+address does.
+</p>
+
+<aside class="note">
+<span class="label">What this is &mdash; and what it is not</span>
+Implemented: the <strong>serial (character device) group</strong> &mdash;
+character in, character out, input and output status, device initialise, query
+and describe &mdash; plus the version and serial-unit-count calls a program uses
+to check what it is talking to. <strong>Not</strong> implemented: bank switching
+and memory management, disk, real-time clock, video, sound, and the DSKY. Those
+are RomWBW <em>hardware</em> services with no counterpart in this emulator, and
+every function outside the supported set returns a failure result, so a program
+that needs one finds out at the call instead of misbehaving later. This is an
+emulation of one API group so that RomWBW-targeted comms software can reach the
+virtual modem &mdash; the emulator is still CP/M&nbsp;2.2, not a RomWBW system.
+It was written from the published HBIOS interface description; no RomWBW code is
+included.
+</aside>
+
+<h3>Tested comms software &amp; the profile to pair with it</h3>
+
+<p>
+The CP/M programs below have been run inside this emulator against the virtual
+modem. Pick the <code>cpm_emu_uart</code> profile in the same row &mdash; a
+program that pokes a hard-coded I/O port only answers at that port&rsquo;s
+address.
+</p>
+
+<table>
+    <thead><tr><th>Program</th><th>Profile</th><th>Result</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><code>qterm82.com</code><br>QTERM V4.3f, &ldquo;Version for RC2014 SIO/2 - VT100&rdquo;</td>
+            <td><code>rc2014_1b</code><br>(<code>0x82/0x83</code>)</td>
+            <td><strong>Works.</strong> <code>AT</code> &rarr; <code>OK</code>, <code>ATDT&nbsp;host:port</code> &rarr; <code>CONNECT</code>, transfers run over the connection.</td>
+        </tr>
+        <tr>
+            <td><code>qterm84.com</code><br>same build, ported to the second SIO/2 board</td>
+            <td><code>rc2014_2a</code><br>(<code>0x84/0x85</code>)</td>
+            <td><strong>Works</strong>, identically. This is the same binary as <code>qterm82.com</code> with different port operands.</td>
+        </tr>
+        <tr>
+            <td><code>imp8.com</code><br>IMP v2.45 (Irvin Hoff), Altair 8800 build &mdash; &ldquo;HAYES compatible external modem on 2SIO, port 012H&rdquo;</td>
+            <td><code>altair_2sio2</code><br>(<code>0x12/0x13</code>)</td>
+            <td><strong>Works.</strong> <code>AT</code> &rarr; <code>OK</code>, <code>ATDT&nbsp;host:port</code> &rarr; <code>CONNECT</code>. Reach the modem with <code>T</code> (terminal mode) at its <code>COMMAND:</code> prompt. See the type-ahead note below.</td>
+        </tr>
+        <tr>
+            <td><code>QTERMH1.COM</code><br>QTERM V4.3f, &ldquo;Version for RomWBW HBIOS - VT100&rdquo; (HBIOS serial unit 1)</td>
+            <td><code>hbios_1</code></td>
+            <td><strong>Works.</strong> <code>AT</code> &rarr; <code>OK</code>, <code>ATDT&nbsp;host:port</code> &rarr; <code>CONNECT</code>, and a Kermit transfer runs over the connection. Needs an HBIOS profile: on any port profile or <code>aux</code> it hangs before its banner.</td>
+        </tr>
+        <tr>
+            <td><code>QTERMH2.COM</code><br>same build, HBIOS serial unit 2</td>
+            <td><code>hbios_2</code></td>
+            <td><strong>Works</strong>, identically. Unit gating is real: <code>QTERMH1</code> under <code>hbios_2</code> gets no response at all.</td>
+        </tr>
+        <tr>
+            <td><code>KERCPM22.COM</code><br>Kermit-80 v4.11, &ldquo;Generic CP/M-80&rdquo; overlay</td>
+            <td>&mdash;</td>
+            <td><strong>Cannot work, on any profile.</strong> The generic overlay has no serial driver &mdash; every one of its <code>SET PORT</code> choices (CRT/PTR/TTY/UC1/UR1/UR2) still talks to the <em>console</em>, so the modem never sees a byte. Use a machine-specific Kermit-80 overlay, or QTERM.</td>
+        </tr>
+    </tbody>
+</table>
+
+<aside class="note">
+<span class="label">Symptom of the wrong profile: complete silence</span>
+A port-poking program pointed at the wrong address gets <em>no</em> response at
+all &mdash; not even a local echo of what you type, because the echo comes from
+the virtual modem. <code>qterm82.com</code> under <code>rc2014_2a</code>
+behaves exactly this way. So if <code>AT</code> produces nothing, suspect the
+profile before suspecting the dial string. The profile only matters for
+programs doing real port <code>IN</code>/<code>OUT</code>: software that reaches
+the modem through BDOS funcs&nbsp;3/4 or BIOS <code>PUNCH</code>/<code>READER</code>
+works with <em>any</em> profile enabled, so <code>aux</code> and
+<code>rc2014_1b</code> are equivalent for it.
+</aside>
+
+<aside class="note">
+<span class="label">Type at human speed &mdash; don&rsquo;t paste into a polling terminal program</span>
+The emulator gives the guest a deep console type&#8209;ahead buffer, where a real
+CP/M machine&rsquo;s console UART holds a single byte. A comms program whose
+terminal loop re&#8209;checks console status <em>before</em> forwarding the key it
+already read will overwrite that key when a second one is already waiting
+&mdash; so a pasted or scripted burst loses characters, while ordinary typing
+(where the keys arrive milliseconds apart) is fine. <code>imp8.com</code>
+behaves exactly this way: typed <code>AT</code> returns <code>OK</code>, pasted
+<code>AT</code> reaches the modem as <code>T</code> and returns
+<code>ERROR</code>. QTERM does not have this loop and takes bursts intact. This
+affects only keystrokes you paste &mdash; file transfers, which read from disk,
+are unaffected.
+</aside>
+
+<aside class="note">
+<span class="label">From QTERM, transfer with XMODEM &mdash; not Kermit</span>
+QTERM&rsquo;s Kermit is <strong>text-only</strong> and there is no setting to
+make it binary: it stops at the first <code>^Z</code> (0x1A) in the file and
+still reports &ldquo;Transfer complete&rdquo;, so a binary upload is silently
+truncated. Use <code>xk</code> (XMODEM-1K), <code>x</code>, or <code>xy</code>
+for <code>.COM</code> files and other binaries. Note also that the QTERM builds
+above use <strong>Ctrl-Y</strong>, not the stock Ctrl-\, as the escape to
+command mode.
 </aside>
 
 <h3>Dialling out</h3>
@@ -3853,7 +3983,7 @@ numeric values fall back to the default.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Enable the CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/H</code> under <code>transfer_dir</code>. Off by default (arbitrary-code risk); when off the menu item is hidden and the key rejected. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
-        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>off</code></td><td>a profile name</td><td>Virtual-modem UART port the emulated CP/M's comms software sees. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); or <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>off</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>

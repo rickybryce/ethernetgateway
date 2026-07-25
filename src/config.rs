@@ -658,9 +658,11 @@ pub struct Config {
     /// never performs console I/O is aborted once it reaches this count, so
     /// the user always regains the `A>` prompt.
     pub cpm_emu_max_minstr: u32,
-    /// Virtual-modem UART profile for the CP/M emulator — which machine/port
-    /// (`rc2014_1b`, `altair_2sio1`, …) the emulated modem answers at, or
-    /// `off`.  Validated against `crate::cpm::uart::UART_CHOICES`.
+    /// Virtual-modem access profile for the CP/M emulator — which machine/port
+    /// (`rc2014_1b`, `altair_2sio1`, …) the emulated modem answers at, the BDOS
+    /// `AUX:` device (`aux`), a RomWBW HBIOS serial unit (`hbios_1` /
+    /// `hbios_2`), or `off`.  Validated against
+    /// `crate::cpm::uart::UART_CHOICES`.
     pub cpm_emu_uart: String,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
@@ -1861,9 +1863,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.
-# cpm_emu_uart: virtual-modem UART port the emulated CP/M sees.  off (default)
-#   = no modem; otherwise a machine/port profile, e.g. rc2014_1b (RC2014 SIO/2
-#   0x82/0x83), altair_2sio1 (Altair 88-2SIO 0x10/0x11).
+# cpm_emu_uart: how the emulated CP/M reaches the virtual modem.  off
+#   (default) = no modem; a machine/port profile, e.g. rc2014_1b (RC2014 SIO/2
+#   0x82/0x83), altair_2sio1 (Altair 88-2SIO 0x10/0x11); aux (BDOS AUX:
+#   device); or hbios_1 / hbios_2 (RomWBW HBIOS serial unit 1 / 2, reached by
+#   RST 8 — for software built for RomWBW rather than for a bare UART, such as
+#   the QTERM 'h' builds).
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);

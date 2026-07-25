@@ -30,6 +30,7 @@
 
 mod fcb;
 mod fs;
+pub mod hbios;
 mod machine;
 pub mod uart;
 
@@ -90,6 +91,20 @@ const BIOS_TRAP: u16 = 0xFF40;
 /// LISTST, SECTRAN.
 const BIOS_VECTORS: u16 = 17;
 
+/// Page-zero `RST 8` vector — where a RomWBW system's HBIOS entry lives.  On
+/// real hardware HBIOS is banked out of the CPU's reach, so RomWBW keeps a
+/// small proxy in the top pages of RAM and points this vector at it; software
+/// makes an HBIOS call with `RST 8` (function in `B`, unit in `C`).  We install
+/// the same vector shape — `JP` to a trap address the host services — and only
+/// when an HBIOS access mode is selected, so a plain CP/M guest sees the
+/// untouched page zero it would on a non-RomWBW machine.  See [`hbios`].
+const HBIOS_VECTOR: u16 = 0x0008;
+/// Trap address the `RST 8` vector jumps to, recognised by [`Cpm::run`].  It
+/// sits at the same place a real system's proxy entry does, above every
+/// structure the emulator keeps in high memory (alloc vector, BIOS table, DPB)
+/// and above the guest's stack top.
+const HBIOS_TRAP: u16 = 0xFFF0;
+
 /// Why a [`Cpm::run`] batch returned control to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -103,6 +118,14 @@ pub enum Stop {
     /// [`Cpm::bios_return`]; used by software that bypasses BDOS for
     /// console I/O (MBASIC, WordStar, Infocom, …).
     Bios(u8),
+    /// The guest made a RomWBW HBIOS call (`RST 8`); this is the function
+    /// number from `B`, with the unit in `C`.  Serviced by [`hbios`] against
+    /// the virtual modem when an `hbios_*` access mode is selected.  The host
+    /// may leave the call *unanswered* (simply run again without calling
+    /// [`Cpm::hbios_return`]) to park the guest on a blocking call until the
+    /// device is ready — the PC stays on the trap, so the next batch re-reports
+    /// it.
+    Hbios(u8),
     /// System reset / warm boot (BDOS function 0, `JP 0`, or `RET` to the
     /// warm-boot vector).  The run is over.
     WarmBoot,
@@ -121,6 +144,10 @@ pub struct Cpm {
     /// Total instructions executed since the last load — used both for the
     /// warm-boot gate (ignore the initial `PC == 0`) and diagnostics.
     instructions: u64,
+    /// Line characteristics the guest last set through the HBIOS `INITDEV`
+    /// call, reported back verbatim by `QUERY`.  There is no real UART to
+    /// program, so this is remembered rather than acted on.
+    hbios_line: u16,
 }
 
 impl Default for Cpm {
@@ -136,6 +163,7 @@ impl Cpm {
             cpu: Cpu::new(), // Z80
             mem: CpmMachine::new(),
             instructions: 0,
+            hbios_line: hbios::default_line(),
         };
         cpm.install_low_memory();
         cpm
@@ -157,6 +185,22 @@ impl Cpm {
         self.mem.poke(0x0005, 0xC3); // JP BDOS
         self.mem.poke16(0x0006, STACK_TOP);
         self.install_bios_table();
+        self.install_hbios_vector();
+    }
+
+    /// Install (or clear) the `RST 8` HBIOS vector to match the selected
+    /// access mode.  Present only for an `hbios_*` mode: RomWBW software finds
+    /// its API where RomWBW puts it, and everything else finds the page zero of
+    /// a plain CP/M 2.2 machine — so a program probing for RomWBW on a
+    /// port-I/O profile isn't told a system it can't have is present.
+    fn install_hbios_vector(&mut self) {
+        if self.mem.hbios_unit().is_some() {
+            self.mem.poke(HBIOS_VECTOR, 0xC3); // JP <proxy entry>
+            self.mem.poke16(HBIOS_VECTOR + 1, HBIOS_TRAP);
+        } else {
+            self.mem.poke(HBIOS_VECTOR, 0x00);
+            self.mem.poke16(HBIOS_VECTOR + 1, 0);
+        }
     }
 
     /// Lay a real 17-entry CP/M 2.2 BIOS jump table at [`BIOS_BASE`].  Each
@@ -221,6 +265,13 @@ impl Cpm {
             if (BIOS_TRAP..BIOS_TRAP + BIOS_VECTORS).contains(&pc) {
                 return Stop::Bios((pc - BIOS_TRAP) as u8);
             }
+            // An HBIOS call: `RST 8` pushed the return address and the page-zero
+            // vector jumped here.  The function is in `B` (the unit in `C`).
+            // Nothing is popped yet — a host that parks a blocking call just
+            // runs again and lands right back here.
+            if pc == HBIOS_TRAP {
+                return Stop::Hbios(self.cpu.registers().get8(Reg8::B));
+            }
             self.cpu.execute_instruction(&mut self.mem);
             self.instructions += 1;
             executed += 1;
@@ -271,6 +322,93 @@ impl Cpm {
         let ret = self.mem.peek16(sp);
         self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
         self.cpu.registers().set_pc(ret);
+    }
+
+    /// Finish an HBIOS call: the result code in `A` (0 = success, non-zero =
+    /// error, per the API's convention) and `RET` to where `RST 8` came from.
+    pub fn hbios_return(&mut self, result: u8) {
+        self.cpu.registers().set8(Reg8::A, result);
+        // Flags must reflect the result, not whatever the guest had before the
+        // `RST 8`.  A real HBIOS call returns through code that ends on a
+        // flag-setting instruction, and callers rely on it: QTERM's RomWBW
+        // overlay returns the status straight to a `JR Z` in QTERM's core, so
+        // stale flags read as "device not ready" and the program waits for a
+        // transmitter that is already free.  These are the flags `OR A` leaves
+        // (S/Z/P from the value, H/N/C cleared, plus the two undocumented bits
+        // a real Z80 copies from the value).
+        let f = (result & 0x80)                                  // S
+            | (if result == 0 { 0x40 } else { 0 })               // Z
+            | (result & 0x28)                                    // undocumented 5/3
+            | (if result.count_ones().is_multiple_of(2) { 0x04 } else { 0 }); // P
+        self.cpu.registers().set8(Reg8::F, f);
+        self.hbios_ret();
+    }
+
+    /// Finish an HBIOS call that yields a byte in `E` as well as the result in
+    /// `A` — the input / status group (character read, pending count, free
+    /// count).
+    pub fn hbios_return_e(&mut self, result: u8, e: u8) {
+        self.cpu.registers().set8(Reg8::E, e);
+        self.hbios_return(result);
+    }
+
+    /// Finish an HBIOS call that reports line characteristics in `DE` and a
+    /// terminal type in `L` (the device-configuration query).
+    pub fn hbios_return_de_l(&mut self, result: u8, de: u16, l: u8) {
+        self.cpu.registers().set16(Reg16::DE, de);
+        self.cpu.registers().set8(Reg8::L, l);
+        self.hbios_return(result);
+    }
+
+    /// Finish an HBIOS device-description call: device type in `D`, device
+    /// number in `E`, attributes in `C`, mode in `H`, base I/O address in `L`.
+    pub fn hbios_return_device(&mut self, result: u8, d: u8, e: u8, c: u8, h: u8, l: u8) {
+        self.cpu.registers().set8(Reg8::D, d);
+        self.cpu.registers().set8(Reg8::E, e);
+        self.cpu.registers().set8(Reg8::C, c);
+        self.cpu.registers().set8(Reg8::H, h);
+        self.cpu.registers().set8(Reg8::L, l);
+        self.hbios_return(result);
+    }
+
+    /// Pop the `RST 8` return address and resume the guest there.
+    fn hbios_ret(&mut self) {
+        let sp = self.cpu.registers().get16(Reg16::SP);
+        let ret = self.mem.peek16(sp);
+        self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
+        self.cpu.registers().set_pc(ret);
+    }
+
+    /// HBIOS sub-function argument: the byte in `C` (the unit for a serial
+    /// call, the sub-function for the `GET`/`SET` groups).
+    pub fn arg_hbios_unit(&mut self) -> u8 {
+        self.reg8(Reg8::C)
+    }
+
+    /// Bytes waiting for the guest on the virtual modem.
+    pub fn modem_rx_len(&self) -> usize {
+        self.mem.modem_rx_len()
+    }
+
+    /// Room left in the guest's outbound modem ring.
+    pub fn modem_tx_free(&self) -> usize {
+        self.mem.modem_tx_free()
+    }
+
+    /// The HBIOS serial unit the virtual modem answers as, if any.
+    pub fn hbios_unit(&self) -> Option<u8> {
+        self.mem.hbios_unit()
+    }
+
+    /// Line characteristics the guest last set through HBIOS `INITDEV`.
+    pub fn hbios_line(&self) -> u16 {
+        self.hbios_line
+    }
+
+    /// Remember the line characteristics an HBIOS `INITDEV` requested, so
+    /// `QUERY` reports back what was set.
+    pub fn set_hbios_line(&mut self, line: u16) {
+        self.hbios_line = line;
     }
 
     /// BIOS "console/list/punch output" argument: the character in `C`.
@@ -451,6 +589,9 @@ impl Cpm {
     /// at the profile's addresses reach the modem's byte rings.
     pub fn set_modem_access(&mut self, access: ModemAccess) {
         self.mem.set_access(access);
+        // The `RST 8` vector's presence follows the access mode, so selecting
+        // (or clearing) an HBIOS mode after construction is honoured.
+        self.install_hbios_vector();
     }
 
     /// Drain the bytes the guest has written toward the peer (the modem TX

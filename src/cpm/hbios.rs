@@ -1,0 +1,375 @@
+//! RomWBW **HBIOS** character-I/O calls for the emulated CP/M machine.
+//!
+//! Some CP/M comms software is built for RomWBW rather than for a bare
+//! machine: instead of poking a UART at a fixed I/O port, it asks the firmware
+//! to move the byte.  The QTERM `h` builds are the example that motivated this
+//! — they reach the serial device with `RST 8`, a function number in `B` and a
+//! unit number in `C`, and never touch a port at all.  On a port-I/O profile
+//! (or `aux`) such a program hangs before it prints anything, because its very
+//! first call goes nowhere.
+//!
+//! This module answers the **serial (character device) group** of that API for
+//! one unit — the virtual modem — plus the two management calls a program uses
+//! to check what it is talking to.  It is written from the published HBIOS
+//! interface description (function numbers, which register carries what, and
+//! the result convention); no RomWBW code is used, and the implementation is
+//! entirely our own dispatch over the modem rings in
+//! [`crate::cpm::machine`].
+//!
+//! Deliberately **not** implemented: bank switching / memory management, disk,
+//! RTC, video, sound, and the DSKY.  Those are RomWBW *hardware* services with
+//! no counterpart here, and pretending otherwise would strand a program deeper
+//! in its run than an honest refusal does.  Every function outside the
+//! supported set returns [`ERR`], which the API defines as a failure (any
+//! non-zero / negative result), so a caller finds out at the call rather than
+//! by corrupted behaviour later.  This is an emulation of one API group, not a
+//! RomWBW system.
+//!
+//! ## Blocking calls
+//!
+//! `IN` waits for a character and `OUT` waits for room to send one.  Rather
+//! than spin the emulator inside a handler, an unready call is left
+//! *unanswered*: the driver simply runs the CPU again, and because the guest's
+//! PC is still parked on the `RST 8` trap the call is re-reported next batch —
+//! after the driver's normal seam work (service the modem, drain the wire,
+//! check for the `ESC ESC` break-out) has had a turn.  The guest sees one
+//! blocking call; the host stays responsive and interruptible.
+
+use super::Cpm;
+
+/// Serial: wait for a character, return it in `E`.
+const FN_IN: u8 = 0x00;
+/// Serial: wait until the device can accept the character in `E`, then send it.
+const FN_OUT: u8 = 0x01;
+/// Serial: input status — how many characters are waiting.
+const FN_IST: u8 = 0x02;
+/// Serial: output status — how much output buffer space is free.
+const FN_OST: u8 = 0x03;
+/// Serial: initialise the unit to the line characteristics in `DE`.
+const FN_INITDEV: u8 = 0x04;
+/// Serial: report the unit's current line characteristics.
+const FN_QUERY: u8 = 0x05;
+/// Serial: describe the unit's hardware.
+const FN_DEVICE: u8 = 0x06;
+/// Management: report the firmware version.
+const FN_VER: u8 = 0xF1;
+/// Management: the `GET` group, whose sub-function is in `C`.
+const FN_GET: u8 = 0xF8;
+/// `GET` sub-function: count of serial units.
+const GET_CIOCNT: u8 = 0x00;
+
+/// Our result code for anything we do not implement.  The API treats a
+/// non-zero (negative) result as a failure; `0xFF` is the plainest such value
+/// and is ours, not a borrowed constant.
+const ERR: u8 = 0xFF;
+/// Success.
+const OK: u8 = 0x00;
+
+/// "Reset the unit using its current settings" — the value RomWBW software
+/// passes in `DE` when it wants initialisation without changing the line.
+const LINE_KEEP: u16 = 0xFFFF;
+
+/// Line characteristics we report before anything sets them.  The encoding
+/// packs the baud rate and handshake in `D` and the framing in `E`; the value
+/// here reads as 8 data bits, 1 stop bit, no parity, no flow control, which is
+/// what the virtual modem behaves like.  A guest that sets its own value gets
+/// that value back from `QUERY` — we keep it verbatim rather than
+/// re-interpreting a rate no real UART is clocking here.
+const LINE_DEFAULT: u16 = 0x0000;
+
+/// Device type we report for the virtual modem.  Every real value in the API's
+/// list names a specific chip driver, none of which is running: reporting one
+/// would be a false claim about the hardware, so the virtual modem reports 0 —
+/// "no physical serial driver" — with the RS-232 attribute a comms program
+/// cares about and a base I/O address of 0 (there is no port to read).
+const DEVICE_TYPE_NONE: u8 = 0x00;
+/// Serial device attributes: bit 7 clear = RS-232 (rather than a terminal).
+const DEVICE_ATTR_RS232: u8 = 0x00;
+/// Device mode: no chip variant to report.
+const DEVICE_MODE_NONE: u8 = 0x00;
+/// Base I/O address: none — this unit is not at a port.
+const DEVICE_BASE_NONE: u8 = 0x00;
+
+/// The API generation this implements, reported by `VER` as Maj/Min/Upd/Pat in
+/// `DE`.  Platform id (`L`) is 0: we are not any of the real RomWBW platforms,
+/// and a program that switches on platform id is about to do something
+/// hardware-specific that would not work here anyway.
+const VER_DE: u16 = 0x0306;
+const VER_PLATFORM: u8 = 0x00;
+
+/// What the driver should do after [`service`] looked at an HBIOS call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HbiosOutcome {
+    /// The call was answered (the guest has been resumed past it).
+    Answered,
+    /// A blocking call whose device is not ready.  The call was left
+    /// unanswered; run the CPU again after the seam and it will be re-reported.
+    Waiting,
+}
+
+/// Service one [`Stop::Hbios`] call against the virtual modem.
+///
+/// Synchronous by design — every supported function is a ring operation or a
+/// constant, so the async driver needs no special handling beyond honouring
+/// [`HbiosOutcome::Waiting`].
+pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
+    // Which unit this build of the guest software was patched to use.  A call
+    // for any other unit is refused, exactly as a program built for the wrong
+    // port address finds nothing at that address: the failure points at the
+    // profile, which is what makes it diagnosable.
+    let our_unit = cpm.hbios_unit();
+    let unit = cpm.arg_hbios_unit();
+
+    // The management group is unit-independent.
+    match func {
+        FN_VER => {
+            cpm.hbios_return_de_l(OK, VER_DE, VER_PLATFORM);
+            return HbiosOutcome::Answered;
+        }
+        FN_GET => {
+            // Sub-function in C.  Only the serial-unit count is meaningful
+            // here; the disk / RTC / video counts describe hardware we do not
+            // have, so they are refused rather than answered with zero (which
+            // a caller would read as a successful "none").
+            if unit == GET_CIOCNT {
+                // Units 0..=our unit exist as far as the guest can tell; only
+                // ours answers.
+                let count = our_unit.map(|u| u.saturating_add(1)).unwrap_or(0);
+                cpm.hbios_return_e(OK, count);
+            } else {
+                cpm.hbios_return(ERR);
+            }
+            return HbiosOutcome::Answered;
+        }
+        _ => {}
+    }
+
+    if our_unit != Some(unit) {
+        cpm.hbios_return(ERR);
+        return HbiosOutcome::Answered;
+    }
+
+    match func {
+        FN_IN => match cpm.modem_rx_pop() {
+            Some(b) => {
+                cpm.hbios_return_e(OK, b);
+                HbiosOutcome::Answered
+            }
+            // Nothing yet: park the guest on the call.
+            None => HbiosOutcome::Waiting,
+        },
+        FN_OUT => {
+            if cpm.modem_tx_free() == 0 {
+                // Ring full — the peer is behind.  Park rather than drop the
+                // byte, which is the whole point of a blocking send.
+                return HbiosOutcome::Waiting;
+            }
+            let b = cpm.arg_e();
+            cpm.modem_tx_push(b);
+            cpm.hbios_return(OK);
+            HbiosOutcome::Answered
+        }
+        FN_IST => {
+            let pending = cpm.modem_rx_len().min(u8::MAX as usize) as u8;
+            cpm.hbios_return_e(pending, pending);
+            HbiosOutcome::Answered
+        }
+        FN_OST => {
+            let free = cpm.modem_tx_free().min(u8::MAX as usize) as u8;
+            cpm.hbios_return_e(free, free);
+            HbiosOutcome::Answered
+        }
+        FN_INITDEV => {
+            // There is no UART to program: a TCP connection has no baud rate.
+            // Accept the request (a failure here stops software before it
+            // starts — it is the first call QTERM's overlay makes) and
+            // remember the characteristics so QUERY reports back what was set.
+            let de = cpm.arg_de();
+            if de != LINE_KEEP {
+                cpm.set_hbios_line(de);
+            }
+            cpm.hbios_return(OK);
+            HbiosOutcome::Answered
+        }
+        FN_QUERY => {
+            let line = cpm.hbios_line();
+            cpm.hbios_return_de_l(OK, line, VER_PLATFORM);
+            HbiosOutcome::Answered
+        }
+        FN_DEVICE => {
+            cpm.hbios_return_device(
+                OK,
+                DEVICE_TYPE_NONE,
+                unit,
+                DEVICE_ATTR_RS232,
+                DEVICE_MODE_NONE,
+                DEVICE_BASE_NONE,
+            );
+            HbiosOutcome::Answered
+        }
+        // Serial functions beyond the group above, and every other HBIOS
+        // group (disk, RTC, video, sound, DSKY, bank management): refused.
+        _ => {
+            cpm.hbios_return(ERR);
+            HbiosOutcome::Answered
+        }
+    }
+}
+
+/// The default line characteristics a freshly created machine reports.
+pub fn default_line() -> u16 {
+    LINE_DEFAULT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpm::uart::resolve_access;
+    use crate::cpm::{Cpm, Stop};
+    use std::sync::atomic::AtomicBool;
+
+    /// Assemble the smallest program that makes one HBIOS call: set the
+    /// function/unit, `RST 8`, then halt on a warm boot.
+    fn machine_with_call(func: u8, unit: u8, profile: &str) -> (Cpm, AtomicBool) {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access(profile));
+        // LD B,func / LD C,unit / RST 8 / JP 0
+        cpm.load_com(&[0x06, func, 0x0E, unit, 0xCF, 0xC3, 0x00, 0x00]);
+        (cpm, AtomicBool::new(false))
+    }
+
+    #[test]
+    fn test_rst8_vector_installed_only_for_hbios_profiles() {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("rc2014_1b"));
+        cpm.load_com(&[0xC9]);
+        assert_eq!(cpm.read_block(0x0008, 1)[0], 0x00, "port profile: no vector");
+        cpm.set_modem_access(resolve_access("hbios_1"));
+        cpm.load_com(&[0xC9]);
+        assert_eq!(cpm.read_block(0x0008, 1)[0], 0xC3, "hbios: JP installed");
+    }
+
+    #[test]
+    fn test_rst8_reaches_the_trap_with_function_in_b() {
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+    }
+
+    #[test]
+    fn test_ist_reports_pending_count_and_ost_reports_free_space() {
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_1");
+        cpm.modem_queue_rx(b"abc");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        assert_eq!(service(&mut cpm, FN_IST), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), 3, "3 bytes waiting");
+        assert_eq!(cpm.reg8(iz80::Reg8::E), 3, "count mirrored in E");
+
+        let (mut cpm, abort) = machine_with_call(FN_OST, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_OST));
+        assert_eq!(service(&mut cpm, FN_OST), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), 0xFF, "free space, capped at 255");
+    }
+
+    #[test]
+    fn test_in_returns_byte_in_e_and_parks_when_empty() {
+        let (mut cpm, abort) = machine_with_call(FN_IN, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IN));
+        // Nothing queued: the call is left unanswered and re-reported.
+        assert_eq!(service(&mut cpm, FN_IN), HbiosOutcome::Waiting);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IN), "PC still parked");
+        cpm.modem_queue_rx(b"Q");
+        assert_eq!(service(&mut cpm, FN_IN), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.reg8(iz80::Reg8::E), b'Q');
+    }
+
+    #[test]
+    fn test_out_sends_e_toward_the_peer() {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("hbios_2"));
+        // LD B,OUT / LD C,2 / LD E,'Z' / RST 8 / JP 0
+        cpm.load_com(&[0x06, FN_OUT, 0x0E, 0x02, 0x1E, b'Z', 0xCF, 0xC3, 0x00, 0x00]);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_OUT));
+        assert_eq!(service(&mut cpm, FN_OUT), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.modem_drain_tx(), b"Z");
+    }
+
+    #[test]
+    fn test_wrong_unit_is_refused() {
+        // A unit-1 build (qtermh1) under the unit-2 profile finds nothing —
+        // the HBIOS equivalent of the wrong port address.
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_2");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        assert_eq!(service(&mut cpm, FN_IST), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR);
+    }
+
+    #[test]
+    fn test_initdev_accepts_and_query_reports_back() {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("hbios_1"));
+        // LD B,INITDEV / LD C,1 / LD DE,-1 / RST 8 / JP 0  (the "keep current
+        // settings" call QTERM's RomWBW overlay makes at startup)
+        cpm.load_com(&[0x06, FN_INITDEV, 0x0E, 0x01, 0x11, 0xFF, 0xFF, 0xCF, 0xC3, 0x00, 0x00]);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_INITDEV));
+        assert_eq!(service(&mut cpm, FN_INITDEV), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK, "startup init must succeed");
+        assert_eq!(cpm.hbios_line(), default_line(), "-1 keeps current line");
+
+        // An explicit setting round-trips through QUERY.
+        cpm.set_hbios_line(0x1234);
+        assert_eq!(service(&mut cpm, FN_QUERY), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg16(iz80::Reg16::DE), 0x1234);
+    }
+
+    #[test]
+    fn test_device_describes_a_virtual_unit() {
+        let (mut cpm, abort) = machine_with_call(FN_DEVICE, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_DEVICE));
+        assert_eq!(service(&mut cpm, FN_DEVICE), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.reg8(iz80::Reg8::D), DEVICE_TYPE_NONE, "no real driver");
+        assert_eq!(cpm.reg8(iz80::Reg8::E), 1, "our unit number");
+        assert_eq!(cpm.reg8(iz80::Reg8::L), DEVICE_BASE_NONE, "not at a port");
+    }
+
+    #[test]
+    fn test_ver_and_unit_count_are_answered() {
+        let (mut cpm, abort) = machine_with_call(FN_VER, 0, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_VER));
+        assert_eq!(service(&mut cpm, FN_VER), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.reg16(iz80::Reg16::DE), VER_DE);
+
+        let (mut cpm, abort) = machine_with_call(FN_GET, GET_CIOCNT, "hbios_2");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_GET));
+        assert_eq!(service(&mut cpm, FN_GET), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.reg8(iz80::Reg8::E), 3, "units 0..2 as far as it can see");
+    }
+
+    #[test]
+    fn test_unsupported_groups_are_refused_not_faked() {
+        // Disk status (0x10), a bank switch (0xF2) and an unknown GET
+        // sub-function must all fail rather than return a plausible success.
+        for (func, unit) in [(0x10u8, 1u8), (0xF2, 1), (FN_GET, 0x10)] {
+            let (mut cpm, abort) = machine_with_call(func, unit, "hbios_1");
+            assert_eq!(cpm.run(100, &abort), Stop::Hbios(func));
+            assert_eq!(service(&mut cpm, func), HbiosOutcome::Answered);
+            assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "func {func:#04x} must error");
+        }
+    }
+
+    #[test]
+    fn test_answered_call_resumes_after_the_rst() {
+        // The `RST 8` return address must be popped exactly once: the guest
+        // continues with the instruction after it (here `JP 0` → warm boot).
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        service(&mut cpm, FN_IST);
+        assert_eq!(cpm.run(100, &abort), Stop::WarmBoot);
+    }
+}

@@ -85,6 +85,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Z80 core doesn't implement the Z180 `IN0`/`OUT0` instructions the ASCI
     uses). The modem is a self-contained async layer bridged to the guest's
     synchronous UART/AUX byte rings at the CPU batch seam.
+  - **Virtual modem — RomWBW HBIOS access (`hbios_1` / `hbios_2`).** Some CP/M
+    comms software doesn't drive a UART at all: software built for RomWBW asks
+    the firmware to move the byte, issuing an `RST 8` with a function number in
+    `B` and a serial unit in `C`. On a port profile such a program hangs before
+    printing anything — its first call goes nowhere — which no port address can
+    fix; the QTERM `h` builds (`QTERMH1.COM`/`QTERMH2.COM`, "Version for RomWBW
+    HBIOS") are exactly this case. Two new `cpm_emu_uart` choices answer that
+    API for one serial unit (the virtual modem), so those builds now run: `AT` →
+    `OK`, `ATDT host:port` → `CONNECT`, with data flowing both ways. The `RST 8`
+    vector is installed *only* for these profiles, so every other setting keeps
+    the untouched page zero of a plain CP/M 2.2 machine; a call for a unit other
+    than the selected one is refused, so a mismatch fails the same recognisable
+    way a wrong port address does. Implemented: the serial (character device)
+    group — in, out, input/output status, initialise, query, describe — plus the
+    version and serial-unit-count calls. Refused with an error result: bank
+    switching / memory management, disk, RTC, video, sound, DSKY (RomWBW
+    *hardware* services with no counterpart here) — an honest failure at the
+    call beats stranding a program later. A blocking call whose device isn't
+    ready parks the guest on the trap and is re-reported after the driver's
+    seam work, so it stays interruptible by the double-`ESC` break-out and
+    doesn't spin the host. Written from the published HBIOS interface
+    description (function numbers and register conventions); no RomWBW code is
+    included. New `src/cpm/hbios.rs` with 11 unit tests, plus a fidelity fix the
+    guests depend on: an HBIOS return now sets the flags from the result byte
+    (as `OR A` leaves them) instead of leaving the guest's stale flags — QTERM's
+    overlay hands the status straight to a `JR Z`, so stale flags read as
+    "transmitter not ready" and it waited forever.
   - **Virtual modem — dialable as `CPM@<ip>` (inbound).** The CP/M emulator is
     now a third dialable peer endpoint named `CPM`, alongside Ports A/B: from
     another modem on the gateway, `ATD CPM@<ip>` rings it exactly as

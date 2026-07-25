@@ -104,6 +104,11 @@ pub enum ModemAccess {
     Ports(UartProfile),
     /// The CP/M BDOS `AUX:` device (functions 3/4).
     Aux,
+    /// RomWBW HBIOS character-unit calls (`RST 8`) for this serial unit.
+    /// Software built for RomWBW (the SC126 / RC2014 QTERM `h` builds, for
+    /// instance) reaches its serial device through the HBIOS API rather than
+    /// through port I/O or CP/M's `AUX:` device.  See [`super::hbios`].
+    Hbios { unit: u8 },
 }
 
 /// One selectable choice: the config value, a human description for the UIs,
@@ -163,6 +168,16 @@ pub const UART_CHOICES: &[UartChoice] = &[
         key: "aux",
         description: "BDOS AUX: device (SC126 / RomWBW, hardware-independent)",
         access: ModemAccess::Aux,
+    },
+    UartChoice {
+        key: "hbios_1",
+        description: "RomWBW HBIOS serial unit 1 (RST 8) — e.g. qtermh1",
+        access: ModemAccess::Hbios { unit: 1 },
+    },
+    UartChoice {
+        key: "hbios_2",
+        description: "RomWBW HBIOS serial unit 2 (RST 8) — e.g. qtermh2",
+        access: ModemAccess::Hbios { unit: 2 },
     },
 ];
 

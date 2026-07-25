@@ -707,6 +707,14 @@ impl TelnetSession {
         // State persists across BDOS calls (a cursor-address sequence can
         // straddle them).
         let mut term = Adm3a::default();
+        // Set when an HBIOS blocking call (`IN` with nothing waiting, `OUT`
+        // with a full ring) parked the guest on the trap this batch.  The wait
+        // is then paced below, so a program sitting in a blocking read costs
+        // the host a poll every few milliseconds instead of a spin.  The
+        // instruction budget deliberately doesn't advance while parked — a
+        // program waiting for its peer isn't a runaway — and the `ESC ESC`
+        // break-out still works, because the drain runs at every seam.
+        let mut hbios_waiting = false;
 
         loop {
             // Runaway guard, checked every batch regardless of why run()
@@ -906,6 +914,18 @@ impl TelnetSession {
                         _ => cpm.bios_return(0),
                     }
                 }
+                Stop::Hbios(func) => {
+                    // A RomWBW HBIOS call (`RST 8`).  Serviced synchronously
+                    // against the virtual modem; a blocking call whose device
+                    // isn't ready is left parked so the seam below (modem
+                    // service + break-out drain) runs and the call is
+                    // re-reported next batch.
+                    if crate::cpm::hbios::service(cpm, func)
+                        == crate::cpm::hbios::HbiosOutcome::Waiting
+                    {
+                        hbios_waiting = true;
+                    }
+                }
                 Stop::WarmBoot => {
                     // Real CP/M's CCP emits CR/LF before redrawing the
                     // prompt.  Many transients (STAT, and utilities in
@@ -958,6 +978,14 @@ impl TelnetSession {
             // can't pin the tokio worker.  Interactive handlers already
             // await; this makes the non-awaiting ones cooperative too.
             tokio::task::yield_now().await;
+            // Pace a parked HBIOS blocking call.  Without this the guest's PC
+            // sits on the trap and the loop would spin as fast as the executor
+            // allows; a few milliseconds between polls is imperceptible at the
+            // byte rates a CP/M comms program works at.
+            if hbios_waiting {
+                hbios_waiting = false;
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
         }
     }
 

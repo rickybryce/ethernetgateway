@@ -95,6 +95,27 @@ impl CpmMachine {
             self.tx.push_back(b);
         }
     }
+
+    /// Bytes waiting for the guest to read (HBIOS input-status count).
+    pub fn modem_rx_len(&self) -> usize {
+        self.rx.len()
+    }
+
+    /// Room left in the TX ring (HBIOS output-status count).  Zero means the
+    /// guest must wait — the same backpressure the port-I/O status bit reports
+    /// as transmit-not-ready.
+    pub fn modem_tx_free(&self) -> usize {
+        MODEM_RING_CAP.saturating_sub(self.tx.len())
+    }
+
+    /// The HBIOS serial unit the virtual modem answers as, if an HBIOS access
+    /// mode is selected.
+    pub fn hbios_unit(&self) -> Option<u8> {
+        match self.access {
+            ModemAccess::Hbios { unit } => Some(unit),
+            _ => None,
+        }
+    }
 }
 
 impl Default for CpmMachine {
