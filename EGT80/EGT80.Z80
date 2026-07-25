@@ -121,6 +121,7 @@ NAK     EQU     15H             ; block rejected / send in checksum mode
 CAN     EQU     18H             ; cancel (two in a row)
 CRCC    EQU     'C'             ; receiver asking for CRC mode
 XRETRY  EQU     10              ; retries per block, and 'C' attempts
+XNOISE  EQU     255             ; junk bytes tolerated before a transfer
 XSHORT  EQU     1               ; inter-byte wait, in XGETB passes
 XLONG   EQU     6               ; wait for a block / handshake
 
@@ -996,6 +997,7 @@ FCSI:   LD      A,E
 ;-----------------------------------------------------------------------
 XSEND:  CALL    XREADY          ; is a port selected at all?
         RET     C
+        CALL    RSTDMA          ; start from CP/M's own record buffer
         LD      HL,MXSFIL
         CALL    PSTR
         CALL    XFNAME
@@ -1008,9 +1010,15 @@ XSEND:  CALL    XREADY          ; is a port selected at all?
         LD      HL,MXNOFIL
         CALL    PSTR
         RET
-XSEND1: LD      HL,MXWAIT
+XSEND1: LD      A,XNOISE
+        LD      (XNCNT),A
+        LD      HL,MXWAIT
         CALL    PSTR
-        CALL    XPURGE
+        ; No XPURGE here on purpose.  The receiver is already sending its
+        ; 'C' every few seconds, and a purge window on a slow machine can
+        ; be long enough to swallow each one as it arrives - the sender
+        ; would then wait out the whole negotiation with the answer in its
+        ; hand.  The handshake loop below tolerates noise instead.
         LD      A,XRETRY
         LD      (XCNT),A
 XSEND2: LD      A,XLONG         ; wait for the receiver to ask
@@ -1028,11 +1036,23 @@ XSEND3: CP      CRCC
         JR      Z,XSENDK
         CP      CAN
         JP      Z,XABORT
-        JR      XSEND2          ; noise: keep listening
+        ; Noise.  Not an error: the far end usually prints something like
+        ; "start your transfer now" first, and every character of it
+        ; arrives here.  So it gets its own generous budget, kept apart
+        ; from the retry count - spending a retry per character of a
+        ; banner would fail the transfer before it began, which is
+        ; exactly what an earlier version of this did.
+        LD      A,(XNCNT)
+        DEC     A
+        LD      (XNCNT),A
+        JR      NZ,XSEND2
+        JP      XFAIL
 XSENDC: LD      A,1             ; CRC mode
         JR      XSEND4
 XSENDK: XOR     A               ; checksum mode
 XSEND4: LD      (XCRCM),A
+        CALL    XPURGE          ; drop the far end's "start now" banner: from
+                                ; here on, anything arriving is protocol
         LD      A,1
         LD      (XBLK),A        ; XMODEM blocks start at 1
         LD      HL,MXGO
@@ -1050,15 +1070,22 @@ XSLOOP: LD      DE,XBUF
         LD      A,XRETRY
         LD      (XCNT),A
 XSBLK:  CALL    XBLKSN          ; put the block on the wire
-        LD      A,XLONG
+XSWAIT: LD      A,XLONG
         LD      (XTMO),A
         CALL    XGETB
-        JR      C,XSBAD         ; no answer at all
+        JR      C,XSBAD         ; silence: send the block again
         CP      ACK
         JR      Z,XSNEXT
         CP      CAN
         JP      Z,XABORT
-XSBAD:  LD      A,'?'           ; NAK, noise or silence: send it again
+        CP      NAK
+        JR      Z,XSBAD         ; asked for it again
+        LD      A,(XNCNT)       ; anything else is noise: keep waiting for a
+        DEC     A               ; real answer instead of resending on it
+        LD      (XNCNT),A
+        JR      NZ,XSWAIT
+        JP      XFAIL
+XSBAD:  LD      A,'?'           ; resend this block
         CALL    COUT
         LD      A,(XCNT)
         DEC     A
@@ -1139,6 +1166,7 @@ XBLKS2: LD      A,(XSUM)
 ;-----------------------------------------------------------------------
 XRECV:  CALL    XREADY
         RET     C
+        CALL    RSTDMA          ; the directory search below uses the DMA
         LD      HL,MXRFIL
         CALL    PSTR
         CALL    XFNAME
@@ -1169,7 +1197,9 @@ XRECV1: LD      DE,XFCB
         LD      HL,MXNOMK       ; directory full, or a bad name
         CALL    PSTR
         RET
-XRECV2: LD      A,1
+XRECV2: LD      A,XNOISE
+        LD      (XNCNT),A
+        LD      A,1
         LD      (XCRCM),A       ; ask for CRC mode first
         LD      A,1
         LD      (XBLK),A
@@ -1193,7 +1223,7 @@ XRWAIT: LD      A,XLONG
         LD      A,(XCNT)        ; silence: ask again, and after half the
         DEC     A               ; attempts stop asking for CRC mode
         LD      (XCNT),A
-        JP      Z,XFAILR
+        JP      Z,XFAIL
         CP      XRETRY
         JR      NZ,XRLOOP
         XOR     A
@@ -1204,8 +1234,12 @@ XRGOT:  CP      SOH
         CP      EOT
         JP      Z,XRDONE
         CP      CAN
-        JP      Z,XABRTR
-        JR      XRWAIT          ; noise: keep waiting
+        JP      Z,XABORT
+        LD      A,(XNCNT)       ; noise: same generous, separate budget
+        DEC     A
+        LD      (XNCNT),A
+        JP      Z,XFAIL
+        JP      XRWAIT
 
 ;--- a block header arrived: read it, check it, write it ---
 XRBLK:  LD      A,XSHORT        ; the rest of a block must arrive promptly
@@ -1253,13 +1287,24 @@ XRB2:   CALL    XGETB
         JR      NZ,XRBAD
 
 ;--- the block is sound: is it the one we expect? ---
-XRGOOD: LD      A,(XGOTBL)
-        LD      HL,XBLK
+XRGOOD: LD      HL,XBLK
+        LD      A,(XGOTBL)
         CP      (HL)
         JR      Z,XRSAVE
-        DEC     (HL)            ; the previous block resent means our ACK
-        CP      (HL)            ; was lost: acknowledge again, do not save
-        INC     (HL)
+        ; Not the expected block.  If it is the PREVIOUS one, the sender
+        ; never saw our ACK and has resent it: acknowledge again and do
+        ; NOT write it a second time.  Anything else means the two ends
+        ; have lost step, which is a bad block.
+        ;
+        ; Note the register work: the comparison result has to survive
+        ; until the branch, so "expected minus one" is computed in A
+        ; rather than by DEC/CP/INC on the counter in memory - INC (HL)
+        ; sets the flags itself and would overwrite the very answer the
+        ; branch is waiting for.
+        LD      A,(HL)
+        DEC     A               ; the block before the one we want
+        LD      HL,XGOTBL
+        CP      (HL)
         JR      NZ,XRBAD        ; a different block entirely: out of step
         LD      A,ACK
         CALL    PSEND
@@ -1280,6 +1325,8 @@ XRSAVE: LD      DE,XBUF
         INC     (HL)
 XRRSET: LD      A,XRETRY        ; progress: a fresh budget of retries
         LD      (XCNT),A
+        LD      A,XNOISE        ; ...and of tolerance for junk
+        LD      (XNCNT),A
         JP      XRWAIT
 
 ;--- a bad block: drain the line, NAK, try again ---
@@ -1289,7 +1336,7 @@ XRBAD:  LD      A,'?'
         LD      A,(XCNT)
         DEC     A
         LD      (XCNT),A
-        JP      Z,XFAILR
+        JP      Z,XFAIL
         LD      A,NAK
         CALL    PSEND
         JP      XRWAIT
@@ -1420,18 +1467,7 @@ XABORT: CALL    RSTDMA
         LD      HL,MXCAN
         CALL    PSTR
         RET
-XABRTR: CALL    RSTDMA
-        CALL    CRLF
-        LD      HL,MXCAN
-        CALL    PSTR
-        RET
 XFAIL:  CALL    XCANC
-        CALL    RSTDMA
-        CALL    CRLF
-        LD      HL,MXFAIL
-        CALL    PSTR
-        RET
-XFAILR: CALL    XCANC
         CALL    RSTDMA
         CALL    CRLF
         LD      HL,MXFAIL
@@ -2304,6 +2340,7 @@ XCRCM:  DB      0               ; non-zero = CRC mode, zero = checksum
 XCRC:   DW      0               ; CRC-16 accumulator
 XSUM:   DB      0               ; checksum accumulator
 XCNT:   DB      0               ; retries left
+XNCNT:  DB      0               ; junk bytes still tolerated
 XTMO:   DB      0               ; XGETB timeout, in 65536-poll passes
 XTMOC:  DB      0               ; ...and its working copy
 XLINE:  DS      24              ; console line buffer for a filename
@@ -2312,7 +2349,14 @@ XBUF:   DS      128             ; the block, which is also the CP/M record
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 
-        DS      64              ; stack: 32 levels, ample here
+; Stack.  128 bytes = 64 levels, which is more than this program's own
+; call depth needs (about a dozen levels at the deepest, inside a
+; transfer) - the margin is for the system underneath: a real CP/M BIOS
+; may use the CALLER's stack, and the BDOS file calls a transfer makes
+; are exactly where that would bite.  It matters here because the stack
+; grows down towards XBUF, so an overflow would quietly corrupt the block
+; being transferred rather than crashing where it happened.
+        DS      128
 STKTOP  EQU     $
 
         END     START

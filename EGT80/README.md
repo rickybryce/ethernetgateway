@@ -152,6 +152,33 @@ key — leaving terminal mode doesn't hang up, so the usual sequence is to dial,
 tell the far end what you want, then press the menu key and `U`/`D`. A dot marks
 each block and a `?` each retry.
 
+## Reviewing the assembly found three more
+
+A quality/stability pass over the source after phase 3 turned up one real bug
+and two things that were bounded wrongly. All three are the sort that a clean
+line never shows you:
+
+**A resent block was rejected instead of acknowledged.** The duplicate-block
+check compared the block number, then did `INC (HL)` before branching — and
+`INC (HL)` sets the flags itself, so the branch tested the increment rather than
+the comparison. Every lost ACK (the exact case XMODEM's duplicate handling
+exists for) therefore turned into a NAK, and a noisy line would eventually fail
+the transfer rather than recovering. Proved with a deliberately lossy sender that
+repeats block 1: the old binary answers `NAK`, the fixed one `ACK`, and the file
+is two blocks, not three.
+
+**Noise was charged against the retry budget.** The far end usually prints
+something like "start your transfer now", and every character of it arrived where
+a protocol byte was expected. Spending a retry per character failed the transfer
+before it began. Noise now has its own generous budget, separate from the retries,
+refreshed on progress; the sender also purges once the mode is agreed, and treats
+an unexpected byte as noise to wait through rather than as a reason to resend.
+
+**The stack could overflow into the transfer buffer.** 32 levels was ample for
+this program's own depth, but a real CP/M BIOS may use the *caller's* stack, and
+the reserve sat directly above `XBUF` — so an overflow would quietly corrupt the
+block being transferred instead of failing where it happened. Now 64 levels.
+
 ## Three things learned the hard way
 
 Both are worth knowing before touching this code.
