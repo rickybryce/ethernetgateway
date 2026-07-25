@@ -12,8 +12,8 @@ the pairing wrong and the program is simply silent.
 EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-**Status: phase 2** — a usable terminal with all five port families and settings
-that survive a restart. Only file transfer is still to come (phase 3).
+**Status: complete (v0.4)** — a working terminal with all five port families,
+settings that survive a restart, and XMODEM file transfer in both directions.
 
 Verified in the gateway's CP/M emulator, each family against the matching
 `cpm_emu_uart` profile: `AT` → `OK` and `ATI4` identifying the modem through
@@ -23,6 +23,12 @@ picking the saved port and filter mode back up; a deliberately corrupted
 settings block falling back to defaults with a message; HBIOS refused with an
 explanation on a machine with no `RST 8` vector; and the ASCII filter reducing a
 colour ANSI menu to clean text (18 escape sequences in, 0 out, all text intact).
+
+**Transfers** were tested end to end against the gateway's own File Transfer
+menu, dialled from inside EGT80: a file uploaded from CP/M arrived byte-identical
+(once the trailing `^Z` record padding is trimmed), and a file downloaded to CP/M
+matched the original for its whole length with `^Z` padding to the block
+boundary — which is what CP/M's record granularity means for XMODEM.
 
 ## Building
 
@@ -132,7 +138,21 @@ sector, one 128-byte disk record) rather than "whatever memory is free". A
 terminal does not need to claim the TPA, and a known size is a known worst case
 on a machine that may only have 32 KB of it.
 
-## Two things learned the hard way
+## Transfers
+
+Plain XMODEM: 128-byte blocks, CRC-16 with the checksum fallback an older peer
+may insist on, and one buffer that serves as both the protocol block and the
+CP/M record — they are the same 128 bytes, which is why the two fit together so
+neatly. The CRC is computed a bit at a time rather than from a 512-byte table: at
+9600 baud a byte takes a millisecond and its CRC takes microseconds, so the table
+would cost more memory than the whole transfer routine and buy nothing.
+
+`U` uploads, `D` downloads, from the main menu **or** from the terminal-mode menu
+key — leaving terminal mode doesn't hang up, so the usual sequence is to dial,
+tell the far end what you want, then press the menu key and `U`/`D`. A dot marks
+each block and a `?` each retry.
+
+## Three things learned the hard way
 
 Both are worth knowing before touching this code.
 
@@ -142,6 +162,18 @@ An early `PSTR` printed its first character forever, because the console call ha
 left the string pointer pointing at itself. `CST`/`CIN`/`COUT` therefore preserve
 BC, DE and HL. The terminal loop is kept cheap by holding no state across calls
 at all — not by shaving pushes off the routine every screen depends on.
+
+**Register discipline is the whole game in a counted loop.** The XMODEM code
+counts 128 bytes in `B` while walking the buffer with `HL`, and calls routines
+that need registers of their own. Three separate bugs came from exactly that:
+`PSEND`, `XGETB` and `XACCUM` each used `BC` as a private counter, and `XACCUM`
+also used `HL`. Worse, `PSEND` restored `BC` *before* its final jump to the
+output vector — and the port driver sets `B` to address the port, so the restore
+was undone on the way out. Every one of them produced the same spectacular
+symptom: the send loop walked off the end of the buffer and shovelled a megabyte
+of RAM at the wire. `PSEND`/`XGETB` now preserve `BC`, `XACCUM` preserves `BC`
+and `HL`, and each restores *after* its last vector call. The port and console
+vectors themselves preserve nothing — that is stated at the top of the source.
 
 **A send wait must be bounded.** If the selected port is wrong, the transmitter
 is never ready — an absent chip answers identically forever — so an unbounded

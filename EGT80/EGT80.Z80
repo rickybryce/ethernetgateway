@@ -32,9 +32,9 @@
 ;     M80 and ZMAC assemble almost nothing while reporting success).
 ;
 ;-----------------------------------------------------------------------
-; PHASE 2: all five port families (Z80 SIO/2, 6850 ACIA, RomWBW HBIOS,
-; Z180 ASCI, CP/M AUX:), the two-step port menu, and settings saved into
-; the program's own file.  XMODEM transfers follow in phase 3.
+; COMPLETE: all five port families (Z80 SIO/2, 6850 ACIA, RomWBW HBIOS,
+; Z180 ASCI, CP/M AUX:), the two-step port menu, settings saved into the
+; program's own file, and XMODEM file transfer in both directions.
 ;
 ;-----------------------------------------------------------------------
 ; HOW THE HOT PATH IS KEPT CHEAP
@@ -54,6 +54,27 @@
 ; calls: everything it needs is in A or in memory.  That removes any need
 ; for the vectors to preserve registers - which matters because on CP/M 3
 ; they land in the BDOS, which preserves nothing.
+;
+;-----------------------------------------------------------------------
+; REGISTER CONVENTION - read this before adding a counted loop
+;
+; The XMODEM code counts 128 bytes in B while calling routines that need
+; counters of their own, and three of them (PSEND, XGETB, XACCUM) used BC
+; for that.  Each one silently destroyed the caller's count, and the
+; symptom was not subtle: the send loop walked off the end of the buffer
+; and shovelled a megabyte of RAM at the wire.
+;
+; So: PSEND and XGETB preserve BC; XACCUM preserves BC and HL (the block
+; loops walk the buffer with HL while it needs HL for the accumulators);
+; COUT/CST/CIN preserve BC, DE and HL.  The port and console vectors
+; preserve NOTHING - call them only with everything you care about either
+; in A or in memory.
+;
+; And the order matters as much as the pushes: a routine that restores a
+; register BEFORE its last call to a port vector has not restored it at
+; all, because the driver sets B to address the port.  PSEND had exactly
+; that bug - it popped BC and then jumped to the output vector - and the
+; symptom was the same runaway buffer walk as forgetting the push.
 ;=======================================================================
 
 ;-----------------------------------------------------------------------
@@ -68,6 +89,12 @@ BOPEN   EQU     15              ; open file
 BCLOSE  EQU     16              ; close file
 BSETDMA EQU     26              ; set the DMA (record buffer) address
 BWRRAN  EQU     34              ; write random record
+BRDBUF  EQU     10              ; read console buffer (a line)
+BDELET  EQU     19              ; delete file
+BREADS  EQU     20              ; read sequential record
+BWRITS  EQU     21              ; write sequential record
+BMAKE   EQU     22              ; create file
+BSEARF  EQU     17              ; search for first match
 
 ; Direct-console-I/O sub-codes used on CP/M 3
 DCIRD   EQU     0FFH            ; read a character
@@ -85,6 +112,19 @@ ESC     EQU     1BH
 DEL     EQU     7FH
 
 ;-----------------------------------------------------------------------
+; XMODEM protocol bytes and bounds
+;-----------------------------------------------------------------------
+SOH     EQU     01H             ; start of a 128-byte block
+EOT     EQU     04H             ; end of transmission
+ACK     EQU     06H             ; block accepted
+NAK     EQU     15H             ; block rejected / send in checksum mode
+CAN     EQU     18H             ; cancel (two in a row)
+CRCC    EQU     'C'             ; receiver asking for CRC mode
+XRETRY  EQU     10              ; retries per block, and 'C' attempts
+XSHORT  EQU     1               ; inter-byte wait, in XGETB passes
+XLONG   EQU     6               ; wait for a block / handshake
+
+;-----------------------------------------------------------------------
 ; Port kinds.  Only SIO is implemented in phase 1; the rest are listed
 ; here because the settings block records the kind numerically and the
 ; numbering must not shift when they arrive.
@@ -100,7 +140,7 @@ PKAUX   EQU     5               ; CP/M BDOS AUX    (phase 2)
 ; Build identity
 ;-----------------------------------------------------------------------
 VERMAJ  EQU     0
-VERMIN  EQU     3
+VERMIN  EQU     4
 
         ORG     0100H
 
@@ -640,7 +680,8 @@ POUT:   JP      VPOUT
 ; The counter lives in BC and is saved around the status call, because
 ; the port drivers use BC for the I/O address.
 ;=======================================================================
-PSEND:  LD      (SENDCH),A
+PSEND:  PUSH    BC              ; BC is this routine's poll counter; callers
+        LD      (SENDCH),A      ; count block bytes in B, so hand it back
         LD      A,4
         LD      (PTRIES),A
 PSNDO:  LD      BC,0            ; 65536 polls per pass
@@ -656,11 +697,14 @@ PSEND1: PUSH    BC
         DEC     A
         LD      (PTRIES),A
         JR      NZ,PSNDO
+        POP     BC
         LD      A,1
         LD      (PDEAD),A       ; transmitter never came free
         RET
 PSEND2: LD      A,(SENDCH)
-        JP      POUT
+        CALL    POUT            ; the driver clobbers BC, so restore AFTER it
+        POP     BC
+        RET
 
 ;=======================================================================
 ; MAIN MENU
@@ -674,6 +718,10 @@ MAINLP: CALL    SCMENU
         JR      Z,DOPORT
         CP      'S'
         JR      Z,DOSETT
+        CP      'U'
+        JR      Z,DOSEND
+        CP      'D'
+        JR      Z,DORECV
         CP      'H'
         JR      Z,DOHELP
         CP      'V'
@@ -692,6 +740,12 @@ DOSETT: CALL    SCSETT
 DOHELP: CALL    SCHELP
         JR      MAINLP
 DOSAVE: CALL    SAVCFG
+        JR      MAINLP
+DOSEND: CALL    XSEND
+        CALL    TWAIT
+        JR      MAINLP
+DORECV: CALL    XRECV
+        CALL    TWAIT
         JR      MAINLP
 DOEXIT: CALL    CRLF
         LD      HL,MBYE
@@ -791,6 +845,10 @@ TESC:   CALL    CRLF
         JR      Z,TESCHL
         CP      'S'
         JR      Z,TESCST
+        CP      'U'
+        JR      Z,TESCU
+        CP      'D'
+        JR      Z,TESCD
         CALL    CRLF            ; anything else: back to the session
         JP      TLOOP
 TESCLI: LD      A,(ESCCH)
@@ -799,6 +857,12 @@ TESCLI: LD      A,(ESCCH)
 TESCHL: CALL    SCHELP
         JP      TLOOP
 TESCST: CALL    SCSETT
+        JP      TLOOP
+TESCU:  CALL    XSEND           ; transfer without leaving the session
+        CALL    TWAIT
+        JP      TLOOP
+TESCD:  CALL    XRECV
+        CALL    TWAIT
         JP      TLOOP
 TESCEX: CALL    CRLF
         LD      HL,MTEXIT
@@ -901,6 +965,579 @@ FCSI:   LD      A,E
         LD      (HL),0          ; final byte: sequence complete
         RET
 
+
+
+;=======================================================================
+; XMODEM
+;
+; Plain XMODEM: 128-byte blocks, CRC-16 with the checksum fallback a
+; vintage peer may insist on.  One 128-byte buffer serves as both the
+; protocol block and the CP/M record, because they are the same size -
+; that is why XMODEM and CP/M fit together so neatly, and it is what
+; keeps the memory cost of transfers to a single buffer.
+;
+; The CRC is computed a bit at a time rather than from a 512-byte table.
+; A table would cost more memory than the whole transfer code and buy
+; nothing: at 9600 baud a byte takes a millisecond and the CRC of one
+; takes microseconds, so the wire is the limit, not the arithmetic.
+;
+; Both directions run from the menu with the connection already up, so
+; the usual sequence is: dial in terminal mode, tell the far end what you
+; want, then press U or D here.  Leaving terminal mode does not hang up.
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; XSEND - send a file (upload to the far end).
+;
+; The receiver drives the start: it sends 'C' for CRC mode or NAK for
+; checksum, repeatedly, and we answer whichever arrives.  That is the
+; protocol's one piece of negotiation, and honouring it is what makes a
+; transfer work against both a modern peer and a 1980s one.
+;-----------------------------------------------------------------------
+XSEND:  CALL    XREADY          ; is a port selected at all?
+        RET     C
+        LD      HL,MXSFIL
+        CALL    PSTR
+        CALL    XFNAME
+        RET     C
+        LD      DE,XFCB         ; must exist to be sent
+        LD      C,BOPEN
+        CALL    BDOS
+        INC     A
+        JR      NZ,XSEND1
+        LD      HL,MXNOFIL
+        CALL    PSTR
+        RET
+XSEND1: LD      HL,MXWAIT
+        CALL    PSTR
+        CALL    XPURGE
+        LD      A,XRETRY
+        LD      (XCNT),A
+XSEND2: LD      A,XLONG         ; wait for the receiver to ask
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      NC,XSEND3
+        LD      A,(XCNT)        ; nothing yet: keep waiting a while
+        DEC     A
+        LD      (XCNT),A
+        JR      NZ,XSEND2
+        JP      XFAIL
+XSEND3: CP      CRCC
+        JR      Z,XSENDC
+        CP      NAK
+        JR      Z,XSENDK
+        CP      CAN
+        JP      Z,XABORT
+        JR      XSEND2          ; noise: keep listening
+XSENDC: LD      A,1             ; CRC mode
+        JR      XSEND4
+XSENDK: XOR     A               ; checksum mode
+XSEND4: LD      (XCRCM),A
+        LD      A,1
+        LD      (XBLK),A        ; XMODEM blocks start at 1
+        LD      HL,MXGO
+        CALL    PSTR
+
+;--- the per-record loop: read one CP/M record, send it, wait for ACK ---
+XSLOOP: LD      DE,XBUF
+        LD      C,BSETDMA
+        CALL    BDOS
+        LD      DE,XFCB
+        LD      C,BREADS
+        CALL    BDOS
+        OR      A
+        JR      NZ,XSDONE       ; no more records: end of file
+        LD      A,XRETRY
+        LD      (XCNT),A
+XSBLK:  CALL    XBLKSN          ; put the block on the wire
+        LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      C,XSBAD         ; no answer at all
+        CP      ACK
+        JR      Z,XSNEXT
+        CP      CAN
+        JP      Z,XABORT
+XSBAD:  LD      A,'?'           ; NAK, noise or silence: send it again
+        CALL    COUT
+        LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JR      NZ,XSBLK
+        JP      XFAIL
+XSNEXT: LD      A,'.'
+        CALL    COUT
+        LD      HL,XBLK
+        INC     (HL)            ; block numbers wrap at 256, as they must
+        JR      XSLOOP
+
+;--- end of file: EOT until acknowledged, then tidy up ---
+XSDONE: LD      A,XRETRY
+        LD      (XCNT),A
+XSEOT:  LD      A,EOT
+        CALL    PSEND
+        LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      C,XSEOT1
+        CP      ACK
+        JR      Z,XSOK
+XSEOT1: LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JR      NZ,XSEOT
+        JP      XFAIL
+XSOK:   LD      DE,XFCB
+        LD      C,BCLOSE
+        CALL    BDOS
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXSENT
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; XBLKSN - send the block in XBUF: header, 128 bytes, then the check.
+;-----------------------------------------------------------------------
+XBLKSN: LD      A,SOH
+        CALL    PSEND
+        LD      A,(XBLK)
+        CALL    PSEND
+        LD      A,(XBLK)
+        CPL                     ; the header carries the block number twice,
+        CALL    PSEND           ; the second time inverted
+        LD      HL,0            ; CRC accumulator
+        LD      (XCRC),HL
+        XOR     A
+        LD      (XSUM),A        ; checksum accumulator
+        LD      HL,XBUF
+        LD      B,128
+XBLKS1: LD      A,(HL)
+        CALL    PSEND
+        LD      A,(HL)
+        CALL    XACCUM          ; fold the byte into both checks
+        INC     HL
+        DEC     B
+        JR      NZ,XBLKS1
+        LD      A,(XCRCM)
+        OR      A
+        JR      Z,XBLKS2
+        LD      HL,(XCRC)       ; CRC-16, high byte first
+        LD      A,H
+        CALL    PSEND
+        LD      A,L
+        JP      PSEND
+XBLKS2: LD      A,(XSUM)
+        JP      PSEND
+
+;-----------------------------------------------------------------------
+; XRECV - receive a file (download from the far end).
+;
+; We drive the start here: 'C' every couple of seconds to ask for CRC
+; mode, and if the far end never answers, NAK for the rest of the
+; attempts - a peer too old to know CRC mode responds to that instead.
+;-----------------------------------------------------------------------
+XRECV:  CALL    XREADY
+        RET     C
+        LD      HL,MXRFIL
+        CALL    PSTR
+        CALL    XFNAME
+        RET     C
+        LD      DE,XFCB         ; refuse to clobber silently
+        LD      C,BSEARF
+        CALL    BDOS
+        INC     A
+        JR      Z,XRECV1
+        LD      HL,MXEXIST
+        CALL    PSTR
+        CALL    CIN
+        CALL    UPCASE
+        CP      'Y'
+        JR      Z,XRECVD
+        CALL    CRLF
+        LD      HL,MXKEEP
+        CALL    PSTR
+        RET
+XRECVD: LD      DE,XFCB
+        LD      C,BDELET
+        CALL    BDOS
+XRECV1: LD      DE,XFCB
+        LD      C,BMAKE
+        CALL    BDOS
+        INC     A
+        JR      NZ,XRECV2
+        LD      HL,MXNOMK       ; directory full, or a bad name
+        CALL    PSTR
+        RET
+XRECV2: LD      A,1
+        LD      (XCRCM),A       ; ask for CRC mode first
+        LD      A,1
+        LD      (XBLK),A
+        LD      HL,MXGO
+        CALL    PSTR
+        CALL    XPURGE
+        LD      A,XRETRY+XRETRY ; 'C' attempts, then NAK attempts
+        LD      (XCNT),A
+
+;--- ask for a block, then take whatever arrives ---
+XRLOOP: LD      A,(XCRCM)
+        OR      A
+        LD      A,CRCC
+        JR      NZ,XRL1
+        LD      A,NAK
+XRL1:   CALL    PSEND
+XRWAIT: LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      NC,XRGOT
+        LD      A,(XCNT)        ; silence: ask again, and after half the
+        DEC     A               ; attempts stop asking for CRC mode
+        LD      (XCNT),A
+        JP      Z,XFAILR
+        CP      XRETRY
+        JR      NZ,XRLOOP
+        XOR     A
+        LD      (XCRCM),A       ; fall back to checksum
+        JR      XRLOOP
+XRGOT:  CP      SOH
+        JR      Z,XRBLK
+        CP      EOT
+        JP      Z,XRDONE
+        CP      CAN
+        JP      Z,XABRTR
+        JR      XRWAIT          ; noise: keep waiting
+
+;--- a block header arrived: read it, check it, write it ---
+XRBLK:  LD      A,XSHORT        ; the rest of a block must arrive promptly
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      C,XRBAD
+        LD      (XGOTBL),A      ; block number as sent
+        CALL    XGETB
+        JP      C,XRBAD
+        LD      HL,XGOTBL       ; ...and its complement must agree
+        CPL
+        CP      (HL)
+        JP      NZ,XRBAD
+        LD      HL,0
+        LD      (XCRC),HL
+        XOR     A
+        LD      (XSUM),A
+        LD      HL,XBUF
+        LD      B,128
+XRB1:   CALL    XGETB
+        JR      C,XRBAD
+        LD      (HL),A
+        CALL    XACCUM
+        INC     HL
+        DEC     B
+        JR      NZ,XRB1
+        LD      A,(XCRCM)
+        OR      A
+        JR      Z,XRB2
+        CALL    XGETB           ; CRC-16: two bytes, high first
+        JR      C,XRBAD
+        LD      HL,(XCRC)
+        CP      H
+        JR      NZ,XRBAD
+        CALL    XGETB
+        JR      C,XRBAD
+        LD      HL,(XCRC)
+        CP      L
+        JR      NZ,XRBAD
+        JR      XRGOOD
+XRB2:   CALL    XGETB
+        JR      C,XRBAD
+        LD      HL,XSUM
+        CP      (HL)
+        JR      NZ,XRBAD
+
+;--- the block is sound: is it the one we expect? ---
+XRGOOD: LD      A,(XGOTBL)
+        LD      HL,XBLK
+        CP      (HL)
+        JR      Z,XRSAVE
+        DEC     (HL)            ; the previous block resent means our ACK
+        CP      (HL)            ; was lost: acknowledge again, do not save
+        INC     (HL)
+        JR      NZ,XRBAD        ; a different block entirely: out of step
+        LD      A,ACK
+        CALL    PSEND
+        JP      XRRSET
+XRSAVE: LD      DE,XBUF
+        LD      C,BSETDMA
+        CALL    BDOS
+        LD      DE,XFCB
+        LD      C,BWRITS
+        CALL    BDOS
+        OR      A
+        JR      NZ,XRDISK       ; disk full: stop rather than lose data
+        LD      A,ACK
+        CALL    PSEND
+        LD      A,'.'
+        CALL    COUT
+        LD      HL,XBLK
+        INC     (HL)
+XRRSET: LD      A,XRETRY        ; progress: a fresh budget of retries
+        LD      (XCNT),A
+        JP      XRWAIT
+
+;--- a bad block: drain the line, NAK, try again ---
+XRBAD:  LD      A,'?'
+        CALL    COUT
+        CALL    XPURGE
+        LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JP      Z,XFAILR
+        LD      A,NAK
+        CALL    PSEND
+        JP      XRWAIT
+
+;--- EOT: acknowledge, close, done ---
+XRDONE: LD      A,ACK
+        CALL    PSEND
+        LD      DE,XFCB
+        LD      C,BCLOSE
+        CALL    BDOS
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXRECVD
+        CALL    PSTR
+        RET
+
+XRDISK: CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXDISK
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; XACCUM - fold the byte in A into both the CRC and the checksum, so the
+; block loops need not care which check mode is in force.
+;
+; CRC-16 with polynomial 1021H, one bit at a time: the byte goes into the
+; high half of the accumulator, then eight shifts, XORing the polynomial
+; back in whenever a 1 falls off the top.
+;-----------------------------------------------------------------------
+XACCUM: PUSH    BC              ; the block loops count 128 bytes in B and
+        PUSH    HL              ; walk the buffer with HL; this routine needs
+        LD      E,A             ; both, so it borrows and gives them back
+        LD      HL,XSUM
+        ADD     A,(HL)
+        LD      (HL),A          ; checksum: a plain 8-bit sum
+        LD      HL,(XCRC)
+        LD      A,H
+        XOR     E
+        LD      H,A
+        LD      B,8
+XACC1:  ADD     HL,HL
+        JR      NC,XACC2
+        LD      A,H
+        XOR     10H
+        LD      H,A
+        LD      A,L
+        XOR     21H
+        LD      L,A
+XACC2:  DEC     B
+        JR      NZ,XACC1
+        LD      (XCRC),HL
+        POP     HL
+        POP     BC
+        LD      A,E
+        RET
+
+;-----------------------------------------------------------------------
+; XGETB - wait for a byte from the port.  Byte in A, carry clear; carry
+; set if nothing came within (XTMO) passes of a 65536-poll loop.
+;
+; A poll loop is the only clock a CP/M program can count on - there is no
+; timer service in CP/M 2.2 - so the wait is measured in polls, which
+; makes it faster on a faster machine.  That is acceptable here: both
+; bounds are generous multiples of the time a byte actually takes, and the
+; retry counts do the real work of bounding a transfer.
+;-----------------------------------------------------------------------
+XGETB:  PUSH    BC              ; BC is this routine's poll counter, and the
+        LD      A,(XTMO)        ; block loops are counting in B - hand it back
+        LD      (XTMOC),A
+XGETB0: LD      BC,0
+XGETB1: PUSH    BC
+        CALL    PST
+        POP     BC
+        JR      NZ,XGETB2
+        DEC     BC
+        LD      A,B
+        OR      C
+        JR      NZ,XGETB1
+        LD      A,(XTMOC)
+        DEC     A
+        LD      (XTMOC),A
+        JR      NZ,XGETB0
+        POP     BC
+        SCF                     ; nothing arrived
+        RET
+XGETB2: CALL    PIN
+        POP     BC
+        OR      A               ; carry clear: a byte is in A
+        RET
+
+;-----------------------------------------------------------------------
+; XPURGE - swallow whatever is still coming until the line goes quiet,
+; so a retry starts from a known state instead of half-way through the
+; block that just failed.
+;-----------------------------------------------------------------------
+XPURGE: LD      A,XSHORT
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      NC,XPURGE
+        RET
+
+;-----------------------------------------------------------------------
+; XREADY - refuse a transfer when no port is selected, with the same
+; wording the terminal uses, rather than "transferring" into nothing.
+;-----------------------------------------------------------------------
+XREADY: LD      A,(PKIND)
+        OR      A
+        RET     NZ              ; carry clear: good to go
+        CALL    CRLF
+        LD      HL,MNOPRT
+        CALL    PSTR
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XCANC / XABORT / XFAIL - the ways a transfer ends badly.  Two CANs are
+; how XMODEM says "stop"; one can be line noise, which is why the
+; protocol asks for two and why we send two.
+;-----------------------------------------------------------------------
+XCANC:  LD      A,CAN
+        CALL    PSEND
+        LD      A,CAN
+        JP      PSEND
+XABORT: CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXCAN
+        CALL    PSTR
+        RET
+XABRTR: CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXCAN
+        CALL    PSTR
+        RET
+XFAIL:  CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXFAIL
+        CALL    PSTR
+        RET
+XFAILR: CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXFAIL
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; XFNAME - prompt for a filename and build an FCB from it.
+;
+; Accepts an optional drive letter (B:PROG.COM), folds to upper case, and
+; pads the name and type with spaces the way CP/M expects.  Carry set if
+; the user typed nothing, so RETURN always means "never mind".
+;-----------------------------------------------------------------------
+XFNAME: LD      A,20            ; room for drive + 8.3 + slack
+        LD      (XLINE),A
+        LD      DE,XLINE
+        LD      C,BRDBUF
+        CALL    BDOS
+        CALL    CRLF
+        LD      A,(XLINE+1)     ; how many characters were typed
+        OR      A
+        JP      Z,XFNBAD
+        LD      B,A
+        LD      HL,XLINE+2
+        XOR     A               ; clear the FCB: drive 0, spaces, no extent
+        LD      (XFCB),A
+        LD      DE,XFCB+1
+        LD      A,' '
+        LD      C,11
+XFN1:   LD      (DE),A
+        INC     DE
+        DEC     C
+        JR      NZ,XFN1
+        XOR     A
+        LD      (XFCB+12),A
+        LD      (XFCB+13),A
+        LD      (XFCB+14),A
+        LD      (XFCB+15),A
+        LD      (XFCB+32),A     ; current record
+        ; a drive letter?
+        LD      A,B
+        CP      2
+        JR      C,XFN2
+        LD      A,(XLINE+3)
+        CP      ':'
+        JR      NZ,XFN2
+        LD      A,(XLINE+2)
+        CALL    UPCASE
+        SUB     'A'-1           ; FCB drive is 1-based (1 = A:)
+        LD      (XFCB),A
+        INC     HL
+        INC     HL
+        DEC     B
+        DEC     B
+        ; name, up to 8 characters, then the type after a dot
+XFN2:   LD      DE,XFCB+1
+        LD      C,8
+XFN3:   LD      A,B
+        OR      A
+        JR      Z,XFNOK
+        LD      A,(HL)
+        CP      '.'
+        JR      Z,XFN4
+        CALL    UPCASE
+        LD      (DE),A
+        INC     DE
+        INC     HL
+        DEC     B
+        DEC     C
+        JR      NZ,XFN3
+XFN3A:  LD      A,B             ; name full: skip to the dot
+        OR      A
+        JR      Z,XFNOK
+        LD      A,(HL)
+        INC     HL
+        DEC     B
+        CP      '.'
+        JR      NZ,XFN3A
+XFN4:   LD      A,(HL)          ; step over the dot itself
+        CP      '.'
+        JR      NZ,XFN5
+        INC     HL
+        DEC     B
+XFN5:   LD      DE,XFCB+9
+        LD      C,3
+XFN6:   LD      A,B
+        OR      A
+        JR      Z,XFNOK
+        LD      A,(HL)
+        CALL    UPCASE
+        LD      (DE),A
+        INC     DE
+        INC     HL
+        DEC     B
+        DEC     C
+        JR      NZ,XFN6
+XFNOK:  LD      A,(XFCB+1)      ; a name of nothing but spaces is no name
+        CP      ' '
+        JR      Z,XFNBAD
+        XOR     A               ; carry clear: the FCB is ready
+        RET
+XFNBAD: CALL    CRLF
+        LD      HL,MXNONAM
+        CALL    PSTR
+        SCF
+        RET
 
 ;=======================================================================
 ; SETTINGS PERSISTENCE
@@ -1450,7 +2087,7 @@ SCHELP: CALL    CRLF
 ;=======================================================================
 MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
 MRULE:  DB      '-------------------------',CR,LF,0
-MVER:   DB      'EGT80 v0.3  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
+MVER:   DB      'EGT80 v0.4  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
 
 MPORT:  DB      'Port: ',0
 MMODE:  DB      'Mode: ',0
@@ -1470,6 +2107,8 @@ MMENU:  DB      CR,LF
         DB      '  T  Terminal mode',CR,LF
         DB      '  P  Select serial port',CR,LF
         DB      '  S  Settings',CR,LF
+        DB      '  U  Upload a file   (XMODEM, to the far end)',CR,LF
+        DB      '  D  Download a file (XMODEM, from the far end)',CR,LF
         DB      '  H  Help',CR,LF
         DB      '  V  Save settings into EGT80.COM',CR,LF
         DB      '  X  Exit to CP/M',CR,LF
@@ -1531,7 +2170,7 @@ MESCIS: DB      'Menu key is now ',0
 MTERM:  DB      'Terminal mode.  Press ',0
 MTERM2: DB      ' for the menu.',CR,LF,CR,LF,0
 MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
-MESCMN: DB      'E)xit  H)elp  S)ettings  (again to send the key): ',0
+MESCMN: DB      'E)xit H)elp S)et U)pload D)ownload (twice=send): ',0
 MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
         DB      'Press P at the menu and pick the one your',CR,LF
         DB      'machine uses.',CR,LF,0
@@ -1541,6 +2180,22 @@ MDEAD:  DB      'Nothing was sent: the port did not accept the',CR,LF
 MDEAD2: DB      'Either no serial chip answers at that address,',CR,LF
         DB      'or it is held off by flow control.  Press P at',CR,LF
         DB      'the menu to pick a different port.',CR,LF,0
+
+MXSFIL: DB      CR,LF,'Send which file? ',0
+MXRFIL: DB      CR,LF,'Receive as which file? ',0
+MXNONAM: DB     'No filename given - nothing done.',CR,LF,0
+MXNOFIL: DB     CR,LF,'No such file on that drive.',CR,LF,0
+MXEXIST: DB     CR,LF,'That file already exists.  Overwrite (Y/N)? ',0
+MXKEEP: DB      'Kept the existing file - nothing done.',CR,LF,0
+MXNOMK: DB      CR,LF,'Could not create the file (directory full?).',CR,LF,0
+MXWAIT: DB      CR,LF,'Waiting for the other end to start receiving...',CR,LF,0
+MXGO:   DB      CR,LF,'Transferring ( . = block, ? = retry )',CR,LF,0
+MXSENT: DB      'Sent.',CR,LF,0
+MXRECVD: DB     'Received.',CR,LF,0
+MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF
+        DB      'Nothing was saved from an incomplete download.',CR,LF,0
+MXCAN:  DB      'The other end cancelled the transfer.',CR,LF,0
+MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
 MSAVED: DB      'Settings saved into EGT80.COM.',CR,LF,0
 MSAVERR: DB     'Could not save: EGT80.COM must be on the current',CR,LF
@@ -1614,8 +2269,11 @@ MHELP3: DB      'Help - two things to know',CR,LF
         DB      'your system has moved the internal I/O base away',CR,LF
         DB      'from 00, set that base first with B on the ASCI',CR,LF
         DB      'menu, then pick the channel.',CR,LF,CR,LF
-        DB      'File transfer arrives in the next build; until then',CR,LF
-        DB      'use the gateway to move files.',CR,LF,0
+        DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF
+        DB      'with the checksum fallback an older peer may want.',CR,LF
+        DB      'Start the far end first, then press U or D - from',CR,LF
+        DB      'the menu or from the terminal-mode menu key, which',CR,LF
+        DB      'does not hang up.  A dot is a block, a ? a retry.',CR,LF,0
 
 ;=======================================================================
 ; VECTORS AND VARIABLES
@@ -1640,6 +2298,17 @@ PTRIES: DB      0               ; PSEND give-up counter
 PDEAD:  DB      0               ; set when the transmitter never freed
 TYPECH: DB      0               ; byte in flight in TSEND
 HEXACC: DB      0               ; high nibble held while HEXASK reads the low
+XBLK:   DB      0               ; block number being sent / expected
+XGOTBL: DB      0               ; block number as it arrived
+XCRCM:  DB      0               ; non-zero = CRC mode, zero = checksum
+XCRC:   DW      0               ; CRC-16 accumulator
+XSUM:   DB      0               ; checksum accumulator
+XCNT:   DB      0               ; retries left
+XTMO:   DB      0               ; XGETB timeout, in 65536-poll passes
+XTMOC:  DB      0               ; ...and its working copy
+XLINE:  DS      24              ; console line buffer for a filename
+XFCB:   DS      36              ; FCB for the file being transferred
+XBUF:   DS      128             ; the block, which is also the CP/M record
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 
