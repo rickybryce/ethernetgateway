@@ -282,6 +282,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist entirely) as an operator's only way in; the narrow rule is now the
   opt-in. Loopback is exempt either way, public addresses are still refused, and
   the toggle applies on the next connection with no restart.
+- **A slave's log now tells the whole story.** Each attempt to reach the master
+  is logged with its number (`announcing to master 10.1.2.3:2223 as 'relay'
+  (attempt 5)`), so a slave that cannot connect no longer looks identical to one
+  sitting idle — previously the failure reason was deduped (rightly, it repeats
+  forever) and nothing showed the retries still happening. On success there is a
+  plain `CONNECTED to master …` line followed by one consolidated block naming
+  every port, the mode it is in, and what the link is doing:
+
+  ```
+  Slave link to master 10.1.2.3:2223 —
+      Port A  mode=modem   registered — awaiting a pick from the master
+      Port B  mode=kermit  bridging — a master user is attached
+      CPM       emulator  announced — dialable as CPM@this-host
+  ```
+
+  Disabled ports are listed as disabled rather than omitted, because "why is
+  port B missing?" is exactly what a summary should answer. The CP/M announcer
+  also gained what the serial loops already had: its failure reason is now
+  logged (it used to be discarded, leaving identical lines with nothing to act
+  on) and its retry backs off 1s→30s instead of hammering a dead master once a
+  second.
+- **EGT80: `^C` backs out of every menu**, not just the notice screens — the port
+  family list, all four per-family prompts, and Settings — so one habit works
+  everywhere. `Q` still does the same, and the menus say so.
 
 ### Fixed
 - **The CP/M virtual modem no longer chokes on `CR NUL` line endings.** An NVT

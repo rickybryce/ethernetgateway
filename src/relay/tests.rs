@@ -437,6 +437,42 @@ async fn test_claim_remote_peer_activates() {
 /// its labels are stable (the status screen prints them).  Uses port index
 /// 1 (B) so it can't race another test on index 0.
 #[test]
+fn test_cpm_announced_flag_roundtrips() {
+    use super::{set_cpm_announced, log_slave_link_summary};
+    // The flag drives what the summary claims about the CP/M endpoint, so a
+    // stale `true` would have the log advertising something the master cannot
+    // reach.  Round-trip it, and prove the summary runs in both states without
+    // touching config that isn't there (it reads the live config singleton).
+    set_cpm_announced(true);
+    log_slave_link_summary("192.0.2.10", 2223);
+    set_cpm_announced(false);
+    log_slave_link_summary("192.0.2.10", 2223);
+}
+
+#[test]
+fn test_slave_link_summary_names_every_port_and_its_mode() {
+    use super::{log_slave_link_summary, set_slave_link, SlaveLinkState};
+    use crate::logger;
+    // The point of the summary is that one glance answers "what can the master
+    // reach?", so every port must appear with its mode and state — including a
+    // port that is down, since "why is B missing?" is the question a summary
+    // exists to answer.
+    set_slave_link(0, SlaveLinkState::Registered);
+    set_slave_link(1, SlaveLinkState::Bridging);
+    logger::init();
+    log_slave_link_summary("10.1.2.3", 2223);
+    let joined = logger::snapshot(64).join("\n");
+    assert!(joined.contains("Slave link to master 10.1.2.3:2223"), "{joined}");
+    assert!(joined.contains("Port A"), "port A missing: {joined}");
+    assert!(joined.contains("Port B"), "port B missing: {joined}");
+    assert!(joined.contains("mode="), "modes missing: {joined}");
+    assert!(joined.contains("registered"), "state missing: {joined}");
+    assert!(joined.contains("bridging"), "state missing: {joined}");
+    set_slave_link(0, SlaveLinkState::Down);
+    set_slave_link(1, SlaveLinkState::Down);
+}
+
+#[test]
 fn test_slave_link_state_roundtrip() {
     use super::{set_slave_link, slave_link_state, SlaveLinkState};
     for st in [

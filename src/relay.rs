@@ -897,6 +897,54 @@ pub fn set_slave_link(port_index: usize, state: SlaveLinkState) {
 }
 
 /// Read a slave port's current link state.
+/// True while this gateway is the one announcing its CP/M emulator to the
+/// master as the dialable `CPM` endpoint.  Set by the announcer task; read for
+/// the slave-link summary so the log shows the emulator alongside the ports.
+static CPM_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the CP/M endpoint is currently announced to the master.
+pub fn set_cpm_announced(on: bool) {
+    CPM_ANNOUNCED.store(on, Ordering::SeqCst);
+}
+
+/// Log one consolidated picture of the slave link.
+///
+/// A slave's log used to be a scatter of per-port lines, which answered "did
+/// port B register?" but never "am I connected, and what does the master
+/// actually see?".  This prints the whole state in one block whenever it
+/// changes, naming each port, the mode it is in, and what the link is doing —
+/// so an operator reading the log terminal can tell at a glance what the master
+/// can reach.  Ports that are disabled or not in slave-relay mode are listed as
+/// such rather than omitted, because "why is port B missing?" is exactly the
+/// question a summary should answer.
+pub fn log_slave_link_summary(host: &str, port: u16) {
+    let cfg = crate::config::get_config();
+    let mut lines: Vec<String> = Vec::new();
+    for (idx, (label, pc)) in [("A", &cfg.serial_a), ("B", &cfg.serial_b)]
+        .into_iter()
+        .enumerate()
+    {
+        let state = slave_link_state(idx);
+        let detail = match state {
+            SlaveLinkState::Registered => "registered — awaiting a pick from the master",
+            SlaveLinkState::Bridging => "bridging — a master user is attached",
+            SlaveLinkState::Connecting => "connecting to the master",
+            SlaveLinkState::Down if !pc.enabled => "port disabled",
+            SlaveLinkState::Down => "down — not connected to the master",
+        };
+        lines.push(format!("    Port {label}  mode={:<7} {detail}", pc.mode));
+    }
+    if CPM_ANNOUNCED.load(Ordering::SeqCst) {
+        lines.push("    CPM       emulator  announced — dialable as CPM@this-host".to_string());
+    } else if cfg.cpm_emu_enabled {
+        lines.push("    CPM       emulator  not announced (needs allow_peer_dial)".to_string());
+    }
+    glog!("Slave link to master {}:{} —", host, port);
+    for l in lines {
+        glog!("{}", l);
+    }
+}
+
 pub fn slave_link_state(port_index: usize) -> SlaveLinkState {
     SLAVE_LINK
         .get(port_index)

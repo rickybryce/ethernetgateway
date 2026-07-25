@@ -200,7 +200,8 @@ somewhere odd. The screen also names the port currently in force, since "which
 port am I on?" is why most people open that menu. A Rust test fails the build if
 this default and the gateway's ever drift apart.
 
-**`^C`** gets you out. Settings and port changes take effect immediately, but
+**`^C`** gets you out — of any menu (the port list, every per-family prompt,
+Settings) as well as the notice screens. Settings and port changes take effect immediately, but
 they are only written to the file on `V`, and until then the menu says
 `(changed — press V to keep it for next time)` — without that, "my settings
 aren't saving" is the obvious conclusion. And where a message appears *while you

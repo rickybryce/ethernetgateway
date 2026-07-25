@@ -1423,6 +1423,7 @@ fn console_slave_register_tick(
     // "log the outage once" dedupe so a persistent failure neither hammers
     // the master nor floods the log.
     let mut net_backoff = RECONNECT_BACKOFF_MIN;
+    let mut attempt: u32 = 0; // reconnect attempts since the last success
     let mut last_outage: Option<String> = None;
 
     loop {
@@ -1451,6 +1452,20 @@ fn console_slave_register_tick(
             }
         };
 
+        // Every attempt is logged, not just the failures.  A slave that cannot
+        // reach its master used to look identical to one sitting idle: the
+        // outage reason is deduped (rightly — it would repeat forever), so
+        // nothing showed the retries still happening.  The attempt number and
+        // the growing backoff make the progression visible.
+        attempt = attempt.saturating_add(1);
+        glog!(
+            "Serial console (Port {}): connecting to master {}:{} as '{}' (attempt {})",
+            label,
+            host,
+            mport,
+            user,
+            attempt
+        );
         let connected = handle.block_on(async {
             crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
         });
@@ -1500,11 +1515,15 @@ fn console_slave_register_tick(
         }
         last_outage = None;
         net_backoff = RECONNECT_BACKOFF_MIN;
+        attempt = 0; // connected: the next outage starts its own count
         crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Registered);
         glog!(
-            "Serial console (Port {}): registered with master; awaiting pick",
-            label
+            "Serial console (Port {}): CONNECTED to master {}:{} and registered",
+            label,
+            host,
+            mport
         );
+        crate::relay::log_slave_link_summary(&host, mport);
 
         let crate::relay::MasterRelay {
             _session,
@@ -1581,6 +1600,7 @@ fn modem_slave_announce_tick(
     let aborted =
         |idx: usize| shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst);
     let mut net_backoff = RECONNECT_BACKOFF_MIN;
+    let mut attempt: u32 = 0; // reconnect attempts since the last success
     let mut last_outage: Option<String> = None;
 
     loop {
@@ -1606,6 +1626,15 @@ fn modem_slave_announce_tick(
         let pass = cfg.slave_master_password.clone();
         let label = id.label();
 
+        attempt = attempt.saturating_add(1);
+        glog!(
+            "Serial modem (Port {}): announcing to master {}:{} as '{}' (attempt {})",
+            label,
+            host,
+            mport,
+            user,
+            attempt
+        );
         let connected = handle.block_on(async {
             crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
         });
@@ -1799,6 +1828,9 @@ async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
 /// per-session endpoint rather than a fixed port — spawned by the CP/M driver
 /// (already on the tokio runtime) and stopped via `stop` when the shell exits.
 pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
+    let mut attempt: u32 = 0; // announce attempts since the last success
+    let mut backoff = RECONNECT_BACKOFF_MIN; // grows while the master is away
+    let mut last_err: Option<String> = None; // so one reason logs once
     loop {
         if stop.load(Ordering::SeqCst) {
             return;
@@ -1812,9 +1844,26 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
         let user = cfg.slave_master_username.clone();
         let pass = cfg.slave_master_password.clone();
 
+        attempt = attempt.saturating_add(1);
+        glog!(
+            "CP/M emulator: announcing to master {}:{} as '{}' (attempt {})",
+            host,
+            mport,
+            user,
+            attempt
+        );
         match crate::relay::connect_master_register(&host, mport, &user, &pass, "CPM").await {
             Ok(crate::relay::MasterRelay { _session, mut stream }) => {
-                glog!("CP/M emulator: announced to master {}:{} for peer-dial (CPM@)", host, mport);
+                attempt = 0; // connected: a later outage counts from one again
+                backoff = RECONNECT_BACKOFF_MIN;
+                last_err = None;
+                crate::relay::set_cpm_announced(true);
+                glog!(
+                    "CP/M emulator: CONNECTED to master {}:{} — dialable as CPM@this-host",
+                    host,
+                    mport
+                );
+                crate::relay::log_slave_link_summary(&host, mport);
                 match cpm_wait_activate(&mut stream, &stop).await {
                     CpmActivate::Activated => {
                         glog!("CP/M emulator: remote peer-dial in — ringing local endpoint");
@@ -1847,10 +1896,31 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                     }
                 }
             }
-            Err(_) => {
-                cpm_announce_backoff(&stop, RECONNECT_BACKOFF_MIN).await;
+            Err(e) => {
+                // Say WHY, once per distinct reason: repeating it every retry
+                // buries the log, but discarding it (as this used to) leaves an
+                // operator watching identical lines with nothing to act on.
+                let msg = e.to_string();
+                if should_log_outage(&last_err, &msg) {
+                    glog!(
+                        "CP/M emulator: master {}:{} unreachable: {} — retrying, backing off to {}s",
+                        host,
+                        mport,
+                        msg,
+                        backoff.as_secs().max(1)
+                    );
+                    last_err = Some(msg);
+                }
+                cpm_announce_backoff(&stop, backoff).await;
+                backoff = next_network_backoff(backoff);
             }
         }
+        // The announcement is over however that arm ended — the call finished,
+        // the channel closed, or the connect failed.  Clearing the flag here
+        // rather than in each arm is what keeps the slave-link summary honest:
+        // a stale "announced" would have it reporting an endpoint the master
+        // can no longer reach.
+        crate::relay::set_cpm_announced(false);
     }
 }
 

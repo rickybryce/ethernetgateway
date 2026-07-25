@@ -2100,6 +2100,8 @@ SCPOR1: CALL    CIN
         JR      Z,SCPONO
         CP      'Q'
         RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
         LD      A,BEL
         CALL    COUT
         JR      SCPOR1
@@ -2148,6 +2150,8 @@ SCPSI1: CALL    CIN
         JR      Z,SCPSBA
         CP      'Q'
         RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
         LD      A,BEL
         CALL    COUT
         JR      SCPSI1
@@ -2181,6 +2185,8 @@ SCPAC1: CALL    CIN
         CP      'B'
         JR      Z,SCPABA
         CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
@@ -2219,6 +2225,8 @@ SCPHB2: CALL    CIN
         CALL    UPCASE
         CP      'Q'
         RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
         SUB     '0'
         CP      4               ; units 0-3
         JR      C,SCPHBS
@@ -2252,6 +2260,8 @@ SCPAS1: CALL    CIN
         CP      'B'
         JR      Z,SCPASB
         CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
@@ -2356,6 +2366,8 @@ SCSET1: CALL    CIN
         JR      Z,CYCESC
         CP      'Q'
         RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
         LD      A,BEL
         CALL    COUT
         JR      SCSET1
@@ -2458,7 +2470,7 @@ MPORTS: DB      'Select serial port',CR,LF
         DB      '  5  CP/M AUX:     - portable fallback, see Help',CR,LF
         DB      '  D  Default - Z80 SIO/2 board 1 ch B, 82/83',CR,LF
         DB      '  N  None',CR,LF
-        DB      '  Q  Leave unchanged',CR,LF
+        DB      '  Q  Leave unchanged  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MPDEF:  DB      'Back to the default port.',CR,LF,0
 MPNOW:  DB      'Currently selected: ',0
@@ -2468,13 +2480,13 @@ MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
         DB      '  3  board 2 channel A - 84/85',CR,LF
         DB      '  4  board 2 channel B - 86/87',CR,LF
         DB      '  B  some other address',CR,LF
-        DB      '  Q  Back',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MPACIM: DB      '6850 ACIA port',CR,LF
         DB      '  1  88-2SIO port 1 - 10/11',CR,LF
         DB      '  2  88-2SIO port 2 - 12/13',CR,LF
         DB      '  B  some other address',CR,LF
-        DB      '  Q  Back',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MPHBM:  DB      'RomWBW HBIOS serial unit (0-3), Q to go back: ',0
 MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
@@ -2486,7 +2498,7 @@ MPASCM: DB      'Z180 ASCI channel',CR,LF
         DB      '  0  channel 0',CR,LF
         DB      '  1  channel 1',CR,LF
         DB      '  B  set the internal I/O base first',CR,LF
-        DB      '  Q  Back',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MAUXW:  DB      'CP/M AUX: selected.  Note that CP/M 2.2 has no way',CR,LF
         DB      'to ask whether a byte is waiting, so this family',CR,LF
@@ -2503,7 +2515,7 @@ MSETT2: DB      CR,LF
         DB      '  E  Local echo on / off',CR,LF
         DB      '  L  Send LF after a typed CR',CR,LF
         DB      '  K  Change the menu key',CR,LF
-        DB      '  Q  Back',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MESCIS: DB      'Menu key is now ',0
 
