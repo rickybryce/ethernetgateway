@@ -75,6 +75,11 @@ jobs:
           mkdir -p "dist/${NAME}"
           cp "target/${{ matrix.target }}/release/ethernetgateway" "dist/${NAME}/"
           cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
+          # EGT80.COM is also compiled into the binary (it lands on CP/M
+          # drive A: by itself), but ship the loose file too: it is what you
+          # send to a real CP/M machine over XMODEM, and it should not require
+          # starting the emulator to get at.
+          cp EGT80/EGT80.COM "dist/${NAME}/" 2>/dev/null || true
           tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
           echo "ARTIFACT=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
 
@@ -87,6 +92,8 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\ethernetgateway.exe" "dist\$name\"
           if (Test-Path "README.md") { Copy-Item "README.md" "dist\$name\" }
           if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist\$name\" }
+          # See the tar.gz step: shipped loose as well as compiled in.
+          if (Test-Path "EGT80\EGT80.COM") { Copy-Item "EGT80\EGT80.COM" "dist\$name\" }
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
 

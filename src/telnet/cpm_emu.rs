@@ -68,6 +68,19 @@ const CPM_RUN_BATCH: u64 = 200_000;
 /// Highest emulated drive letter (A:–P:, the 16 drives CP/M 2.2 allows).
 const CPM_LAST_DRIVE: u8 = b'P';
 
+/// EGT80, the gateway's own CP/M terminal, carried inside the binary and
+/// placed on drive A: when the drive folders are created (see
+/// [`TelnetSession::cpmemu_place_egt80`]).  It is built from `EGT80/EGT80.Z80`
+/// by that directory's Makefile; `include_bytes!` means a release ships one
+/// file and the terminal is simply *there* when someone first opens the
+/// emulator, rather than being something they have to find and upload.
+const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
+/// Filename EGT80 is placed under.  It is also the name EGT80 looks for when
+/// saving its settings (CP/M never tells a program its own name, so the name
+/// is compiled into it) — renaming the file costs the user that feature.
+const EGT80_NAME: &str = "EGT80.COM";
+
 /// Outcome of a single console-input read while a program runs.
 enum ConIn {
     /// A translated data byte to hand to the guest.
@@ -213,7 +226,39 @@ impl TelnetSession {
             p.push((drive as char).to_string());
             tokio::fs::create_dir_all(&p).await?;
         }
+        self.cpmemu_place_egt80(&cfg.transfer_dir).await;
         Ok(())
+    }
+
+    /// Put EGT80 on drive A: if it is not already there.
+    ///
+    /// **Only when absent, never overwriting.** EGT80 saves its settings — the
+    /// selected serial port, the ANSI/ASCII choice, the menu key — into a patch
+    /// area inside its own `.COM` file, so refreshing the copy on every launch
+    /// would silently throw away the user's configuration. It also means a user
+    /// may deliberately keep an older build, or their own build with different
+    /// defaults. Deleting the file restores the shipped copy on the next launch,
+    /// which is the documented way to get back to a known state.
+    ///
+    /// A failure here is logged and ignored rather than propagated: not having
+    /// the bundled terminal is a missing convenience, and it must not stop
+    /// someone from reaching a CP/M prompt to run their own software.
+    async fn cpmemu_place_egt80(&mut self, transfer_dir: &str) {
+        let mut path = PathBuf::from(transfer_dir);
+        path.push("CPM");
+        path.push("A");
+        path.push(EGT80_NAME);
+        if tokio::fs::metadata(&path).await.is_ok() {
+            return; // already there — leave it, settings and all
+        }
+        match tokio::fs::write(&path, EGT80_COM).await {
+            Ok(()) => glog!(
+                "CP/M: placed the bundled {} ({} bytes) on drive A:",
+                EGT80_NAME,
+                EGT80_COM.len()
+            ),
+            Err(e) => glog!("CP/M: could not place {} on drive A: {}", EGT80_NAME, e),
+        }
     }
 
     /// The Rust CCP-lite command loop.  Prints the `A>` prompt, reads a
@@ -1355,5 +1400,74 @@ impl TelnetSession {
             0x0E, 0x00, // LD C,0
             0xCD, 0x05, 0x00, // CALL 5
         ]
+    }
+}
+
+#[cfg(test)]
+mod egt80_tests {
+    use super::{EGT80_COM, EGT80_NAME};
+
+    /// The committed `EGT80.COM` is a build artifact of `EGT80/EGT80.Z80`, and
+    /// CI cannot rebuild it: that needs SLR's `Z80ASM.COM` and `zxcc`, neither
+    /// of which is in this repository (the assembler is third-party, and is
+    /// deliberately not vendored).  So the risk is drift — a source edit whose
+    /// binary was never rebuilt.
+    ///
+    /// These checks close most of that gap without any tooling: they compare
+    /// the *shape* of the binary against what the source says it must be, and
+    /// the version string against the one the source prints.  What they cannot
+    /// catch is a code change made without touching the version — the local
+    /// `make` (which assembles with three period assemblers) remains the real
+    /// gate, and `make check` should be run before a release cut.
+    #[test]
+    fn test_bundled_egt80_looks_like_a_com_file() {
+        assert!(!EGT80_COM.is_empty(), "EGT80.COM is empty — was it built?");
+        assert_eq!(
+            EGT80_COM.len() % 128,
+            0,
+            "a CP/M .COM is a whole number of 128-byte records; got {}",
+            EGT80_COM.len()
+        );
+        // The first instruction is `JP BEGIN`, jumping over the settings
+        // patch area that follows it.
+        assert_eq!(EGT80_COM[0], 0xC3, "should start with a JP instruction");
+        assert_eq!(EGT80_NAME, "EGT80.COM");
+    }
+
+    #[test]
+    fn test_bundled_egt80_has_its_settings_block_where_the_save_expects_it() {
+        // EGT80 rewrites exactly one record of its own file to save settings,
+        // and that record number is compiled into it: the block sits at 0180H,
+        // which is file offset 0x80 — record 1.  If the layout ever moves, the
+        // save would rewrite the wrong part of the program, so pin it here.
+        const OFFSET: usize = 0x80;
+        assert!(EGT80_COM.len() > OFFSET + 8);
+        assert_eq!(
+            &EGT80_COM[OFFSET..OFFSET + 8],
+            b"EGT80CFG",
+            "settings signature must sit at file offset 0x80 (record 1)"
+        );
+    }
+
+    #[test]
+    fn test_bundled_egt80_matches_the_version_in_its_source() {
+        // Catches the realistic mistake: bumping the version in EGT80.Z80 and
+        // committing without rebuilding EGT80.COM.
+        let src = include_str!("../../EGT80/EGT80.Z80");
+        let line = src
+            .lines()
+            .find(|l| l.trim_start().starts_with("MVER:"))
+            .expect("EGT80.Z80 should declare its version in MVER");
+        let quoted: Vec<&str> = line.split('\'').collect();
+        let version = quoted
+            .get(1)
+            .expect("MVER should contain a quoted version string");
+        assert!(
+            EGT80_COM
+                .windows(version.len())
+                .any(|w| w == version.as_bytes()),
+            "the built EGT80.COM does not contain the source's version string \
+             ({version:?}) — rebuild it with `make -C EGT80`"
+        );
     }
 }

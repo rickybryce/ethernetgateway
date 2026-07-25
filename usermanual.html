@@ -2475,12 +2475,24 @@ works with <em>any</em> profile enabled, so <code>aux</code> and
 <p>
 Every terminal in the table above was built for one machine&rsquo;s serial port,
 which is why choosing the profile is guesswork until it works.
-<strong><code>EGT80.COM</code></strong>, in the <code>EGT80/</code> directory of
-the gateway&rsquo;s source tree, asks instead: it presents a menu, you pick the
-port, and it remembers. It is written in Z80 assembly for real CP/M hardware as
-much as for this emulator, runs on CP/M&nbsp;2.2 and CP/M&nbsp;3, and assembles
-with period tooling (SLR&nbsp;Z80ASM, M80, ZMAC) so it can be rebuilt on the
-target machine.
+<strong><code>EGT80.COM</code></strong> asks instead: it presents a menu, you
+pick the port, and it remembers. It is written in Z80 assembly for real CP/M
+hardware as much as for this emulator, runs on CP/M&nbsp;2.2 and CP/M&nbsp;3, and
+assembles with period tooling (SLR&nbsp;Z80ASM, M80, ZMAC) so it can be rebuilt
+on the target machine.
+</p>
+
+<p>
+<strong>It is already there.</strong> EGT80 is carried inside the gateway binary
+and placed on CP/M drive&nbsp;A: the first time the emulator creates its drive
+folders, so <code>DIR</code> shows it and typing <code>EGT80</code> runs it with
+nothing to install. The copy on A: is <em>never</em> overwritten afterwards,
+because EGT80 saves its settings inside its own file &mdash; refreshing it would
+throw away the port you chose. Delete it and the next launch puts the shipped
+copy back, which is the way to return to a known state. Each release also ships
+<code>EGT80.COM</code> as a loose file in the archive, which is the copy to send
+to a real CP/M machine over XMODEM (from QTERM use <code>xk</code>; never Kermit,
+which is text&#8209;only there and would truncate it).
 </p>
 
 <p>

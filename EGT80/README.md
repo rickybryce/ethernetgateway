@@ -30,6 +30,21 @@ menu, dialled from inside EGT80: a file uploaded from CP/M arrived byte-identica
 matched the original for its whole length with `^Z` padding to the block
 boundary — which is what CP/M's record granularity means for XMODEM.
 
+## Getting it
+
+Nothing to install: EGT80 is compiled into the gateway binary and placed on CP/M
+drive A: when the emulator first creates its drive folders. `DIR` shows it, and
+typing `EGT80` runs it.
+
+That copy is **never overwritten** afterwards. EGT80 stores its settings inside
+its own `.COM`, so replacing the file on each launch would silently discard the
+port you chose — and you may be deliberately running an older or locally-modified
+build. Delete it if you want the shipped copy back on the next launch.
+
+Each release archive also carries `EGT80.COM` as a loose file: that is the copy to
+send to real CP/M hardware over XMODEM (from QTERM use `xk`, never Kermit — it is
+text-only there and truncates binaries at the first `^Z`).
+
 ## Building
 
 ```sh
@@ -71,6 +86,18 @@ style, so please keep to it:
 
 `make check` after any edit. The gates exist because these limits are easy to
 break by accident and impossible to notice in a modern assembler.
+
+**CI cannot rebuild this.** Assembling needs SLR's `Z80ASM.COM` and `zxcc`, and
+neither is in the repository — the assembler is third-party software we do not
+vendor. So `EGT80.COM` is a committed artifact, and the risk is drift: a source
+edit whose binary was never rebuilt. Three unit tests in `src/telnet/cpm_emu.rs`
+close most of that gap with no tooling at all — they check the bundled binary is
+a whole number of 128-byte records, starts with the `JP` over the patch area,
+carries the `EGT80CFG` signature at file offset `0x80` (where the save routine
+rewrites record 1), and contains the version string that `EGT80.Z80` declares.
+The last one catches the realistic mistake of bumping the version without
+rebuilding. What they *cannot* catch is a code change made without touching the
+version, so run `make` (and `make check`) before a release cut.
 
 ## Design
 
