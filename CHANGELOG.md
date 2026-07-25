@@ -91,16 +91,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay has no serial driver at all, and pairing one with the wrong port
   produces silence rather than an error. `EGT80.COM` (new `EGT80/` directory,
   Z80 assembly, CP/M 2.2 and CP/M 3) asks instead: a menu picks the port at run
-  time. Phase 1 ships the console layer (BIOS vectors on 2.2, BDOS 6 on 3,
-  decided once at startup), the menu/help screens, terminal mode with an
+  time, from **five families** — Z80 SIO/2, 6850 ACIA, RomWBW HBIOS (`RST 8`),
+  Z180 ASCI and the CP/M `AUX:` device — with a free-form address entry for
+  boards at unusual ports. It carries a console layer chosen once at startup
+  (BIOS vectors on 2.2, BDOS 6 on 3), menus and help written for someone who
+  does not yet know which port their machine uses, terminal mode with an
   escape-key menu, an ANSI/ASCII inbound filter (pass escape sequences through,
-  or strip CSI sequences and the high bit for a dumb console), and the Z80 SIO/2
-  driver; four more drivers (6850 ACIA, RomWBW HBIOS, Z180 ASCI, BDOS AUX),
-  saved settings and XMODEM follow. Built by running the real period assembler
-  (SLR `Z80ASM`) under `zxcc`, so SLR80 compatibility is structural rather than
-  hoped for, with M80+L80 and ZMAC as portability gates. A wrong port selection
-  is diagnosed instead of hanging: the send wait is bounded and terminal mode
-  names the port and explains what happened.
+  or strip them and the high bit for a printing terminal), **settings saved into
+  its own `.COM`** (a 128-byte-aligned patch area rewritten with a
+  random-record write, signature- and range-checked at startup and falling back
+  to defaults if damaged), and **XMODEM transfer both ways** — 128-byte blocks,
+  CRC-16 with the checksum fallback an older peer may insist on, one buffer
+  serving as both protocol block and CP/M record, abortable with a keypress, and
+  refusing to leave a partial file behind when a download fails.
+
+  **Shipped ready to use:** the `.COM` is compiled into the gateway binary and
+  placed on CP/M drive A: when the emulator first creates its drive folders, so
+  it is simply there. That copy is never overwritten afterwards, because the
+  settings live inside it; deleting it restores the shipped copy. Release
+  archives also carry the loose `EGT80.COM` for sending to real hardware.
+
+  Built by running the real period assembler (SLR `Z80ASM`) under `zxcc`, so
+  SLR80 compatibility is structural rather than hoped for, with M80+L80 and ZMAC
+  as portability gates. Wrong choices are diagnosed rather than left to hang: a
+  port that never accepts a byte is named and explained, HBIOS is refused on a
+  machine with no `RST 8` vector, and the Z180 ASCI family is refused on a
+  processor that is not a Z180 (`MLT` tells them apart). Two paths cannot be
+  exercised by any test here and are documented as reasoned-not-run: the Z180
+  ASCI driver (our Z80 core has no `IN0`/`OUT0`) and the CP/M 3 console path.
   - **Virtual modem — RomWBW HBIOS access (`hbios_1` / `hbios_2`).** Some CP/M
     comms software doesn't drive a UART at all: software built for RomWBW asks
     the firmware to move the byte, issuing an `RST 8` with a function number in
