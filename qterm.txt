@@ -108,13 +108,51 @@ What works against THIS gateway
 The gateway supports XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, and Punter.
 The overlap you can actually use from QTERM:
 
-    YES:  XMODEM (x), XMODEM-1K (xk), YMODEM (xy), Kermit (k)
+    YES:  XMODEM (x), XMODEM-1K (xk), YMODEM (xy)
     NO:   ZMODEM and Punter  -- the gateway has them, QTERM does not.
     AVOID: MODEM7 (xb) -- the gateway's receiver auto-detects YMODEM's block-0
            filename header, not MODEM7's batch scheme.  Use x / xk / xy instead.
+    AVOID: Kermit (k) -- it works, but it TRUNCATES BINARY FILES.  Text only.
+           See the next block.  Use xk for anything that is not plain text.
 
 Recommended default for an upload:  xk  (XMODEM-1K) -- the gateway auto-detects
-the 1K blocks and it is noticeably faster than plain XMODEM.
+the 1K blocks and it is noticeably faster than plain XMODEM.  Use XMODEM (or
+XMODEM-1K / YMODEM) as the normal choice from QTERM; reach for Kermit only for
+plain-text files.
+
+
+Kermit (k) truncates binary files -- use XMODEM instead
+-------------------------------------------------------
+QTERM's Kermit is TEXT-ONLY and there is no way to make it binary.  The flag
+letters in the table above (c / k / y / b / a / q) apply ONLY to the "x"
+XMODEM selector -- "k" accepts no flags, and QTERM has no SET FILE TYPE
+BINARY equivalent.  Sending a binary file with "k" stops at the first ^Z
+(0x1A) byte in the file, because QTERM treats ^Z as the CP/M text
+end-of-file marker rather than as data.
+
+The failure is SILENT, which is what makes it dangerous.  Measured against
+this gateway's Kermit server: a 512-byte binary test file counting up through
+the byte values (so offset 26 holds 0x1A) was sent with
+Mode? k b:ztest.bin .  QTERM drew its transfer window, counted 5 packets,
+reported "Packet Errors: 0", "Total Errors: 0", and finished with
+"Transfer complete".  What actually arrived on the gateway was 26 bytes --
+0x00 through 0x19 -- stopping exactly at the first 0x1A.  Both ends called it
+a success: every packet's block check was valid, the sender said EOF, and the
+gateway wrote the 26-byte prefix to disk as a complete file.
+
+The gateway's own short-upload guard does not catch this either.  It refuses
+an upload that arrives shorter than the length declared in the sender's
+attribute (A) packet -- but QTERM sends no length attribute, so there is
+nothing to compare against.  (Note: this is the same class of silent loss
+that CP/M Kermit clients cause when left in their default text mode, where
+a ^Z landing on a 128-byte record boundary is dropped and the rest of the
+file shifts down.  There the fix is SET FILE MODE BINARY on the client;
+QTERM has no such setting, so the fix here is to change protocol.)
+
+So: for .COM files, .DAT files, disk images, or anything else that is not
+plain text, use  xk  (or  x  /  xy ).  Those are block protocols -- they pad
+the final block rather than scanning the data for an end-of-file marker, so
+^Z bytes inside the file are just data.  Reserve  k  for plain text.
 
 
 ------------------------------------------------------------------------------
@@ -183,6 +221,12 @@ XMODEM/YMODEM).
     The first character on the Mode? line was not x or k.  XMODEM is "x",
     Kermit is "k"; flags like c/k/y/b/a/q go AFTER the x with no space.
 
+"Transfer complete" but the file is short / won't run
+    You sent a binary file with Kermit ("k").  QTERM's Kermit is text-only and
+    stops at the first ^Z (0x1A) in the file, reporting success anyway -- see
+    section 3.  Re-send with  xk  (XMODEM-1K) and compare sizes or checksums on
+    both ends to confirm.  This is the usual reason to prefer XMODEM here.
+
 Transfer stalls or never starts
     Make sure BOTH sides are set to the same protocol, and that the gateway's
     Upload (when QTERM sends) or Download (when QTERM receives) is armed.
@@ -206,4 +250,7 @@ Quick card
     Change drive:      Ctrl-\  N
     Help:              Ctrl-\  ?
     Hang up / quit:    Ctrl-\  ,   /   Ctrl-\  Q
+
+    Use XMODEM (xk) as the default.  Kermit (k) is TEXT-ONLY from QTERM and
+    silently truncates binaries at the first ^Z -- see section 3.
 ==============================================================================
