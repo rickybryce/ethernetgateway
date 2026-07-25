@@ -83,6 +83,7 @@
 BDOS    EQU     0005H           ; BDOS entry point
 WBOOT   EQU     0000H           ; warm boot (exit to CCP)
 BIOSPT  EQU     0001H           ; word: address of the BIOS WBOOT entry
+BCONOU  EQU     2               ; console output (no reserved values)
 BCONIO  EQU     6               ; direct console I/O (CP/M 2.2 and 3)
 BVERS   EQU     12              ; return CP/M version
 BOPEN   EQU     15              ; open file
@@ -246,9 +247,25 @@ B6IN:   LD      C,BCONIO
         OR      A
         JR      Z,B6IN          ; no key yet: ask again
         RET
+; B6OUT - console output on CP/M 3.
+;
+; Direct console I/O reserves three values of E: FFh, FEh and FDh mean
+; "read", "status" and "read, waiting" - so passing a DATA byte of FDh or
+; above through function 6 does not print it.  It performs an input
+; instead, silently dropping the byte and, worse, eating a keystroke the
+; user had typed.  A terminal passing 8-bit data through would hit this.
+;
+; Those three go out through function 2 instead, which has no reserved
+; values.  Function 2 expands tabs, which is why it is not used for
+; everything - but FDh..FFh are not tabs, so nothing is lost.
 B6OUT:  LD      A,C
+        CP      0FDH
+        JR      NC,B6OUT1
         LD      E,A
         LD      C,BCONIO
+        JP      BDOS
+B6OUT1: LD      E,A
+        LD      C,BCONOU
         JP      BDOS
 
 ;=======================================================================
@@ -898,7 +915,12 @@ TSEND1: LD      A,(TYPECH)
         LD      A,(CRLFFL)      ; append LF to a typed CR?
         OR      A
         RET     Z
+        LD      A,(ECHOFL)      ; if the echo is ours, echo the LF too -
+        OR      A               ; otherwise the local screen keeps
+        JR      Z,TSEND2        ; overwriting the same line
         LD      A,LF
+        CALL    FILTE
+TSEND2: LD      A,LF
         JP      PSEND
 
 ;-----------------------------------------------------------------------
@@ -1097,7 +1119,9 @@ XSEND1: LD      A,XNOISE
         ; hand.  The handshake loop below tolerates noise instead.
         LD      A,XRETRY
         LD      (XCNT),A
-XSEND2: LD      A,XLONG         ; wait for the receiver to ask
+XSEND2: CALL    XCHKAB          ; waiting for the far end is the likeliest
+        JP      C,XUSER         ; moment to change your mind
+        LD      A,XLONG         ; wait for the receiver to ask
         LD      (XTMO),A
         CALL    XGETB
         JR      NC,XSEND3
@@ -1135,7 +1159,9 @@ XSEND4: LD      (XCRCM),A
         CALL    PSTR
 
 ;--- the per-record loop: read one CP/M record, send it, wait for ACK ---
-XSLOOP: LD      DE,XBUF
+XSLOOP: CALL    XCHKAB          ; a keypress can stop this
+        JP      C,XUSER
+        LD      DE,XBUF
         LD      C,BSETDMA
         CALL    BDOS
         LD      DE,XFCB
@@ -1294,7 +1320,9 @@ XRLOOP: LD      A,(XCRCM)
         JR      NZ,XRL1
         LD      A,NAK
 XRL1:   CALL    PSEND
-XRWAIT: LD      A,XLONG
+XRWAIT: CALL    XCHKAB
+        JP      C,XUSER
+        LD      A,XLONG
         LD      (XTMO),A
         CALL    XGETB
         JR      NC,XRGOT
@@ -1526,8 +1554,11 @@ XPURGE: LD      A,XSHORT
 ;-----------------------------------------------------------------------
 XREADY: LD      A,(PKIND)
         OR      A
-        RET     NZ              ; carry clear: good to go
-        CALL    CRLF
+        JR      Z,XREADY1
+        XOR     A               ; a fresh diagnosis for this transfer: the
+        LD      (PDEAD),A       ; flag may be left over from a past session
+        RET                     ; carry clear: good to go
+XREADY1: CALL   CRLF
         LD      HL,MNOPRT
         CALL    PSTR
         SCF
@@ -1573,7 +1604,52 @@ XABORT: CALL    RSTDMA
 XFAIL:  CALL    XCANC
         CALL    RSTDMA
         CALL    CRLF
+        LD      A,(PDEAD)       ; did the PORT stop taking characters?
+        OR      A
+        JR      NZ,XFAILP
         LD      HL,MXFAIL
+        CALL    PSTR
+        JP      XSCRAP
+XFAILP: LD      HL,MDEAD        ; then give the port diagnosis, not a vague
+        CALL    PSTR            ; "the other end stopped answering"
+        CALL    SHPORT
+        LD      HL,MDEAD2
+        CALL    PSTR
+        JP      XSCRAP
+
+;-----------------------------------------------------------------------
+; XCHKAB - has the user asked to stop?  Carry set if so.
+;
+; Checked once per block rather than per byte: a block is milliseconds of
+; work, and this way the cost is nothing while the transfer still answers
+; a keypress.  Without it, a transfer whose peer has walked away can only
+; be waited out through every retry - which is the one moment a person is
+; most likely to want out.
+;
+; ESC or the menu key stop it; any other key is swallowed, because a
+; stray keystroke during a transfer should not end it.
+;-----------------------------------------------------------------------
+XCHKAB: CALL    CST
+        RET     Z               ; nothing typed: carry clear
+        CALL    CIN
+        CP      ESC
+        JR      Z,XCHKA1
+        LD      HL,ESCCH
+        CP      (HL)
+        JR      Z,XCHKA1
+        XOR     A               ; some other key: ignore it
+        RET
+XCHKA1: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XUSER - the user stopped it.  Tell the far end with the protocol's own
+; cancel, then clean up exactly as a failure does.
+;-----------------------------------------------------------------------
+XUSER:  CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXUSER
         CALL    PSTR
         JP      XSCRAP
 
@@ -2370,6 +2446,7 @@ MXRECVD: DB     'Received.',CR,LF,0
 MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF,0
 MXCAN:  DB      'The other end cancelled the transfer.',CR,LF,0
 MXSCRAP: DB     'The incomplete file has been deleted.',CR,LF,0
+MXUSER: DB      'Stopped at this end.',CR,LF,0
 MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
 MSAVED: DB      'Settings saved into EGT80.COM.',CR,LF,0

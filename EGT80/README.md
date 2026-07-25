@@ -175,6 +175,32 @@ key — leaving terminal mode doesn't hang up, so the usual sequence is to dial,
 tell the far end what you want, then press the menu key and `U`/`D`. A dot marks
 each block and a `?` each retry.
 
+## A further pass found four more
+
+**CP/M 3 could swallow a data byte and eat a keystroke.** Direct console I/O
+(BDOS 6) reserves three values of `E` — `FFh`, `FEh`, `FDh` mean read, status and
+read-waiting — so writing a *data* byte of `FDh` or above through it performs an
+input instead: the byte never prints, and a keystroke the user had typed is
+consumed. A terminal passing 8-bit data hits this. Those three values now go out
+through BDOS 2, which has no reserved values. (Reasoned from the CP/M 3 API, not
+run: this emulator is CP/M 2.2, so the affected path can only be exercised on a
+CP/M 3 machine.)
+
+**A transfer can now be stopped.** Without it, a transfer whose peer has walked
+away could only be waited out through every retry — the one moment a person most
+wants out. `ESC` or the menu key stops it, checked once per block so the cost is
+nothing; any other key is swallowed, because a stray keystroke shouldn't end a
+transfer.
+
+**A stale dead-port flag could misreport a failure.** `PDEAD` was only cleared
+when terminal mode started, so a transfer run from the menu after a dead-port
+session would blame the port for a failure it had nothing to do with. Each
+transfer now starts with a fresh diagnosis — and when the port *is* the problem,
+the failure names it instead of saying "the other end stopped answering".
+
+**With local echo on, `CR` was echoed without its `LF`**, so the local screen
+kept overwriting one line while the remote saw correct line ends.
+
 ## Reviewing the assembly found three more
 
 A quality/stability pass over the source after phase 3 turned up one real bug
