@@ -96,6 +96,11 @@ const DEVICE_BASE_NONE: u8 = 0x00;
 /// hardware-specific that would not work here anyway.
 const VER_DE: u16 = 0x0306;
 const VER_PLATFORM: u8 = 0x00;
+/// Terminal type reported by `QUERY` in `L`.  A different field from the
+/// platform id above, even though both happen to be zero: this one says "no
+/// particular terminal", which is the truth for a virtual modem whose far end
+/// is whatever dialled in.
+const TERM_TYPE_NONE: u8 = 0x00;
 
 /// What the driver should do after [`service`] looked at an HBIOS call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +124,18 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
     // profile, which is what makes it diagnosable.
     let our_unit = cpm.hbios_unit();
     let unit = cpm.arg_hbios_unit();
+
+    // No HBIOS access mode selected: refuse everything, including the
+    // management group.  The `RST 8` vector is only installed for an
+    // `hbios_*` profile, but the trap address itself is always live — a guest
+    // that reaches it another way (a `CALL` straight at it, or a stray jump)
+    // must not be told a RomWBW system is present, because on a port profile
+    // one is not.  Answering `VER` here would make the emulator lie to any
+    // program that probes before deciding how to reach its modem.
+    if our_unit.is_none() {
+        cpm.hbios_return(ERR);
+        return HbiosOutcome::Answered;
+    }
 
     // The management group is unit-independent.
     match func {
@@ -169,6 +186,12 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
             cpm.hbios_return(OK);
             HbiosOutcome::Answered
         }
+        // IST and OST report a COUNT in A as well as in E, and the flags follow
+        // it, so Z means "nothing waiting" / "no room".  The API labels A a
+        // result code, but RomWBW's own drivers return the count there (the SIO
+        // driver's IST returns 1 when a character is waiting), and callers rely
+        // on it: QTERM's overlay hands A straight to a JR Z.  Do not "correct"
+        // this to always-zero-on-success.
         FN_IST => {
             let pending = cpm.modem_rx_len().min(u8::MAX as usize) as u8;
             cpm.hbios_return_e(pending, pending);
@@ -193,7 +216,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
         }
         FN_QUERY => {
             let line = cpm.hbios_line();
-            cpm.hbios_return_de_l(OK, line, VER_PLATFORM);
+            cpm.hbios_return_de_l(OK, line, TERM_TYPE_NONE);
             HbiosOutcome::Answered
         }
         FN_DEVICE => {
@@ -297,6 +320,22 @@ mod tests {
     }
 
     #[test]
+    fn test_ports_stay_inert_under_an_hbios_profile() {
+        // The two access modes must not overlap: with HBIOS selected, the I/O
+        // ports belong to whatever hardware the guest thinks is there, and
+        // reading them must not drain the modem's rings.
+        let mut m = crate::cpm::CpmMachine::new();
+        m.set_access(resolve_access("hbios_1"));
+        m.modem_queue_rx(b"xy");
+        use iz80::Machine;
+        assert_eq!(m.port_in(0x82), 0, "SIO status stays inert");
+        assert_eq!(m.port_in(0x83), 0, "SIO data must not drain the ring");
+        m.port_out(0x83, b'Z');
+        assert!(m.modem_drain_tx().is_empty(), "a port write reaches nothing");
+        assert_eq!(m.modem_rx_len(), 2, "ring untouched");
+    }
+
+    #[test]
     fn test_wrong_unit_is_refused() {
         // A unit-1 build (qtermh1) under the unit-2 profile finds nothing —
         // the HBIOS equivalent of the wrong port address.
@@ -352,6 +391,33 @@ mod tests {
     }
 
     #[test]
+    fn test_no_hbios_profile_refuses_even_the_management_group() {
+        // The trap address is always live, so a guest can reach it without the
+        // page-zero vector (a CALL straight at it, or a stray jump).  On a port
+        // profile there is no RomWBW system, and answering VER would tell a
+        // program that probes before choosing how to reach its modem exactly
+        // the wrong thing.
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("rc2014_1b")); // a PORT profile
+        // LD B,VER / CALL <trap> / JP 0
+        cpm.load_com(&[0x06, FN_VER, 0xCD, 0xF0, 0xFF, 0xC3, 0x00, 0x00]);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_VER), "trap still fires");
+        assert_eq!(service(&mut cpm, FN_VER), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "must not claim RomWBW");
+        // The serial group too, not just management.
+        for func in [FN_IST, FN_IN, FN_OUT, FN_DEVICE] {
+            let mut cpm = Cpm::new();
+            cpm.set_modem_access(resolve_access("altair_2sio1"));
+            cpm.load_com(&[0x06, func, 0x0E, 0x01, 0xCD, 0xF0, 0xFF, 0xC3, 0x00, 0x00]);
+            let abort = AtomicBool::new(false);
+            assert_eq!(cpm.run(100, &abort), Stop::Hbios(func));
+            assert_eq!(service(&mut cpm, func), HbiosOutcome::Answered);
+            assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "func {func:#04x}");
+        }
+    }
+
+    #[test]
     fn test_unsupported_groups_are_refused_not_faked() {
         // Disk status (0x10), a bank switch (0xF2) and an unknown GET
         // sub-function must all fail rather than return a plausible success.
@@ -373,3 +439,4 @@ mod tests {
         assert_eq!(cpm.run(100, &abort), Stop::WarmBoot);
     }
 }
+

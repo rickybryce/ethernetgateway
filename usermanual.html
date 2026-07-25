@@ -2470,6 +2470,32 @@ works with <em>any</em> profile enabled, so <code>aux</code> and
 <code>rc2014_1b</code> are equivalent for it.
 </aside>
 
+<h3>EGT80 &mdash; the gateway&rsquo;s own CP/M terminal</h3>
+
+<p>
+Every terminal in the table above was built for one machine&rsquo;s serial port,
+which is why choosing the profile is guesswork until it works.
+<strong><code>EGT80.COM</code></strong>, in the <code>EGT80/</code> directory of
+the gateway&rsquo;s source tree, asks instead: it presents a menu, you pick the
+port, and it remembers. It is written in Z80 assembly for real CP/M hardware as
+much as for this emulator, runs on CP/M&nbsp;2.2 and CP/M&nbsp;3, and assembles
+with period tooling (SLR&nbsp;Z80ASM, M80, ZMAC) so it can be rebuilt on the
+target machine.
+</p>
+
+<p>
+It is still being built out. Today it offers the menus, help, terminal mode with
+an escape-key menu, an ANSI/ASCII output filter (pass escape sequences through
+for a real terminal, or strip them and the high bit for a printing terminal), and
+the <strong>Z80 SIO/2</strong> driver &mdash; so it pairs with the
+<code>rc2014_*</code> profiles here and with an RC2014-class machine on real
+iron. The 6850&nbsp;ACIA, RomWBW&nbsp;HBIOS, Z180&nbsp;ASCI and BDOS&nbsp;AUX
+drivers, saved settings and XMODEM transfers are still to come; see
+<code>EGT80/README.md</code>. Unlike the period terminals, a wrong port
+selection is <em>diagnosed</em> rather than silently hung: it names the port and
+says what to do.
+</p>
+
 <aside class="note">
 <span class="label">Type at human speed &mdash; don&rsquo;t paste into a polling terminal program</span>
 The emulator gives the guest a deep console type&#8209;ahead buffer, where a real

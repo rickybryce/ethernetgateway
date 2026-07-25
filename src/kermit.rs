@@ -1569,6 +1569,11 @@ pub(crate) struct KermitReceive {
     pub data: Vec<u8>,
     /// File length declared by the peer in the A-packet (when sent).
     pub declared_size: Option<u64>,
+    /// True when the peer's A-packet declared TEXT (`A`) rather than binary
+    /// transfer for this file.  Kept because a text-mode transfer of a binary
+    /// file is silently truncated at the first `^Z`, and a peer that declares
+    /// text but sends no length gives us no other way to catch it.
+    pub text_declared: bool,
     /// File modification time declared by the peer in the A-packet
     /// (UNIX epoch seconds, when parseable).
     pub modtime: Option<u64>,
@@ -1589,6 +1594,35 @@ pub(crate) struct KermitReceive {
     /// the directory the peer asked for instead of the base.  Plain
     /// (non-server) `kermit_receive_with_init` callers leave it empty.
     pub subdir: String,
+}
+
+/// Does this payload contain bytes that plain text never does?
+///
+/// Distinct from [`crate::telnet::TelnetSession::looks_binary`], deliberately:
+/// that one decides whether a file is *viewable* and tolerates a minority of
+/// control bytes (a NUL, or more than 30% C0), which is the right rule for a
+/// display but the wrong one here — it counts `ESC` as control, so it would
+/// call ANSI art binary and refuse a legitimate upload, while letting a file
+/// with a few stray control bytes through.  A guard that refuses a transfer
+/// needs zero tolerance in one direction and none of that fuzziness in the
+/// other.
+///
+/// Used to catch the one upload failure the protocol cannot: a peer set to
+/// TEXT mode sending a binary file stops at the first `^Z` and every packet
+/// still checks out, so without a declared length there is nothing to compare
+/// against — only the content itself gives it away.
+///
+/// The test is deliberately narrow, because a false positive would refuse a
+/// legitimate upload.  Only control codes that no text file carries count:
+/// `NUL` through `ACK`, and the `0x0E`–`0x19` / `0x1C`–`0x1F` ranges.  `BEL`,
+/// `BS`, `TAB`, `LF`, `VT`, `FF`, `CR` and `ESC` are all things real text
+/// files contain (ANSI art is full of `ESC`), `^Z` is CP/M's own text
+/// end-of-file, and the high bit is left alone entirely — WordStar documents,
+/// PETSCII and UTF-8 all set it in ordinary text.
+fn has_non_text_bytes(data: &[u8]) -> bool {
+    data.iter().any(|&b| {
+        matches!(b, 0x00..=0x06 | 0x0E..=0x19 | 0x1C..=0x1F)
+    })
 }
 
 /// Single source-file payload accepted by `kermit_send`.
@@ -4015,6 +4049,7 @@ pub(crate) async fn kermit_receive_with_init(
                     filename: fname,
                     data: Vec::new(),
                     declared_size: None,
+                    text_declared: false,
                     modtime: None,
                     mode: None,
                     flavor: flavor.clone(),
@@ -4065,6 +4100,9 @@ pub(crate) async fn kermit_receive_with_init(
                 if let Some(ft) = a.file_type
                     && ft.eq_ignore_ascii_case(&b'A')
                 {
+                    if let Some(last) = received.last_mut() {
+                        last.text_declared = true;
+                    }
                     glog!(
                         "Kermit recv: peer declares TEXT mode for '{}' — binary files (.COM, game data) will be corrupted; set the peer to binary (kermit: SET FILE TYPE BINARY)",
                         received
@@ -4393,6 +4431,48 @@ pub(crate) async fn kermit_receive_with_init(
                                 declared
                             );
                         }
+                    } else if last.text_declared && has_non_text_bytes(&last.data) {
+                        // No declared length, but the peer told us it was
+                        // sending TEXT and what arrived is not text.  That is
+                        // the CP/M truncation signature: the sender stopped at
+                        // the first ^Z, so this file is a prefix of the real
+                        // one.  Nothing else can catch it — every packet's
+                        // block check was valid and there is no size to
+                        // compare against — so refuse on the content.
+                        let name = sanitize_for_terminal(&last.filename);
+                        glog!(
+                            "Kermit recv: '{}' declared TEXT but contains binary data ({}B received) — refusing: a text-mode transfer stops at the first ^Z, so this file is truncated (set the peer to binary: SET FILE TYPE BINARY)",
+                            name,
+                            last.data.len()
+                        );
+                        send_error(
+                            writer,
+                            pkt.seq,
+                            "Binary file sent in text mode: set FILE TYPE BINARY",
+                            session.chkt,
+                            session.npad,
+                            session.padc,
+                            session.eol,
+                            is_tcp,
+                        )
+                        .await?;
+                        return Err(format!(
+                            "Kermit recv: '{}' declared TEXT but is binary — refused as truncated",
+                            name
+                        ));
+                    } else if !session.attribute_packets && has_non_text_bytes(&last.data) {
+                        // A peer that sends no attribute packets at all (QTERM
+                        // is one) tells us neither the length nor the mode, so a
+                        // truncated binary and a complete one are identical on
+                        // the wire.  This cannot be refused without breaking
+                        // legitimate uploads from the same peers, so it is
+                        // flagged instead: the user can check the size, or use
+                        // XMODEM, which frames its own length.
+                        glog!(
+                            "Kermit recv: '{}' looks binary and the peer sent no attributes ({}B) — its size cannot be verified; if the peer was in text mode the file is truncated at the first ^Z (prefer XMODEM for binaries)",
+                            sanitize_for_terminal(&last.filename),
+                            last.data.len()
+                        );
                     }
                 }
                 send_ack(
@@ -11269,6 +11349,156 @@ mod tests {
             output.windows(4).any(|w| w[0] == 0x01 && w[3] == b'E'),
             "expected an E-packet in the receiver's output"
         );
+    }
+
+    #[tokio::test]
+    async fn test_receive_refuses_binary_content_declared_as_text() {
+        // Closes the gap the length check cannot: a CP/M peer (kercpm3) that
+        // declares TEXT mode but sends no length.  There is nothing to compare
+        // against, so the content itself is the evidence — a "text" file full
+        // of NULs is a binary that stopped at the first ^Z.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            file_type: Some(b'A'), // TEXT, and deliberately no length
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"witness.com", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"\x00\x01\x02MZ\x03binary", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, output) = receive_hand_built_wire(wire).await;
+        let err = result.expect_err("binary content declared as text must be refused");
+        assert!(
+            err.contains("TEXT") && err.contains("binary"),
+            "expected a text-mode refusal, got: {}",
+            err
+        );
+        assert!(
+            output.windows(4).any(|w| w[0] == 0x01 && w[3] == b'E'),
+            "the peer's user must see an E-packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_keeps_real_text_declared_as_text() {
+        // The false positive that would matter: a genuine text file sent in
+        // text mode with no length must still be accepted.  ESC, TAB, CR/LF
+        // and a trailing ^Z all appear in real CP/M text and must not read as
+        // "binary" — ANSI art is nothing but ESC sequences.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            file_type: Some(b'A'),
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"readme.txt", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"hello\ttabbed\r\n\x1b[1mbright\x1b[0m\r\n\x1a", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, _output) = receive_hand_built_wire(wire).await;
+        let files = result.expect("a real text file in text mode must be accepted");
+        assert_eq!(files.len(), 1, "the file must be kept");
+        assert!(
+            files[0].data.ends_with(b"\x1a"),
+            "payload must arrive intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_keeps_binary_declared_as_binary() {
+        // The other false positive: binary content is perfectly fine when the
+        // peer said it was sending binary.  Only the text-mode claim makes it
+        // evidence of truncation.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let q = plain_peer_quoting();
+        let attrs = Attributes {
+            file_type: Some(b'B'),
+            ..Attributes::default()
+        };
+        let mut wire = wire_with_send_init();
+        wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"prog.com", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(
+            TYPE_ATTRIBUTE,
+            2,
+            &encode_data(&encode_attributes(&attrs), q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(
+            TYPE_DATA,
+            3,
+            &encode_data(b"\x00\x01\x02\x03\xc3\x00\x01", q),
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+        wire.extend_from_slice(&build_packet(TYPE_EOF, 4, b"", b'1', 0, 0, CR));
+        wire.extend_from_slice(&build_packet(TYPE_EOT, 5, b"", b'1', 0, 0, CR));
+
+        let (result, _output) = receive_hand_built_wire(wire).await;
+        let files = result.expect("binary declared as binary must be accepted");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].data.len(), 7, "every byte kept");
+    }
+
+    #[test]
+    fn test_has_non_text_bytes_is_narrow_enough_for_real_text() {
+        // The guard must not fire on anything a text file legitimately holds.
+        assert!(!has_non_text_bytes(b"plain ascii"));
+        assert!(!has_non_text_bytes(b"tab\there\r\nlines\r\n"));
+        assert!(!has_non_text_bytes(b"\x1b[1;33mANSI art\x1b[0m"));
+        assert!(!has_non_text_bytes(b"ends with cp/m eof\x1a"));
+        assert!(!has_non_text_bytes(b"bell\x07 backspace\x08 formfeed\x0c"));
+        assert!(!has_non_text_bytes(&[0xC1, 0xE9, 0xF3])); // high-bit: WordStar/PETSCII
+        // ...and must fire on what only binaries hold.
+        assert!(has_non_text_bytes(b"\x00"));
+        assert!(has_non_text_bytes(b"jump \x11\x12"));
+        assert!(has_non_text_bytes(&[0x03, 0x04]));
     }
 
     #[tokio::test]

@@ -440,6 +440,7 @@ TERM1:  CALL    CRLF
         CALL    PSTR
         XOR     A
         LD      (FSTATE),A      ; no half-finished escape sequence
+        LD      (ESTATE),A      ; on either stream
         LD      (PDEAD),A       ; and no diagnosis pending
 TLOOP:  CALL    PST             ; anything from the port?
         JR      Z,TL1
@@ -478,7 +479,7 @@ TSEND:  LD      (TYPECH),A
         OR      A
         JR      Z,TSEND1
         LD      A,(TYPECH)
-        CALL    FILT            ; echo through the same filter
+        CALL    FILTE           ; echo through its own filter state
 TSEND1: LD      A,(TYPECH)
         CALL    PSEND
         LD      A,(TYPECH)
@@ -535,27 +536,53 @@ TWAIT:  LD      HL,MKEY
         RET
 
 ;=======================================================================
-; FILT - inbound filter: byte in A, to the console.
+; FILT / FILTE - filter a byte to the console.  Byte in A.
+;
+; FILT  is the INBOUND path (bytes from the port).
+; FILTE is the LOCAL ECHO path (bytes the user just typed).
+;
+; They are the same code over SEPARATE state bytes, and that separation
+; matters: the state machine spans several bytes of an escape sequence, so
+; a single shared state would let a typed ESC swallow the next byte that
+; arrived from the port - two independent streams cannot share one
+; half-finished sequence.  HL carries the state byte's address through the
+; whole routine, which is why nothing here may clobber it.
 ;
 ; ANSI mode passes everything through, for a terminal that understands
-; escape sequences.  ASCII mode swallows CSI sequences and control codes
-; a dumb console would render as litter, keeping CR, LF, TAB, BS and BEL
-; because those do useful work on any terminal.
+; escape sequences.  ASCII mode is for a printing terminal or a console
+; with no cursor addressing: the high bit is stripped (the classic
+; parity-bit strip, so 8-bit text reads as ASCII rather than as garbage),
+; CSI sequences are swallowed whole, DEL is dropped, and of the control
+; codes only CR, LF, TAB, BS and BEL - the ones that do useful work on any
+; terminal - are let through.
 ;
-; FSTATE: 0 = normal, 1 = an ESC was seen, 2 = inside a CSI sequence.
+; State: 0 = normal, 1 = an ESC was seen, 2 = inside a CSI sequence.  The MODE
+; is tested before the state, and ANSI clears it: otherwise switching from
+; ASCII to ANSI part-way through a sequence would keep swallowing bytes on the
+; new setting until that sequence happened to finish.
 ;=======================================================================
-FILT:   LD      E,A             ; hold the byte
-        LD      A,(FSTATE)
-        OR      A
-        JR      NZ,FILT2
+FILT:   LD      HL,FSTATE       ; inbound stream's own state
+        JR      FILT0
+FILTE:  LD      HL,ESTATE       ; echo stream's own state
+FILT0:  LD      E,A             ; hold the byte
         LD      A,(FLTMOD)
         OR      A
+        JR      NZ,FASCII
+        LD      (HL),0          ; ANSI: no sequence state to carry
         LD      A,E
-        JP      Z,COUT          ; ANSI: straight through
+        JP      COUT            ; straight through
+FASCII: LD      A,(HL)          ; ASCII: mid-sequence?
+        OR      A
+        JR      NZ,FILT2
+        LD      A,E
+        AND     7FH             ; strip the high bit
+        LD      E,A
         CP      ESC
         JR      Z,FSESC
+        CP      DEL
+        RET     Z               ; DEL prints as litter: drop it
         CP      20H
-        JR      NC,FPRIN        ; printable, and DEL passes as before
+        JR      NC,FPRIN        ; printable
         CP      CR
         JR      Z,FPRIN
         CP      LF
@@ -568,8 +595,7 @@ FILT:   LD      E,A             ; hold the byte
         JR      Z,FPRIN
         RET                     ; other control code: drop it
 FPRIN:  JP      COUT
-FSESC:  LD      A,1
-        LD      (FSTATE),A
+FSESC:  LD      (HL),1
         RET
 
 ;-----------------------------------------------------------------------
@@ -580,21 +606,20 @@ FSESC:  LD      A,1
 FILT2:  DEC     A
         JR      NZ,FCSI         ; state 2: already inside a CSI
         LD      A,E
+        AND     7FH
         CP      '['
         JR      Z,FCSIST
-        XOR     A               ; two-character escape: done
-        LD      (FSTATE),A
+        LD      (HL),0          ; two-character escape: done
         RET
-FCSIST: LD      A,2
-        LD      (FSTATE),A
+FCSIST: LD      (HL),2
         RET
 FCSI:   LD      A,E
+        AND     7FH
         CP      40H
         RET     C               ; parameter byte: keep swallowing
         CP      7FH
         RET     NC
-        XOR     A               ; final byte: sequence complete
-        LD      (FSTATE),A
+        LD      (HL),0          ; final byte: sequence complete
         RET
 
 ;=======================================================================
@@ -939,6 +964,7 @@ VPOUT:  JP      0               ; port output
 
 CPMVER: DB      0               ; BDOS version, from CONSET
 FSTATE: DB      0               ; inbound escape-sequence state
+ESTATE: DB      0               ; local-echo escape-sequence state
 SENDCH: DB      0               ; byte in flight in PSEND
 PTRIES: DB      0               ; PSEND give-up counter
 PDEAD:  DB      0               ; set when the transmitter never freed

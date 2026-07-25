@@ -715,6 +715,20 @@ impl TelnetSession {
         // program waiting for its peer isn't a runaway — and the `ESC ESC`
         // break-out still works, because the drain runs at every seam.
         let mut hbios_waiting = false;
+        // How long the guest has sat parked on a blocking HBIOS call with
+        // nothing arriving.  The session's idle timeout applies here exactly as
+        // it does to a console read: the parked path polls the modem instead of
+        // blocking on the wire, so it would otherwise never reach the timeout
+        // check in `read_byte_filtered` and an abandoned session could sit in a
+        // 2 ms poll loop for ever.  Reset by any progress or any keystroke, so a
+        // program legitimately waiting for an inbound call is only closed when
+        // the *user* has gone away — which is what the operator's timeout means.
+        //
+        // Measured against the clock rather than by adding up the naps: the rest
+        // of the loop body (servicing the modem, draining the wire) also takes
+        // time, so summing 2 ms per pass would under-count the wait and let the
+        // timeout fire long after the operator's configured limit.
+        let mut hbios_parked_since: Option<tokio::time::Instant> = None;
 
         loop {
             // Runaway guard, checked every batch regardless of why run()
@@ -964,6 +978,7 @@ impl TelnetSession {
             // Out-of-band break-out reader: drain any wire bytes waiting right
             // now (non-blocking) so a double-`ESC` aborts even a program that
             // never reads the console; other bytes are buffered for CONIN.
+            let pending_before = pending_input.len();
             match self.cpmemu_oob_drain(&mut pending_input, &mut last_esc).await {
                 Ok(OobDrain::Continue) => {}
                 Ok(OobDrain::BreakOut) => {
@@ -982,9 +997,19 @@ impl TelnetSession {
             // sits on the trap and the loop would spin as fast as the executor
             // allows; a few milliseconds between polls is imperceptible at the
             // byte rates a CP/M comms program works at.
+            if pending_input.len() > pending_before {
+                hbios_parked_since = None; // the user is here: not idle
+            }
             if hbios_waiting {
                 hbios_waiting = false;
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                let since = *hbios_parked_since.get_or_insert_with(tokio::time::Instant::now);
+                if !self.idle_timeout.is_zero() && since.elapsed() >= self.idle_timeout {
+                    glog!("CP/M: session idle timeout while a program waited on the modem");
+                    return Ok(false);
+                }
+            } else {
+                hbios_parked_since = None; // the guest progressed
             }
         }
     }

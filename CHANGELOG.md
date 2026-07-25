@@ -85,6 +85,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Z80 core doesn't implement the Z180 `IN0`/`OUT0` instructions the ASCI
     uses). The modem is a self-contained async layer bridged to the guest's
     synchronous UART/AUX byte rings at the CPU batch seam.
+- **EGT80 — "Ethernet Gateway Terminal", a CP/M terminal of our own.** Every
+  period CP/M terminal is built for one machine's serial port: QTERM ships a
+  separate binary per port, IMP8 is an Altair 2SIO build, KERCPM22's generic
+  overlay has no serial driver at all, and pairing one with the wrong port
+  produces silence rather than an error. `EGT80.COM` (new `EGT80/` directory,
+  Z80 assembly, CP/M 2.2 and CP/M 3) asks instead: a menu picks the port at run
+  time. Phase 1 ships the console layer (BIOS vectors on 2.2, BDOS 6 on 3,
+  decided once at startup), the menu/help screens, terminal mode with an
+  escape-key menu, an ANSI/ASCII inbound filter (pass escape sequences through,
+  or strip CSI sequences and the high bit for a dumb console), and the Z80 SIO/2
+  driver; four more drivers (6850 ACIA, RomWBW HBIOS, Z180 ASCI, BDOS AUX),
+  saved settings and XMODEM follow. Built by running the real period assembler
+  (SLR `Z80ASM`) under `zxcc`, so SLR80 compatibility is structural rather than
+  hoped for, with M80+L80 and ZMAC as portability gates. A wrong port selection
+  is diagnosed instead of hanging: the send wait is bounded and terminal mode
+  names the port and explains what happened.
   - **Virtual modem — RomWBW HBIOS access (`hbios_1` / `hbios_2`).** Some CP/M
     comms software doesn't drive a UART at all: software built for RomWBW asks
     the firmware to move the byte, issuing an `RST 8` with a function number in
@@ -218,6 +234,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   software is unsupported. Noted in the manual and the `uart` module.
 
 ### Fixed
+- **Kermit refuses a binary file declared as text, even with no length given.**
+  The length check added earlier can only fire when the peer declares a size,
+  and the two CP/M clients that hit this in practice do not: kercpm3 sends the
+  file type but no length, and QTERM sends no attribute packets at all. A peer
+  that declares TEXT mode and then sends bytes plain text never contains (NUL,
+  and the other C0 codes that are not `BEL`/`BS`/`TAB`/`LF`/`VT`/`FF`/`CR`/`ESC`
+  /`^Z`) is sending a binary file that stopped at the first `^Z`, so the upload
+  is now refused in-band on the content alone. The test is deliberately narrow —
+  ANSI art, tabs, a trailing `^Z` and high-bit text (WordStar, PETSCII, UTF-8)
+  are all still accepted as text. A peer that declares nothing cannot be
+  distinguished from a legitimate binary upload, so that case is logged with a
+  warning rather than refused.
+- **The CP/M emulator no longer reports a RomWBW system when none is
+  configured.** The `RST 8` vector is only installed for an `hbios_*` profile,
+  but the trap address itself is always live, so a guest that reached it another
+  way (a `CALL` straight at it, or a stray jump) got a successful `VER` reply on
+  a port profile — telling a program that probes before choosing how to reach
+  its modem exactly the wrong thing. Every HBIOS function now fails when no
+  HBIOS access mode is selected.
+- **A CP/M program parked on a blocking HBIOS call now honours the session idle
+  timeout.** The timeout lived only in the console read path; the parked path
+  polls the modem instead of blocking on the wire, so an abandoned session could
+  sit in a 2 ms poll loop indefinitely. Any progress or keystroke resets it, so
+  a program legitimately waiting for an inbound call is only closed when the
+  user has actually gone away.
 - **Kermit uploads that arrive incomplete are no longer saved as if whole.**
   Three gaps let a corrupt upload reach disk silently — every packet's block
   check passed, the sender said "end of file", and we wrote what we had:
