@@ -251,13 +251,29 @@ impl TelnetSession {
         if tokio::fs::metadata(&path).await.is_ok() {
             return; // already there — leave it, settings and all
         }
-        match tokio::fs::write(&path, EGT80_COM).await {
+        // Written to a temporary name and renamed into place, the way
+        // `config.rs` writes the config file.  Two sessions can enter the
+        // emulator at the same moment on a first-ever launch, both find the
+        // file absent, and both write it; a plain write would let a CP/M
+        // program load a half-written image.  A rename is atomic, so every
+        // reader sees either no file or the whole one.  The temporary name
+        // carries the process id so two gateways sharing a transfer directory
+        // cannot collide either.
+        let tmp = path.with_extension(format!("t{}", std::process::id()));
+        let placed = match tokio::fs::write(&tmp, EGT80_COM).await {
+            Ok(()) => tokio::fs::rename(&tmp, &path).await,
+            Err(e) => Err(e),
+        };
+        match placed {
             Ok(()) => glog!(
                 "CP/M: placed the bundled {} ({} bytes) on drive A:",
                 EGT80_NAME,
                 EGT80_COM.len()
             ),
-            Err(e) => glog!("CP/M: could not place {} on drive A: {}", EGT80_NAME, e),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await; // don't leave litter
+                glog!("CP/M: could not place {} on drive A: {}", EGT80_NAME, e);
+            }
         }
     }
 
