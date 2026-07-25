@@ -704,6 +704,33 @@
                         <li>The peer sends <code>B</code> (EOT) to end the batch; the gateway <code>ACK</code>s and the session ends. (More <code>F</code>&hellip;<code>Z</code> groups before the <code>B</code> mean more files.)</li>
                     </ol>
                 </div>
+
+                <div class="callout callout-warn">
+                    <strong>Set binary file mode on the sending client.</strong>
+                    Vintage Kermit clients default to <em>text</em> (ASCII) file
+                    mode, and a binary file sent that way <strong>silently loses
+                    bytes</strong> &mdash; every packet's block check passes and
+                    the client reports success, but the file that lands is subtly
+                    wrong. A CP/M client reads the file in 128-byte records and
+                    in text mode treats <code>^Z</code> (0x1A, the CP/M
+                    end-of-file pad) as padding rather than data, so a
+                    <code>^Z</code> falling on a record boundary is dropped and
+                    every following byte shifts down one. Switch the client
+                    first: <code>SET FILE MODE BINARY</code> on kercpm3 / CP/M
+                    Kermit (some builds spell it <code>SET FILE TYPE
+                    BINARY</code>), <code>set file type binary</code> or
+                    <code>-i</code> on C-Kermit.
+                    <br><br>
+                    The gateway always transfers binary, byte-for-byte, in both
+                    directions, so this is purely client-side &mdash; which is
+                    why a download can be perfect while an upload of the same
+                    file is damaged. The gateway refuses an upload that comes in
+                    shorter than the size declared in its <code>A</code> packet,
+                    but clients that send no length attribute leave nothing to
+                    check against. Verify with <em>checksums</em>, not packet
+                    counts &mdash; quoting expansion makes the same file take a
+                    different number of packets in each direction.
+                </div>
             </div>
 
             <hr class="divider">
