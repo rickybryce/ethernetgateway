@@ -1148,13 +1148,24 @@ fn serial_manager(
                 // bridge that exits when the attached DOS terminal closes).
                 // Loop until a config-change restart or a server shutdown.
                 //
-                // On a slave with peer-dial on, also spawn a peer-dial
-                // announcer (Phase 2b-ii): a sibling thread that registers
-                // this port with the master so it can be dialed, and on a
-                // call rings the local port.  It runs for this modem-branch
-                // lifetime and stops on the same restart/shutdown flags; we
-                // join it after the reopen loop so it can't pile up.
-                let announcer = if cfg.gateway_role == "slave" && cfg.allow_peer_dial {
+                // On a slave, spawn the master-registration announcer: a
+                // sibling thread that registers this port with the master so
+                // the master can *ring* it (its Serial Gateway picker, or a
+                // peer-dial), and on a call rings the local port.  It runs for
+                // this modem-branch lifetime and stops on the same
+                // restart/shutdown flags; we join it after the reopen loop so
+                // it can't pile up.
+                //
+                // NOT gated on `allow_peer_dial`.  That setting is about this
+                // gateway *dialing* arbitrary peers (`ATD <Port>@<IP>`), and
+                // gating registration behind it left a slave that could never
+                // be reached from its own master — which is the entire point of
+                // slave mode, already an explicit, mutual, authenticated
+                // pairing (the slave holds the master's credentials; the master
+                // sets master_accept_relays).  The third-party crossbar case a
+                // caller could reach through the master is still gated, on the
+                // master, in relay::run_master_relay_peer.
+                let announcer = if cfg.gateway_role == "slave" {
                     let h = handle.clone();
                     let sd = shutdown.clone();
                     std::thread::Builder::new()
@@ -1525,6 +1536,10 @@ fn console_slave_register_tick(
         );
         crate::relay::log_slave_link_summary(&host, mport);
 
+        // What this registration was made under; the idle wait below re-forms
+        // it if any of it changes (see slave_link_fingerprint).
+        let registered_as = slave_link_fingerprint(&config::get_config(), id);
+
         let crate::relay::MasterRelay {
             _session,
             mut stream,
@@ -1540,7 +1555,7 @@ fn console_slave_register_tick(
         // panic ("no reactor running") if they drop on this bare serial
         // thread (see `relay_teardown`).  `run_console_bridge` moves the
         // stream into a spawned task, so its halves already drop in-runtime.
-        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
+        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx, id, &registered_as) {
             ActivateOutcome::Activated => {
                 glog!("Serial console (Port {}): master attached; bridging", label);
                 crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
@@ -1556,6 +1571,21 @@ fn console_slave_register_tick(
                     "Serial console (Port {}): registration channel closed; reconnecting",
                     label
                 );
+                drop(port);
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
+            }
+            ActivateOutcome::Reconfigured => {
+                // Settings changed under an idle registration: drop it and
+                // register again from the top of the loop, which re-reads the
+                // config (and returns if this port is no longer relayed at all).
+                glog!(
+                    "Serial console (Port {}): settings changed; re-registering with master",
+                    label
+                );
+                crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
                 drop(port);
                 handle.block_on(async move {
                     drop(stream);
@@ -1612,7 +1642,6 @@ fn modem_slave_announce_tick(
         let cfg = config::get_config();
         let p = cfg.port(id);
         if cfg.gateway_role != "slave"
-            || !cfg.allow_peer_dial
             || cfg.slave_master_host.is_empty()
             || !p.enabled
             || p.port.is_empty()
@@ -1628,7 +1657,7 @@ fn modem_slave_announce_tick(
 
         attempt = attempt.saturating_add(1);
         glog!(
-            "Serial modem (Port {}): announcing to master {}:{} as '{}' (attempt {})",
+            "Serial modem (Port {}): registering with master {}:{} as '{}' (attempt {})",
             label,
             host,
             mport,
@@ -1645,7 +1674,7 @@ fn modem_slave_announce_tick(
                 let msg = e.to_string();
                 if should_log_outage(&last_outage, &msg) {
                     glog!(
-                        "Serial modem (Port {}): peer-dial announce to master {}:{} failed: {}",
+                        "Serial modem (Port {}): registration with master {}:{} failed: {}",
                         label,
                         host,
                         mport,
@@ -1658,20 +1687,21 @@ fn modem_slave_announce_tick(
             }
         };
         if last_outage.is_some() {
-            glog!("Serial modem (Port {}): peer-dial announce reconnected", label);
+            glog!("Serial modem (Port {}): registration with master reconnected", label);
         }
         last_outage = None;
         net_backoff = RECONNECT_BACKOFF_MIN;
         glog!(
-            "Serial modem (Port {}): announced to master for peer-dial; awaiting call",
+            "Serial modem (Port {}): REGISTERED with master; awaiting a call",
             label
         );
 
+        let registered_as = slave_link_fingerprint(&config::get_config(), id);
         let crate::relay::MasterRelay { _session, mut stream } = relay;
-        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
+        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx, id, &registered_as) {
             ActivateOutcome::Activated => {
                 glog!(
-                    "Serial modem (Port {}): peer-dial call in — ringing local port",
+                    "Serial modem (Port {}): call in from master — ringing local port",
                     label
                 );
                 // Ring the LOCAL modem port (serviced by our serial_thread)
@@ -1693,7 +1723,7 @@ fn modem_slave_announce_tick(
                                 }
                                 Err(o) => {
                                     glog!(
-                                        "Serial modem (Port {}): peer-dial ring not answered: {:?}",
+                                        "Serial modem (Port {}): ring not answered: {:?}",
                                         id.label(),
                                         o
                                     );
@@ -1711,6 +1741,16 @@ fn modem_slave_announce_tick(
                     drop(_session);
                 });
             }
+            ActivateOutcome::Reconfigured => {
+                glog!(
+                    "Serial modem (Port {}): settings changed; re-announcing to master",
+                    label
+                );
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
+            }
             ActivateOutcome::Aborted => {
                 handle.block_on(async move {
                     drop(stream);
@@ -1723,6 +1763,32 @@ fn modem_slave_announce_tick(
     }
 }
 
+/// The settings a slave's registration with its master depends on: who the
+/// master is, how we authenticate to it, and what this port actually is.
+///
+/// A registration is a *standing* claim — the master holds the idle channel and
+/// rings it later — so one made under stale settings is worse than none: the
+/// master would offer a port whose device or credentials have since changed.
+/// The idle wait therefore watches this fingerprint and re-registers when it
+/// moves, which is what makes "a config change re-registers" true no matter
+/// which UI made the change, without every UI having to remember to ask.
+///
+/// Pure over `cfg` so the "what counts as a change" rule is testable.
+fn slave_link_fingerprint(cfg: &config::Config, id: SerialPortId) -> String {
+    let p = cfg.port(id);
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        cfg.gateway_role,
+        cfg.slave_master_host,
+        cfg.slave_master_port,
+        cfg.slave_master_username,
+        cfg.slave_master_password,
+        p.enabled,
+        p.mode,
+        p.port
+    )
+}
+
 /// Outcome of waiting for the master's activate signal on a registration
 /// channel.
 enum ActivateOutcome {
@@ -1732,6 +1798,10 @@ enum ActivateOutcome {
     Closed,
     /// Server shutdown / config restart — stop.
     Aborted,
+    /// A setting this registration depends on changed while we were idle
+    /// (see [`slave_link_fingerprint`]) — drop the channel and register again
+    /// with the new settings.
+    Reconfigured,
 }
 
 /// Block (responsively) until the master sends the one-byte activate
@@ -1742,15 +1812,27 @@ fn slave_wait_for_activate<S>(
     stream: &mut S,
     shutdown: &Arc<AtomicBool>,
     idx: usize,
+    id: SerialPortId,
+    registered_as: &str,
 ) -> ActivateOutcome
 where
     S: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
     let mut byte = [0u8; 1];
+    // The fingerprint is compared once a second rather than on every 250 ms
+    // wake: `get_config()` clones the whole config, and a registration that
+    // re-forms a second late is indistinguishable from one that doesn't.
+    let mut ticks: u32 = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst) {
             return ActivateOutcome::Aborted;
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks.is_multiple_of(4)
+            && slave_link_fingerprint(&config::get_config(), id) != registered_as
+        {
+            return ActivateOutcome::Reconfigured;
         }
         let result = handle.block_on(async {
             tokio::time::timeout(Duration::from_millis(250), stream.read(&mut byte)).await
@@ -6365,6 +6447,95 @@ mod tests {
         p.mode = mode.into();
         p.port = port.into();
         cfg
+    }
+
+    /// Every setting a standing registration depends on must move the
+    /// fingerprint, or a config change would leave the master holding a
+    /// registration made under settings that no longer exist.
+    #[test]
+    fn test_slave_link_fingerprint_tracks_every_relevant_setting() {
+        let base = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
+        let id = SerialPortId::A;
+        let start = slave_link_fingerprint(&base, id);
+
+        // Same config, same fingerprint — no spurious re-registration.
+        assert_eq!(slave_link_fingerprint(&base, id), start);
+
+        let mut c = base.clone();
+        c.gateway_role = "master".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "role");
+
+        let mut c = base.clone();
+        c.slave_master_host = "192.168.1.9".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "master host");
+
+        let mut c = base.clone();
+        c.slave_master_port = 2223;
+        assert_ne!(slave_link_fingerprint(&c, id), start, "master port");
+
+        let mut c = base.clone();
+        c.slave_master_username = "someone".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "master username");
+
+        let mut c = base.clone();
+        c.slave_master_password = "different".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "master password");
+
+        let mut c = base.clone();
+        c.port_mut(id).enabled = false;
+        assert_ne!(slave_link_fingerprint(&c, id), start, "port enabled");
+
+        let mut c = base.clone();
+        c.port_mut(id).mode = "console".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "port mode");
+
+        let mut c = base.clone();
+        c.port_mut(id).port = "/dev/ttyUSB1".into();
+        assert_ne!(slave_link_fingerprint(&c, id), start, "device path");
+    }
+
+    /// ...and nothing else may, or every unrelated edit (a weather location, a
+    /// timeout) would drop and re-form both slaves' registrations.
+    #[test]
+    fn test_slave_link_fingerprint_ignores_unrelated_settings() {
+        let base = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
+        let id = SerialPortId::A;
+        let start = slave_link_fingerprint(&base, id);
+
+        let mut c = base.clone();
+        c.weather_location = "London, GB".into();
+        c.verbose = true;
+        c.telnet_port = 9999;
+        c.allow_peer_dial = !c.allow_peer_dial;
+        c.groq_api_key = "sk-whatever".into();
+        assert_eq!(
+            slave_link_fingerprint(&c, id),
+            start,
+            "unrelated settings must not force a re-registration"
+        );
+
+        // The *other* port's settings are also unrelated to this one's.
+        let mut c = base.clone();
+        c.port_mut(SerialPortId::B).mode = "console".into();
+        c.port_mut(SerialPortId::B).port = "/dev/ttyUSB7".into();
+        assert_eq!(slave_link_fingerprint(&c, id), start, "other port");
+    }
+
+    /// The two ports fingerprint independently, so Port B re-registering never
+    /// looks like a change to Port A.
+    #[test]
+    fn test_slave_link_fingerprint_is_per_port() {
+        let mut cfg = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
+        {
+            let b = cfg.port_mut(SerialPortId::B);
+            b.enabled = true;
+            b.mode = "modem".into();
+            b.port = "/dev/ttyUSB1".into();
+        }
+        assert_ne!(
+            slave_link_fingerprint(&cfg, SerialPortId::A),
+            slave_link_fingerprint(&cfg, SerialPortId::B)
+        );
     }
 
     /// `check_console_bridge_eligible` rejects a disabled port.

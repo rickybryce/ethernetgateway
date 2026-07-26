@@ -298,6 +298,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2222" *first* and then surfaced "Address already in use" as a generic
   post-hoc "SSH server error", which read as though the port had come up.
 
+- **A slave's modem ports now register with the master at startup, so the
+  master can ring them.** The registration machinery existed but was gated
+  behind `allow_peer_dial`, which meant a slave with the default settings could
+  never be reached *from its own master* — the master's Serial Gateway menu
+  simply never listed the port, and nothing contacted the master until the
+  attached device happened to dial out. That gate was the wrong one:
+  `allow_peer_dial` governs this gateway *dialing* arbitrary peers, whereas
+  master/slave is already an explicit, mutual, authenticated pairing (the slave
+  holds the master's credentials; the master sets `master_accept_relays`). A
+  third party reaching the port through the master's crossbar is still gated, on
+  the master. The announcer's log lines now describe registration rather than
+  peer-dial.
+- **A config change re-registers both slave ports.** A registration is a
+  standing claim — the master holds an idle channel and rings it later — so one
+  made under settings that have since changed is worse than none. Both the
+  modem announcer and the console register loop now watch a fingerprint of what
+  a registration depends on (role, the master's host/port/username/password, and
+  that port's own enabled flag, mode and device path) and re-register within
+  about a second of any of it changing, whichever UI made the change. Unrelated
+  edits — a weather location, a timeout — deliberately don't disturb a live
+  registration, and a call in progress is never interrupted (the check only runs
+  while idle).
+
 ### Changed
 - **Gateway Shell now surfaces the CP/M "destination first" operand order.**
   `COPY` and `MOVE` take the destination *before* the source (`COPY dst src`) —

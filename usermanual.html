@@ -3610,14 +3610,24 @@ sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
 <h3>9.14.3 How Ports Relay</h3>
 <ul>
     <li><strong>Modem-mode port</strong> — the slave runs the Hayes
-        emulator locally; when the device dials, the slave bridges the call
-        to the master, which serves its menu or dials a resolved
-        <code>host:port</code> onward.  The slave's <em>local</em> dial map
+        emulator locally and <strong>registers the port with its master at
+        startup</strong>, so the link works in both directions.  Inbound: the
+        master's <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu lists the
+        port and can <em>ring</em> it — the slave rings its local UART, which
+        answers per its own S0 / <code>ATA</code> rules, and the master is then
+        bridged to the device.  Outbound: when the device dials, the slave
+        bridges the call to the master, which serves its menu or dials a
+        resolved <code>host:port</code> onward.  The slave's <em>local</em> dial map
         resolves the number and the master performs the dial
         ("resolve local, dial central").  Onward-dial requires the master's
         <code>allow_peer_dial</code> to be on — otherwise the master refuses
         the outbound connection.  <code>+++</code> / <code>ATO</code>
-        work normally.</li>
+        work normally.  Registering with the master is <em>not</em> gated on
+        <code>allow_peer_dial</code>: that setting governs this gateway
+        <em>dialing</em> arbitrary peers, and a slave that its own master could
+        never reach would defeat the purpose of slave mode.  (A third party
+        reaching the port through the master's crossbar is still gated, on the
+        master.)</li>
     <li><strong>Console-mode port</strong> — the slave registers the port
         with the master; a master user reaches it from the master's
         <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu, which lists local
@@ -3627,7 +3637,20 @@ sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
 </ul>
 
 <p>
-<strong>Each gateway's serial ports are configured on the gateway they are
+<strong><aside class="note">
+<span class="label">Re-registering after a change</span>
+A registration is a standing claim — the master holds an idle channel and rings
+it later — so one made under settings that have since changed is worse than
+none.  Both ports therefore watch the settings a registration depends on (the
+role, the master's host / port / username / password, and that port's own
+enabled flag, mode, and device path) and re-register within about a second of
+any of them changing, whichever UI made the change.  A serial or server restart
+re-registers too.  Editing something unrelated — a weather location, a
+timeout — deliberately does <em>not</em> disturb a live registration.
+</aside>
+
+<p>
+Each gateway's serial ports are configured on the gateway they are
 physically attached to.</strong>  A slave's ports use the <em>slave's</em> own
 <code>serial_a_*</code> / <code>serial_b_*</code> settings (device path, baud,
 mode, flow control, <code>drive_carrier</code>, S-registers, <code>AT&amp;W</code>);
