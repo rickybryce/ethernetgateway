@@ -666,7 +666,10 @@ ASCC2:  DB      00H             ; OUT0 (CNTLAn),A
         RET
 
 ;-----------------------------------------------------------------------
-; ASCPAT - write the register addresses into the ASCI routines.
+; ASCPAT - write the register addresses into the ASCI routines.  Every
+; patched operand in the family belongs here, the four line-settings ones
+; included; a routine that patches only its own is a routine that works
+; until someone selects channel 1.
 ;-----------------------------------------------------------------------
 ASCPAT: LD      A,(PCHAN)
         AND     01H             ; channel 0 or 1
@@ -688,7 +691,13 @@ ASCPAT: LD      A,(PCHAN)
         LD      A,D             ; CNTLAn is the base itself
         LD      (ASCC1),A
         LD      (ASCC2),A
-        RET
+        LD      (LSASA1),A      ; ...and the line-settings pair, which must be
+        LD      (LSASA2),A      ; patched here too: they are the same kind of
+        LD      A,D             ; self-modified operand, and left at 00H they
+        ADD     A,02H           ; would address channel 0 of an unmoved I/O
+        LD      (LSASB1),A      ; base whatever the user picked - writing
+        LD      (LSASB2),A      ; CNTLB's value into CNTLA, whose RE and TE
+        RET                     ; bits would then silence the port
 
 ;-----------------------------------------------------------------------
 ; ISZ180 - is this processor a Z180?  Carry set if it is not.
@@ -3173,13 +3182,14 @@ RATEAS: DB      2DH,2CH,2BH,2AH,29H,28H,21H,20H,01H,00H
 ; the hardware documentation uses.
 ;-----------------------------------------------------------------------
 SCHELP: CALL    CLS
-        CALL    CRLF
         LD      HL,MHELP
         CALL    PSTR
         CALL    TWAIT
-        LD      HL,MHELP2
-        CALL    PSTR
+        CALL    CLS             ; a page per screen: pages 2 and 3 used to
+        LD      HL,MHELP2       ; scroll on below page 1, so on a 24-row
+        CALL    PSTR            ; terminal the top of each was already gone
         CALL    TWAIT
+        CALL    CLS
         LD      HL,MHELP3
         CALL    PSTR
         JP      TWAIT
@@ -3462,11 +3472,13 @@ MHELP2: DB      'Help - using the terminal',CR,LF
         DB      '-------------------------',CR,LF,CR,LF
         DB      'Terminal mode passes what you type to the port and',CR,LF
         DB      'what arrives to your screen.  The menu key',CR,LF
-        DB      'interrupts it; pressing that key twice sends it to',CR,LF
-        DB      'the remote end instead, and Settings can move it to',CR,LF
-        DB      'any control key if the remote system wants that one',CR,LF
-        DB      'for itself.  Settings also holds the serial port and',CR,LF
-        DB      'how to clear the screen.',CR,LF
+        DB      'interrupts it; pressing it twice sends it to the',CR,LF
+        DB      'remote end instead.',CR,LF
+        DB      'Settings holds the rest: the serial port, the line',CR,LF
+        DB      'settings (speed and framing, where the hardware has',CR,LF
+        DB      'any to set - a Z80 SIO/2 has none), the menu key',CR,LF
+        DB      '(any control key you press), and how to clear the',CR,LF
+        DB      'screen, which CP/M has no standard way to do.',CR,LF,CR,LF
         DB      'ANSI mode passes escape sequences through to your',CR,LF
         DB      'terminal.  ASCII mode strips them, drops the high',CR,LF
         DB      'bit and discards control codes that are not CR, LF,',CR,LF
@@ -3474,31 +3486,29 @@ MHELP2: DB      'Help - using the terminal',CR,LF
         DB      'a console with no cursor addressing: a remote menu',CR,LF
         DB      'drawn with graphics still reads as text.',CR,LF,CR,LF
         DB      'Settings are saved into EGT80.COM itself, so a copy',CR,LF
-        DB      'of the program carries them to another disk.  The',CR,LF
-        DB      'file has to be on the current drive under its own',CR,LF
-        DB      'name for that to work.',CR,LF,0
+        DB      'carries them to another disk - the file must be on',CR,LF
+        DB      'the current drive under its own name.',CR,LF,0
 MHELP3: DB      'Help - two things to know',CR,LF
         DB      '-------------------------',CR,LF,CR,LF
         DB      'CP/M AUX: has no way to ask whether a byte is',CR,LF
-        DB      'waiting - the operating system offers no such call.',CR,LF
-        DB      'EGT80 therefore reads one byte ahead, which means',CR,LF
-        DB      'this family cannot receive a literal ^Z, and on real',CR,LF
-        DB      'CP/M 2.2 hardware the read waits instead of',CR,LF
-        DB      'returning.  Against the Ethernet Gateway it works',CR,LF
-        DB      'well; on real hardware prefer the family that',CR,LF
+        DB      'waiting - the OS offers no such call - so EGT80',CR,LF
+        DB      'reads one byte ahead.  This family therefore cannot',CR,LF
+        DB      'receive a literal ^Z, and on real CP/M 2.2 the read',CR,LF
+        DB      'waits instead of returning.  Against the gateway it',CR,LF
+        DB      'works well; on real hardware prefer the family that',CR,LF
         DB      'matches your serial chip.',CR,LF,CR,LF
         DB      'The Z180 ASCI registers are Z180 internal I/O.  If',CR,LF
-        DB      'your system has moved the internal I/O base away',CR,LF
-        DB      'from 00, set that base first with B on the ASCI',CR,LF
-        DB      'menu, then pick the channel.',CR,LF,CR,LF
+        DB      'your system has moved that base away from 00, set',CR,LF
+        DB      'the base first with B on the ASCI menu, then pick',CR,LF
+        DB      'the channel.',CR,LF,CR,LF
         DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF
         DB      'with the checksum fallback an older peer may want.',CR,LF
         DB      'Start the far end first, then press U or D - from',CR,LF
-        DB      'the menu or from the terminal-mode menu key, which',CR,LF
-        DB      'does not hang up.  A dot is a block, a ? a retry.',CR,LF
-        DB      '^C stops a transfer at any point, and stops it at',CR,LF
-        DB      'the filename prompt too; an incomplete download is',CR,LF
-        DB      'deleted rather than left looking like a file.',CR,LF,0
+        DB      'the menu or the terminal-mode menu key, which does',CR,LF
+        DB      'not hang up.  A dot is a block, a ? a retry.  ^C',CR,LF
+        DB      'stops a transfer at any point, and at the filename',CR,LF
+        DB      'prompt too; an incomplete download is deleted',CR,LF
+        DB      'rather than left looking like a file.',CR,LF,0
 
 ;=======================================================================
 ; VECTORS AND VARIABLES

@@ -901,6 +901,13 @@ impl TelnetSession {
     /// grants nothing: whoever dialed it is *already* inside a session that
     /// passed the gate (telnet/SSH login, or the physical serial port's own
     /// trust boundary) — reaching the CP/M emulator at all required that.
+    ///
+    /// For the same reason it is neither counted against the telnet session cap
+    /// nor registered in [`SessionWriters`], exactly as the physical modem's
+    /// `dial_ethernet_gateway` is not: this is not an inbound connection but a
+    /// second screen for a caller already counted once.  A shutdown still ends
+    /// it — the shared `shutdown` flag is passed in, and the caller's own
+    /// session is registered, so the goodbye reaches the human either way.
     pub(crate) fn new_cpm_menu(
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,

@@ -331,9 +331,7 @@ impl CpmModem {
     }
 
     async fn dial(&mut self, target: &str, out: &mut Vec<u8>) {
-        // Strip a leading tone/pulse modifier.
-        let t = target.trim();
-        let t = t.strip_prefix(['T', 'P']).unwrap_or(t).trim();
+        let t = strip_dial_modifier(target);
 
         // This gateway's own menu, by keyword or by the built-in number — the
         // same two dial targets the *physical* serial modem answers.  Without
@@ -719,6 +717,24 @@ fn local_port(label: &str) -> Option<SerialPortId> {
     }
 }
 
+/// Strip a leading tone/pulse modifier from a dial target, as it arrived after
+/// the `D` and before any trimming.
+///
+/// The position matters: a `T` or `P` is only a modifier where it sits against
+/// the `D` (`ATDT host`).  Stripping after trimming ate the first letter of
+/// every host beginning with those letters — `ATD telnetbible.com` dialled
+/// `elnetbible.com`, silently — because the spaced form leaves no modifier to
+/// strip.  (The physical modem sidesteps this by honouring modifiers only
+/// inside a phone-like string.)  `ATDThost` with no space is ambiguous by
+/// nature and is still read as a modifier, which is what a user typing it
+/// means.
+fn strip_dial_modifier(target: &str) -> &str {
+    match target.strip_prefix(['T', 'P']) {
+        Some(rest) => rest.trim(),
+        None => target.trim(),
+    }
+}
+
 /// Resolve an ordinary (non-keyword, non-serial-port) dial target to the host
 /// and port to connect to, or `None` for a target that can't be dialed.
 ///
@@ -889,6 +905,29 @@ mod tests {
         );
         assert_eq!(resolve_host_port("host:notaport"), None);
         assert_eq!(resolve_host_port(""), None);
+    }
+
+    /// `ATD <host>` must not lose its first letter.  The tone/pulse modifier
+    /// is only a modifier when it sits against the `D`; after a space it is
+    /// the start of the hostname, and stripping it regardless turned
+    /// `telnetbible.com` into `elnetbible.com`.
+    #[test]
+    fn test_dial_modifier_does_not_eat_a_hostname() {
+        // What `dial` receives for each typed form, and what it must resolve.
+        for (after_the_d, host, port) in [
+            ("T TELNETBIBLE.COM:6400", "TELNETBIBLE.COM", 6400), // ATDT <host>
+            ("TTELNETBIBLE.COM:6400", "TELNETBIBLE.COM", 6400),  // ATDT<host>
+            (" TELNETBIBLE.COM:6400", "TELNETBIBLE.COM", 6400),  // ATD <host>
+            (" PORTAL.EXAMPLE.COM", "PORTAL.EXAMPLE.COM", 23),   // ...and P
+            ("P 192.168.1.50:2323", "192.168.1.50", 2323),       // pulse dial
+        ] {
+            let t = strip_dial_modifier(after_the_d);
+            assert_eq!(
+                resolve_host_port(t),
+                Some((host.to_string(), port)),
+                "target {after_the_d:?} resolved from {t:?}"
+            );
+        }
     }
 
     #[tokio::test]

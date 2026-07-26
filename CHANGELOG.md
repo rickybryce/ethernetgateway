@@ -325,6 +325,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Every EGT80 screen is now checked to fit a 24×80 terminal**, by a new test
+    that parses the `DB` strings out of `EGT80.Z80` — a source-level check, so it
+    runs in CI even though the binary itself cannot be rebuilt there. It found
+    help page 3 had been two rows over since it was written and page 2 going over
+    as line settings were described in it, both of which pushed the page's own
+    heading off the top; both are trimmed, and each help page now clears the
+    screen instead of scrolling on below the previous one.
   - **Line settings (baud rate, data bits, parity, stop bits)** on a new Settings
     submenu, applied where a terminal genuinely can and refused with an
     explanation where it cannot. **RomWBW HBIOS** takes speed and framing in one
@@ -348,7 +355,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     including at startup, guarded so a config carried to the wrong machine cannot
     `RST 8` or `IN0` on hardware that has neither. Verified end to end in the
     emulator: after applying 19200 7E2 through HBIOS, a `CIOQUERY` probe read back
-    `289E`, exactly that framing plus RTS+DTR.
+    `289E`, exactly that framing plus RTS+DTR. The four ASCI register operands
+    are patched by `ASCPAT` along with every other one in that family — a review
+    caught them missing, which would have sent the CNTLB writes to CNTLA, whose
+    receiver/transmitter enables would then have silenced the port.
 - **EGT80: `^C` backs out of every menu**, not just the notice screens — the port
   family list, all four per-family prompts, and Settings — so one habit works
   everywhere. `Q` still does the same, and the menus say so.
@@ -367,6 +377,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:port` defaults to telnet's 23, so `ATDT bbs.example.com` dials instead of
   failing), and a **phone number is looked up in the dialup phonebook** as on
   the physical modem.
+- **`ATD <host>` no longer eats the first letter of the hostname.** The CP/M
+  modem stripped a leading tone/pulse modifier *after* trimming, so any host
+  beginning with `T` or `P` lost that letter when dialled without a modifier:
+  `ATD telnetbible.com` silently dialled `elnetbible.com` and reported NO
+  CARRIER. A `T`/`P` is now only a modifier where it sits against the `D`
+  (`ATDT host`), which is how the physical modem has always behaved — it honours
+  modifiers only inside a phone-like string. Found reviewing the dial path, and
+  confirmed against a real BBS.
 - **Backspace works at the CP/M modem's `AT` prompt.** The byte was removed
   from the command line, but the echo was the raw `BS`/`DEL` — a bare `BS` only
   walks the cursor left and leaves the character on the screen, and EGT80's

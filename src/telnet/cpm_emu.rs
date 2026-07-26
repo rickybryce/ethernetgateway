@@ -1476,6 +1476,112 @@ mod egt80_tests {
         );
     }
 
+    /// Every EGT80 screen has to fit the terminal it is printed on: 24 rows by
+    /// 80 columns, the CP/M-era console (ADM-3A, VT100, and what the gateway
+    /// renders to).  A screen two lines too tall loses its *heading* off the
+    /// top, which is the part naming what you are looking at.
+    ///
+    /// This is a source-level check on purpose: it parses the `DB` strings out
+    /// of `EGT80.Z80`, so it needs no assembler and runs in CI, unlike the
+    /// binary itself.  It caught help page 3 having been over the limit since
+    /// it was written, and page 2 going over when line settings were described
+    /// in it.  Two rows are reserved for the "Press any key" prompt that
+    /// follows a full-screen page.
+    #[test]
+    fn test_egt80_screens_fit_a_24_by_80_terminal() {
+        const ROWS: usize = 24;
+        const COLS: usize = 80;
+        const PROMPT_ROWS: usize = 2; // blank line + "Press any key."
+
+        let src = include_str!("../../EGT80/EGT80.Z80");
+        let mut label = String::new();
+        let mut text = String::new();
+        let check = |label: &str, text: &str| {
+            if label.is_empty() {
+                return;
+            }
+            let rows = text.matches('\n').count();
+            let widest = text
+                .split('\n')
+                .map(|l| l.trim_end_matches('\r').len())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                rows + PROMPT_ROWS <= ROWS,
+                "EGT80 screen {label} is {rows} rows; with the key prompt that \
+                 scrolls its heading off a {ROWS}-row terminal"
+            );
+            assert!(
+                widest <= COLS - 2,
+                "EGT80 screen {label} has a {widest}-column line; it would wrap \
+                 on an {COLS}-column terminal"
+            );
+        };
+
+        for line in src.lines() {
+            let body = line.split(';').next().unwrap_or("");
+            // A new label starts a new message; an indented DB continues one.
+            if let Some((name, rest)) = body.split_once(":") {
+                if !name.starts_with(char::is_whitespace)
+                    && !name.is_empty()
+                    && rest.trim_start().starts_with("DB")
+                {
+                    check(&label, &text);
+                    label = name.to_string();
+                    text = render_db(rest.trim_start().trim_start_matches("DB"));
+                    continue;
+                }
+            }
+            if !label.is_empty() && body.starts_with(char::is_whitespace) {
+                let t = body.trim_start();
+                if let Some(rest) = t.strip_prefix("DB") {
+                    text.push_str(&render_db(rest));
+                    continue;
+                }
+            }
+            check(&label, &text);
+            label.clear();
+            text.clear();
+        }
+        check(&label, &text);
+    }
+
+    /// Render one `DB` operand list the way the console would see it: quoted
+    /// runs verbatim, and the `CR`/`LF` symbols as the bytes they equate to.
+    /// Anything else (a numeric byte, a `0` terminator) contributes no width.
+    fn render_db(operands: &str) -> String {
+        let mut out = String::new();
+        let mut rest = operands;
+        while !rest.is_empty() {
+            if let Some(open) = rest.find('\'') {
+                let (before, tail) = rest.split_at(open);
+                out.push_str(&symbols(before));
+                let tail = &tail[1..];
+                match tail.find('\'') {
+                    Some(close) => {
+                        out.push_str(&tail[..close]);
+                        rest = &tail[close + 1..];
+                    }
+                    None => return out, // unterminated: nothing sane to add
+                }
+            } else {
+                out.push_str(&symbols(rest));
+                return out;
+            }
+        }
+        out
+    }
+
+    fn symbols(part: &str) -> String {
+        part.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter_map(|tok| match tok {
+                "CR" => Some('\r'),
+                "LF" => Some('\n'),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_egt80_default_port_matches_the_gateway_default() {
         // "They work together out of the box" rests on two constants in two
