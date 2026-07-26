@@ -757,7 +757,19 @@ fn menu_session(
             lockouts,
         );
         if let Err(e) = session.run().await {
-            crate::glog!("CP/M modem: gateway menu session error: {}", e);
+            // A hangup closes our end of the duplex, so the session's next
+            // write fails - that is how this session *normally* ends, and
+            // logging it as an error trains the reader to skip the very lines
+            // a real fault would appear in.  Only genuine failures are logged.
+            let normal = matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+            );
+            if !normal {
+                crate::glog!("CP/M modem: gateway menu session error: {}", e);
+            }
         }
         let mut w = writer.lock().await;
         let _ = w.shutdown().await;
