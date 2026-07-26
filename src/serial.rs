@@ -3769,7 +3769,7 @@ fn clear_active_connection(state: &mut ModemState) {
 // ─── Dialing ───────────────────────────────────────────────
 
 /// Built-in phone number that dials the local Ethernet Gateway menu.
-const GATEWAY_PHONE_NUMBER: &str = "1001000";
+pub(crate) const GATEWAY_PHONE_NUMBER: &str = "1001000";
 
 /// Parsed representation of an ATDT/ATDP dial string with Hayes modifiers
 /// applied.
@@ -4416,7 +4416,7 @@ fn dial_master_relay(
 /// and the leading `+` for international format.  Dots are excluded so that
 /// IP addresses (e.g. `192.168.1.1`) and hostnames are not mistaken for
 /// phone numbers.
-fn is_phone_number(s: &str) -> bool {
+pub(crate) fn is_phone_number(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }

@@ -12,7 +12,7 @@ the pairing wrong and the program is simply silent.
 EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-**Status: complete (v0.6)** — a working terminal with all five port families,
+**Status: complete (v0.7)** — a working terminal with all five port families,
 settings that survive a restart, and XMODEM file transfer in both directions.
 
 Verified in the gateway's CP/M emulator, each family against the matching
@@ -44,6 +44,11 @@ build. Delete it if you want the shipped copy back on the next launch.
 Each release archive also carries `EGT80.COM` as a loose file: that is the copy to
 send to real CP/M hardware over XMODEM (from QTERM use `xk`, never Kermit — it is
 text-only there and truncates binaries at the first `^Z`).
+
+The quickest proof it works needs nothing outside the gateway: run `EGT80`, press
+`T` for terminal mode, and dial the gateway itself with
+`ATDT ethernetgateway` — the menu answers over the virtual modem, so a
+successful `CONNECT` tests the port, the modem and the terminal in one go.
 
 ## Building
 
@@ -188,6 +193,60 @@ sector, one 128-byte disk record) rather than "whatever memory is free". A
 terminal does not need to claim the TPA, and a known size is a known worst case
 on a machine that may only have 32 KB of it.
 
+## Line settings, and the honest answer about baud rates
+
+Settings → `B` sets speed and framing. What that can *do* depends entirely on
+the family, and the screen says which case you are in rather than offering a knob
+that goes nowhere:
+
+| Family | What EGT80 can set |
+|--------|--------------------|
+| RomWBW HBIOS | speed **and** framing, in one `CIOINIT` firmware call |
+| Z180 ASCI | speed and framing — the rate genuinely lives in CNTLA/CNTLB |
+| 6850 ACIA | framing, and the rate only as the board clock ÷1, ÷16 or ÷64 |
+| Z80 SIO/2 | **nothing** — see below |
+| CP/M AUX: | **nothing** — the OS owns the port |
+
+A **Z80 SIO/2 has no baud rate generator at all**: the bit rate arrives on a
+clock pin from the board or its CTC. Only framing is inside the chip, and its
+registers are *write-only*, so EGT80 cannot even read what the ROM chose — it
+would be reprogramming from a guess, with a silent port as the prize. So it
+declines and explains, which is more useful than a rate field that lies.
+
+And against the gateway's own virtual modem **none of it matters in either
+direction**: a TCP connection has no bit rate, so the emulated UART accepts
+line-configuration writes and ignores them. Nothing you set here can break the
+gateway link.
+
+Hence the default: **EGT80 programs nothing at all** unless you press `A`. The
+port keeps whatever the ROM, the firmware or the OS set up — the arrangement that
+already works on the machine — and `R` returns to that state. `A` also makes the
+setting stick: it is re-applied whenever the port is selected, including at
+startup, so it is a setting rather than a one-off command.
+
+Two encodings are worth recording because they are easy to get wrong:
+
+- **HBIOS** takes a 16-bit line-characteristics word whose baud field is not a
+  rate but an exponent pair — the published rule is `V = 75 × 2^X × 3^Y` with the
+  bits laid out `YXXXX`, which is why the table jumps from 9 (38400) to 24
+  (57600). `RATEHB` holds the codes so that arithmetic is done once. RTS and DTR
+  are asserted deliberately: clearing DTR on a real modem drops the call.
+  Verified end to end — after applying 19200 7E2, a `CIOQUERY` probe run in the
+  emulator read back `289E`, which decodes as exactly that plus RTS+DTR.
+- **The 6850 has only eight framing combinations**, so 7 data bits without parity,
+  and 8 data bits with parity and two stop bits, do not exist. Those are refused
+  by name rather than rounded to the nearest — a framing mismatch shows up as
+  garbage characters, which is the symptom the user came to this screen to fix.
+
+The Z180 rate table assumes the 18.432 MHz crystal Z180 boards use precisely
+because it divides to the standard rates (an SC126 has one); the screen prints
+that assumption next to the rate. Both ASCI registers are read-modify-write, since
+CNTLA carries the receiver and transmitter enables and clearing either would
+silence the port being configured. One caveat is in the silicon: CNTLB bit 5 reads
+back as the CTS input but writes the prescaler select, so it can never be
+preserved by a read and is always taken from the table. **Reasoned, not run** —
+like the rest of the ASCI driver.
+
 ## Getting unstuck
 
 Two things exist because the alternative was confusing rather than because the
@@ -199,6 +258,27 @@ whole port group, so no leftover from another family can be left pointing
 somewhere odd. The screen also names the port currently in force, since "which
 port am I on?" is why most people open that menu. A Rust test fails the build if
 this default and the gateway's ever drift apart.
+
+**The screen is cleared and the banner redrawn** before the main menu and on
+entering terminal mode, so it is always clear which program you are talking to
+once a remote system has filled the screen. There is no portable clear on CP/M —
+the terminal is not the computer's and the BIOS offers nothing — so Settings → `C`
+picks the dialect: the ADM-3A's `^Z` (the default, and what the gateway's own
+terminal translation recognises and re-renders for whatever is really connected,
+PETSCII C64 included), the ANSI `ESC [ 2 J` for a VT100, or off for a printing
+terminal, where clearing the screen means feeding paper. Clearing the screen also
+means a message can be wiped before it is read, so the places where a message is
+the only feedback — a damaged settings block, a save, a refused port family —
+now pause for a keypress.
+
+**The menu key is any control key you press.** Settings → `K` asks for it
+directly instead of cycling three fixed choices, because which key is free
+depends on the remote system rather than on us (`^Y` is WordStar's delete-line,
+`^]` is telnet's escape, `^\` is Kermit's, and something wants each of them).
+Five are refused and the refusal says why: `^C` backs out of every screen here,
+CR/LF/TAB are ordinary typing, and `ESC` begins the arrow-key sequences, so a
+cursor key would open the menu. A saved key is validated on startup too — an
+invalid one would trap that key for ever.
 
 **`^C`** gets you out — of any menu (the port list, every per-family prompt,
 Settings) as well as the notice screens. Settings and port changes take effect immediately, but

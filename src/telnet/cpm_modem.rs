@@ -11,7 +11,9 @@
 //!
 //! Both directions work: **outbound** (`ATD A`/`B` for the gateway's own
 //! ports, `ATD A@<remote-ip>` for a port on another gateway via the crossbar
-//! master, `ATDT host:port` for TCP) and **inbound** — the emulator is dialable
+//! master, `ATDT host[:port]` for TCP — port 23 by default — and
+//! `ATDT ethernetgateway` for this gateway's own menu, the same dial targets
+//! the physical serial modem answers) and **inbound** — the emulator is dialable
 //! as `CPM@<ip>`, ringing the guest (`RING`) which answers with `ATA` or
 //! `ATS0=`*n* auto-answer.
 
@@ -80,6 +82,17 @@ pub(in crate::telnet) struct CpmModem {
     /// is online, alongside `conn` (its channel stream).  Type-erased so this
     /// module needn't name the russh types.  Cleared on hangup.
     relay_keepalive: Option<Box<dyn std::any::Any + Send>>,
+    /// What `ATDT ethernetgateway` needs to spawn a session on this gateway's
+    /// own menu, handed over by the CP/M session that owns this modem.  `None`
+    /// in unit tests, where that dial reports NO CARRIER.
+    menu: Option<MenuContext>,
+}
+
+/// The session-owned handles a locally-dialed gateway menu session needs.
+pub(in crate::telnet) struct MenuContext {
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lockouts: super::LockoutMap,
 }
 
 impl CpmModem {
@@ -102,7 +115,20 @@ impl CpmModem {
             dcd_mode: 1,
             s_regs: default_s_regs(),
             relay_keepalive: None,
+            menu: None,
         }
+    }
+
+    /// Give the modem what it needs to answer `ATDT ethernetgateway` with a
+    /// session on this gateway's own menu.  Called by the CP/M session, which
+    /// owns the shutdown/restart flags and the lockout map.
+    pub(in crate::telnet) fn set_menu_context(
+        &mut self,
+        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        lockouts: super::LockoutMap,
+    ) {
+        self.menu = Some(MenuContext { shutdown, restart, lockouts });
     }
 
     /// Reset AT state to power-on defaults (ATZ / AT&F).
@@ -178,6 +204,19 @@ impl CpmModem {
 
     /// Accumulate a command-mode byte; on CR, dispatch the line.
     async fn feed_command_byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        // Backspace / DEL edit the line, and the echo must *erase*: a bare BS
+        // only walks the cursor left (the character stays on the screen), and a
+        // bare DEL prints as litter on a printing terminal — EGT80 drops it
+        // outright.  Echoing the raw byte therefore made the command line look
+        // uneditable even though the buffer really had been trimmed, so a typo
+        // could only be fixed by starting the line again.  Nothing is echoed
+        // when the line is already empty, as a real modem does.
+        if matches!(b, 0x08 | 0x7F) {
+            if self.line.pop().is_some() && self.echo {
+                out.extend_from_slice(b"\x08 \x08");
+            }
+            return;
+        }
         if self.echo {
             out.push(b);
         }
@@ -195,9 +234,6 @@ impl CpmModem {
             // dialling problem rather than a parsing one.  A real modem ignores
             // NUL padding; so do we.
             b'\n' | 0x00 => {}
-            0x08 | 0x7F => {
-                self.line.pop();
-            }
             _ => {
                 if self.line.len() < 128 {
                     self.line.push(b);
@@ -299,6 +335,22 @@ impl CpmModem {
         let t = target.trim();
         let t = t.strip_prefix(['T', 'P']).unwrap_or(t).trim();
 
+        // This gateway's own menu, by keyword or by the built-in number — the
+        // same two dial targets the *physical* serial modem answers.  Without
+        // this the CP/M guest had no way to reach the gateway it is running
+        // inside: `ATDT ethernetgateway` fell through to the TCP path, failed to
+        // parse as `host:port`, and came back NO CARRIER.
+        let lower = t.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "ethernetgateway" | "ethernet-gateway" | "ethernet gateway"
+        ) || (crate::serial::is_phone_number(t)
+            && crate::config::normalize_phone_number(t) == crate::serial::GATEWAY_PHONE_NUMBER)
+        {
+            self.dial_gateway_menu(out).await;
+            return;
+        }
+
         // Serial port: "A"/"B", optionally "A@<host>".  A bare label or a
         // local host rings the gateway's own port; a remote host targets a
         // port a slave registered with this gateway's crossbar (master).
@@ -369,8 +421,9 @@ impl CpmModem {
             return;
         }
 
-        // TCP host:port.
-        if let Some((host, port)) = parse_host_port(t) {
+        // A phone number is looked up in the dialup phonebook, as on the
+        // physical modem; anything else is taken as a host.
+        if let Some((host, port)) = resolve_host_port(t) {
             match tokio::net::TcpStream::connect((host.as_str(), port)).await {
                 Ok(stream) => {
                     self.conn = Some(Box::new(stream));
@@ -383,6 +436,39 @@ impl CpmModem {
         }
 
         self.result(out, "NO CARRIER");
+    }
+
+    /// Dial this gateway's own menu over an in-memory duplex, the way the
+    /// physical modem's `dial_ethernet_gateway` does.  The spawned session is
+    /// built with `new_cpm_menu`, which carries **raw serial semantics** — no
+    /// telnet IAC negotiation, whose bytes would reach the CP/M guest as
+    /// garbage — so the guest sees the same clean menu a serial caller does.
+    async fn dial_gateway_menu(&mut self, out: &mut Vec<u8>) {
+        let Some(ctx) = self.menu.as_ref() else {
+            self.result(out, "NO CARRIER"); // no session behind us (tests)
+            return;
+        };
+        let shutdown = ctx.shutdown.clone();
+        let restart = ctx.restart.clone();
+        let lockouts = ctx.lockouts.clone();
+
+        // Generous buffer: the guest drains its RX ring a batch at a time.
+        let (session_side, modem_side) = tokio::io::duplex(65536);
+        let (session_read, session_write) = tokio::io::split(session_side);
+        let boxed: Box<dyn AsyncWrite + Unpin + Send> = Box::new(session_write);
+        let writer: super::SharedWriter = std::sync::Arc::new(tokio::sync::Mutex::new(boxed));
+
+        tokio::spawn(menu_session(
+            Box::new(session_read),
+            writer,
+            shutdown,
+            restart,
+            lockouts,
+        ));
+
+        self.conn = Some(Box::new(modem_side));
+        self.mode = Mode::Online;
+        self.result(out, "CONNECT");
     }
 
     /// Online mode: forward one byte to the peer, tracking the (simplified)
@@ -557,6 +643,40 @@ impl CpmModem {
     }
 }
 
+/// The menu session a `ATDT ethernetgateway` dial runs, as an already-boxed
+/// `Send` future.
+///
+/// The boxing is load-bearing, not style: that session may itself start the
+/// CP/M emulator, whose modem can dial the menu again, so the future's type is
+/// **recursive**.  Spawning an inline `async` block asks the compiler to decide
+/// `Send` for a type defined in terms of itself, and it gives up ("cannot
+/// satisfy `impl Future: Send`").  Declaring `Send` in this signature cuts the
+/// cycle: every nesting level is proved against the trait object, not the
+/// concrete future.  (The nesting itself is bounded by the user — each level is
+/// a real session someone chose to open, exactly as on the physical modem.)
+fn menu_session(
+    reader: Box<dyn AsyncRead + Unpin + Send>,
+    writer: super::SharedWriter,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lockouts: super::LockoutMap,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let mut session = super::TelnetSession::new_cpm_menu(
+            reader,
+            writer.clone(),
+            shutdown,
+            restart,
+            lockouts,
+        );
+        if let Err(e) = session.run().await {
+            crate::glog!("CP/M modem: gateway menu session error: {}", e);
+        }
+        let mut w = writer.lock().await;
+        let _ = w.shutdown().await;
+    })
+}
+
 /// Power-on S-register defaults (S0..S27); mirrors a typical Hayes modem.
 fn default_s_regs() -> [u8; 28] {
     let mut s = [0u8; 28];
@@ -597,6 +717,28 @@ fn local_port(label: &str) -> Option<SerialPortId> {
         "B" | "PORTB" => Some(SerialPortId::B),
         _ => None,
     }
+}
+
+/// Resolve an ordinary (non-keyword, non-serial-port) dial target to the host
+/// and port to connect to, or `None` for a target that can't be dialed.
+///
+/// A phone number goes through the dialup phonebook, as on the physical modem;
+/// anything else is a host, and a host with no `:port` gets telnet's port 23.
+/// That default is the fix for the reported failure: requiring an explicit port
+/// meant a plain `ATDT somehost` could only ever answer NO CARRIER.
+fn resolve_host_port(t: &str) -> Option<(String, u16)> {
+    let resolved = if crate::serial::is_phone_number(t) {
+        crate::config::lookup_dialup_number(t)?
+    } else {
+        t.to_string()
+    };
+    if resolved.contains(':') {
+        return parse_host_port(&resolved); // an explicit port must be valid
+    }
+    if resolved.is_empty() {
+        return None;
+    }
+    Some((resolved, 23))
 }
 
 /// Parse a `host:port` dial target.  Requires an explicit port.
@@ -655,8 +797,9 @@ mod tests {
         // reported from a real session, where a correct `ATDT host:port` was
         // refused while the identical first command had been accepted.
         let mut m = CpmModem::new(true);
-        // First command: a dial with no port fails, leaving us in command mode.
-        let out = m.service(b"ATDT nowhere\r\0".to_vec(), 65536).await;
+        // First command: a dial to a name that cannot resolve (RFC 2606
+        // `.invalid`) fails, leaving us in command mode.
+        let out = m.service(b"ATDT nowhere.invalid\r\0".to_vec(), 65536).await;
         let first = String::from_utf8_lossy(&out).to_string();
         assert!(first.contains("NO CARRIER"), "first command: {first}");
         // Second command must be parsed, not refused because of the NUL.
@@ -671,6 +814,81 @@ mod tests {
         let out = m.service(b"AT\r\0".to_vec(), 65536).await;
         let third = String::from_utf8_lossy(&out).to_string();
         assert!(third.contains("OK") && !third.contains("ERROR"), "third: {third}");
+    }
+
+    /// Reported from a real EGT80 session: backspacing a typo at the AT prompt
+    /// did nothing visible.  The byte *was* removed from the line buffer, but
+    /// the echo was the raw BS/DEL — a bare BS leaves the character on screen
+    /// and EGT80's filter drops DEL entirely.  The echo must erase.
+    #[tokio::test]
+    async fn test_backspace_erases_and_edits_the_command_line() {
+        for erase in [0x08u8, 0x7F] {
+            let mut m = CpmModem::new(true);
+            // Type "ATZX", rub out the X, then Return: the line must be "ATZ".
+            let mut input = b"ATZX".to_vec();
+            input.push(erase);
+            input.push(b'\r');
+            let out = m.service(input, 65536).await;
+            let s = String::from_utf8_lossy(&out).to_string();
+            assert!(s.contains("\x08 \x08"), "destructive echo missing: {s:?}");
+            // ATZ applied (not ERROR from a stray X reaching the parser).
+            assert!(s.contains("OK") && !s.contains("ERROR"), "{s:?}");
+        }
+    }
+
+    /// A backspace on an empty line echoes nothing (a real modem's behavior) —
+    /// otherwise the erase walks back over the prompt.
+    #[tokio::test]
+    async fn test_backspace_on_empty_line_echoes_nothing() {
+        let mut m = CpmModem::new(true);
+        assert!(m.service(vec![0x08], 65536).await.is_empty());
+    }
+
+    /// `ATDT ethernetgateway` from a CP/M terminal must reach this gateway's
+    /// own menu — the keyword the physical serial modem has always answered.
+    /// Before this, it fell through to the TCP path, failed to parse as
+    /// `host:port`, and reported NO CARRIER.
+    #[tokio::test]
+    async fn test_gateway_keyword_dials_the_local_menu() {
+        for kw in ["ethernetgateway", "ethernet-gateway", "ETHERNET GATEWAY", "1001000"] {
+            let mut m = CpmModem::new(true);
+            m.set_menu_context(
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            );
+            let out = m.service(format!("ATDT {kw}\r").into_bytes(), 65536).await;
+            let s = String::from_utf8_lossy(&out).to_string();
+            assert!(s.contains("CONNECT"), "{kw}: {s:?}");
+            assert!(m.conn.is_some() && m.mode == Mode::Online, "{kw}: not online");
+        }
+    }
+
+    /// The session behind the modem is what serves the menu; with no session
+    /// context (as in a bare unit test) the keyword fails cleanly instead of
+    /// panicking.
+    #[tokio::test]
+    async fn test_gateway_keyword_without_session_context_is_no_carrier() {
+        let mut m = CpmModem::new(true);
+        let out = m.service(b"ATDT ethernetgateway\r".to_vec(), 65536).await;
+        assert!(String::from_utf8_lossy(&out).contains("NO CARRIER"));
+        assert!(m.conn.is_none());
+    }
+
+    /// A host with no `:port` gets telnet's 23, as on the physical modem; an
+    /// explicit port still wins, and a malformed one is not dialed.
+    #[test]
+    fn test_bare_host_defaults_to_telnet_port() {
+        assert_eq!(
+            resolve_host_port("bbs.example.com"),
+            Some(("bbs.example.com".to_string(), 23))
+        );
+        assert_eq!(
+            resolve_host_port("192.168.1.50:2323"),
+            Some(("192.168.1.50".to_string(), 2323))
+        );
+        assert_eq!(resolve_host_port("host:notaport"), None);
+        assert_eq!(resolve_host_port(""), None);
     }
 
     #[tokio::test]

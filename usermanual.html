@@ -2500,12 +2500,56 @@ It drives <strong>all five port families</strong> &mdash; Z80&nbsp;SIO/2,
 6850&nbsp;ACIA, RomWBW&nbsp;HBIOS (<code>RST&nbsp;8</code>), Z180&nbsp;ASCI and
 the CP/M <code>AUX:</code> device &mdash; each picked from a menu, with a
 free-form address entry for boards at unusual ports, so it pairs with every
-profile in the table above. Settings (port, filter mode, echo, menu key) are
-saved into <code>EGT80.COM</code> itself, so a copy carries them to another disk.
+profile in the table above. Everything configurable lives under
+<strong>Settings</strong>: the serial port, the line settings (below), ANSI or
+ASCII output, local echo, LF-after-CR, the menu key (any control key you press),
+and how to clear the screen. All of it is saved into <code>EGT80.COM</code>
+itself, so a copy carries the settings to another disk.
 It also moves files: <strong>XMODEM</strong> in both directions, from its menu or
 from the terminal-mode menu key (which doesn&rsquo;t hang up the call), tested
 against this gateway&rsquo;s own File Transfer menu. See
 <code>EGT80/README.md</code>.
+</p>
+
+<p>
+<strong>Line settings &mdash; and whether a baud rate means anything here.</strong>
+Settings&nbsp;&rarr;&nbsp;<code>B</code> sets speed and framing, but what that can
+actually do depends on the family, and the screen says which case you are in
+rather than offering a knob that goes nowhere. <strong>RomWBW HBIOS</strong> takes
+speed and framing together in one firmware call; <strong>Z180 ASCI</strong> really
+does hold the rate in its own registers; a <strong>6850 ACIA</strong> can set
+framing and divide the board&rsquo;s clock by 1, 16 or 64. A
+<strong>Z80&nbsp;SIO/2 cannot set a rate at all</strong> &mdash; the chip has no
+baud generator, the bit rate arrives from the board&rsquo;s clock or CTC, and its
+registers are write-only, so EGT80 declines rather than reprogram from a guess.
+The CP/M <code>AUX:</code> device belongs to the operating system.
+</p>
+
+<p>
+Against <em>this gateway</em> none of it matters in either direction: the virtual
+modem is a TCP connection, which has no bit rate, so the emulated UART accepts
+line-configuration writes and ignores them &mdash; nothing set here can break the
+link. Accordingly EGT80 <strong>programs nothing at all</strong> unless you press
+<code>A</code> to apply, and <code>R</code> returns to that state: the port keeps
+whatever the ROM, the firmware or CP/M set up, which is the arrangement that
+already works on the machine. An applied setting is re-applied whenever the port
+is selected, including at startup, so it behaves as a setting rather than a
+one-off command. A combination the hardware does not have &mdash; 7 data bits
+without parity on a 6850, say &mdash; is refused by name instead of being rounded
+to the nearest, because a framing mismatch shows up as garbage characters, which
+is the symptom that sent you to this screen.
+</p>
+
+<p>
+<strong>The screen is cleared and the banner redrawn</strong> before the main menu
+and on entering terminal mode, which also names the menu key and says that the key
+followed by <code>E</code> returns to the main menu. CP/M has no standard
+clear-screen &mdash; the terminal is not the computer&rsquo;s and the BIOS offers
+nothing &mdash; so Settings&nbsp;&rarr;&nbsp;<code>C</code> picks the dialect: the
+ADM-3A&rsquo;s <code>^Z</code> (the default, and the one the gateway&rsquo;s own
+terminal translation recognises and re-renders for whatever client is really
+connected, PETSCII C64 included), the ANSI <code>ESC&nbsp;[&nbsp;2&nbsp;J</code>
+for a VT100, or off for a printing terminal.
 </p>
 
 <p>
@@ -2555,9 +2599,21 @@ way Ports A/B dial each other: <code>ATD A</code> / <code>ATD B</code> reach
 this gateway&rsquo;s own ports, and <code>ATD A@&lt;ip&gt;</code> /
 <code>B@&lt;ip&gt;</code> reach a port on another gateway across the master/slave
 relay (same routing and <code>allow_peer_dial</code> gate as the physical
-modem). Or dial a network host directly with <code>ATDT host:port</code>. On
+modem). Or dial a network host directly with <code>ATDT host:port</code> &mdash;
+a target with no <code>:port</code> defaults to port 23, and a phone number is
+looked up in <code>dialup.conf</code>, both as on the physical modem. On
 answer the modem reports <code>CONNECT</code> and becomes a transparent data
 pipe; <code>+++</code> returns to command mode and <code>ATH</code> hangs up.
+</p>
+
+<p>
+It can also dial <strong>this gateway&rsquo;s own menu</strong>:
+<code>ATDT ethernetgateway</code> (or <code>ethernet-gateway</code>, or the
+built-in number <code>1001000</code>) &mdash; the same targets the physical
+modem answers. That is the quickest way to prove a CP/M terminal works, since
+it needs nothing outside the gateway: from EGT80, pick the port, press
+<code>T</code> for terminal mode, and dial. The menu session runs with raw
+serial semantics, so no telnet negotiation bytes reach the CP/M program.
 </p>
 
 <p>

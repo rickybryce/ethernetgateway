@@ -178,6 +178,25 @@ FLTMOD: DB      0               ; 0 = ANSI pass, 1 = ASCII strip
 ECHOFL: DB      0               ; local echo off (the remote echoes)
 CRLFFL: DB      0               ; do not add LF to a typed CR
 ESCCH:  DB      19H             ; ^Y, as the QTERM builds here use
+LBAUD:  DB      5               ; index into RATETB; 5 = 9600
+LBITS:  DB      8               ; 7 or 8 data bits
+LPAR:   DB      0               ; parity: 0 none, 1 even, 2 odd
+LSTOP:  DB      1               ; 1 or 2 stop bits
+LADIV:  DB      1               ; 6850 clock divider: 0 = /1, 1 = /16, 2 = /64
+LSAPP:  DB      0               ; 0 = never program the port - the default, and
+                                ; the state to come back to: the port keeps
+                                ; whatever the ROM, the firmware or the OS set
+                                ; up, which is the arrangement that already
+                                ; works on the machine.  1 = apply the line
+                                ; settings above whenever the port is selected.
+CLSMOD: DB      0               ; how to clear the screen: 0 = ADM-3A ^Z,
+                                ; 1 = ANSI ESC [ 2 J, 2 = don't.  ^Z is the
+                                ; default because it is what the gateway's
+                                ; own terminal translation understands (it
+                                ; renders the clear for whatever the far
+                                ; client is, PETSCII included) and what most
+                                ; CP/M-era terminals use.  A VT100 wants the
+                                ; ANSI form.
 
 CFGADR  EQU     0180H           ; where the block lives
 CFGREC  EQU     1               ; ...which is file record 1
@@ -188,8 +207,7 @@ BEGIN:  LD      SP,STKTOP       ; our stack, not the CCP's
         CALL    CONSET          ; choose the console I/O path
         CALL    CFGCHK          ; trust the saved settings only if sane
         CALL    PORTST          ; point the port vectors at the default
-        CALL    SCTTL           ; title screen
-        JP      MAINLP          ; main menu
+        JP      MAINLP          ; main menu - which draws the title itself
 
 ;=======================================================================
 ; CONSET - decide how console I/O is done, once.
@@ -381,7 +399,11 @@ UPCASE: CP      'a'
 ; for the Z180 ASCI (with the channel in PCHAN), and nothing at all for
 ; the CP/M AUX device.
 ;=======================================================================
-PORTST: LD      A,(PKIND)
+PORTST: CALL    PORTS1
+        JP      LSAUTO          ; re-apply the line settings, if any were
+                                ; asked for: that is what makes them a
+                                ; setting and not a one-off command
+PORTS1: LD      A,(PKIND)
         CP      PKSIO
         JR      Z,PSSIO
         CP      PKACIA
@@ -808,8 +830,6 @@ MAINLP: CALL    SCMENU
         CALL    UPCASE
         CP      'T'
         JR      Z,DOTERM
-        CP      'P'
-        JR      Z,DOPORT
         CP      'S'
         JR      Z,DOSETT
         CP      'U'
@@ -827,14 +847,13 @@ MAINLP: CALL    SCMENU
         JR      MAINLP
 DOTERM: CALL    TERM
         JR      MAINLP
-DOPORT: CALL    SCPORT
-        JR      MAINLP
 DOSETT: CALL    SCSETT
         JR      MAINLP
 DOHELP: CALL    SCHELP
         JR      MAINLP
 DOSAVE: CALL    SAVCFG
-        JR      MAINLP
+        CALL    TWAIT           ; the menu redraw clears the screen, and
+        JR      MAINLP          ; whether it saved is worth reading
 DOSEND: CALL    XSEND
         CALL    TWAIT
         JR      MAINLP
@@ -859,11 +878,15 @@ TERM:   LD      A,(PKIND)
         LD      HL,MNOPRT       ; refuse rather than read a dead port
         CALL    PSTR
         JP      TCWAIT          ; ...and they may already be typing
-TERM1:  CALL    CRLF
-        LD      HL,MTERM
+TERM1:  CALL    SCTTL           ; the banner heads every session, so it is
+        CALL    CRLF            ; always clear which program you are talking
+        LD      HL,MTERM        ; to once the remote end fills the screen
         CALL    PSTR
-        CALL    SHESC           ; name the escape key in the banner
-        LD      HL,MTERM2
+        CALL    SHESC           ; name the menu key - a terminal you cannot
+        LD      HL,MTERM2       ; get out of is the worst kind
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MTERM3
         CALL    PSTR
         XOR     A
         LD      (FSTATE),A      ; no half-finished escape sequence
@@ -1919,6 +1942,34 @@ CFGCH1: LD      A,(DE)
         LD      A,(PABASE)      ; an ASCI base whose registers would run off
         CP      0F0H            ; the end of the I/O space is not usable
         JR      NC,CFGBAD
+        LD      A,(CLSMOD)      ; one of the three clear-screen dialects
+        CP      3
+        JR      NC,CFGBAD
+        LD      A,(LBAUD)       ; the line settings, each within its table
+        CP      RATEN
+        JR      NC,CFGBAD
+        LD      A,(LBITS)
+        CP      7
+        JR      C,CFGBAD
+        CP      9
+        JR      NC,CFGBAD
+        LD      A,(LPAR)
+        CP      3
+        JR      NC,CFGBAD
+        LD      A,(LSTOP)
+        OR      A
+        JR      Z,CFGBAD
+        CP      3
+        JR      NC,CFGBAD
+        LD      A,(LADIV)
+        CP      3
+        JR      NC,CFGBAD
+        LD      A,(LSAPP)
+        CP      2
+        JR      NC,CFGBAD
+        LD      A,(ESCCH)       ; a menu key that is not a usable control key
+        CALL    ESCOK           ; would trap that key for ever - and a letter
+        JR      C,CFGBAD        ; would swallow ordinary typing
         RET
 CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ANSI
         LD      (PKIND),A
@@ -1928,11 +1979,51 @@ CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ANSI
         LD      (FLTMOD),A
         LD      (ECHOFL),A
         LD      (CRLFFL),A
+        LD      (CLSMOD),A      ; ^Z clear, the portable default
+        LD      (LPAR),A        ; 9600 8N1, and programming switched off -
+        LD      (LSAPP),A       ; the values are only a starting point while
+        LD      A,5             ; LSAPP is 0, but they must still be legal
+        LD      (LBAUD),A       ; because the screen displays them
+        LD      A,8
+        LD      (LBITS),A
+        LD      A,1
+        LD      (LSTOP),A
+        LD      (LADIV),A
         LD      A,19H           ; ^Y
         LD      (ESCCH),A
         CALL    CRLF
         LD      HL,MCFGBAD
         CALL    PSTR
+        JP      TWAIT           ; the menu clears the screen: make sure this
+                                ; is read before it goes
+
+;-----------------------------------------------------------------------
+; ESCOK - is A a usable menu key?  Carry clear if it is.
+;
+; It has to be a control key: a letter would be swallowed the moment the
+; user typed it in terminal mode.  Four control keys are refused for
+; reasons of their own - ^C backs out of every screen here, CR and LF are
+; ordinary typing, TAB is wanted by full-screen software, and ESC begins
+; the arrow-key sequences, so it would fire on a cursor key.
+;-----------------------------------------------------------------------
+ESCOK:  OR      A
+        JR      Z,ESCNO         ; NUL is not a key anyone can press
+        CP      20H
+        JR      NC,ESCNO        ; not a control key at all
+        CP      03H
+        JR      Z,ESCNO
+        CP      TAB
+        JR      Z,ESCNO
+        CP      LF
+        JR      Z,ESCNO
+        CP      CR
+        JR      Z,ESCNO
+        CP      ESC
+        JR      Z,ESCNO
+        OR      A               ; A is known non-zero, so this only clears
+        RET                     ; carry - which a CP does NOT do: every CP
+                                ; above a control code leaves it set
+ESCNO:  SCF
         RET
 
 ;=======================================================================
@@ -1940,13 +2031,37 @@ CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ANSI
 ;=======================================================================
 
 ;-----------------------------------------------------------------------
-; SCTTL - the opening screen.
+; CLS - clear the screen, in whichever dialect this console understands.
 ;
-; Plain text on purpose: the user has not yet told us whether this
-; console understands ANSI, and a title screen that sprays escape
-; sequences at a dumb terminal is a poor first impression.
+; CP/M has no standard for this: the terminal is not the computer's, and
+; the BIOS offers nothing.  Period software therefore either asked or was
+; built per terminal.  EGT80 asks, and defaults to the ADM-3A's ^Z, which
+; is the widest answer - most CP/M-era terminals took it, and the gateway's
+; own terminal translation recognises it and re-renders the clear for
+; whatever is really connected, PETSCII C64 included.  A VT100 or a modern
+; emulator wants the ANSI form instead, and `off` is there for a printing
+; terminal, where clearing the screen means feeding paper.
 ;-----------------------------------------------------------------------
-SCTTL:  CALL    CRLF
+CLS:    LD      A,(CLSMOD)
+        OR      A
+        JR      NZ,CLSANS
+        LD      A,1AH           ; ADM-3A: clear screen and home the cursor
+        JP      COUT
+CLSANS: DEC     A
+        RET     NZ              ; 2 = off: leave the screen alone
+        LD      HL,MANSCL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; SCTTL - the title, on a freshly cleared screen.
+;
+; Plain text on purpose beyond the clear itself: the user may not have
+; told us yet whether this console understands ANSI, and a title screen
+; that sprays escape sequences at a dumb terminal is a poor first
+; impression.
+;-----------------------------------------------------------------------
+SCTTL:  CALL    CLS
+        CALL    CRLF
         LD      HL,MTITLE
         CALL    PSTR
         LD      HL,MRULE
@@ -1961,7 +2076,8 @@ SCTTL:  CALL    CRLF
 ; The port and the filter mode are shown every time because they are the
 ; two settings that decide whether the program appears to work at all.
 ;-----------------------------------------------------------------------
-SCMENU: CALL    CRLF
+SCMENU: CALL    SCTTL           ; cleared screen + banner, every time round
+        CALL    CRLF
         LD      HL,MPORT
         CALL    PSTR
         CALL    SHPORT
@@ -2075,7 +2191,8 @@ SHESC:  LD      A,'^'
 ; wrong choice produces silence rather than an error, so the help says so
 ; and the menu names real machines.
 ;-----------------------------------------------------------------------
-SCPORT: CALL    CRLF
+SCPORT: CALL    CLS
+        CALL    CRLF
         LD      HL,MPNOW        ; what is in force right now
         CALL    PSTR
         CALL    SHPORT
@@ -2217,7 +2334,7 @@ SCPHB:  LD      A,(0008H)       ; the RST 8 vector
         CALL    CRLF
         LD      HL,MNOHB
         CALL    PSTR
-        RET
+        JP      TWAIT           ; Settings clears on return: hold it here
 SCPHB1: CALL    CRLF
         LD      HL,MPHBM
         CALL    PSTR
@@ -2247,7 +2364,7 @@ SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
         CALL    CRLF
         LD      HL,MNOZ180
         CALL    PSTR
-        RET
+        JP      TWAIT           ; as above: read before the screen clears
 SCPAS2: CALL    CRLF
         LD      HL,MPASCM
         CALL    PSTR
@@ -2289,6 +2406,7 @@ SCPAUX: LD      A,PKAUX
         CALL    CRLF
         LD      HL,MAUXW
         CALL    PSTR
+        CALL    TWAIT           ; a caveat worth reading, not flashing past
         JP      PDONE
 
 ;-----------------------------------------------------------------------
@@ -2348,14 +2466,27 @@ HEXBAD: SCF
 ; SCSETT - settings.  Each key toggles and the screen redraws, so the
 ; effect of a keypress is always visible.
 ;-----------------------------------------------------------------------
-SCSETT: CALL    CRLF
+SCSETT: CALL    CLS
+        CALL    CRLF
         LD      HL,MSETT
         CALL    PSTR
         CALL    SHMODE
+        LD      HL,MSPORT       ; the port lives here now, so show it here
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MSKEY
+        CALL    PSTR
+        CALL    SHESC
+        CALL    CRLF            ; SHESC names the key and stops there
+        LD      HL,MSCLS
+        CALL    PSTR
+        CALL    SHCLS
         LD      HL,MSETT2
         CALL    PSTR
 SCSET1: CALL    CIN
         CALL    UPCASE
+        CP      'P'
+        JR      Z,DOSPRT
         CP      'A'
         JR      Z,TOGANS
         CP      'E'
@@ -2363,7 +2494,11 @@ SCSET1: CALL    CIN
         CP      'L'
         JR      Z,TOGCRL
         CP      'K'
-        JR      Z,CYCESC
+        JR      Z,CHGESC
+        CP      'B'
+        JR      Z,DOSLIN
+        CP      'C'
+        JR      Z,CYCCLS
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
@@ -2371,50 +2506,674 @@ SCSET1: CALL    CIN
         LD      A,BEL
         CALL    COUT
         JR      SCSET1
+DOSPRT: CALL    SCPORT
+        JR      SCSETT          ; back to Settings, showing the new port
+DOSLIN: CALL    SCLINE
+        JR      SCSETT
 TOGANS: LD      HL,FLTMOD
         CALL    TOGGLE
-        JR      SCSETT
+        JP      SCSETT
 TOGECH: LD      HL,ECHOFL
         CALL    TOGGLE
-        JR      SCSETT
+        JP      SCSETT
 TOGCRL: LD      HL,CRLFFL
         CALL    TOGGLE
-        JR      SCSETT
+        JP      SCSETT
 TOGGLE: LD      A,(HL)
         XOR     1
         LD      (HL),A
         JP      XDIRTS          ; a toggle is a change too
 
 ;-----------------------------------------------------------------------
-; CYCESC - step the escape key through the three characters period
-; terminals use for it, so it can be moved off a key the remote system
-; wants (^Y is WordStar's delete-line, for instance).
+; CHGESC - set the menu key to whichever control key the user presses.
+;
+; A cycle through three fixed choices was not enough: which key is free
+; depends on the remote system, not on us (^Y is WordStar's delete-line,
+; ^] is telnet's escape, ^\ is Kermit's, and something wants each of
+; them).  So the user presses the key they want and we take it, subject to
+; ESCOK, which refuses the handful that cannot work.  An unusable key is
+; explained rather than beeped at: "nothing happened" is indistinguishable
+; from a broken keyboard.
 ;-----------------------------------------------------------------------
-CYCESC: LD      A,(ESCCH)
-        CP      19H             ; ^Y
-        JR      Z,CYCE1
-        CP      1DH             ; ^]
-        JR      Z,CYCE2
-        LD      A,19H           ; anything else: back to ^Y
-        JR      CYCE3
-CYCE1:  LD      A,1DH
-        JR      CYCE3
-CYCE2:  LD      A,1CH           ; ^\
-CYCE3:  LD      (ESCCH),A
+CHGESC: CALL    CRLF
+        LD      HL,MESCAS
+        CALL    PSTR
+        CALL    CIN
+        CP      03H             ; ^C: changed my mind
+        JP      Z,SCSETT
+        CALL    ESCOK
+        JR      C,ESCREF
+        LD      (ESCCH),A
+        CALL    XDIRTS
+        JP      SCSETT          ; the redraw names the new key
+ESCREF: CALL    CRLF
+        LD      HL,MESCNO
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; CYCCLS - step the clear-screen dialect: ADM-3A ^Z, ANSI, off.
+;
+; A cycle rather than a submenu: there are only three answers, and the
+; effect shows on the very next redraw - which is the quickest way to find
+; the one a given terminal understands.
+;-----------------------------------------------------------------------
+CYCCLS: LD      A,(CLSMOD)
+        INC     A
+        CP      3
+        JR      C,CYCCL1
+        XOR     A
+CYCCL1: LD      (CLSMOD),A
+        CALL    XDIRTS
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; SHCLS - name the clear-screen dialect in force.
+;-----------------------------------------------------------------------
+SHCLS:  LD      A,(CLSMOD)
+        OR      A
+        LD      HL,MCLSZ
+        JR      Z,SHCLS1
+        DEC     A
+        LD      HL,MCLSAN
+        JR      Z,SHCLS1
+        LD      HL,MCLSOF
+SHCLS1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SCLINE - line settings: speed and framing.
+;
+; What a terminal can actually set depends entirely on the family, and
+; this screen says so rather than offering knobs that do nothing:
+;
+;   RomWBW HBIOS  a firmware call sets speed AND framing (CIOINIT).
+;   Z180 ASCI     the rate really is in the CPU's own registers.
+;   6850 ACIA     framing is in the control register; the rate is only
+;                 the board clock divided by 1, 16 or 64.
+;   Z80 SIO/2     nothing: the SIO has no baud generator at all.  The bit
+;                 rate comes from the board's clock or CTC, and the chip's
+;                 registers are write-only, so we cannot even read what
+;                 the ROM chose - reprogramming it would be a guess with a
+;                 dead port as the prize.
+;   CP/M AUX:     nothing: the operating system owns the port.
+;
+; And against the Ethernet Gateway's own virtual modem none of it applies
+; either way - a TCP connection has no bit rate.  Hence R: EGT80 programs
+; nothing at all unless asked, which is both the shipped state and the way
+; back from a setting that made a real port stop answering.
+;-----------------------------------------------------------------------
+SCLINE: CALL    CLS
+        CALL    CRLF
+        LD      HL,MLINE
+        CALL    PSTR
+        LD      HL,MSPORT
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MLRATE
+        CALL    PSTR
+        CALL    SHRATE
+        LD      HL,MLFMT
+        CALL    PSTR
+        CALL    SHFMT
+        CALL    SHAPP
+        LD      HL,MLINE2
+        CALL    PSTR
+SCLIN1: CALL    CIN
+        CALL    UPCASE
+        CP      'B'
+        JP      Z,SCBAUD
+        CP      'D'
+        JP      Z,SCFMT
+        CP      'A'
+        JR      Z,SCLAPP
+        CP      'R'
+        JR      Z,SCLDEF
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JR      SCLIN1
+SCLAPP: CALL    LSAPLY          ; apply, and say what happened
+        CALL    TWAIT
+        JP      SCLINE
+SCLDEF: XOR     A
+        LD      (LSAPP),A       ; stop programming the port
+        LD      (LPAR),A
+        LD      A,5
+        LD      (LBAUD),A       ; 9600 8N1 as the displayed starting point
+        LD      A,8
+        LD      (LBITS),A
+        LD      A,1
+        LD      (LSTOP),A
+        LD      (LADIV),A
         CALL    XDIRTS
         CALL    CRLF
-        LD      HL,MESCIS
+        LD      HL,MLDEF
         CALL    PSTR
-        CALL    SHESC
+        CALL    TWAIT
+        JP      SCLINE
+
+;-----------------------------------------------------------------------
+; SHRATE - the speed, in the only terms that are true for this family.
+;-----------------------------------------------------------------------
+SHRATE: LD      A,(PKIND)
+        CP      PKSIO
+        JR      Z,SHRSIO
+        CP      PKAUX
+        JR      Z,SHRAUX
+        CP      PKACIA
+        JR      Z,SHRACI
+        CP      PKNONE
+        JR      Z,SHRNON
+        CALL    PRATE           ; HBIOS and ASCI: a real number of bits/s
+        LD      A,(PKIND)
+        CP      PKASCI
+        JR      NZ,SHRAT1
+        LD      HL,MLASCLK      ; ...on the clock the table assumes
+        CALL    PSTR
+SHRAT1: JP      CRLF
+SHRSIO: LD      HL,MLRSIO
+        CALL    PSTR
+        JP      CRLF
+SHRAUX: LD      HL,MLRAUX
+        CALL    PSTR
+        JP      CRLF
+SHRNON: LD      HL,MLRNON
+        CALL    PSTR
+        JP      CRLF
+SHRACI: LD      HL,MLRACI       ; a divider, not a rate: say divider
+        CALL    PSTR
+        LD      A,(LADIV)
+        OR      A
+        LD      HL,MLD1
+        JR      Z,SHRAC1
+        DEC     A
+        LD      HL,MLD16
+        JR      Z,SHRAC1
+        LD      HL,MLD64
+SHRAC1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; PRATE - print the selected rate from the table.
+;-----------------------------------------------------------------------
+PRATE:  LD      A,(LBAUD)
+        ADD     A,A             ; two bytes per pointer
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEPT
+        ADD     HL,DE
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; SHFMT - the framing, in words rather than a code.
+;-----------------------------------------------------------------------
+SHFMT:  LD      A,(LBITS)
+        ADD     A,'0'
+        CALL    COUT
+        LD      HL,MFDATA
+        CALL    PSTR
+        LD      A,(LPAR)
+        OR      A
+        LD      HL,MFPNO
+        JR      Z,SHFMT1
+        DEC     A
+        LD      HL,MFPEV
+        JR      Z,SHFMT1
+        LD      HL,MFPOD
+SHFMT1: CALL    PSTR
+        LD      A,(LSTOP)
+        ADD     A,'0'
+        CALL    COUT
+        LD      HL,MFSTOP
+        CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHAPP - whether any of it is actually being written to the port.  This
+; is the line that answers "I set 9600 and nothing changed".
+;-----------------------------------------------------------------------
+SHAPP:  LD      A,(LSAPP)
+        OR      A
+        LD      HL,MLAPPN
+        JR      Z,SHAPP1
+        LD      HL,MLAPPY
+SHAPP1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SCBAUD - pick the speed.  The list is the family's list: real rates
+; where the family has a rate to set, the three 6850 dividers where that
+; is all the chip has, and an explanation where there is nothing.
+;-----------------------------------------------------------------------
+SCBAUD: LD      A,(PKIND)
+        CP      PKACIA
+        JR      Z,SCBACI
+        CP      PKHBIO
+        JR      Z,SCBRAT
+        CP      PKASCI
+        JR      Z,SCBRAT
+        CALL    CRLF            ; SIO, AUX or nothing selected
+        LD      HL,MLNOSET
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCLINE
+SCBRAT: CALL    CLS
         CALL    CRLF
-        JP      SCSETT
+        LD      HL,MBAUDM
+        CALL    PSTR
+SCBRA1: CALL    CIN
+        CALL    UPCASE
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        SUB     'A'
+        CP      RATEN           ; A..J, one per table entry
+        JR      NC,SCBRA2
+        LD      (LBAUD),A
+        CALL    XDIRTS
+        JP      SCLINE
+SCBRA2: LD      A,BEL
+        CALL    COUT
+        JR      SCBRA1
+SCBACI: CALL    CLS
+        CALL    CRLF
+        LD      HL,MACIDM
+        CALL    PSTR
+SCBAC1: CALL    CIN
+        CALL    UPCASE
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        CP      '1'
+        JR      Z,SCBAC2
+        CP      '2'
+        JR      Z,SCBAC3
+        CP      '3'
+        JR      Z,SCBAC4
+        LD      A,BEL
+        CALL    COUT
+        JR      SCBAC1
+SCBAC2: XOR     A               ; /1
+        JR      SCBAC5
+SCBAC3: LD      A,1             ; /16
+        JR      SCBAC5
+SCBAC4: LD      A,2             ; /64
+SCBAC5: LD      (LADIV),A
+        CALL    XDIRTS
+        JP      SCLINE
+
+;-----------------------------------------------------------------------
+; SCFMT - data bits, parity and stop bits.  One key each, and the screen
+; redraws, so the current framing is always the thing on the screen.
+;-----------------------------------------------------------------------
+SCFMT:  CALL    CLS
+        CALL    CRLF
+        LD      HL,MFMTM
+        CALL    PSTR
+        CALL    SHFMT
+        LD      HL,MFMTM2
+        CALL    PSTR
+SCFMT2: CALL    CIN
+        CALL    UPCASE
+        CP      '7'
+        JR      Z,SCFMT7
+        CP      '8'
+        JR      Z,SCFMT8
+        CP      'N'
+        JR      Z,SCFMTN
+        CP      'E'
+        JR      Z,SCFMTE
+        CP      'O'
+        JR      Z,SCFMTO
+        CP      '1'
+        JR      Z,SCFMS1
+        CP      '2'
+        JR      Z,SCFMS2
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        LD      A,BEL
+        CALL    COUT
+        JR      SCFMT2
+SCFMT7: LD      A,7
+        LD      (LBITS),A
+        JR      SCFMTD
+SCFMT8: LD      A,8
+        LD      (LBITS),A
+        JR      SCFMTD
+SCFMTN: XOR     A
+        LD      (LPAR),A
+        JR      SCFMTD
+SCFMTE: LD      A,1
+        LD      (LPAR),A
+        JR      SCFMTD
+SCFMTO: LD      A,2
+        LD      (LPAR),A
+        JR      SCFMTD
+SCFMS1: LD      A,1
+        LD      (LSTOP),A
+        JR      SCFMTD
+SCFMS2: LD      A,2
+        LD      (LSTOP),A
+SCFMTD: CALL    XDIRTS
+        JP      SCFMT
+
+;-----------------------------------------------------------------------
+; LSAUTO - apply the line settings if the user has asked for them to be
+; applied, silently.  Called from PORTST, so it runs at startup and again
+; whenever the port is re-selected - which is what makes this a setting
+; rather than a one-shot command.  Silent because at startup the menu is
+; about to clear the screen, and because a failure is visible on the Line
+; settings screen, which reports it properly when A is pressed there.
+;-----------------------------------------------------------------------
+LSAUTO: LD      A,(LSAPP)
+        OR      A
+        RET     Z
+        LD      A,1             ; ask LSAPP1 not to print
+        LD      (LSQUIT),A
+        CALL    LSAPP1
+        XOR     A
+        LD      (LSQUIT),A
+        RET
+
+;-----------------------------------------------------------------------
+; LSAPLY - apply now, from the Line settings screen, and report.  A
+; successful apply is also what turns programming on for good.
+;-----------------------------------------------------------------------
+LSAPLY: XOR     A
+        LD      (LSQUIT),A
+        CALL    LSAPP1
+        RET     C               ; it could not be done: leave LSAPP alone
+        LD      A,1
+        LD      (LSAPP),A
+        JP      XDIRTS
+
+;-----------------------------------------------------------------------
+; LSAPP1 - the apply itself, per family.  Carry set if nothing was done.
+;-----------------------------------------------------------------------
+LSAPP1: LD      A,(PKIND)
+        CP      PKHBIO
+        JR      Z,LSHB
+        CP      PKACIA
+        JR      Z,LSACIA
+        CP      PKASCI
+        JP      Z,LSASCI
+        LD      HL,MLNOSET      ; SIO, AUX, or nothing selected
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSMSG - print a message unless we were asked to be quiet.
+;-----------------------------------------------------------------------
+LSMSG:  LD      A,(LSQUIT)
+        OR      A
+        RET     NZ
+        PUSH    HL
+        CALL    CRLF
+        POP     HL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; LSHB - RomWBW HBIOS: one firmware call sets speed and framing together.
+;
+; The line-characteristics word is the published HBIOS layout: bit 13 RTS,
+; bits 12-8 the baud code, bit 7 DTR, bit 4 even parity, bit 3 parity
+; enable, bit 2 two stop bits, bits 1-0 the data bits as 5-8 = 0-3.  RTS
+; and DTR are asserted rather than left clear, because clearing DTR on a
+; real modem drops the call - the one setting here that could hang up the
+; line it is being used on.
+;
+; The baud code is not a rate but an exponent pair: the published rule is
+; V = 75 * 2^X * 3^Y with the bits laid out YXXXX, which is why the table
+; jumps from 9 (38400) to 24 (57600) - 57600 is 75 * 2^8 * 3, so Y is set
+; and X restarts.  RATEHB holds the codes so the arithmetic is done once,
+; here, and not in the head of whoever reads this next.
+;-----------------------------------------------------------------------
+LSHB:   LD      A,(0008H)       ; a saved HBIOS setting can arrive on a
+        CP      0C3H            ; machine that has no RST 8 at all - and this
+        JR      NZ,LSHBNO       ; runs at startup, before the user asks for
+        LD      A,(LBAUD)       ; anything, so it must check for itself
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEHB
+        ADD     HL,DE
+        LD      A,(HL)
+        OR      20H             ; bit 13 of the word: RTS asserted
+        LD      D,A
+        CALL    LSFRAM          ; the framing bits, in A
+        OR      80H             ; bit 7: DTR asserted
+        LD      E,A
+        LD      A,(PBASE)
+        LD      C,A             ; the character unit
+        LD      B,04H           ; CIOINIT
+        RST     8
+        OR      A               ; 0 = OK, anything else is a refusal
+        JR      NZ,LSHBNO
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear: done
+        RET
+LSHBNO: LD      HL,MLHBNO
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSFRAM - the HBIOS framing bits for the current format, in A.
+;-----------------------------------------------------------------------
+LSFRAM: LD      A,(LBITS)
+        SUB     5               ; 5-8 data bits encode as 0-3
+        LD      E,A
+        LD      A,(LSTOP)
+        CP      2
+        JR      NZ,LSFRA1
+        LD      A,E
+        OR      04H             ; bit 2: two stop bits
+        LD      E,A
+LSFRA1: LD      A,(LPAR)
+        OR      A
+        JR      Z,LSFRA3        ; no parity: bits 4-3 stay clear
+        LD      A,E
+        OR      08H             ; bit 3: parity enabled
+        LD      E,A
+        LD      A,(LPAR)
+        CP      1
+        JR      NZ,LSFRA3       ; odd leaves bit 4 clear
+        LD      A,E
+        OR      10H             ; bit 4: even parity
+        LD      E,A
+LSFRA3: LD      A,E
+        RET
+
+;-----------------------------------------------------------------------
+; LSACIA - 6850 ACIA: master reset, then the control register.
+;
+; The 6850 does not offer every combination - its word-select field has
+; eight entries and 7 bits with no parity, or 8 bits with parity and two
+; stop bits, are not among them.  An unavailable combination is refused
+; and named rather than quietly turned into the nearest one, because a
+; framing mismatch shows up as garbage characters, which is exactly the
+; symptom the user came here to fix.
+;-----------------------------------------------------------------------
+LSACIA: CALL    LSAWRD          ; the word-select field, or carry set
+        JR      C,LSACNO
+        LD      E,A             ; hold it: bits 4-2 of the control byte
+        LD      A,(LADIV)       ; the divider is bits 1-0, same order
+        OR      E
+        LD      E,A
+        LD      A,(PBASE)
+        LD      C,A
+        LD      B,0
+        LD      A,03H           ; master reset first, as the data sheet
+        OUT     (C),A           ; requires before a control write
+        LD      A,E
+        OUT     (C),A
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear
+        RET
+LSACNO: LD      HL,MLACNO
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSAWRD - the 6850 word-select bits (already shifted into 4-2) for the
+; current format, or carry set if the chip has no such combination.
+;
+; The eight the chip does have, in its own order: 7E2 7O2 7E1 7O1 8N2
+; 8N1 8E1 8O1.
+;-----------------------------------------------------------------------
+LSAWRD: LD      A,(LBITS)
+        CP      8
+        JR      Z,LSAW8
+        LD      A,(LPAR)        ; 7 bits: parity is compulsory here
+        OR      A
+        JR      Z,LSAWNO
+        LD      A,(LSTOP)
+        CP      2
+        JR      Z,LSAW72
+        LD      A,(LPAR)        ; 7 bits, 1 stop
+        CP      1
+        LD      A,08H           ; 010 = 7E1
+        JR      Z,LSAWOK
+        LD      A,0CH           ; 011 = 7O1
+        JR      LSAWOK
+LSAW72: LD      A,(LPAR)        ; 7 bits, 2 stop
+        CP      1
+        LD      A,00H           ; 000 = 7E2
+        JR      Z,LSAWOK
+        LD      A,04H           ; 001 = 7O2
+        JR      LSAWOK
+LSAW8:  LD      A,(LPAR)
+        OR      A
+        JR      NZ,LSAW8P
+        LD      A,(LSTOP)       ; 8 bits, no parity: both stop counts exist
+        CP      2
+        LD      A,10H           ; 100 = 8N2
+        JR      Z,LSAWOK
+        LD      A,14H           ; 101 = 8N1
+        JR      LSAWOK
+LSAW8P: LD      A,(LSTOP)       ; 8 bits with parity: only 1 stop bit
+        CP      2
+        JR      Z,LSAWNO
+        LD      A,(LPAR)
+        CP      1
+        LD      A,18H           ; 110 = 8E1
+        JR      Z,LSAWOK
+        LD      A,1CH           ; 111 = 8O1
+LSAWOK: OR      A               ; carry clear, A holds the field
+        RET
+LSAWNO: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSASCI - Z180 ASCI: the rate divider in CNTLB, the framing in CNTLA.
+;
+; Both are read-modify-write, because those registers hold bits that must
+; not be disturbed - CNTLA carries the receiver and transmitter enables,
+; and clearing either would silence the port we are configuring.  CNTLA
+; bit 3 is written as 0 on purpose: that resets the latched receive error
+; flags, which is harmless here and is what the error path does too.
+;
+; One caveat is in the silicon, not in this code: CNTLB bit 5 reads back
+; as the CTS input but writes the prescaler select, so it cannot be
+; preserved by a read - it is always taken from the table.
+;
+; The rate table assumes the 18.432 MHz crystal Z180 boards use precisely
+; because it divides to the standard rates (an SC126 has one).  On a
+; different clock every entry scales by the same ratio, and the screen
+; says so rather than printing a number that would be wrong.
+;
+; REASONED, NOT RUN: our emulator's Z80 core has no IN0/OUT0, so this
+; path cannot be exercised here - the same standing limitation as the rest
+; of the ASCI driver.
+;-----------------------------------------------------------------------
+LSASCI: CALL    ISZ180          ; likewise: never execute IN0/OUT0 on a
+        JR      C,LSASNO        ; processor that has no such instruction
+        CALL    ASCPAT          ; make sure the operands match the channel
+        LD      A,(LBAUD)
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEAS
+        ADD     HL,DE
+        LD      A,(HL)
+        LD      E,A             ; E = PS, DR and SS bits for this rate
+        LD      A,(LPAR)
+        CP      2
+        JR      NZ,LSASC1
+        LD      A,E
+        OR      10H             ; CNTLB bit 4: odd parity
+        LD      E,A
+LSASC1: DB      0EDH,38H
+LSASB1: DB      00H             ; IN0 A,(CNTLBn) - operand patched
+        AND     0C0H            ; keep MPBT and MP; bit 5 must not be kept
+        OR      E
+        DB      0EDH,39H
+LSASB2: DB      00H             ; OUT0 (CNTLBn),A
+        LD      A,(LBITS)       ; CNTLA: MOD2 data bits, MOD1 parity,
+        CP      8               ; MOD0 stop bits
+        LD      E,0
+        JR      NZ,LSASC2
+        LD      E,04H           ; 8 data bits
+LSASC2: LD      A,(LPAR)
+        OR      A
+        JR      Z,LSASC3
+        LD      A,E
+        OR      02H             ; parity enabled
+        LD      E,A
+LSASC3: LD      A,(LSTOP)
+        CP      2
+        JR      NZ,LSASC4
+        LD      A,E
+        OR      01H             ; two stop bits
+        LD      E,A
+LSASC4: DB      0EDH,38H
+LSASA1: DB      00H             ; IN0 A,(CNTLAn)
+        AND     0F0H            ; keep MPE, RE, TE and RTS0; clear EFR
+        OR      E
+        DB      0EDH,39H
+LSASA2: DB      00H             ; OUT0 (CNTLAn),A
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear
+        RET
+LSASNO: LD      HL,MNOZ180
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; Rate tables.  One row per entry, and the three columns must stay in
+; step: the label, the HBIOS baud code, and the Z180 CNTLB divider bits.
+;-----------------------------------------------------------------------
+RATEN   EQU     10              ; entries in each table below
+
+RATEPT: DW      MR300,MR600,MR1200,MR2400,MR4800
+        DW      MR9600,MR19K,MR38K,MR57K,MR115K
+RATEHB: DB      2,3,4,5,6,7,8,9,24,25
+RATEAS: DB      2DH,2CH,2BH,2AH,29H,28H,21H,20H,01H,00H
 
 ;-----------------------------------------------------------------------
 ; SCHELP - help.  The port choice is the one thing that decides whether
 ; this program works, so the help says so plainly and in the same terms
 ; the hardware documentation uses.
 ;-----------------------------------------------------------------------
-SCHELP: CALL    CRLF
+SCHELP: CALL    CLS
+        CALL    CRLF
         LD      HL,MHELP
         CALL    PSTR
         CALL    TWAIT
@@ -2434,11 +3193,11 @@ SCHELP: CALL    CRLF
 ;=======================================================================
 MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
 MRULE:  DB      '-------------------------',CR,LF,0
-MVER:   DB      'EGT80 v0.6  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
+MVER:   DB      'EGT80 v0.7  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
 
 MPORT:  DB      'Port: ',0
 MMODE:  DB      'Mode: ',0
-MPNONE: DB      'none selected - press P',0
+MPNONE: DB      'none selected - press S then P',0
 MPSIO:  DB      'Z80 SIO/2 at ',0
 MPACIA: DB      '6850 ACIA at ',0
 MPHBIO: DB      'RomWBW HBIOS unit ',0
@@ -2452,8 +3211,7 @@ MMCRLF: DB      ' +CR/LF',0
 
 MMENU:  DB      CR,LF
         DB      '  T  Terminal mode',CR,LF
-        DB      '  P  Select serial port',CR,LF
-        DB      '  S  Settings',CR,LF
+        DB      '  S  Settings  (serial port, line, display)',CR,LF
         DB      '  U  Upload a file   (XMODEM, to the far end)',CR,LF
         DB      '  D  Download a file (XMODEM, from the far end)',CR,LF
         DB      '  H  Help',CR,LF
@@ -2509,29 +3267,132 @@ MPSET:  DB      'Port is now: ',0
 
 MSETT:  DB      'Settings',CR,LF
         DB      '--------',CR,LF
-        DB      'Now: ',0
+        DB      'Mode:     ',0
+MSPORT: DB      'Port:     ',0
+MSKEY:  DB      'Menu key: ',0
+MSCLS:  DB      'Clear:    ',0
 MSETT2: DB      CR,LF
+        DB      '  P  Serial port - which chip, which address',CR,LF
         DB      '  A  ANSI / ASCII output',CR,LF
         DB      '  E  Local echo on / off',CR,LF
         DB      '  L  Send LF after a typed CR',CR,LF
         DB      '  K  Change the menu key',CR,LF
+        DB      '  B  Line settings - baud, bits, parity',CR,LF
+        DB      '  C  How to clear the screen',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
-MESCIS: DB      'Menu key is now ',0
+MESCAS: DB      'Press the control key you want as the menu key.',CR,LF
+        DB      '(^C cancels and keeps the present one.) ',0
+MESCNO: DB      'That key cannot be the menu key.  It has to be a',CR,LF
+        DB      'control key, and not ^C, RETURN, LINEFEED, TAB or',CR,LF
+        DB      'ESC - ^C backs out of these screens, the first',CR,LF
+        DB      'three are ordinary typing, and ESC begins the',CR,LF
+        DB      'arrow-key sequences, so a cursor key would open',CR,LF
+        DB      'the menu.',CR,LF,0
+MLINE:  DB      'Line settings',CR,LF
+        DB      '-------------',CR,LF,0
+MLRATE: DB      'Rate:     ',0
+MLFMT:  DB      'Format:   ',0
+MLINE2: DB      CR,LF
+        DB      '  B  Baud rate',CR,LF
+        DB      '  D  Data bits / parity / stop bits',CR,LF
+        DB      '  A  Apply to the port now',CR,LF
+        DB      '  R  Default - program nothing',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MLRSIO: DB      'set by the board clock or CTC',0
+MLRAUX: DB      'set by CP/M - the OS owns this port',0
+MLRNON: DB      'no port selected',0
+MLRACI: DB      'board clock ',0
+MLD1:   DB      '/ 1',0
+MLD16:  DB      '/ 16  (the usual setting)',0
+MLD64:  DB      '/ 64',0
+MLASCLK: DB     '  (at 18.432 MHz)',0
+MFDATA: DB      ' data, ',0
+MFPNO:  DB      'no parity, ',0
+MFPEV:  DB      'even parity, ',0
+MFPOD:  DB      'odd parity, ',0
+MFSTOP: DB      ' stop',0
+MLAPPY: DB      'EGT80 sets this on the port when it is selected.',0
+MLAPPN: DB      'EGT80 programs nothing: the system setting stands.',0
+MLDEF:  DB      'Back to programming nothing - 9600 8N1 shown, but',CR,LF
+        DB      'not written to any port.  A chip already',CR,LF
+        DB      'programmed keeps what it was given until the',CR,LF
+        DB      'machine is reset.',CR,LF,0
+MLOK:   DB      'Applied to the port.',CR,LF,0
+MLHBNO: DB      'The firmware refused those line characteristics,',CR,LF
+        DB      'or there is no RomWBW here to ask.',CR,LF,0
+MLACNO: DB      'The 6850 has no such combination.  It offers 7',CR,LF
+        DB      'data bits only with parity, and 8 data bits with',CR,LF
+        DB      'parity only with one stop bit.',CR,LF,0
+MLNOSET: DB     'This port has no line settings EGT80 can write.',CR,LF
+        DB      'A Z80 SIO/2 has no baud rate generator at all -',CR,LF
+        DB      'the bit rate comes from the board clock or its',CR,LF
+        DB      'CTC - and its registers cannot be read back, so',CR,LF
+        DB      'EGT80 will not guess at them.  CP/M AUX: belongs',CR,LF
+        DB      'to the operating system.  Set the rate where the',CR,LF
+        DB      'machine sets it, or use HBIOS if this is a RomWBW',CR,LF
+        DB      'system.  (Against the gateway itself nothing is',CR,LF
+        DB      'needed: a TCP connection has no bit rate.)',CR,LF,0
+MBAUDM: DB      'Baud rate',CR,LF
+        DB      '---------',CR,LF
+        DB      '  A  300      F  9600',CR,LF
+        DB      '  B  600      G  19200',CR,LF
+        DB      '  C  1200     H  38400',CR,LF
+        DB      '  D  2400     I  57600',CR,LF
+        DB      '  E  4800     J  115200',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MACIDM: DB      '6850 clock divider',CR,LF
+        DB      '------------------',CR,LF
+        DB      'A 6850 has no rate of its own: it divides the',CR,LF
+        DB      'clock the board gives it.',CR,LF,CR,LF
+        DB      '  1  / 1   (a synchronous clock only)',CR,LF
+        DB      '  2  / 16  (the usual setting)',CR,LF
+        DB      '  3  / 64  (a quarter of the / 16 rate)',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MFMTM:  DB      'Data bits, parity and stop bits',CR,LF
+        DB      '-------------------------------',CR,LF
+        DB      'Now: ',0
+MFMTM2: DB      CR,LF
+        DB      '  7  7 data bits      N  No parity',CR,LF
+        DB      '  8  8 data bits      E  Even parity',CR,LF
+        DB      '                      O  Odd parity',CR,LF
+        DB      '  1  1 stop bit',CR,LF
+        DB      '  2  2 stop bits',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MR300:  DB      '300',0
+MR600:  DB      '600',0
+MR1200: DB      '1200',0
+MR2400: DB      '2400',0
+MR4800: DB      '4800',0
+MR9600: DB      '9600',0
+MR19K:  DB      '19200',0
+MR38K:  DB      '38400',0
+MR57K:  DB      '57600',0
+MR115K: DB      '115200',0
+MCLSZ:  DB      'ADM-3A ^Z  (works through the gateway)',0
+MCLSAN: DB      'ANSI ESC [ 2 J  (VT100 and modern terminals)',0
+MCLSOF: DB      'off  (printing terminal - do not clear)',0
+MANSCL: DB      ESC,'[2J',ESC,'[H',0
 
 MTERM:  DB      'Terminal mode.  Press ',0
-MTERM2: DB      ' for the menu.',CR,LF,CR,LF,0
+MTERM2: DB      ' for the terminal menu.',CR,LF
+        DB      'To return to the main menu, press ',0
+MTERM3: DB      ' then E.',CR,LF,CR,LF,0
 MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
 MESCMN: DB      'E)xit H)elp S)et U)pload D)ownload (twice=send): ',0
 MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
-        DB      'Press P at the menu and pick the one your',CR,LF
-        DB      'machine uses.',CR,LF,0
+        DB      'Press S for Settings, then P, and pick the one',CR,LF
+        DB      'your machine uses.',CR,LF,0
 
 MDEAD:  DB      'Nothing was sent: the port did not accept the',CR,LF
         DB      'character.  Selected port is ',0
 MDEAD2: DB      'Either no serial chip answers at that address,',CR,LF
-        DB      'or it is held off by flow control.  Press P at',CR,LF
-        DB      'the menu to pick a different port.',CR,LF,0
+        DB      'or it is held off by flow control.  Press S for',CR,LF
+        DB      'Settings, then P, to pick a different port.',CR,LF,0
 
 MXSFIL: DB      CR,LF,'Send which file? ',0
 MXRFIL: DB      CR,LF,'Receive as which file? ',0
@@ -2602,8 +3463,10 @@ MHELP2: DB      'Help - using the terminal',CR,LF
         DB      'Terminal mode passes what you type to the port and',CR,LF
         DB      'what arrives to your screen.  The menu key',CR,LF
         DB      'interrupts it; pressing that key twice sends it to',CR,LF
-        DB      'the remote end instead, and Settings can move it if',CR,LF
-        DB      'the remote system wants that key for itself.',CR,LF
+        DB      'the remote end instead, and Settings can move it to',CR,LF
+        DB      'any control key if the remote system wants that one',CR,LF
+        DB      'for itself.  Settings also holds the serial port and',CR,LF
+        DB      'how to clear the screen.',CR,LF
         DB      'ANSI mode passes escape sequences through to your',CR,LF
         DB      'terminal.  ASCII mode strips them, drops the high',CR,LF
         DB      'bit and discards control codes that are not CR, LF,',CR,LF
@@ -2674,6 +3537,7 @@ XTMOC:  DB      0               ; ...and its working copy
 XLINE:  DS      24              ; console line buffer for a filename
 XFCB:   DS      36              ; FCB for the file being transferred
 XBUF:   DS      128             ; the block, which is also the CP/M record
+LSQUIT: DB      0               ; non-zero while an apply must not print
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 

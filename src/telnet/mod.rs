@@ -887,6 +887,32 @@ impl TelnetSession {
     }
 
 
+    /// Create a session for a call the **CP/M emulator's virtual modem** placed
+    /// to this gateway's own menu (`ATDT ethernetgateway` from inside a CP/M
+    /// terminal such as EGT80).
+    ///
+    /// The bytes cross an in-memory duplex to a guest that speaks to a UART, so
+    /// they carry raw serial semantics end to end — `new_relay`'s I/O behavior
+    /// exactly (`is_serial = true`, no IAC, no local serial port), which is why
+    /// this defers to it.  It is not a slave relay though: `is_relay` is cleared
+    /// so the Troubleshooting screen doesn't label the caller "Relay (slave)".
+    ///
+    /// Like every `is_serial` session this one does not authenticate, and that
+    /// grants nothing: whoever dialed it is *already* inside a session that
+    /// passed the gate (telnet/SSH login, or the physical serial port's own
+    /// trust boundary) — reaching the CP/M emulator at all required that.
+    pub(crate) fn new_cpm_menu(
+        reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        writer: SharedWriter,
+        shutdown: Arc<AtomicBool>,
+        restart: Arc<AtomicBool>,
+        lockouts: LockoutMap,
+    ) -> Self {
+        let mut s = Self::new_relay(reader, writer, shutdown, restart, None, lockouts);
+        s.is_relay = false;
+        s
+    }
+
     /// In-page browser key bindings, split by terminal width.  Plain
     /// (uncolored) lines the display iterates and a unit test asserts fit 40
     /// cols on PETSCII (see `punter_help_lines`).

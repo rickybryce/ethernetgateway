@@ -300,6 +300,13 @@ impl TelnetSession {
         let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
         cpm.set_modem_access(access);
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
+        // Let the guest dial the gateway it is running inside
+        // (`ATDT ethernetgateway`); that spawns a menu session of its own.
+        modem.set_menu_context(
+            self.shutdown.clone(),
+            self.restart.clone(),
+            self.lockouts.clone(),
+        );
         // Join the inbound `CPM@<ip>` call pool (RAII-released on any exit).
         // `CPM@<ip>` is a single dialable address, but every modem-enabled
         // CP/M session joins the pool and any idle member answers the next

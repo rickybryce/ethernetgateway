@@ -303,11 +303,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logged (it used to be discarded, leaving identical lines with nothing to act
   on) and its retry backs off 1s→30s instead of hammering a dead master once a
   second.
+- **EGT80 v0.7 &mdash; the screen is cleared, and everything configurable is under
+  Settings.** The screen is cleared and the "Ethernet Gateway Terminal" banner
+  redrawn before the main menu and on entering terminal mode, so it stays clear
+  which program you are talking to once a remote system has filled the screen;
+  the terminal-mode banner now also names the menu key *and* says that the key
+  followed by `E` returns to the main menu. CP/M has no standard clear-screen, so
+  a new Settings item picks the dialect: ADM-3A `^Z` (the default &mdash; the
+  gateway's own terminal translation recognises it and re-renders the clear for
+  whatever client is connected, PETSCII included), ANSI `ESC [ 2 J`, or off for a
+  printing terminal. Because a clear can wipe a message before it is read, the
+  places where a message is the only feedback — a damaged settings block, a save,
+  a refused port family — now pause for a keypress.
+
+  The **serial-port selector moved off the main menu into Settings**, which now
+  shows the port, the menu key and the clear dialect alongside the filter mode.
+  The **menu key is any control key you press** rather than a cycle through three
+  fixed choices, because which key is free depends on the remote system (`^Y` is
+  WordStar's delete-line, `^]` telnet's escape, `^\` Kermit's). Five keys are
+  refused with the reason: `^C` backs out of every screen, CR/LF/TAB are ordinary
+  typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
+  menu. A saved key is validated at startup too, since an invalid one would trap
+  that key for ever.
+  - **Line settings (baud rate, data bits, parity, stop bits)** on a new Settings
+    submenu, applied where a terminal genuinely can and refused with an
+    explanation where it cannot. **RomWBW HBIOS** takes speed and framing in one
+    `CIOINIT` call — the published line-characteristics word, whose baud field is
+    an exponent pair (`V = 75 × 2^X × 3^Y`, bits `YXXXX`) rather than a rate, with
+    RTS and DTR asserted deliberately because clearing DTR on a real modem drops
+    the call. **Z180 ASCI** sets the rate and framing in CNTLA/CNTLB by
+    read-modify-write, preserving the receiver and transmitter enables (reasoned,
+    not run: our Z80 core has no `IN0`/`OUT0`). A **6850 ACIA** sets framing and
+    the ÷1/÷16/÷64 clock divider; the eight combinations it lacks (7 data bits
+    without parity, 8 with parity and two stop bits) are refused by name rather
+    than rounded to the nearest, because a framing mismatch presents as garbage
+    characters. A **Z80 SIO/2 has no baud generator at all** — the bit rate comes
+    from the board's clock or CTC and its registers are write-only, so EGT80
+    declines rather than reprogram from a guess — and CP/M `AUX:` belongs to the
+    OS. Against the gateway itself none of it applies in either direction: a TCP
+    connection has no bit rate, so the emulated UART accepts line-configuration
+    writes and ignores them. The default is therefore **program nothing at all**,
+    with `R` to return to it: the port keeps whatever the ROM, firmware or OS set
+    up. Applying makes it stick — it is re-applied whenever the port is selected,
+    including at startup, guarded so a config carried to the wrong machine cannot
+    `RST 8` or `IN0` on hardware that has neither. Verified end to end in the
+    emulator: after applying 19200 7E2 through HBIOS, a `CIOQUERY` probe read back
+    `289E`, exactly that framing plus RTS+DTR.
 - **EGT80: `^C` backs out of every menu**, not just the notice screens — the port
   family list, all four per-family prompts, and Settings — so one habit works
   everywhere. `Q` still does the same, and the menus say so.
 
 ### Fixed
+- **`ATDT ethernetgateway` now works from inside CP/M.** The physical serial
+  modem has always answered the gateway's own dial targets — the keywords
+  `ethernetgateway` / `ethernet-gateway` / `ethernet gateway` and the built-in
+  number `1001000` — but the CP/M emulator's virtual modem knew nothing about
+  them: the keyword fell through to the TCP path, failed to parse as
+  `host:port`, and came back `NO CARRIER`. Dialing it from EGT80 now spawns a
+  session on this gateway's own menu over an in-memory duplex, exactly as the
+  physical modem does, with raw serial semantics (no telnet IAC negotiation,
+  whose bytes would reach the guest as garbage). Two more parity gaps went with
+  it: a **bare hostname no longer needs an explicit port** (a target with no
+  `:port` defaults to telnet's 23, so `ATDT bbs.example.com` dials instead of
+  failing), and a **phone number is looked up in the dialup phonebook** as on
+  the physical modem.
+- **Backspace works at the CP/M modem's `AT` prompt.** The byte was removed
+  from the command line, but the echo was the raw `BS`/`DEL` — a bare `BS` only
+  walks the cursor left and leaves the character on the screen, and EGT80's
+  filter drops `DEL` outright as printing-terminal litter. Either way the line
+  looked uneditable, so a typo could only be fixed by starting again. The echo
+  is now a destructive erase (`BS SPACE BS`), and nothing is echoed when the
+  line is already empty, as a real modem does.
 - **The CP/M virtual modem no longer chokes on `CR NUL` line endings.** An NVT
   telnet client writes a bare Return as `CR NUL` (RFC 854). The `CR` ended the
   command correctly, but the `NUL` stayed in the modem's line buffer and became
