@@ -187,12 +187,18 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
     out
 }
 
-/// The commands that actually answer "who has my port?", per platform.
-fn how_to_check() -> Vec<String> {
-    if cfg!(windows) {
+/// The commands that actually answer "who has my port?".
+///
+/// `windows` is a parameter rather than a `cfg!` so both wordings are reachable
+/// from a test on any host — the alternative cost a red Windows CI run for a
+/// message only Windows produces, which no amount of local testing would have
+/// caught.
+fn how_to_check_for(windows: bool) -> Vec<String> {
+    if windows {
         vec![
             "         Check:  netstat -ano | findstr :<port>".to_string(),
-            "         Then stop the older copy from Task Manager and restart this one."
+            "         Find it:  tasklist | findstr ethernetgateway".to_string(),
+            "         Stop it:  taskkill /IM ethernetgateway.exe   then start this one again."
                 .to_string(),
         ]
     } else {
@@ -203,6 +209,10 @@ fn how_to_check() -> Vec<String> {
                 .to_string(),
         ]
     }
+}
+
+fn how_to_check() -> Vec<String> {
+    how_to_check_for(cfg!(windows))
 }
 
 #[cfg(test)]
@@ -241,8 +251,33 @@ mod tests {
         for port in ["2222", "2323", "2424", "8080"] {
             assert!(text.contains(port), "port {port} missing from: {text}");
         }
-        // And it says how to find the culprit.
+        // And it says how to find the culprit — in this host's own idiom.
         assert!(text.contains("ethernetgateway"), "{text}");
+    }
+
+    /// Both platform wordings must name this program, so the operator can find
+    /// the other copy.  Parameterised precisely because a `cfg!`-only version of
+    /// this check passes on the host that wrote it and fails on the other one —
+    /// which is exactly how this shipped red the first time.
+    #[test]
+    fn test_how_to_check_names_the_program_on_both_platforms() {
+        for windows in [false, true] {
+            let lines = how_to_check_for(windows);
+            let text = lines.join("\n");
+            assert!(
+                text.contains("ethernetgateway"),
+                "windows={windows}: {text}"
+            );
+            assert!(!lines.is_empty());
+            // Each platform names a way to look and a way to stop it.
+            let (look, stop) = if windows {
+                ("netstat", "taskkill")
+            } else {
+                ("pgrep", "pkill")
+            };
+            assert!(text.contains(look), "windows={windows}: {text}");
+            assert!(text.contains(stop), "windows={windows}: {text}");
+        }
     }
 
     /// A total failure that is NOT address-in-use (say, ports below 1024
