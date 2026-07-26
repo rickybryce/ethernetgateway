@@ -1753,11 +1753,11 @@ XPURGE: LD      A,XSHORT
 ;-----------------------------------------------------------------------
 XREADY: LD      A,(PKIND)
         OR      A
-        JR      Z,XREADY1
+        JR      Z,XRDY1
         XOR     A               ; a fresh diagnosis for this transfer: the
         LD      (PDEAD),A       ; flag may be left over from a past session
         RET                     ; carry clear: good to go
-XREADY1: CALL   CRLF
+XRDY1: CALL   CRLF
         LD      HL,MNOPRT
         CALL    PSTR
         SCF
@@ -2372,7 +2372,7 @@ SCPORT: CALL    CLS
         JR      NC,SCPORH
         LD      HL,MHINT3
 SCPORH: CALL    PSTR
-SCPOR0: LD      HL,MPORTS
+        LD      HL,MPORTS
         CALL    PSTR
 SCPOR1: CALL    CIN
         CALL    UPCASE
@@ -2459,7 +2459,8 @@ SCPDEF: LD      A,PKSIO
 ;-----------------------------------------------------------------------
 ; SCPSIO - Z80 SIO/2: four channels across two boards, or any address.
 ;-----------------------------------------------------------------------
-SCPSIO: CALL    CRLF
+SCPSIO: CALL    CLS
+        CALL    CRLF
         LD      HL,MPSIOM
         CALL    PSTR
 SCPSI1: CALL    CIN
@@ -2499,7 +2500,8 @@ SCPSSE: LD      (PBASE),A
 ;-----------------------------------------------------------------------
 ; SCPACI - 6850 ACIA: the two Altair 88-2SIO ports, or any address.
 ;-----------------------------------------------------------------------
-SCPACI: CALL    CRLF
+SCPACI: CALL    CLS
+        CALL    CRLF
         LD      HL,MPACIM
         CALL    PSTR
 SCPAC1: CALL    CIN
@@ -2582,6 +2584,15 @@ SCPHB1: CALL    CLS
         CALL    CRLF
         LD      HL,MHBUNM       ; heading, then one line per unit
         CALL    PSTR
+        CALL    HBCNT           ; how many units does the firmware have?
+        JR      NC,SCPHBC
+        LD      A,4             ; it would not say: offer the four we can pick
+SCPHBC: CP      5
+        JR      C,SCPHBD
+        LD      A,4             ; more than the menu can address
+SCPHBD: LD      (HBMAX),A
+        OR      A
+        JP      Z,SCPHBP        ; none at all: straight to the prompt
         XOR     A
         LD      (HBSCAN),A
 SCPHBL: LD      HL,MHBIND       ; '  n  '
@@ -2608,9 +2619,10 @@ SCPHBN: LD      HL,MHBNON       ; refused: not present on this machine
 SCPHBI: LD      A,(HBSCAN)
         INC     A
         LD      (HBSCAN),A
-        CP      4               ; units 0-3, as before
+        LD      HL,HBMAX
+        CP      (HL)
         JR      C,SCPHBL
-        LD      HL,MPHBM        ; the prompt itself
+SCPHBP: LD      HL,MPHBM        ; the prompt itself
         CALL    PSTR
 SCPHB2: CALL    CIN
         CALL    UPCASE
@@ -2619,7 +2631,8 @@ SCPHB2: CALL    CIN
         CP      03H             ; ^C backs out too
         RET     Z
         SUB     '0'
-        CP      4               ; units 0-3
+        LD      HL,HBMAX        ; only a unit the firmware listed
+        CP      (HL)
         JR      C,SCPHBS
         LD      A,BEL
         CALL    COUT
@@ -2640,6 +2653,9 @@ SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
         CALL    PSTR
         JP      TWAIT           ; as above: read before the screen clears
 SCPASF: CALL    ASCAUT          ; let the firmware fill the base in, if it can
+; Deliberately does not clear: the base setters (R, C, B) print what they
+; found and then come back here, and a clear would wipe the answer before it
+; could be read.  The screen is short enough to redraw under it.
 SCPAS2: CALL    CRLF
         LD      HL,MPASCM
         CALL    PSTR
@@ -2855,7 +2871,7 @@ SCPASS: LD      (PCHAN),A
         ADD     A,'0'
         CALL    COUT
         CALL    CRLF
-        LD      HL,MASCHB2
+        LD      HL,MASCH2
         CALL    PSTR
         CALL    TWAIT
         JP      PDONE
@@ -3128,6 +3144,8 @@ SCLDEF: XOR     A
 SHRATE: LD      A,(PKIND)
         CP      PKSIO
         JR      Z,SHRSIO
+        CP      PKS88
+        JR      Z,SHR88
         CP      PKAUX
         JR      Z,SHRAUX
         CP      PKACIA
@@ -3142,6 +3160,9 @@ SHRATE: LD      A,(PKIND)
         CALL    PSTR
 SHRAT1: JP      CRLF
 SHRSIO: LD      HL,MLRSIO
+        CALL    PSTR
+        JP      CRLF
+SHR88:  LD      HL,MLR88
         CALL    PSTR
         JP      CRLF
 SHRAUX: LD      HL,MLRAUX
@@ -3704,7 +3725,7 @@ MPORTS: DB      CR,LF
         DB      '  3  Altair 88-2SIO    - 6850 ACIA at 10/11 or 12/13',CR,LF
         DB      '  4  Altair 88-SIO     - the original MITS board, 00/01',CR,LF
         DB      '  5  Other hardware    - the chip, then the address',CR,LF
-        DB      '  6  CP/M AUX: device  - portable fallback, see Help',CR,LF,CR,LF
+        DB      '  6  CP/M AUX: device  - portable, see Help',CR,LF,CR,LF
         DB      '  D  Default - the same as 1, and clears the rest',CR,LF
         DB      '  N  None      Q  Leave unchanged  (^C backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
@@ -3746,7 +3767,7 @@ MPACIM: DB      '6850 ACIA - which port?',CR,LF
         DB      '  B  some other address',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
-MPHBM:  DB      CR,LF,'Which unit (0-3), Q to go back: ',0
+MPHBM:  DB      CR,LF,'Which unit, or Q to go back: ',0
 MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
         DB      'running RomWBW - HBIOS is not available here.',CR,LF
         DB      'Pick the chip your board uses instead.',CR,LF,0
@@ -3771,7 +3792,7 @@ MASCHB: DB      'RomWBW drives this port itself, with interrupts, so',CR,LF
         DB      'EGT80 will reach it through the firmware instead of',CR,LF
         DB      'the registers - the way QTERM RomWBW builds do.',CR,LF
         DB      'HBIOS unit ',0
-MASCHB2: DB     'Polling the chip directly here would race the',CR,LF
+MASCH2: DB     'Polling the chip directly here would race the',CR,LF
         DB      'firmware for each byte and read noise.',CR,LF,0
 MASCNOR: DB     'There is no RomWBW here to ask, or it lists no ASCI',CR,LF
         DB      'port.  Press C for C0 (what RomWBW uses on Small',CR,LF
@@ -3824,6 +3845,7 @@ MLINE2: DB      CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MLRSIO: DB      'set by the board clock or CTC',0
+MLR88:  DB      'set by the board - no rate register',0
 MLRAUX: DB      'set by CP/M - the OS owns this port',0
 MLRNON: DB      'no port selected',0
 MLRACI: DB      'board clock ',0
@@ -3849,7 +3871,8 @@ MLACNO: DB      'The 6850 has no such combination.  It offers 7',CR,LF
         DB      'data bits only with parity, and 8 data bits with',CR,LF
         DB      'parity only with one stop bit.',CR,LF,0
 MLNOSET: DB     'This port has no line settings EGT80 can write.',CR,LF
-        DB      'A Z80 SIO/2 has no baud rate generator at all -',CR,LF
+        DB      'Neither a Z80 SIO/2 nor an Altair 88-SIO has a rate',CR,LF
+        DB      'generator in it at all -',CR,LF
         DB      'the bit rate comes from the board clock or its',CR,LF
         DB      'CTC - and its registers cannot be read back, so',CR,LF
         DB      'EGT80 will not guess at them.  CP/M AUX: belongs',CR,LF
@@ -3969,7 +3992,7 @@ MHELP:  DB      'Help - the serial port',CR,LF
         DB      '----------------------',CR,LF,CR,LF
         DB      'The port menu names machines rather than chips, so',CR,LF
         DB      'pick the one you are sitting at.  Get it wrong and',CR,LF
-        DB      'nothing is sent and nothing arrives - just silence.',CR,LF,CR,LF
+        DB      'nothing is sent, nothing arrives - just silence.',CR,LF,CR,LF
         DB      '1 Gateway   Its own emulated port, 82/83.  This is',CR,LF
         DB      '            the default, so EGT80 and the gateway',CR,LF
         DB      '            work together untouched.',CR,LF
@@ -4070,6 +4093,7 @@ HBPHYS: DB      0               ; physical channel it reported
 HBBASE: DB      0               ; base I/O address it reported
 HBSCAN: DB      0               ; unit being listed / scanned
 HBWANT: DB      0               ; ASCI channel being looked for
+HBMAX:  DB      0               ; units the firmware says it has (menu cap 4)
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 

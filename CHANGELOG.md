@@ -328,6 +328,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Assembly quality pass.** A mechanical sweep of `EGT80.Z80` found and fixed:
+    two source lines over the 80-column house limit; `HBCNT` written but never
+    called (the HBIOS unit list scanned a fixed 0–3 instead of asking how many
+    units exist — it now asks, lists only those, and refuses a unit the firmware
+    does not list); an orphaned label left behind when the detection hint replaced
+    the older notice; and **two label pairs that collide within their first six
+    characters** — `MASCHB`/`MASCHB2` (new) and `XREADY`/`XREADY1` (latent since
+    the transfer code was written). The six-character rule is in the editing rules
+    because a stricter assembler may treat such a pair as *one* label and merge
+    them silently; both are renamed. Also `SHRATE` fell through to the baud table
+    for the 88-SIO, printing a rate for a chip with no rate register — every
+    switch on the port family was audited for the new driver. Screen conventions
+    are now uniform: every full screen clears first, with the one deliberate
+    exception commented (the ASCI menu must not clear, or it would wipe the base
+    it just reported).
   - **The port menu names machines rather than chips.** Choosing a port meant
     choosing a chip family first, which is a question only someone who already
     knows their board can answer — and two entries claimed an SC126 (Z180 ASCI
