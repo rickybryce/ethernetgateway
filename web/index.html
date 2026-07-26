@@ -987,7 +987,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     corrupts binary transfers through telnet&harr;serial bridges like tcpser
                     that don't un-stuff it.) Real telnet clients (PuTTY / ExtraPuTTY, Tera
                     Term, C-Kermit) negotiate the protocol and need IAC escaping; raw retro
-                    clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware) blast raw bytes
+                    clients (CCGMS and StrikeTerm on a Commodore, IMP8 on CP/M, AltairDuino firmware) blast raw bytes
                     and don't. The default follows that: escaping turns on only if the
                     client actually negotiated telnet, off otherwise. If a transfer fails
                     repeatedly with bad-block / CRC errors, press <strong>I</strong> in the

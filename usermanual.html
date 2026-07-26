@@ -1547,7 +1547,8 @@ semantics):
 The honest reality: there's no way for the server to know for certain whether
 a given client actually expects IAC escaping during an XMODEM/YMODEM transfer.
 Strict clients (PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT) do; many
-retro clients (IMP8, CCGMS, StrikeTerm, NovaTerm, some AltairDuino firmware)
+retro clients (CCGMS, StrikeTerm and NovaTerm on a Commodore, IMP8 on CP/M,
+some AltairDuino firmware)
 don't — they treat a TCP connection to port 23 as raw bytes. Rather than guess
 from the terminal type, the gateway keys the default on a signal it can
 actually observe: <em>whether the client engaged in telnet option negotiation
@@ -1563,7 +1564,7 @@ detected terminal type, so in practice the defaults line up like this:
     <thead><tr><th>Terminal (typical)</th><th>Typical client</th><th>Negotiates?</th><th>Auto default</th></tr></thead>
     <tbody>
         <tr><td>ANSI</td><td>PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT, xterm</td><td>yes</td><td>IAC <strong>on</strong></td></tr>
-        <tr><td>PETSCII</td><td>Commodore 64/128 (IMP8, CCGMS, StrikeTerm, NovaTerm)</td><td>no (raw TCP)</td><td>IAC <strong>off</strong></td></tr>
+        <tr><td>PETSCII</td><td>Commodore 64/128 (CCGMS, StrikeTerm, NovaTerm)</td><td>no (raw TCP)</td><td>IAC <strong>off</strong></td></tr>
         <tr><td>ASCII</td><td>Dumb terminals, AltairDuino, custom hardware</td><td>no (raw TCP)</td><td>IAC <strong>off</strong></td></tr>
     </tbody>
 </table>
@@ -2874,16 +2875,29 @@ ATDT 5551234
 
 <p>
 The gateway also maintains <code>dialup.conf</code>, which maps phone numbers
-to <code>host:port</code> targets.  The mapping table is <strong>shared</strong>
-across both ports — one file consulted by both modems — so a number you
-add is dialable from either Port A's or Port B's modem.  Edit it through
-either port's Modem Emulator menu (<em>Configuration &rarr; M &rarr; A or B
-&rarr; D</em>).  A built-in entry, <code>1001000</code>, always maps to
+to <code>host:port</code> targets.  The mapping table is <strong>shared by every
+modem in the gateway</strong> &mdash; one file, consulted by Port A, by Port B,
+and by the CP/M emulator&rsquo;s virtual modem &mdash; so a number you add once is
+dialable from any of them, including from a CP/M program running inside the
+emulator.  Edit it through either port's Modem Emulator menu
+(<em>Configuration &rarr; M &rarr; A or B &rarr; D</em>); there is no separate
+CP/M copy to keep in step.  A built-in entry, <code>1001000</code>, always maps to
 the local gateway menu (equivalent to <code>ATDT ethernetgateway</code>) and
-cannot be deleted.  Numbers are matched by digits only — dashes, spaces,
+cannot be deleted &mdash; that one works from the emulator too.  Numbers are matched by digits only — dashes, spaces,
 and parentheses are ignored — so <code>555-1234</code> and <code>5551234</code>
 hit the same entry.
 </p>
+
+<aside class="note">
+<span class="label">Shared: the phone book. Not shared: the stored-number slots</span>
+<code>dialup.conf</code> is one table for the whole gateway, but the four
+<code>AT&amp;Z<em>n</em>=<em>s</em></code> stored-number slots are <em>per port</em>
+(<code>serial_a_stored_0</code>&hellip;<code>serial_b_stored_3</code>), so Port A's
+slot&nbsp;0 and Port B's are different numbers. The CP/M emulator&rsquo;s modem has
+no stored slots at all &mdash; <code>AT&amp;Z</code> and <code>ATDS<em>n</em></code>
+are not implemented there; use the shared phone book, which reaches the same
+targets by number.
+</aside>
 
 <h3 id="ch9-peerdial">9.2.3 Calling Another Port (Peer-Dial)</h3>
 
