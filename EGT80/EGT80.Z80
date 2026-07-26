@@ -2183,6 +2183,11 @@ SCMENU: CALL    SCTTL           ; cleared screen + banner, every time round
         LD      HL,MMODE
         CALL    PSTR
         CALL    SHMODE
+        LD      HL,MMKEY        ; say how to get back before they go in
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MMKEY2
+        CALL    PSTR
         CALL    CRLF
         LD      HL,MMENU
         CALL    PSTR
@@ -2490,13 +2495,21 @@ SCPHBS: LD      (PBASE),A
 ; has moved it (RomWBW does on some boards).
 ;-----------------------------------------------------------------------
 SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
-        JR      NC,SCPAS2
+        JR      NC,SCPASF
         CALL    CRLF
         LD      HL,MNOZ180
         CALL    PSTR
         JP      TWAIT           ; as above: read before the screen clears
+SCPASF: CALL    ASCAUT          ; let the firmware fill the base in, if it can
 SCPAS2: CALL    CRLF
         LD      HL,MPASCM
+        CALL    PSTR
+        LD      HL,MASCBAS      ; the base in force, so it is never a mystery
+        CALL    PSTR
+        LD      A,(PABASE)
+        CALL    PHEX
+        CALL    CRLF
+        LD      HL,MASCPR
         CALL    PSTR
 SCPAS1: CALL    CIN
         CALL    UPCASE
@@ -2540,7 +2553,67 @@ SCASC0: LD      A,0C0H
         CALL    CRLF
         LD      HL,MASCC0
         CALL    PSTR
-        JP      SCPAS2          ; then still ask for the channel
+        LD      HL,MASCPIK      ; setting a base selects no port on its own
+        CALL    PSTR
+        JP      SCPAS2
+
+;-----------------------------------------------------------------------
+; ASCAUT - fill in the I/O base from RomWBW on the way into this menu.
+;
+; The base was a step the user had to know existed: pick the family, then
+; realise the registers are somewhere else, then find the right number.  On
+; a RomWBW machine none of that is necessary - the firmware will say - so it
+; is asked here and the answer used, silently, before the menu is drawn.
+; Nothing is reported because there is nothing to decide; the menu shows the
+; base in force, and R re-asks with an explanation if anyone wants to see it.
+;-----------------------------------------------------------------------
+ASCAUT: CALL    ASCFND          ; carry set: no HBIOS, or no ASCI unit listed
+        RET     C
+        LD      HL,PABASE
+        CP      (HL)
+        RET     Z               ; already right: leave the dirty flag alone
+        LD      (HL),A
+        JP      XDIRTS
+
+;-----------------------------------------------------------------------
+; ASCFND - scan the HBIOS character units for an ASCI one and return the
+; base of its register block in A.  Carry set if there is nothing to ask or
+; no ASCI unit among them.
+;
+; The base HBIOS reports belongs to a physical channel, and channel 1 sits
+; one address above channel 0 (RomWBW: ASCI1_BASE = Z180_BASE + 1), so the
+; channel it also reports is subtracted to recover the block base - the
+; number this program adds the channel back to when it addresses a
+; register.  Off by one there would put every register one byte out.
+;-----------------------------------------------------------------------
+ASCFND: XOR     A
+        LD      (HBSCAN),A
+ASCFN1: LD      A,(HBSCAN)
+        CALL    HBDEV
+        JR      C,ASCFN2
+        LD      A,(HBTYPE)
+        CP      01H             ; the published ASCI device type
+        JR      Z,ASCFN3
+ASCFN2: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4
+        JR      C,ASCFN1
+        SCF
+        RET
+ASCFN3: LD      A,(HBBASE)
+        LD      E,A
+        LD      A,(HBPHYS)
+        CP      E               ; a channel above its own base is nonsense
+        JR      Z,ASCFN4
+        JR      NC,ASCFN2
+ASCFN4: LD      A,E
+        LD      HL,HBPHYS
+        SUB     (HL)
+        CP      0F0H            ; base+9 must stay inside the I/O space
+        JR      NC,ASCFN2
+        OR      A               ; carry clear: A holds the block base
+        RET
 
 ;-----------------------------------------------------------------------
 ; SCASCR - ask RomWBW where the ASCI registers are, rather than assume.
@@ -2557,35 +2630,8 @@ SCASC0: LD      A,0C0H
 ; which is what this program adds the channel to when it addresses a
 ; register.  Getting that wrong would put every register one byte out.
 ;-----------------------------------------------------------------------
-SCASCR: XOR     A
-        LD      (HBSCAN),A
-SCASR1: LD      A,(HBSCAN)
-        CALL    HBDEV
-        JR      C,SCASR2
-        LD      A,(HBTYPE)
-        CP      01H             ; the published ASCI device type
-        JR      Z,SCASR3
-SCASR2: LD      A,(HBSCAN)
-        INC     A
-        LD      (HBSCAN),A
-        CP      4
-        JR      C,SCASR1
-        CALL    CRLF            ; nothing to ask, or no ASCI unit listed
-        LD      HL,MASCNOR
-        CALL    PSTR
-        CALL    TWAIT
-        JP      SCPAS2
-SCASR3: LD      A,(HBBASE)
-        LD      E,A
-        LD      A,(HBPHYS)
-        CP      E               ; a channel above its own base is nonsense
-        JR      Z,SCASR4
-        JR      NC,SCASR2
-SCASR4: LD      A,E             ; the base of that physical channel...
-        LD      HL,HBPHYS
-        SUB     (HL)            ; ...less the channel, giving the block base
-        CP      0F0H            ; base+9 must stay inside the I/O space
-        JR      NC,SCASR2
+SCASCR: CALL    ASCFND
+        JR      C,SCASRN
         LD      (PABASE),A
         CALL    XDIRTS
         CALL    CRLF
@@ -2594,6 +2640,13 @@ SCASR4: LD      A,E             ; the base of that physical channel...
         LD      A,(PABASE)
         CALL    PHEX
         CALL    CRLF
+        LD      HL,MASCPIK
+        CALL    PSTR
+        JP      SCPAS2
+SCASRN: CALL    CRLF            ; nothing to ask, or no ASCI unit listed
+        LD      HL,MASCNOR
+        CALL    PSTR
+        CALL    TWAIT
         JP      SCPAS2
 SCPASB: CALL    HEXASK          ; internal I/O base
         RET     C
@@ -3414,6 +3467,9 @@ MRULE:  DB      '-------------------------',CR,LF,0
 MVER:   DB      'EGT80 v0.7  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
 
 MPORT:  DB      'Port: ',0
+MMKEY:  DB      'Keys: ',0
+MMKEY2: DB      ' leaves terminal mode for the menu; then E',CR,LF
+        DB      '      returns here.',CR,LF,0
 MMODE:  DB      'Mode: ',0
 MPNONE: DB      'none selected - press S then P',0
 MPSIO:  DB      'Z80 SIO/2 at ',0
@@ -3471,16 +3527,20 @@ MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
 MNOZ180: DB     'This processor is not a Z180, so it has no ASCI',CR,LF
         DB      'ports.  Pick the serial chip your board uses.',CR,LF,0
 MPASCM: DB      'Z180 ASCI channel',CR,LF
+        DB      'Pick a channel: nothing is selected until you do.',CR,LF
         DB      '  0  channel 0  (ASCI0 - usually the console)',CR,LF
         DB      '  1  channel 1  (ASCI1 - the second port)',CR,LF
-        DB      '  R  read the I/O base from RomWBW (best)',CR,LF
+        DB      '  R  re-read the I/O base from RomWBW',CR,LF
         DB      '  C  I/O base C0 - RomWBW on Small Computer',CR,LF
         DB      '     boards (SC126 and friends)',CR,LF
         DB      '  B  set the internal I/O base by hand',CR,LF
-        DB      '  Q  Back  (^C also backs out)',CR,LF
-        DB      CR,LF,'Choice: ',0
+        DB      '  Q  Back, leaving the port as it is',CR,LF
+        DB      '     (^C also backs out)',CR,LF,0
+MASCBAS: DB     'I/O base in force: ',0
+MASCPR: DB      CR,LF,'Channel (0/1), or R C B Q: ',0
 MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
 MASCGOT: DB     'RomWBW reports the ASCI block at base ',0
+MASCPIK: DB     'Now pick the channel: 0 or 1.',CR,LF,0
 MASCNOR: DB     'There is no RomWBW here to ask, or it lists no ASCI',CR,LF
         DB      'port.  Press C for C0 (what RomWBW uses on Small',CR,LF
         DB      'Computer boards) or B to enter the base yourself.',CR,LF,0
@@ -3509,7 +3569,7 @@ MSETT2: DB      CR,LF
         DB      '  L  Send LF after a typed CR',CR,LF
         DB      '  K  Change the menu key',CR,LF
         DB      '  B  Line settings - baud, bits, parity',CR,LF
-        DB      '  C  How to clear the screen',CR,LF
+        DB      '  C  Clear Screen',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MESCAS: DB      'Press the control key you want as the menu key.',CR,LF

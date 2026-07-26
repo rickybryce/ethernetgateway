@@ -325,6 +325,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Setting the ASCI I/O base no longer looks like selecting the port.**
+    Reported from real use: choose Z180 ASCI, set the base, back out — and the
+    port menu still showed the old port, because the family is only selected
+    when a *channel* is chosen. The base is now filled in from RomWBW on the way
+    into that menu (so on a RomWBW machine it is not a step at all), the menu
+    shows the base in force and says nothing is selected until a channel is
+    picked, both base setters end with "now pick the channel", and `Q` says it
+    leaves the port as it is.
+  - **The opening menu names the menu key**, so terminal mode is visibly not a
+    one-way door before you enter it: `Keys: ^Y leaves terminal mode for the
+    menu; then E returns here.` The Settings item for the clear-screen dialect is
+    now just `Clear Screen`.
   - **On a RomWBW machine EGT80 asks the firmware instead of guessing.** The
     HBIOS unit prompt now lists the character units that actually exist, each
     with the device type and base I/O address RomWBW reports for it
