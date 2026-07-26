@@ -3340,6 +3340,24 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
         match result {
             AtResult::Ok => { pending_ok = true; }
             AtResult::Error => {
+                // Log the line verbatim, with a byte view, whenever the modem
+                // refuses one.  An intermittent ERROR — "it failed once, then
+                // the same command worked" — is otherwise unattributable: the
+                // user sees their line echoed correctly and a refusal anyway,
+                // and every candidate cause (a byte lost on the wire, a byte
+                // inserted, a mis-parsed chain) looks identical from outside.
+                // The bytes settle it, so record them where the next
+                // occurrence can be read off the log instead of reasoned about.
+                if state.verbose {
+                    let bytes: Vec<String> =
+                        cmd.bytes().map(|b| format!("{b:02X}")).collect();
+                    glog!(
+                        "Serial modem (Port {}): refused command {:?} [{}]",
+                        state.port_id.label(),
+                        cmd,
+                        bytes.join(" "),
+                    );
+                }
                 send_result(state, "ERROR");
                 terminal_emitted = true;
             }
