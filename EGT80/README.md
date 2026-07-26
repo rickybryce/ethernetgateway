@@ -119,8 +119,25 @@ Planned drivers:
 | Z80 SIO/2 | four channels (0x80/0x82/0x84/0x86) or any address | yes — `rc2014_1b` |
 | 6850 ACIA | 88-2SIO 0x10 / 0x12, or any address | yes — `altair_2sio1` |
 | RomWBW HBIOS | unit 0–3, via `RST 8` | yes — `hbios_1` |
-| Z180 ASCI | channel 0/1, internal I/O base (`C0` offered by name) | **not here** — needs real iron |
+| Altair 88-SIO | 0x00/0x01, or any address | yes — `altair_sio` |
+| Z180 ASCI | channel 0/1, internal I/O base (asked of the firmware) | **not here** — needs real iron |
 | CP/M BDOS AUX | no parameters (funcs 3/4) | yes — `aux` |
+
+**The menu names machines, not chips.** Choosing a port used to mean choosing a
+chip family, which is a question only someone who knows their board can answer.
+The top level now reads: the gateway's own emulated port (the default, so EGT80
+and the gateway work together untouched), RomWBW firmware (any such machine), the
+Altair 88-2SIO, the Altair 88-SIO, "other hardware" — which is the old chip list,
+one level down, with the free-form address prompts intact — and the CP/M `AUX:`
+device. A line above the list says which key follows from what the program can
+actually determine about the machine: RomWBW detected, a Z180 without it, or
+neither.
+
+The **88-SIO** is a separate item rather than an address on the 6850 screen
+because it is a different board: it reports ready by pulling a bit *low*, so an
+88-2SIO driver pointed at it reads every test inverted and the port looks
+permanently busy and permanently empty at once. The addresses were never the only
+difference.
 
 Two of these carry caveats the menus and help state plainly:
 

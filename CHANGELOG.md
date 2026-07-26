@@ -328,6 +328,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **The port menu names machines rather than chips.** Choosing a port meant
+    choosing a chip family first, which is a question only someone who already
+    knows their board can answer — and two entries claimed an SC126 (Z180 ASCI
+    *and* RomWBW HBIOS), with only one of them able to work. The top level now
+    reads: the gateway's own emulated port (option 1, and the shipped default, so
+    EGT80 and the gateway work together with nothing set), RomWBW firmware, the
+    Altair 88-2SIO, the Altair 88-SIO, "other hardware", and CP/M `AUX:`. The old
+    chip list survives intact one level down, free-form address entry included, so
+    nothing became unreachable. A line above the list states which key follows
+    from what the program can determine about the machine — RomWBW present, a Z180
+    without it, or neither — which is as far as detection can honestly go, since
+    probing an unmapped port on real hardware is not something to do blind.
+  - **New driver: the Altair 88-SIO** (the original MITS board, 0x00/0x01 or any
+    address), as its own menu item. It is a different board from the 88-2SIO, not
+    just a different address: it reports ready by pulling a bit *low*, so a 6850
+    driver pointed at it reads every test inverted and the port appears
+    permanently busy and permanently empty at the same time. Verified in the
+    emulator against the `altair_sio` profile: `AT` → `OK`, `ATI` identifying the
+    modem.
   - **Z180 ASCI reaches the port the way the machine actually works.** Reported
     from an SC126: `atdt` produced no error but a few random characters, while
     QTERMH1 on the same wire was fine. The reason is not addressing — it is

@@ -137,6 +137,7 @@ PKACIA  EQU     2               ; 6850 ACIA        (phase 2)
 PKHBIO  EQU     3               ; RomWBW HBIOS     (phase 2)
 PKASCI  EQU     4               ; Z180 ASCI        (phase 2)
 PKAUX   EQU     5               ; CP/M BDOS AUX    (phase 2)
+PKS88   EQU     6               ; Altair 88-SIO (the original MITS board)
 
 ; Build identity lives in MVER, in the strings, and nowhere else - a
 ; second copy in an equate only invites the two to drift apart.
@@ -416,35 +417,43 @@ PORTS1: LD      A,(PKIND)
         JR      Z,PSASC
         CP      PKAUX
         JR      Z,PSAUX
+        CP      PKS88
+        JR      Z,PSS88
         LD      HL,PNULL        ; nothing selected: safe stubs
         LD      DE,PNULL
-        JR      PSSET4
+        JP      PSSET4
 PSSIO:  LD      HL,SIOST
         LD      DE,SIOIN
         CALL    PSSET2
         LD      HL,SIOOST
         LD      DE,SIOOUT
-        JR      PSSETO
+        JP      PSSETO
 PSACI:  CALL    ACINIT          ; a 6850 needs programming before use
         LD      HL,ACIST
         LD      DE,ACIIN
         CALL    PSSET2
         LD      HL,ACIOST
         LD      DE,ACIOUT
-        JR      PSSETO
+        JP      PSSETO
 PSHB:   LD      HL,HBST
         LD      DE,HBIN
         CALL    PSSET2
         LD      HL,HBOST
         LD      DE,HBOUT
-        JR      PSSETO
+        JP      PSSETO
 PSASC:  CALL    ASCPAT          ; patch the register addresses in place
         LD      HL,ASCST
         LD      DE,ASCIN
         CALL    PSSET2
         LD      HL,ASCOST
         LD      DE,ASCOUT
-        JR      PSSETO
+        JP      PSSETO
+PSS88:  LD      HL,S8ST
+        LD      DE,S8IN
+        CALL    PSSET2
+        LD      HL,S8OST
+        LD      DE,S8OUT
+        JP      PSSETO
 PSAUX:  XOR     A
         LD      (AUXFLG),A      ; drop any byte held from a previous port
         LD      HL,AUXST
@@ -452,7 +461,7 @@ PSAUX:  XOR     A
         CALL    PSSET2
         LD      HL,AUXOST
         LD      DE,AUXOUT
-        JR      PSSETO
+        JP      PSSETO
 
 ;-----------------------------------------------------------------------
 ; PSSET2 - point the input pair (status in HL, read in DE) at a driver;
@@ -541,6 +550,50 @@ ACIOST: LD      A,(PBASE)
         AND     02H
         RET
 ACIOUT: LD      E,A
+        LD      A,(PBASE)
+        INC     A
+        LD      C,A
+        LD      B,0
+        LD      A,E
+        OUT     (C),A
+        RET
+
+;-----------------------------------------------------------------------
+; Altair 88-SIO driver - the original MITS serial board, not the 88-2SIO.
+;
+; Same shape as the 6850 above, opposite sense: this board reports ready by
+; pulling a bit LOW.  Bit 0 clear means a character is waiting, bit 7 clear
+; means the transmitter will take one.  Altair software has always been
+; written to that convention (IN 0 / ANI 01 / JNZ wait), and it is why an
+; 88-SIO cannot be driven by an 88-2SIO build however the addresses are set:
+; every test comes out inverted, so the port looks permanently busy and
+; permanently empty at the same time.
+;
+; The masked bit is inverted here so the four vectors keep one contract -
+; non-zero means ready - and no caller has to know which board it is on.
+; There is nothing to initialise: the 88-SIO has no control register.
+;-----------------------------------------------------------------------
+S8ST:   LD      A,(PBASE)
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        AND     01H             ; 0 = a character is waiting
+        XOR     01H             ; ...so invert: non-zero = ready
+        RET
+S8IN:   LD      A,(PBASE)
+        INC     A
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        RET
+S8OST:  LD      A,(PBASE)
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
+        AND     80H             ; 0 = the transmitter is free
+        XOR     80H
+        RET
+S8OUT:  LD      E,A
         LD      A,(PBASE)
         INC     A
         LD      C,A
@@ -2029,7 +2082,7 @@ CFGCH1: LD      A,(DE)
         DEC     B
         JR      NZ,CFGCH1
         LD      A,(PKIND)       ; a kind we actually have a driver for
-        CP      PKAUX+1
+        CP      PKS88+1
         JR      NC,CFGBAD
         LD      A,(FLTMOD)      ; the flags are booleans
         CP      2
@@ -2215,6 +2268,8 @@ SHPORT: LD      A,(PKIND)
         JR      Z,SHPASC
         CP      PKAUX
         JR      Z,SHPAUX
+        CP      PKS88
+        JR      Z,SHPS88
         LD      HL,MPNONE
         CALL    PSTR
         JP      CRLF
@@ -2240,6 +2295,9 @@ SHPASC: LD      HL,MPASCI
         LD      A,(PABASE)
         CALL    PHEX
         JP      CRLF
+SHPS88: LD      HL,MPS88
+        CALL    PSTR
+        JP      SHPADR
 SHPAUX: LD      HL,MPAUX
         CALL    PSTR
         JP      CRLF
@@ -2299,15 +2357,21 @@ SHESC:  LD      A,'^'
 ;-----------------------------------------------------------------------
 SCPORT: CALL    CLS
         CALL    CRLF
+        LD      HL,MPTTL
+        CALL    PSTR
         LD      HL,MPNOW        ; what is in force right now
         CALL    PSTR
         CALL    SHPORT
         CALL    CRLF
-        LD      A,(0008H)       ; is there firmware here to ask?
-        CP      0C3H
-        JR      NZ,SCPOR0
-        LD      HL,MHBHER
-        CALL    PSTR
+        LD      A,(0008H)       ; two facts are knowable: is there firmware
+        CP      0C3H            ; to ask, and is this a Z180?  Say which key
+        LD      HL,MHINT1       ; follows from them, so nobody has to know a
+        JR      Z,SCPORH        ; chip name to get started
+        CALL    ISZ180
+        LD      HL,MHINT2
+        JR      NC,SCPORH
+        LD      HL,MHINT3
+SCPORH: CALL    PSTR
 SCPOR0: LD      HL,MPORTS
         CALL    PSTR
 SCPOR1: CALL    CIN
@@ -2315,14 +2379,16 @@ SCPOR1: CALL    CIN
         CP      'D'
         JP      Z,SCPDEF
         CP      '1'
-        JP      Z,SCPSIO
+        JP      Z,SCPDEF        ; the gateway's own emulated port
         CP      '2'
-        JP      Z,SCPACI
+        JP      Z,SCPHB         ; the firmware, on any RomWBW machine
         CP      '3'
-        JP      Z,SCPHB
+        JP      Z,SCPACI        ; Altair 88-2SIO (a 6850)
         CP      '4'
-        JP      Z,SCPASC
+        JP      Z,SCP88         ; Altair 88-SIO (the original board)
         CP      '5'
+        JP      Z,SCPOTH        ; anything else: chip, then address
+        CP      '6'
         JP      Z,SCPAUX
         CP      'N'
         JR      Z,SCPONO
@@ -2336,6 +2402,38 @@ SCPOR1: CALL    CIN
 SCPONO: XOR     A
         LD      (PKIND),A
         JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPOTH - "other hardware": which chip, and then where.
+;
+; This is the old top-level menu, one level down.  The chips are the answer
+; to a question only someone who knows their board can answer, and most
+; people do not need to: a RomWBW machine and an Altair are named on the
+; screen before this one.  What is left here is everything else - and for
+; those, naming the chip is exactly right, because the register layout is
+; what the driver has to know.
+;-----------------------------------------------------------------------
+SCPOTH: CALL    CLS
+        CALL    CRLF
+        LD      HL,MPOTHM
+        CALL    PSTR
+SCPOT1: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JP      Z,SCPSIO
+        CP      '2'
+        JP      Z,SCPACI
+        CP      '3'
+        JP      Z,SCPASC
+        CP      '4'
+        JP      Z,SCP88
+        CP      'Q'
+        JP      Z,SCPORT        ; back to the machine list
+        CP      03H
+        JP      Z,SCPORT
+        LD      A,BEL
+        CALL    COUT
+        JR      SCPOT1
 
 ;-----------------------------------------------------------------------
 ; SCPDEF - the default port: Z80 SIO/2 board 1 channel B, 82/83.
@@ -2427,6 +2525,40 @@ SCPABA: CALL    HEXASK
         RET     C
 SCPASE: LD      (PBASE),A
         LD      A,PKACIA
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCP88 - Altair 88-SIO: the standard pair, or any address.
+;
+; A separate item from the 88-2SIO because it is a different board with the
+; opposite status polarity - the addresses are not the only difference, and
+; picking the wrong one of the two is the mistake this menu exists to make
+; impossible.
+;-----------------------------------------------------------------------
+SCP88:  CALL    CLS
+        CALL    CRLF
+        LD      HL,MP88M
+        CALL    PSTR
+SCP881: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JR      Z,SCP8800
+        CP      'B'
+        JR      Z,SCP88B
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JR      SCP881
+SCP8800: XOR    A               ; status 00, data 01
+        JR      SCP88S
+SCP88B: CALL    HEXASK
+        RET     C
+SCP88S: LD      (PBASE),A
+        LD      A,PKS88
         LD      (PKIND),A
         JP      PDONE
 
@@ -3550,6 +3682,7 @@ MPHBIO: DB      'RomWBW HBIOS unit ',0
 MPASCI: DB      'Z180 ASCI channel ',0
 MPBASE: DB      ', I/O base ',0
 MPAUX:  DB      'CP/M AUX: device (BDOS 3/4)',0
+MPS88:  DB      'Altair 88-SIO at ',0
 MMANSI: DB      'ANSI (pass escape sequences)',0
 MMASC:  DB      'ASCII (strip escape sequences)',0
 MMECHO: DB      ' +echo',0
@@ -3565,21 +3698,39 @@ MMENU:  DB      CR,LF
         DB      '  X  Exit to CP/M',CR,LF
         DB      CR,LF,'Choice: ',0
 
-MPORTS: DB      'Select serial port',CR,LF
-        DB      '------------------',CR,LF
-        DB      '  1  Z80 SIO/2     - RC2014, RomWBW, many Z80 boards',CR,LF
-        DB      '  2  6850 ACIA     - Altair 88-2SIO, RC2014 ACIA',CR,LF
-        DB      '  3  RomWBW HBIOS  - any RomWBW machine (RST 8)',CR,LF
-        DB      '  4  Z180 ASCI     - SC126 and other Z180 boards',CR,LF
-        DB      '  5  CP/M AUX:     - portable fallback, see Help',CR,LF
-        DB      '  D  Default - Z80 SIO/2 board 1 ch B, 82/83',CR,LF
-        DB      '  N  None',CR,LF
-        DB      '  Q  Leave unchanged  (^C also backs out)',CR,LF
+MPORTS: DB      CR,LF
+        DB      '  1  Ethernet Gateway  - its own emulated port, 82/83',CR,LF
+        DB      '  2  RomWBW firmware   - any RomWBW machine',CR,LF
+        DB      '  3  Altair 88-2SIO    - 6850 ACIA at 10/11 or 12/13',CR,LF
+        DB      '  4  Altair 88-SIO     - the original MITS board, 00/01',CR,LF
+        DB      '  5  Other hardware    - the chip, then the address',CR,LF
+        DB      '  6  CP/M AUX: device  - portable fallback, see Help',CR,LF,CR,LF
+        DB      '  D  Default - the same as 1, and clears the rest',CR,LF
+        DB      '  N  None      Q  Leave unchanged  (^C backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
-MPDEF:  DB      'Back to the default port.',CR,LF,0
-MHBHER: DB      'This machine has RomWBW.  Options 3 and 4 both use',CR,LF
-        DB      'it, so the chip and its address need not be known.',CR,LF,CR,LF,0
-MPNOW:  DB      'Currently selected: ',0
+MPOTHM: DB      'Other hardware',CR,LF
+        DB      '--------------',CR,LF
+        DB      'Which serial chip does this machine use?',CR,LF,CR,LF
+        DB      '  1  Z80 SIO/2   - RC2014 and most Z80 boards',CR,LF
+        DB      '  2  6850 ACIA   - RC2014 ACIA, Altair 88-2SIO',CR,LF
+        DB      '  3  Z180 ASCI   - the ports inside a Z180 CPU',CR,LF
+        DB      '  4  Altair 88-SIO - the original MITS board',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MP88M:  DB      'Altair 88-SIO - which address?',CR,LF
+        DB      '------------------------------',CR,LF
+        DB      '  1  the standard pair - status 00, data 01',CR,LF
+        DB      '  B  some other address',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MHINT1: DB      'This machine has RomWBW - press 2.',CR,LF,0
+MHINT2: DB      'This is a Z180 without RomWBW - press 5, then 3.',CR,LF,0
+MHINT3: DB      'Running under the gateway? Press 1.  Otherwise 3 or',CR,LF
+        DB      '4 for an Altair, or 5 to name your chip.',CR,LF,0
+MPDEF:  DB      'Set to the gateway port: Z80 SIO/2 at 82/83.',CR,LF,0
+MPTTL:  DB      'Select serial port',CR,LF
+        DB      '------------------',CR,LF,0
+MPNOW:  DB      'Now: ',0
 MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
         DB      '  1  board 1 channel A - 80/81',CR,LF
         DB      '  2  board 1 channel B - 82/83  (usual AUX: port)',CR,LF
@@ -3588,9 +3739,10 @@ MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
         DB      '  B  some other address',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
-MPACIM: DB      '6850 ACIA port',CR,LF
-        DB      '  1  88-2SIO port 1 - 10/11',CR,LF
-        DB      '  2  88-2SIO port 2 - 12/13',CR,LF
+MPACIM: DB      '6850 ACIA - which port?',CR,LF
+        DB      '-----------------------',CR,LF
+        DB      '  1  Altair 88-2SIO port 1 - 10/11',CR,LF
+        DB      '  2  Altair 88-2SIO port 2 - 12/13',CR,LF
         DB      '  B  some other address',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
@@ -3815,20 +3967,23 @@ MBYE:   DB      'EGT80 done.',CR,LF,0
 
 MHELP:  DB      'Help - the serial port',CR,LF
         DB      '----------------------',CR,LF,CR,LF
-        DB      'Choosing the port is the one setting that decides',CR,LF
-        DB      'whether EGT80 works.  Get it wrong and nothing is',CR,LF
-        DB      'sent and nothing arrives - no error, just silence.',CR,LF,CR,LF
-        DB      'Z80 SIO/2   RC2014 and most Z80 boards.  On RC2014',CR,LF
-        DB      '            or RomWBW, 82/83 is the usual channel.',CR,LF
-        DB      '6850 ACIA   Altair 88-2SIO (10/11, 12/13) and the',CR,LF
-        DB      '            RC2014 ACIA boards.',CR,LF
-        DB      'RomWBW      Asks the firmware to move the byte, so',CR,LF
-        DB      'HBIOS       it works on any RomWBW machine whatever',CR,LF
-        DB      '            the hardware.  Needs RomWBW.',CR,LF
-        DB      'Z180 ASCI   The serial ports inside a Z180, as on',CR,LF
-        DB      '            an SC126.',CR,LF
-        DB      'CP/M AUX:   Portable fallback - read help page 3',CR,LF
-        DB      '            before choosing it.',CR,LF,0
+        DB      'The port menu names machines rather than chips, so',CR,LF
+        DB      'pick the one you are sitting at.  Get it wrong and',CR,LF
+        DB      'nothing is sent and nothing arrives - just silence.',CR,LF,CR,LF
+        DB      '1 Gateway   Its own emulated port, 82/83.  This is',CR,LF
+        DB      '            the default, so EGT80 and the gateway',CR,LF
+        DB      '            work together untouched.',CR,LF
+        DB      '2 RomWBW    Asks the firmware to move the byte, so',CR,LF
+        DB      '            it works on any RomWBW machine whatever',CR,LF
+        DB      '            the chip: SC126, RC2014, N8 and more.',CR,LF
+        DB      '3 88-2SIO   Altair 88-2SIO - a 6850 at 10/11 or',CR,LF
+        DB      '            12/13.',CR,LF
+        DB      '4 88-SIO    The original MITS board at 00/01.  Its',CR,LF
+        DB      '            status bits are inverted, so it and the',CR,LF
+        DB      '            88-2SIO cannot be swapped.',CR,LF
+        DB      '5 Other     Name the chip, then the address:',CR,LF
+        DB      '            SIO/2, 6850, Z180 ASCI, 88-SIO.',CR,LF
+        DB      '6 AUX:      Portable fallback - read help page 3.',CR,LF,0
 MHELP2: DB      'Help - using the terminal',CR,LF
         DB      '-------------------------',CR,LF,CR,LF
         DB      'Terminal mode passes what you type to the port and',CR,LF
@@ -3859,9 +4014,9 @@ MHELP3: DB      'Help - two things to know',CR,LF
         DB      'works well; on real hardware prefer the family that',CR,LF
         DB      'matches your serial chip.',CR,LF,CR,LF
         DB      'The Z180 ASCI registers live inside the CPU, and',CR,LF
-        DB      'the block moves: RomWBW puts it at C0 on Small',CR,LF
-        DB      'Computer boards.  Press C for C0, or B to type',CR,LF
-        DB      'another, then pick the channel.',CR,LF,CR,LF
+        DB      'the block moves.  On a RomWBW machine EGT80 asks',CR,LF
+        DB      'the firmware where it is; otherwise press C for C0',CR,LF
+        DB      'or B to type it, then pick the channel.',CR,LF,CR,LF
         DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF
         DB      'with the checksum fallback an older peer may want.',CR,LF
         DB      'Start the far end first, then press U or D - from',CR,LF
