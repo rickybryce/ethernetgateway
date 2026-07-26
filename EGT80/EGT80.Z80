@@ -738,6 +738,11 @@ HBST:   LD      B,02H           ; serial input status
         LD      A,(PBASE)
         LD      C,A
         RST     8
+        BIT     7,A             ; see HBERR below: negative is an error, not
+        JR      NZ,HBNONE       ; a count, and must not read as "data ready"
+        OR      A
+        RET
+HBNONE: XOR     A               ; report "nothing to read"
         RET
 HBIN:   LD      B,00H           ; serial input (waits for a character)
         LD      A,(PBASE)
@@ -749,7 +754,31 @@ HBOST:  LD      B,03H           ; serial output status
         LD      A,(PBASE)
         LD      C,A
         RST     8
+        BIT     7,A
+        JR      NZ,HBFULL
+        OR      A
         RET
+HBFULL: XOR     A               ; report "no room": PSEND then bounds out and
+        RET                     ; the user gets the dead-port diagnosis
+
+;-----------------------------------------------------------------------
+; HBERR - why those two status calls check bit 7.
+;
+; The published API is explicit: for CIOIST and CIOOST, register A carries
+; a count *and* a status, and "negative values (bit 7 set) indicate a
+; standard HBIOS result (error) code".  A wrong unit number - easy to pick,
+; since the list offers four - therefore answers with bit 7 set.
+;
+; Under this program's vector contract, non-zero means ready.  So an error
+; used to read as "a character is waiting", the driver called CIOIN, and
+; the API says that call "will wait indefinitely" when nothing arrives.
+; The terminal loop never got back to the keyboard, so the menu key and ^C
+; were both dead and the machine needed a reset.  Reported from an SC126.
+;
+; Treating a negative result as "not ready" turns that hang into the
+; diagnosis this program already has: the transmitter never comes free,
+; PSEND gives up, and the wrong-port notice appears with ^C live.
+;-----------------------------------------------------------------------
 HBOUT:  LD      E,A             ; the byte goes out in E
         LD      B,01H           ; serial output
         LD      A,(PBASE)

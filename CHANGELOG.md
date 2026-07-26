@@ -328,6 +328,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **A wrong HBIOS unit froze EGT80 instead of reporting a dead port.**
+    Reported from an SC126: with the wrong port selected, the "nothing was sent"
+    notice appeared as designed — and then `^C` did nothing and the machine had
+    to be reset. The published API is explicit that `CIOIST`/`CIOOST` return a
+    count in `A` and that "negative values (bit 7 set) indicate a standard HBIOS
+    result (error) code". Under EGT80's vector contract, non-zero means ready, so
+    an *error* read as "a character is waiting"; the driver then called `CIOIN`,
+    which the API says "will wait indefinitely". The terminal loop never got back
+    to the keyboard, so the menu key and `^C` were both dead. Those two status
+    calls now treat a negative result as not-ready, which turns the hang into the
+    diagnosis EGT80 already had: the transmitter never comes free, `PSEND` gives
+    up, and the wrong-port notice appears with `^C` live. The emulator's own
+    `CIOIST`/`CIOOST` now cap their counts at `0x7F` for the same reason — a
+    count with bit 7 set would read as a failure on a healthy port.
+  - **A refused AT command is logged verbatim, and debris before `AT` is
+    skipped.** `ATDT ethernetgateway` intermittently answered `ERROR` from an
+    SC126 in two different terminal programs, working when retyped. The new log
+    line caught it on the first occurrence: `refused command "CCatdt
+    ethernetgateway" [43 43 61 74 …]` — two XMODEM `C` handshake bytes, left in
+    flight by a download that stopped early, arriving as the first characters of
+    the next command line. Nothing legitimate precedes `AT` on a command line, so
+    the command is now found rather than refused, with the skipped bytes logged.
+    A real modem would answer `ERROR`; being stricter than the hardware here buys
+    nothing and costs the user an unexplainable intermittent fault.
   - **Transfers were silently corrupted on the HBIOS and `AUX:` drivers.**
     Reported from an SC126: a downloaded file came back the correct length and
     **entirely zero**, with no error at either end. The cause is register

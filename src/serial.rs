@@ -3309,6 +3309,34 @@ fn describe_at_command(cmd: &str) -> String {
 }
 
 fn process_at_command(state: &mut ModemState, cmd: &str) {
+    // Tolerate debris in front of the command.  A vintage program that was
+    // mid-transfer when the call ended leaves protocol bytes in flight, and
+    // the printable ones arrive as the first characters of the next command
+    // line: an XMODEM receiver asking for CRC mode sends 'C' (0x43) every few
+    // seconds, so a download that stopped early turns the user's next line
+    // into "CCatdt ethernetgateway".  The line is then refused, the user sees
+    // their own correct spelling echoed back, and typing it again works
+    // because the debris died with the refused line - an intermittent fault
+    // with no visible cause, which is exactly how this was reported.
+    //
+    // Nothing legitimate precedes AT on a command line, so skip to it rather
+    // than refuse.  A real modem would answer ERROR; being stricter than the
+    // hardware here buys nothing and costs the user a mystery.
+    let cmd = match skip_to_at(cmd) {
+        Some(skipped) if skipped.len() != cmd.len() => {
+            if state.verbose {
+                glog!(
+                    "Serial modem (Port {}): ignored {} byte(s) of debris before \
+                     the command in {:?}",
+                    state.port_id.label(),
+                    cmd.len() - skipped.len(),
+                    cmd,
+                );
+            }
+            skipped
+        }
+        _ => cmd,
+    };
     // Stash the line for Hayes `A/` repeat.  Real modems skip the A/
     // pseudo-command itself (we never route "A/" through here anyway).
     state.last_command = cmd.to_string();
@@ -3862,6 +3890,20 @@ fn parse_dial_string(raw: &str, s_regs: &[u8; NUM_S_REGS]) -> ParsedDial {
         pre_delay: Duration::ZERO,
         stay_in_command,
     }
+}
+
+/// Find the command inside a line that has debris in front of it, returning
+/// the slice from the first `AT` onwards.
+///
+/// `None` when the line holds no `AT` at all (a genuine ERROR) or is not
+/// ASCII, which the parser refuses on its own.  Case-insensitive, and the
+/// index from the upper-cased copy is valid in the original because
+/// `to_ascii_uppercase` only flips ASCII letters in place.
+fn skip_to_at(cmd: &str) -> Option<&str> {
+    if !cmd.is_ascii() {
+        return None;
+    }
+    cmd.to_ascii_uppercase().find("AT").map(|i| &cmd[i..])
 }
 
 /// Return true if `s` contains only characters that can appear in a Hayes
@@ -6257,6 +6299,48 @@ mod tests {
     /// concrete dispatch in the rest of the module.  These look
     /// trivial but they're load-bearing for every per-port array
     /// access; pin them so a future rename can't silently swap A↔B.
+    /// Field-reported: `ATDT ethernetgateway` intermittently answered ERROR
+    /// from an SC126, and the same line worked when retyped.  The gateway's own
+    /// log settled it — `"CCatdt ethernetgateway"`, two XMODEM `C` handshake
+    /// bytes left in flight by a download that stopped early, arriving as the
+    /// first characters of the next command line.  Nothing legitimate precedes
+    /// `AT`, so the command is found rather than refused.
+    #[test]
+    fn test_debris_before_at_is_skipped() {
+        // The exact line from the log.
+        assert_eq!(
+            skip_to_at("CCatdt ethernetgateway"),
+            Some("atdt ethernetgateway")
+        );
+        // Other protocol debris that is printable: NAK and CAN are control
+        // bytes and never reach here, but 'C' and stray text do.
+        assert_eq!(skip_to_at("CCCATDT host:23"), Some("ATDT host:23"));
+        assert_eq!(skip_to_at("junkATZ"), Some("ATZ"));
+        // A clean line is returned unchanged, so the normal path is untouched.
+        assert_eq!(skip_to_at("ATDT ethernetgateway"), Some("ATDT ethernetgateway"));
+        assert_eq!(skip_to_at("AT"), Some("AT"));
+        // No AT at all stays an error, and so does a non-ASCII line.
+        assert_eq!(skip_to_at("CCCC"), None);
+        assert_eq!(skip_to_at(""), None);
+        assert_eq!(skip_to_at("\u{c1}TDT host"), None);
+        // Only the *first* AT matters: the rest is the command's own text.
+        assert_eq!(skip_to_at("xxATDT at.example.com"), Some("ATDT at.example.com"));
+    }
+
+    /// The whole line still parses after the debris is skipped — the point is a
+    /// working dial, not a tidier string.
+    #[test]
+    fn test_command_with_debris_parses_as_the_dial_it_is() {
+        let mut echo = true;
+        let cleaned = skip_to_at("CCatdt ethernetgateway").unwrap();
+        let results = parse_at_command(cleaned, &mut echo, &mut true, &mut false);
+        assert!(
+            matches!(results.first(), Some(AtResult::Dial(t)) if t.eq_ignore_ascii_case("t ethernetgateway")
+                || t.eq_ignore_ascii_case("ethernetgateway")),
+            "expected a dial, got {results:?}"
+        );
+    }
+
     #[test]
     fn test_serial_port_id_label_and_index() {
         assert_eq!(SerialPortId::A.label(), "A");

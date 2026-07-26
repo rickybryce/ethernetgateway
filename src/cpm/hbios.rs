@@ -204,13 +204,20 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
         // on it: QTERM's overlay hands A straight to a JR Z.  Do not "correct"
         // this to always-zero-on-success.
         FN_IST => {
-            let pending = cpm.modem_rx_len().min(u8::MAX as usize) as u8;
+            // Capped at 0x7F, not 0xFF: the API reserves bit 7 for an error
+            // result ("negative values indicate a standard HBIOS result
+            // code"), so a count that large would read as a failure to any
+            // guest that checks — as one now does, having hung on exactly
+            // that ambiguity.  No real driver reports 128 pending bytes
+            // either; RomWBW's character buffers are far smaller.
+            let pending = cpm.modem_rx_len().min(0x7F) as u8;
             cpm.hbios_return_e(pending, pending);
             cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
         }
         FN_OST => {
-            let free = cpm.modem_tx_free().min(u8::MAX as usize) as u8;
+            let free = cpm.modem_tx_free().min(0x7F) as u8; // as above: bit 7
+            // is an error flag, never a count
             cpm.hbios_return_e(free, free);
             cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
@@ -304,7 +311,16 @@ mod tests {
         let (mut cpm, abort) = machine_with_call(FN_OST, 1, "hbios_1");
         assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_OST));
         assert_eq!(service(&mut cpm, FN_OST), HbiosOutcome::Answered);
-        assert_eq!(cpm.reg8(iz80::Reg8::A), 0xFF, "free space, capped at 255");
+        // Capped at 0x7F, not 0xFF: bit 7 is the API's error flag, so a count
+        // that large would read as a failed call.  A guest that checks bit 7
+        // (as it must, to tell a wrong unit from a ready one) would otherwise
+        // see "error" on a perfectly healthy port.
+        assert_eq!(cpm.reg8(iz80::Reg8::A), 0x7F, "free space, capped below the error flag");
+        assert_eq!(
+            cpm.reg8(iz80::Reg8::A) & 0x80,
+            0,
+            "a count must never have bit 7 set"
+        );
     }
 
     #[test]
