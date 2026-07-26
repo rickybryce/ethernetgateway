@@ -378,6 +378,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     now scramble `HL` (`CIOQUERY` and `CIODEVICE` are exempt: they return `L`).
     Verified afterwards with an independent XMODEM peer over TCP: a download and
     an upload on the port drivers are both byte-identical.
+  - **The post-transfer notice no longer costs a keystroke, and the hangup
+    always finishes.** Two faults reported from an SC126, both introduced by
+    earlier fixes in this same area. The "press a key to return to the session"
+    prompt collided with the far end's own prompt whenever that survived the
+    line settle, so one event cost two keystrokes and the first appeared to do
+    nothing but move the cursor down a line. It is now a statement rather than a
+    prompt — `Back in the session - press a key if the far end is waiting for
+    one.` — and the far end owns the keystroke it asked for. And the hangup's
+    settle waited for silence that a talkative peer need never provide, so
+    `Hanging up...` could be the last thing the program printed and the machine
+    had to be restarted; it is now bounded to three drains and abandonable with
+    `^C`, because an exit path has to terminate whatever the other end does.
   - **EGT80 hangs up when it exits.** Leaving the program used to leave the call
     up: the gateway held the session open, and on a real phone line it would hold
     the line. There is no DTR to drop — the SIO and ACIA drivers do not touch the
