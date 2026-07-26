@@ -313,6 +313,18 @@ means a message can be wiped before it is read, so the places where a message is
 the only feedback — a damaged settings block, a save, a refused port family —
 now pause for a keypress.
 
+**The port entry points save registers; the drivers are not all alike.** Three of
+the five drivers touch only `A` and `BC`, so it appeared safe to hold a buffer
+pointer in `HL` across a port call — and for those three it was. HBIOS is an
+`RST 8` into RomWBW's firmware and `AUX:` is a BDOS call, and neither preserves
+anything beyond its documented returns. Both XMODEM loops walk the buffer with
+`HL` across those calls, which corrupted every transfer on those two families
+*without reporting an error*: the byte sent and the byte folded into the CRC came
+from the same wandering pointer, so they agreed and the far end accepted a file of
+the right length full of the wrong bytes. `PST`/`PIN`/`POST`/`POUT` now save
+`BC`/`DE`/`HL`, as `CST`/`CIN` always did. It was invisible in the emulator
+because our HBIOS preserved `HL`; it no longer does, for exactly this reason.
+
 **The menus are coloured, and switch themselves off.** Headings are cyan,
 labels cyan with amber values, and the key letter in every menu line is
 highlighted. Colour is governed by the ANSI/ASCII setting that already exists,

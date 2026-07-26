@@ -1031,10 +1031,62 @@ AUXOUT: PUSH    BC
 ;-----------------------------------------------------------------------
 ; Port vector call sites.
 ;-----------------------------------------------------------------------
-PST:    JP      VPST
-PIN:    JP      VPIN
-POST:   JP      VPOST
-POUT:   JP      VPOUT
+; The port entry points save BC, DE and HL around the driver, exactly as
+; the console ones above do - and for a reason found the hard way.
+;
+; Four of the five drivers touch only A and BC, so callers got away with
+; holding a pointer in HL across a port call.  The other two do not: HBIOS
+; is an RST 8 into RomWBW's firmware, and CP/M AUX: is a BDOS call.
+; Neither promises to preserve anything beyond its documented returns, and
+; real RomWBW returns values in HL for several functions.
+;
+; Both XMODEM inner loops walk the buffer with HL across exactly these
+; calls.  The failure is quiet and total: on the send side the byte read
+; *and* the byte folded into the CRC both come from the wandering pointer,
+; so they agree, the receiver's check passes, and a file of exactly the
+; right length arrives full of whatever HL happened to point at - all
+; zeros, in the case reported.  On the receive side the bytes are stored
+; through the wandering pointer while the CRC is computed on the byte in
+; A, so again every block "passes" and the file is wrong.  Nothing
+; anywhere reports an error.
+;
+; It could not be reproduced in the gateway's emulator because our HBIOS
+; only sets the registers the API documents, so HL survived there.  A real
+; machine is under no such obligation.
+PST:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A               ; Z reflects "nothing to read"
+        RET
+PIN:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPIN
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+POST:   PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPOST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A               ; Z reflects "transmitter busy"
+        RET
+POUT:   PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPOUT
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
 
 ;=======================================================================
 ; PSEND - send the byte in A out the port, waiting for room.

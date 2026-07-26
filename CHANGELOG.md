@@ -328,6 +328,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Transfers were silently corrupted on the HBIOS and `AUX:` drivers.**
+    Reported from an SC126: a downloaded file came back the correct length and
+    **entirely zero**, with no error at either end. The cause is register
+    discipline. The console entry points (`CST`/`CIN`) have always saved `BC`,
+    `DE` and `HL` around the driver; the *port* entry points (`PST`/`PIN`/
+    `POST`/`POUT`) were bare jumps that saved nothing. Three drivers touch only
+    `A` and `BC`, so callers got away with holding a pointer in `HL` across a
+    port call — but **HBIOS is an `RST 8` into RomWBW's firmware and `AUX:` is a
+    BDOS call**, and neither promises to preserve anything beyond its documented
+    returns (real RomWBW returns values in `HL` for several functions).
+    Both XMODEM inner loops walk the buffer with `HL` across exactly those
+    calls, and the failure is quiet and total: on the send side the byte
+    transmitted *and* the byte folded into the CRC both come from the wandering
+    pointer, so they agree, the receiver's check passes, and a file of exactly
+    the right length arrives full of whatever `HL` had wandered onto. On the
+    receive side the bytes are stored through the wandering pointer while the CRC
+    is computed on the byte in `A`, so again every block "passes". The four port
+    entry points now save and restore `BC`/`DE`/`HL` exactly as the console ones
+    do.
+  - **The emulator's HBIOS no longer preserves `HL` either.** This bug could not
+    be reproduced here because our `RST 8` only set the registers the API
+    documents, so `HL` survived — an emulator looser than the hardware turns a
+    reproducible bug into a field report. The character-I/O and management calls
+    now scramble `HL` (`CIOQUERY` and `CIODEVICE` are exempt: they return `L`).
+    Verified afterwards with an independent XMODEM peer over TCP: a download and
+    an upload on the port drivers are both byte-identical.
   - **The line is settled after a transfer, so a lost `ESC` cannot print as
     litter.** Reported from an SC126: after a download the screen showed `2J`
     and did not clear — on a terminal that is definitely ANSI. The cause is the

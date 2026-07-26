@@ -147,6 +147,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
     // The management group is unit-independent.
     match func {
         FN_VER => {
+            // VER returns L, so HL is left alone here.
             cpm.hbios_return_de_l(OK, VER_DE, VER_PLATFORM);
             return HbiosOutcome::Answered;
         }
@@ -163,6 +164,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
             } else {
                 cpm.hbios_return(ERR);
             }
+            cpm.hbios_scramble_hl();
             return HbiosOutcome::Answered;
         }
         _ => {}
@@ -177,6 +179,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
         FN_IN => match cpm.modem_rx_pop() {
             Some(b) => {
                 cpm.hbios_return_e(OK, b);
+                cpm.hbios_scramble_hl();
                 HbiosOutcome::Answered
             }
             // Nothing yet: park the guest on the call.
@@ -191,6 +194,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
             let b = cpm.arg_e();
             cpm.modem_tx_push(b);
             cpm.hbios_return(OK);
+            cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
         }
         // IST and OST report a COUNT in A as well as in E, and the flags follow
@@ -202,11 +206,13 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
         FN_IST => {
             let pending = cpm.modem_rx_len().min(u8::MAX as usize) as u8;
             cpm.hbios_return_e(pending, pending);
+            cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
         }
         FN_OST => {
             let free = cpm.modem_tx_free().min(u8::MAX as usize) as u8;
             cpm.hbios_return_e(free, free);
+            cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
         }
         FN_INITDEV => {
@@ -219,6 +225,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
                 cpm.set_hbios_line(de);
             }
             cpm.hbios_return(OK);
+            cpm.hbios_scramble_hl();
             HbiosOutcome::Answered
         }
         FN_QUERY => {

@@ -326,6 +326,24 @@ impl Cpm {
 
     /// Finish an HBIOS call: the result code in `A` (0 = success, non-zero =
     /// error, per the API's convention) and `RET` to where `RST 8` came from.
+    /// Scramble `HL`, which an HBIOS call does not promise to preserve.
+    ///
+    /// Real RomWBW returns values in `HL` for several functions and uses it
+    /// freely inside the others: software must not hold a pointer there across
+    /// an `RST 8`.  Ours used to leave it untouched, which is *permissive* — and
+    /// permissiveness here hid a total data-corruption bug in EGT80's own
+    /// transfers that only appeared on real hardware (the XMODEM loops walked
+    /// the buffer with `HL` across the port driver, so on a real machine every
+    /// block "passed" its CRC while the file filled with whatever `HL` had
+    /// wandered onto).  An emulator that is looser than the hardware turns a
+    /// reproducible bug into a field report, so this one is not.
+    ///
+    /// Only the functions whose documented returns do *not* include `H` or `L`
+    /// call this — `CIOQUERY` and `CIODEVICE` return in `L`, so they must not.
+    pub fn hbios_scramble_hl(&mut self) {
+        self.cpu.registers().set16(Reg16::HL, 0xFFFF);
+    }
+
     pub fn hbios_return(&mut self, result: u8) {
         self.cpu.registers().set8(Reg8::A, result);
         // Flags must reflect the result, not whatever the guest had before the
