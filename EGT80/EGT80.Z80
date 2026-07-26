@@ -2383,6 +2383,8 @@ SCPAS1: CALL    CIN
         JR      Z,SCPAS0
         CP      '1'
         JR      Z,SCPASA
+        CP      'C'
+        JR      Z,SCASC0
         CP      'B'
         JR      Z,SCPASB
         CP      'Q'
@@ -2396,6 +2398,27 @@ SCPAS0: XOR     A
         JR      SCPASS
 SCPASA: LD      A,1
         JR      SCPASS
+;-----------------------------------------------------------------------
+; SCASC0 - the base RomWBW uses on Small Computer Central boards.
+;
+; The Z180's serial registers are inside the CPU, and the whole internal
+; register block is relocatable - the ICR decides where it lands.  RomWBW
+; moves it to C0 on these boards, so a driver that pokes the registers
+; directly has to be told; the 00 this program defaults to addresses
+; nothing there, and the symptom is the family's usual silence.  It is
+; offered as a named choice because "C0" is knowledge about someone else's
+; firmware, not something a user should have to look up to type into a hex
+; prompt.  (Reaching the port through HBIOS instead avoids the question
+; entirely: the firmware knows where its own registers are.)
+;-----------------------------------------------------------------------
+SCASC0: LD      A,0C0H
+        LD      (PABASE),A
+        CALL    XDIRTS
+        CALL    CRLF
+        LD      HL,MASCC0
+        CALL    PSTR
+        JP      SCPAS2          ; then still ask for the channel
+
 SCPASB: CALL    HEXASK          ; internal I/O base
         RET     C
         CP      0F0H            ; base+9 must not run off the top of the
@@ -3263,11 +3286,14 @@ MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
 MNOZ180: DB     'This processor is not a Z180, so it has no ASCI',CR,LF
         DB      'ports.  Pick the serial chip your board uses.',CR,LF,0
 MPASCM: DB      'Z180 ASCI channel',CR,LF
-        DB      '  0  channel 0',CR,LF
-        DB      '  1  channel 1',CR,LF
-        DB      '  B  set the internal I/O base first',CR,LF
+        DB      '  0  channel 0  (ASCI0 - usually the console)',CR,LF
+        DB      '  1  channel 1  (ASCI1 - the second port)',CR,LF
+        DB      '  C  I/O base C0 - RomWBW on Small Computer',CR,LF
+        DB      '     boards (SC126 and friends)',CR,LF
+        DB      '  B  set the internal I/O base by hand',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
+MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
 MAUXW:  DB      'CP/M AUX: selected.  Note that CP/M 2.2 has no way',CR,LF
         DB      'to ask whether a byte is waiting, so this family',CR,LF
         DB      'reads ahead and cannot receive a literal ^Z.  Use a',CR,LF
@@ -3497,10 +3523,10 @@ MHELP3: DB      'Help - two things to know',CR,LF
         DB      'waits instead of returning.  Against the gateway it',CR,LF
         DB      'works well; on real hardware prefer the family that',CR,LF
         DB      'matches your serial chip.',CR,LF,CR,LF
-        DB      'The Z180 ASCI registers are Z180 internal I/O.  If',CR,LF
-        DB      'your system has moved that base away from 00, set',CR,LF
-        DB      'the base first with B on the ASCI menu, then pick',CR,LF
-        DB      'the channel.',CR,LF,CR,LF
+        DB      'The Z180 ASCI registers live inside the CPU, and',CR,LF
+        DB      'the block moves: RomWBW puts it at C0 on Small',CR,LF
+        DB      'Computer boards.  Press C for C0, or B to type',CR,LF
+        DB      'another, then pick the channel.',CR,LF,CR,LF
         DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF
         DB      'with the checksum fallback an older peer may want.',CR,LF
         DB      'Start the far end first, then press U or D - from',CR,LF

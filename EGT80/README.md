@@ -119,7 +119,7 @@ Planned drivers:
 | Z80 SIO/2 | four channels (0x80/0x82/0x84/0x86) or any address | yes — `rc2014_1b` |
 | 6850 ACIA | 88-2SIO 0x10 / 0x12, or any address | yes — `altair_2sio1` |
 | RomWBW HBIOS | unit 0–3, via `RST 8` | yes — `hbios_1` |
-| Z180 ASCI | channel 0/1, internal I/O base settable | **not here** — needs real iron |
+| Z180 ASCI | channel 0/1, internal I/O base (`C0` offered by name) | **not here** — needs real iron |
 | CP/M BDOS AUX | no parameters (funcs 3/4) | yes — `aux` |
 
 Two of these carry caveats the menus and help state plainly:
@@ -132,6 +132,15 @@ byte when the port is selected — the same self-patching the vectors use, one l
 down. Since no test here can reach that code, it was hardened by reading rather
 than by running:
 
+- **The internal I/O base is offered by name, not just as hex.** The Z180's
+  serial registers live inside the CPU and the whole internal register block is
+  relocatable — the ICR decides where. RomWBW moves it to `C0` on Small Computer
+  Central boards (`cfg_SCZ180.asm`), so EGT80's default of `00` addresses nothing
+  there and the symptom is this family's usual silence. The ASCI menu therefore
+  offers `C0` as a labelled choice: knowing that number is knowledge about
+  someone else's firmware, not something a user should have to look up to type
+  into a hex prompt. Reaching the same port through HBIOS avoids the question
+  altogether, which is why that is the recommended path on a RomWBW machine.
 - **The CPU is checked before the family is accepted.** The ASCI is inside the
   Z180, so on a plain Z80 those opcodes are undefined and the driver would read
   whatever they leave behind. `MLT` tells the two apart — on a Z180 `ED 4C`

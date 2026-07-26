@@ -325,6 +325,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **The Z180 ASCI menu offers the RomWBW I/O base by name.** The Z180's serial
+    registers live inside the CPU and the register block is relocatable; RomWBW
+    puts it at `C0` on Small Computer Central boards, so EGT80's default of `00`
+    addressed nothing there and failed the way that family always fails —
+    silently. `C` now sets `C0` with the boards named on the menu, `B` still
+    takes any base by hand, and the help says which is which. (On a RomWBW
+    machine the HBIOS family sidesteps the question entirely: the firmware knows
+    where its own registers are. That remains the recommended path, and is the
+    one the QTERM `h` builds use.)
   - **Every EGT80 screen is now checked to fit a 24×80 terminal**, by a new test
     that parses the `DB` strings out of `EGT80.Z80` — a source-level check, so it
     runs in CI even though the binary itself cannot be rebuilt there. It found
