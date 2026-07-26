@@ -221,7 +221,7 @@ fn web_ip_rejection(
     disable_ip_safety: bool,
     block_gateway: bool,
     peer_ip: IpAddr,
-) -> Option<&'static str> {
+) -> Option<String> {
     let _ = security_enabled; // deliberately not consulted — see doc comment
     if disable_ip_safety {
         None
@@ -1220,9 +1220,14 @@ fn frame_security(cfg: &Config) -> String {
             cfg.disable_ip_safety,
             "onchange=\"warnOnEnable(this, 'warn-ip-safety')\"",
         ),
+        // Names the detected router (see crate::router); "x.x.x.1" when the
+        // OS could not tell us, which is the rule's own fallback.
         gwblock_chk = checkbox(
             "disable_gateway_connections",
-            "Block connections from x.x.x.1",
+            &format!(
+                "Block connections from the router ({})",
+                crate::router::describe()
+            ),
             cfg.disable_gateway_connections,
         ),
         user = textfield("username", "User", &cfg.username, false, 12),

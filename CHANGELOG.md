@@ -259,6 +259,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway creates itself (a fresh install sees the wizard), but a config file
   that *lacks* the key reads as `true`, so an upgrade is never dropped into it.
 
+- **The router-blocking rule now asks the OS which address the router is.**
+  `disable_gateway_connections` used to assume `x.x.x.1` — a convention, not a
+  fact, which both missed a router living on `.254` and refused an ordinary
+  machine that happened to sit on `.1`. The new `src/router.rs` reads the
+  default route's next hop (Linux: `/proc/net/route` + `/proc/net/ipv6_route`
+  directly, no subprocess; macOS/BSD: `route -n get default`; Windows:
+  `route print`, matched on the addresses rather than the localised column
+  headings) and the rule blocks exactly that, IPv4 and IPv6, including both
+  routers on a multi-homed host. The query runs on a background thread at
+  startup and re-runs when the cached answer ages past five minutes, so a DHCP
+  change is picked up without a restart; it is **never** run on the connection
+  path, which only reads the cache. The detected address is logged at startup
+  and named in the checkbox label in all three config UIs ("Block connections
+  from the router (192.168.1.1)"). Where the address cannot be determined the
+  rule falls back to the historical `.1` behaviour, so it is never silently
+  weaker; loopback stays exempt, and no detected address can widen the
+  allowlist. Every parser is a pure function tested from captured output on all
+  three platforms, including a localised (German) Windows route table.
+
 ### Changed
 - **Gateway Shell now surfaces the CP/M "destination first" operand order.**
   `COPY` and `MOVE` take the destination *before* the source (`COPY dst src`) —

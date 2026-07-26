@@ -325,12 +325,80 @@ fn test_reject_insecure_ip_gateway_allowed_by_default() {
 #[test]
 fn test_reject_insecure_ip_gateway_rejected_when_blocked() {
     // ...and refused when it is asked for, with a reason naming the rule.
+    // Empty router list = "the OS could not tell us", which is the case the
+    // x.x.x.1 fallback exists for.  Passed explicitly so the result does not
+    // depend on the routing table of the machine running the suite.
     for addr in ["192.168.1.1", "10.0.0.1", "172.16.5.1"] {
         let ip: IpAddr = addr.parse().unwrap();
-        let reason = reject_insecure_ip(ip, true);
+        let reason = reject_insecure_ip_with(ip, true, &[]);
         assert!(reason.is_some(), "{addr} should be refused when blocking");
         assert!(reason.unwrap().contains("gateway"));
     }
+}
+
+/// The point of asking the OS: block the address that is *actually* the
+/// router, and stop blocking a `.1` that is just an ordinary host.
+#[test]
+fn test_reject_insecure_ip_blocks_the_detected_router_not_the_guess() {
+    let routers: Vec<IpAddr> = vec!["192.168.1.254".parse().unwrap()];
+    let real: IpAddr = "192.168.1.254".parse().unwrap();
+    let guess: IpAddr = "192.168.1.1".parse().unwrap();
+
+    // Off: neither is refused, exactly as before.
+    assert!(reject_insecure_ip_with(real, false, &routers).is_none());
+    assert!(reject_insecure_ip_with(guess, false, &routers).is_none());
+
+    // On: the real router is refused, and the reason names its address so an
+    // operator reading the log knows what was blocked and why.
+    let reason = reject_insecure_ip_with(real, true, &routers).expect("router refused");
+    assert!(reason.contains("192.168.1.254"), "reason was: {reason}");
+    assert!(reason.contains("router"), "reason was: {reason}");
+
+    // ...and the machine on .1 is now just a machine.
+    assert!(
+        reject_insecure_ip_with(guess, true, &routers).is_none(),
+        "a .1 host that is not the router must no longer be refused"
+    );
+}
+
+/// An IPv4-mapped peer must be judged the same as the bare IPv4 one, or the
+/// policy would depend on which socket family the peer happened to arrive on.
+#[test]
+fn test_detected_router_is_matched_through_v4_mapping() {
+    let routers: Vec<IpAddr> = vec!["10.0.0.254".parse().unwrap()];
+    let mapped: IpAddr = "::ffff:10.0.0.254".parse().unwrap();
+    assert!(reject_insecure_ip_with(mapped, false, &routers).is_none());
+    assert!(reject_insecure_ip_with(mapped, true, &routers).is_some());
+}
+
+/// An IPv6 router is refused by the same rule.  There is no `.1` convention in
+/// IPv6, so this can only ever fire when detection worked.
+#[test]
+fn test_reject_insecure_ip_blocks_a_detected_ipv6_router() {
+    let routers: Vec<IpAddr> = vec!["fe80::1".parse().unwrap()];
+    let router: IpAddr = "fe80::1".parse().unwrap();
+    let other: IpAddr = "fe80::abcd".parse().unwrap();
+
+    assert!(reject_insecure_ip_with(router, false, &routers).is_none());
+    let reason = reject_insecure_ip_with(router, true, &routers).expect("v6 router refused");
+    assert!(reason.contains("fe80::1"), "reason was: {reason}");
+    // Every other link-local address stays allowed.
+    assert!(reject_insecure_ip_with(other, true, &routers).is_none());
+}
+
+/// Detection must never *widen* the allowlist: a public address is refused
+/// whatever the routing table says, including the absurd case of a public
+/// default gateway (a machine with a routable address on its LAN side).
+#[test]
+fn test_detected_router_never_admits_a_public_address() {
+    let routers: Vec<IpAddr> = vec!["8.8.8.8".parse().unwrap()];
+    let public: IpAddr = "8.8.8.8".parse().unwrap();
+    assert!(reject_insecure_ip_with(public, false, &routers).is_some());
+    assert!(reject_insecure_ip_with(public, true, &routers).is_some());
+    // Loopback keeps its exemption even if something claims it is the router.
+    let loop_routers: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+    let lo: IpAddr = "127.0.0.1".parse().unwrap();
+    assert!(reject_insecure_ip_with(lo, true, &loop_routers).is_none());
 }
 
 #[test]
@@ -391,8 +459,8 @@ fn test_reject_insecure_ip_ipv4_mapped_ipv6_gateway_follows_the_flag() {
     // An IPv4-mapped address must obey the same rule as the bare IPv4 one, or
     // the policy would depend on which socket family the peer happened to use.
     let ip: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
-    assert!(reject_insecure_ip(ip, false).is_none());
-    let reason = reject_insecure_ip(ip, true);
+    assert!(reject_insecure_ip_with(ip, false, &[]).is_none());
+    let reason = reject_insecure_ip_with(ip, true, &[]);
     assert!(reason.is_some());
     assert!(reason.unwrap().contains("gateway"));
 }
@@ -420,8 +488,8 @@ fn test_reject_insecure_ip_link_local_dot_one_follows_the_flag() {
     // A link-local .1 is still a .1: allowed by default like any other
     // gateway address, refused when the operator asks for the strict rule.
     let ip: IpAddr = "169.254.0.1".parse().unwrap();
-    assert!(reject_insecure_ip(ip, false).is_none());
-    assert!(reject_insecure_ip(ip, true).is_some());
+    assert!(reject_insecure_ip_with(ip, false, &[]).is_none());
+    assert!(reject_insecure_ip_with(ip, true, &[]).is_some());
 }
 
 // ─── Menu ────────────────────────────────────────────

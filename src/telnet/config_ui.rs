@@ -658,8 +658,17 @@ impl TelnetSession {
             } else {
                 self.green("Allowed")
             };
+            let router = crate::router::describe();
+            let router = if router.chars().count() > 21 {
+                // Keep the line inside the 40-column PETSCII budget: an IPv6
+                // router (or a multi-homed host's two) is longer than the row.
+                format!("{}...", router.chars().take(18).collect::<String>())
+            } else {
+                router
+            };
             self.send_line(&format!(
-                "  Connections from x.x.x.1: {}",
+                "  Router ({}): {}",
+                self.amber(&router),
                 gw_status
             ))
             .await?;
@@ -686,7 +695,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle blocking connections from x.x.x.1",
+                "  {}  Toggle blocking the router",
                 self.cyan("G")
             ))
             .await?;

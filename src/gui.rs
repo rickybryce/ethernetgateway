@@ -2398,10 +2398,20 @@ impl eframe::App for App {
                                     // Safety: this direction *tightens* the
                                     // allowlist, and the off state is the
                                     // default rather than a widening.
+                                    // The label names the address the OS says
+                                    // is this network's router, so the operator
+                                    // sees what the rule will actually block
+                                    // rather than a convention.  Falls back to
+                                    // "x.x.x.1" (which is also what the rule
+                                    // falls back to) when detection found
+                                    // nothing.  Cached — never a query here.
                                     if ui
                                         .checkbox(
                                             &mut self.cfg.disable_gateway_connections,
-                                            "Block connections from x.x.x.1",
+                                            format!(
+                                                "Block connections from the router ({})",
+                                                crate::router::describe()
+                                            ),
                                         )
                                         .changed()
                                     {

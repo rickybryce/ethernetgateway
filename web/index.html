@@ -747,7 +747,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>1. Username and password</td><td>Typed twice and checked; a checkbox reveals what you type. Warns that the password is stored in cleartext in <code>egateway.conf</code>. Used by telnet, SSH, and the web UI alike.</td></tr>
                     <tr><td>2. Telnet server</td><td>On/off and port (default <code>2323</code>), with the cleartext warning.</td></tr>
                     <tr><td>3. SSH server</td><td>On/off and port (default <code>2222</code>). Uses the same login, and always authenticates.</td></tr>
-                    <tr><td>4. Access control</td><td>Require login, disable IP safety, block connections from the router address &mdash; each explained in plain language.</td></tr>
+                    <tr><td>4. Access control</td><td>Require login, disable IP safety, and block connections from the router &mdash; each explained in plain language, with the router's real address read from this machine's routing table.</td></tr>
                     <tr><td>5. Web configuration server</td><td>On/off and port (default <code>8080</code>), plus the URL you'll use.</td></tr>
                     <tr><td>6. Transfer directory</td><td>Typed or picked with a folder browser. Holds the CP/M drives and the Gateway Shell's drive A:.</td></tr>
                     <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT80.COM is placed on drive A: for you.</td></tr>
@@ -1403,7 +1403,9 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <div class="cat">Security Settings</div>
                 <p class="dim-text">
                     Authentication is disabled by default. When disabled, only private/loopback
-                    IPs are allowed, and gateway addresses (*.*.*.1) are rejected.
+                    IPs are allowed. Connections from this network's router are allowed too,
+                    unless you tick "Block connections from the router" &mdash; see
+                    <a href="#security">Security &amp; Networking</a>.
                 </p>
                 <table class="data-table">
                     <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
@@ -1960,7 +1962,35 @@ relay_transport = ssh</span></code></pre>
                         <li><code>127.0.0.0/8</code> &mdash; Loopback</li>
                         <li><code>169.254.0.0/16</code> &mdash; Link-local</li>
                     </ul>
-                    <p style="margin-top: 8px;">Gateway addresses (*.*.*.1) are rejected except for loopback, preventing accidental exposure on network edges.</p>
+                    <p style="margin-top: 8px;">Connections from the network's router are <em>allowed</em> by default &mdash; that address is as often an administrator's machine, or hairpinned LAN traffic, as it is something forwarded in from outside. Refusing it is an opt-in setting; see below.</p>
+                </div>
+
+                <div class="cat">Blocking the Router</div>
+                <p class="dim-text">
+                    Traffic forwarded into your LAN from outside often arrives wearing the
+                    router's source address, so the optional
+                    <code>disable_gateway_connections</code> setting refuses connections from
+                    it. The address is <strong>queried from the operating system</strong>, not
+                    guessed: the gateway reads the default route's next hop and blocks exactly
+                    that, IPv4 and IPv6 alike. A router on <code>.254</code> is caught, and an
+                    ordinary machine that happens to sit on <code>.1</code> is not.
+                </p>
+                <table class="data-table">
+                    <tr><th>Platform</th><th>Where the address comes from</th></tr>
+                    <tr><td>Linux</td><td><code>/proc/net/route</code> and <code>/proc/net/ipv6_route</code>, read directly &mdash; no subprocess</td></tr>
+                    <tr><td>macOS / BSD</td><td><code>route -n get default</code> (and <code>-inet6</code>)</td></tr>
+                    <tr><td>Windows</td><td><code>route print</code> &mdash; the <code>0.0.0.0 0.0.0.0</code> and <code>::/0</code> rows, matched on the addresses rather than the column headings, so a localised Windows works</td></tr>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>Never on the connection path:</strong> the query runs on a
+                    background thread at startup (refreshed if it ages past five minutes, so a
+                    DHCP change is picked up without a restart), and the accept path only reads
+                    the cached answer &mdash; an incoming connection never waits on it. The
+                    detected address is logged at startup and shown in the checkbox label in
+                    all three configuration UIs. If it cannot be determined (unsupported
+                    platform, no default route), the rule falls back to the old "refuse
+                    anything ending in .1" behaviour, so it is never silently weaker. Loopback
+                    is exempt either way, and no detected address can widen the allowlist.
                 </div>
 
                 <div class="cat">Authentication Lockout</div>

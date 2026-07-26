@@ -277,7 +277,11 @@ including Claude Code.
     </li>
     <li><span class="num">5.</span> <a href="#ch5">Telnet Access</a></li>
     <li><span class="num">6.</span> <a href="#ch6">SSH Access</a></li>
-    <li><span class="num">7.</span> <a href="#ch7">Security</a></li>
+    <li><span class="num">7.</span> <a href="#ch7">Security</a>
+        <ol>
+            <li><a href="#ch7-router">Blocking the Router — How the Address Is Found</a></li>
+        </ol>
+    </li>
     <li><span class="num">8.</span> <a href="#ch8">File Transfer</a>
         <ol>
             <li><a href="#ch8-upload">Uploads — Protocol Selection</a></li>
@@ -592,7 +596,8 @@ The screens, in order:
     <li><strong>Access control</strong> — the three checkboxes
     (<code>security_enabled</code>, <code>disable_ip_safety</code>,
     <code>disable_gateway_connections</code>), each with a paragraph explaining
-    what it actually changes.</li>
+    what it actually changes. The router checkbox names the address this
+    machine actually routes through, read from its own routing table.</li>
     <li><strong>Web configuration server</strong> — enable/disable and port
     (default <code>8080</code>), plus the URL you'll use.</li>
     <li><strong>File transfer directory</strong> — typed or chosen with a folder
@@ -716,7 +721,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>gui_zoom</code></td><td>string</td><td><code>auto</code></td><td>Desktop GUI display scale. <code>auto</code> follows the monitor's scale factor; a number (e.g. <code>1.0</code>, <code>1.25</code>) pins the console window's pixels-per-point so an over-reported DPI doesn't render it oversized. Clamped to 0.5&ndash;3.0.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>Session idle timeout. 0 disables.</td></tr>
-        <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>Refuse connections whose source address ends in <code>.1</code> &mdash; usually this subnet&rsquo;s router. <strong>Off by default</strong>, so such connections are allowed while the IP allowlist stays in force; loopback is never affected. The narrow alternative to <code>disable_ip_safety</code>, which drops the allowlist altogether. Shown as &ldquo;Block connections from x.x.x.1&rdquo; in every UI &mdash; named for the address, not for this program.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, the gateway accepts inbound telnet/SSH from any address. Default <code>false</code> restricts to RFC-1918 private ranges and loopback. See §5.4.</td></tr>
+        <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>Refuse connections that come from this network&rsquo;s router. The address is <em>not</em> guessed: the gateway asks the operating system for the default route&rsquo;s next hop and blocks exactly that (see &sect;7.6), so a router on <code>.254</code> is caught and an ordinary machine on <code>.1</code> is not. On a host where the query fails it falls back to the old <code>x.x.x.1</code> rule. <strong>Off by default</strong>, so such connections are allowed while the IP allowlist stays in force; loopback is never affected. The narrow alternative to <code>disable_ip_safety</code>, which drops the allowlist altogether. Every UI shows the detected address in the label &mdash; &ldquo;Block connections from the router (192.168.1.1)&rdquo;.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, the gateway accepts inbound telnet/SSH from any address. Default <code>false</code> restricts to RFC-1918 private ranges and loopback. See §5.4.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>Key for AI chat. Empty disables the feature.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
         <tr><td><code>weather_location</code></td><td>string</td><td>empty</td><td>Last-used city or postal code, worldwide (migrates legacy <code>weather_zip</code>). Updated automatically.</td></tr>
@@ -1434,6 +1439,60 @@ headless mode):
     <li>Lockout events when an IP hits the 3-failure threshold.</li>
     <li>SSH Gateway host-key trust decisions — TOFU accept, key update, and rejection — with host, port, key algorithm, and SHA-256 fingerprint. This gives you a forensic trail if a changed host key turns out to be a man-in-the-middle attempt.</li>
 </ul>
+
+<h2 id="ch7-router">7.6 Blocking the Router — How the Address Is Found</h2>
+
+<p>
+The optional <code>disable_gateway_connections</code> rule refuses connections
+that appear to come from this network&rsquo;s router. Traffic forwarded in from
+outside the LAN often arrives wearing that source address, so refusing it closes
+a path into an unauthenticated gateway &mdash; at the cost of also refusing an
+administrator working from the router&rsquo;s address, and hairpinned traffic
+from inside your own network. That trade is why it is off by default.
+</p>
+
+<p>
+The address is <strong>queried from the operating system</strong>, not guessed.
+Earlier versions assumed the router was <code>x.x.x.1</code>, which is a
+convention rather than a fact: it missed a router living on <code>.254</code>
+and refused an ordinary machine that happened to sit on <code>.1</code>. The
+gateway now reads the default route&rsquo;s next hop &mdash; precisely the
+address the router&rsquo;s traffic arrives from &mdash; and blocks exactly that,
+IPv4 and IPv6 alike. A multi-homed host with two default routes has both
+blocked.
+</p>
+
+<table>
+    <thead><tr><th>Platform</th><th>Source</th></tr></thead>
+    <tbody>
+        <tr><td>Linux</td><td><code>/proc/net/route</code> and <code>/proc/net/ipv6_route</code>, read directly &mdash; no subprocess.</td></tr>
+        <tr><td>macOS / BSD</td><td><code>route -n get default</code> (and <code>-inet6</code>); the <code>gateway:</code> line.</td></tr>
+        <tr><td>Windows</td><td><code>route print</code>; the <code>0.0.0.0 0.0.0.0</code> and <code>::/0</code> rows. Matched on the addresses, not the column headings, so a localised Windows parses correctly.</td></tr>
+    </tbody>
+</table>
+
+<p>
+The query runs on a background thread at startup (and again if the cached answer
+ages past five minutes, so a DHCP change is picked up without a restart). It is
+<em>never</em> run while a connection is being checked &mdash; the accept path
+only reads the cached answer, so no incoming connection can ever wait on a
+subprocess. The detected address is logged at startup
+(<code>Router address: 192.168.1.1</code>) and shown in the checkbox label in all
+three configuration UIs.
+</p>
+
+<aside class="note">
+<span class="label">If the query fails</span>
+On a host where the router cannot be determined &mdash; an unsupported platform,
+a container with no default route, a locked-down system where the command cannot
+run &mdash; the rule falls back to the historical &ldquo;refuse any address
+ending in <code>.1</code>&rdquo; behaviour, and the UIs show
+<code>x.x.x.1</code> in place of an address. The setting therefore never becomes
+silently weaker than it was before the query existed. Loopback
+(<code>127.0.0.1</code>) is exempt either way, and no detected address can widen
+the allowlist: a public source address is still refused even if it somehow *is*
+the default gateway.
+</aside>
 
 <!-- ═══════════════════ 8. File Transfer ═══════════════════ -->
 <h1 id="ch8">8. File Transfer</h1>
@@ -4286,7 +4345,7 @@ numeric values fall back to the default.
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/P</code> under <code>transfer_dir</code>. <strong>On by default</strong>: the guest is jailed to those folders, bounded by <code>cpm_emu_max_minstr</code>, always escapable with a double-<code>ESC</code>, and has no path to a host command. Set <code>false</code> to hide the item and reject the key. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. Default <code>rc2014_1b</code> &mdash; the port the bundled EGT80 expects. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
-        <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from <code>*.*.*.1</code> (typically the local router) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
+        <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from this network&rsquo;s router (the default route&rsquo;s next hop, queried from the OS &mdash; see &sect;7.6; falls back to <code>*.*.*.1</code> if the query fails) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>

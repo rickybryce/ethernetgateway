@@ -17,6 +17,7 @@ mod kermit;
 mod logger;
 mod punter;
 mod relay;
+mod router;
 mod serial;
 mod ssh;
 mod telnet;
@@ -96,6 +97,13 @@ fn main() {
         if cfg.relay_transport == "raw" && cfg.gateway_role != "standalone" {
             glog!("WARNING: relay_transport=raw is not yet implemented; the relay still uses SSH.");
         }
+
+        // Ask the OS which address is this network's router, on a background
+        // thread, so the answer is cached before the first connection arrives.
+        // Only the `disable_gateway_connections` rule uses it, and that rule
+        // falls back to the historical x.x.x.1 assumption until (or unless)
+        // this lands — so nothing waits on it.
+        router::probe_in_background();
 
         // Create transfer directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&cfg.transfer_dir) {

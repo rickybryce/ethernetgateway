@@ -685,17 +685,26 @@ impl Wizard {
         );
         ui.add_space(6.0);
 
+        let router = crate::router::describe();
         ui.checkbox(
             &mut self.disable_gateway_connections,
-            "Block connections that arrive from the router address",
+            format!("Block connections from the router ({})", router),
         );
         indent(
             ui,
-            "Refuses connections whose source address ends in .1 — typically your router. \
-             Traffic forwarded in from outside the LAN often appears to come from there, so \
-             blocking it closes that path; but so does traffic hairpinned from inside your \
-             own network, and an administrator working from the router's address. Off by \
-             default.",
+            &format!(
+                "Traffic forwarded in from outside your LAN often appears to come from the \
+                 router, so refusing it closes that path; but so does traffic hairpinned \
+                 from inside your own network, and an administrator working from the \
+                 router's address. Off by default. {}",
+                if router == "x.x.x.1" {
+                    "This machine could not tell us its router's address, so the rule falls \
+                     back to refusing any address ending in .1 — the usual convention."
+                } else {
+                    "That address came from this machine's own routing table, so it is the \
+                     real router, not a guess."
+                }
+            ),
         );
     }
 

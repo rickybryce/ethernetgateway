@@ -321,26 +321,50 @@ pub(crate) fn clear_lockout(lockouts: &LockoutMap, ip: IpAddr) {
 pub(crate) const AUTH_MAX_ATTEMPTS: u32 = MAX_AUTH_ATTEMPTS;
 
 /// Check an IPv4 address against private/loopback/link-local ranges and the
-/// gateway (.1) restriction. Returns the rejection reason, or None if allowed.
-fn reject_insecure_ipv4(octets: [u8; 4], block_gateway: bool) -> Option<&'static str> {
+/// router restriction.  Returns the rejection reason, or None if allowed.
+///
+/// `routers` is what the OS says this machine's default route(s) point at (see
+/// [`crate::router`]); empty means we could not find out, and the rule falls
+/// back to the historical `.1` assumption.
+fn reject_insecure_ipv4(
+    octets: [u8; 4],
+    block_gateway: bool,
+    routers: &[IpAddr],
+) -> Option<String> {
     let is_private = octets[0] == 10
         || (octets[0] == 172 && (16..=31).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 168)
         || octets[0] == 127
         || (octets[0] == 169 && octets[1] == 254); // link-local
     if !is_private {
-        return Some("Connection refused: security is disabled, only private IP addresses are allowed.");
+        return Some(
+            "Connection refused: security is disabled, only private IP addresses are allowed."
+                .to_string(),
+        );
     }
-    // A source address ending in .1 is usually this subnet's router.  Traffic
-    // that appears to come from there *may* have been forwarded in from
-    // outside, which is why this was once refused outright — but it is just as
-    // often an administrator's own machine, or hairpinned traffic from inside
-    // the LAN.  Refusing it left `disable_ip_safety`, which drops the whole
-    // allowlist, as the only way in.  So it is allowed unless the operator
-    // asks for the strict behaviour.  Loopback keeps its exemption: 127.0.0.1
-    // is this machine, not a router.
-    if block_gateway && octets[3] == 1 && octets[0] != 127 {
-        return Some("Connection refused: gateway addresses (*.*.*.1) are not allowed by this gateway's settings.");
+    // Traffic that appears to come from this subnet's router *may* have been
+    // forwarded in from outside, which is why refusing it is offered at all —
+    // but it is just as often an administrator's own machine, or hairpinned
+    // traffic from inside the LAN, so it is allowed unless the operator asks
+    // for the strict behaviour.  Loopback keeps its exemption: 127.0.0.1 is
+    // this machine, not a router.
+    if block_gateway && octets[0] != 127 {
+        let addr = IpAddr::V4(std::net::Ipv4Addr::from(octets));
+        if crate::router::is_router(addr, routers) {
+            // The address the OS actually routes through — no guessing.
+            return Some(format!(
+                "Connection refused: this network's router ({}) is not allowed by this gateway's settings.",
+                addr
+            ));
+        }
+        // Fallback for a host where the router could not be determined: the
+        // old convention, so the setting is never silently weaker than before.
+        if routers.is_empty() && octets[3] == 1 {
+            return Some(
+                "Connection refused: gateway addresses (*.*.*.1) are not allowed by this gateway's settings."
+                    .to_string(),
+            );
+        }
     }
     None
 }
@@ -351,16 +375,35 @@ fn reject_insecure_ipv4(octets: [u8; 4], block_gateway: bool) -> Option<&'static
 /// default) additionally refuses any address ending in `.1` — typically this
 /// subnet's router — except loopback, which is always allowed.  Returns the
 /// rejection reason, or `None` if the address is allowed.
-pub(crate) fn reject_insecure_ip(ip: IpAddr, block_gateway: bool) -> Option<&'static str> {
+pub(crate) fn reject_insecure_ip(ip: IpAddr, block_gateway: bool) -> Option<String> {
+    reject_insecure_ip_with(ip, block_gateway, &crate::router::cached_addrs())
+}
+
+/// The rule itself, with the router list passed in so it can be tested without
+/// depending on the host's own routing table.
+pub(crate) fn reject_insecure_ip_with(
+    ip: IpAddr,
+    block_gateway: bool,
+    routers: &[IpAddr],
+) -> Option<String> {
     match ip {
-        IpAddr::V4(v4) => reject_insecure_ipv4(v4.octets(), block_gateway),
+        IpAddr::V4(v4) => reject_insecure_ipv4(v4.octets(), block_gateway, routers),
         IpAddr::V6(v6) => {
             // IPv4-mapped IPv6 (::ffff:x.x.x.x) — apply IPv4 rules
             if let Some(mapped) = v6.to_ipv4_mapped() {
-                return reject_insecure_ipv4(mapped.octets(), block_gateway);
+                return reject_insecure_ipv4(mapped.octets(), block_gateway, routers);
             }
             if v6.is_loopback() {
                 return None;
+            }
+            // An IPv6 router is refused by the same rule.  There is no `.1`
+            // convention to fall back on here, so this only ever fires on a
+            // host where detection worked.
+            if block_gateway && crate::router::is_router(ip, routers) {
+                return Some(format!(
+                    "Connection refused: this network's router ({}) is not allowed by this gateway's settings.",
+                    ip
+                ));
             }
             let segments = v6.segments();
             // Link-local (fe80::/10)
@@ -371,7 +414,10 @@ pub(crate) fn reject_insecure_ip(ip: IpAddr, block_gateway: bool) -> Option<&'st
             if segments[0] & 0xff00 == 0xfd00 {
                 return None;
             }
-            Some("Connection refused: security is disabled, only private IP addresses are allowed.")
+            Some(
+                "Connection refused: security is disabled, only private IP addresses are allowed."
+                    .to_string(),
+            )
         }
     }
 }
