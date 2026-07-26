@@ -328,6 +328,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Coloured menus, and a terminal menu that explains itself.** Headings,
+    labels, values and the key letter of every menu line are now coloured.
+    Colour follows the ANSI/ASCII setting already in Settings — that setting
+    means exactly what colour depends on — so ASCII mode emits not one escape
+    byte and a printing terminal or PETSCII console sees the plain text it always
+    did. The key letters are coloured by a printer that recognises the shape
+    every menu line already has (two spaces, key, two spaces, text), so the menus
+    remain single blocks of text in the source and continuation lines are left
+    alone; the escape sequences live in their own strings so the screen-fit test
+    still measures printable width. The terminal-mode menu no longer says
+    `(twice=send)`, which told the user nothing: it now reads
+    `Menu: E)xit  H)elp  S)ettings  U)pload  D)ownload` /
+    `^Y again sends ^Y itself.   Choice:`, naming the actual key both times.
   - **Assembly quality pass.** A mechanical sweep of `EGT80.Z80` found and fixed:
     two source lines over the 80-column house limit; `HBCNT` written but never
     called (the HBIOS unit list scanned a fixed 0–3 instead of asking how many

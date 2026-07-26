@@ -313,6 +313,24 @@ means a message can be wiped before it is read, so the places where a message is
 the only feedback — a damaged settings block, a save, a refused port family —
 now pause for a keypress.
 
+**The menus are coloured, and switch themselves off.** Headings are cyan,
+labels cyan with amber values, and the key letter in every menu line is
+highlighted. Colour is governed by the ANSI/ASCII setting that already exists,
+because that setting means precisely the thing colour depends on — whether this
+terminal understands escape sequences. In ASCII mode not one escape byte is
+emitted, so a printing terminal or a PETSCII console sees exactly the plain text
+it saw before colour existed: no extra setting to find, and nothing to go wrong.
+(The clear-screen dialect stays a separate setting, because "how do I clear" and
+"can you show colour" are genuinely different questions — an ADM-3A answers `^Z`
+and *no* to the second.)
+
+Rather than chop every menu into coloured fragments, the key letters are coloured
+by a printer that recognises the shape every menu line already has — two spaces,
+the key, two spaces, the text — so the menus stay single readable blocks in the
+source, and a continuation line (five leading spaces) is left alone because its
+third character is a space. The escape sequences live in their own strings, never
+inside menu text, so the screen-fit test still measures real printable width.
+
 **The menu key is any control key you press.** Settings → `K` asks for it
 directly instead of cycling three fixed choices, because which key is free
 depends on the remote system rather than on us (`^Y` is WordStar's delete-line,

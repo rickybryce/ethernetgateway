@@ -378,6 +378,111 @@ PHEXD:  AND     0FH
         JP      COUT
 
 ;=======================================================================
+; CCOL - emit a colour, preserving every register.
+;
+; Colour is governed by the ANSI/ASCII setting already in Settings, because
+; that setting means exactly the thing colour depends on: whether this
+; terminal understands escape sequences.  In ASCII mode this is a no-op, so
+; a printing terminal or a PETSCII console sees the same plain text it saw
+; before colour existed - nothing to find, nothing to go wrong.
+;
+; The sequences live in their own strings rather than inside the menu text,
+; so the menus stay measurable: the screen-fit test counts printable
+; columns, and an escape sequence buried in a line would count as width.
+;=======================================================================
+CLHEAD  EQU     0               ; headings and the title
+CLKEY   EQU     1               ; the key letter in a menu line
+CLLBL   EQU     2               ; a label, such as 'Port: '
+CLVAL   EQU     3               ; ...and the value after it
+CLHINT  EQU     4               ; the line that says which key to press
+CLRST   EQU     5               ; back to the terminal's own colours
+
+CCOL:   PUSH    AF
+        PUSH    HL
+        PUSH    DE
+        LD      E,A
+        LD      A,(FLTMOD)
+        OR      A
+        JR      NZ,CCOL1        ; ASCII mode: no colour at all
+        LD      A,E
+        ADD     A,A             ; two bytes per pointer
+        LD      E,A
+        LD      D,0
+        LD      HL,COLTBL
+        ADD     HL,DE
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL
+        CALL    PSTR
+CCOL1:  POP     DE
+        POP     HL
+        POP     AF
+        RET
+
+COLTBL: DW      ESCHD,ESCKY,ESCLB,ESCVL,ESCHT,ESCRS
+ESCHD:  DB      ESC,'[1;36m',0
+ESCKY:  DB      ESC,'[1;33m',0
+ESCLB:  DB      ESC,'[36m',0
+ESCVL:  DB      ESC,'[33m',0
+ESCHT:  DB      ESC,'[32m',0
+ESCRS:  DB      ESC,'[0m',0
+
+;=======================================================================
+; PSTRK - print a menu, colouring the key letters.
+;
+; Every menu line here has the same shape: two spaces, the key, two more
+; spaces, the text.  This walks the string and colours the key wherever it
+; finds that shape, so the menus stay single blocks of readable text in the
+; source instead of being chopped into coloured fragments - and a
+; continuation line (five leading spaces) is left alone, because its third
+; character is a space.
+;=======================================================================
+PSTRK:  LD      C,0             ; 0 = line start, 1 = one leading space,
+                                ; 2 = two (the next char may be a key),
+                                ; 3 = past that, print plainly
+PSTRK1: LD      A,(HL)
+        OR      A
+        RET     Z
+        INC     HL
+        CP      CR
+        JR      Z,PSTRKN
+        CP      LF
+        JR      Z,PSTRKN
+        LD      B,A             ; hold the character
+        LD      A,C
+        CP      2
+        JR      Z,PSTRKK        ; two leading spaces seen already
+        LD      A,B
+        CP      ' '
+        JR      NZ,PSTRK3
+        INC     C               ; another leading space
+        LD      A,B
+        CALL    COUT
+        JR      PSTRK1
+PSTRK3: LD      C,3
+        LD      A,B
+        CALL    COUT
+        JR      PSTRK1
+PSTRKK: LD      A,B
+        CP      ' '
+        JR      Z,PSTRK3        ; a third space: a continuation line
+        LD      A,(HL)          ; a key is followed by a space
+        CP      ' '
+        JR      NZ,PSTRK3
+        LD      A,CLKEY
+        CALL    CCOL
+        LD      A,B
+        CALL    COUT
+        LD      A,CLRST
+        CALL    CCOL
+        LD      C,3
+        JR      PSTRK1
+PSTRKN: LD      C,0
+        CALL    COUT            ; A still holds the CR or LF
+        JR      PSTRK1
+
+;=======================================================================
 ; UPCASE - fold the character in A to upper case, so menus accept either.
 ;=======================================================================
 UPCASE: CP      'a'
@@ -1108,7 +1213,13 @@ TSEND2: LD      A,LF
 ; remote end.
 ;-----------------------------------------------------------------------
 TESC:   CALL    CRLF
-        LD      HL,MESCMN
+        LD      HL,MESCMN       ; name the key rather than say "twice"
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MESCM2
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MESCM3
         CALL    PSTR
         CALL    CIN
         CALL    UPCASE
@@ -2216,10 +2327,14 @@ CLSANS: DEC     A
 ;-----------------------------------------------------------------------
 SCTTL:  CALL    CLS
         CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
         LD      HL,MTITLE
         CALL    PSTR
         LD      HL,MRULE
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
         LD      HL,MVER
         CALL    PSTR
         RET
@@ -2232,20 +2347,36 @@ SCTTL:  CALL    CLS
 ;-----------------------------------------------------------------------
 SCMENU: CALL    SCTTL           ; cleared screen + banner, every time round
         CALL    CRLF
+        LD      A,CLLBL
+        CALL    CCOL
         LD      HL,MPORT
         CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
         CALL    SHPORT
+        LD      A,CLLBL
+        CALL    CCOL
         LD      HL,MMODE
         CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
         CALL    SHMODE
+        LD      A,CLLBL
+        CALL    CCOL
         LD      HL,MMKEY        ; say how to get back before they go in
         CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
         CALL    SHESC
+        LD      A,CLLBL
+        CALL    CCOL
         LD      HL,MMKEY2
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
         CALL    CRLF
         LD      HL,MMENU
-        CALL    PSTR
+        CALL    PSTRK
         LD      A,(XDIRTY)      ; say so while a change is only in memory
         OR      A
         RET     Z
@@ -2357,8 +2488,12 @@ SHESC:  LD      A,'^'
 ;-----------------------------------------------------------------------
 SCPORT: CALL    CLS
         CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
         LD      HL,MPTTL
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
         LD      HL,MPNOW        ; what is in force right now
         CALL    PSTR
         CALL    SHPORT
@@ -2371,9 +2506,13 @@ SCPORT: CALL    CLS
         LD      HL,MHINT2
         JR      NC,SCPORH
         LD      HL,MHINT3
-SCPORH: CALL    PSTR
-        LD      HL,MPORTS
+SCPORH: LD      A,CLHINT
+        CALL    CCOL
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        LD      HL,MPORTS
+        CALL    PSTRK
 SCPOR1: CALL    CIN
         CALL    UPCASE
         CP      'D'
@@ -2416,7 +2555,7 @@ SCPONO: XOR     A
 SCPOTH: CALL    CLS
         CALL    CRLF
         LD      HL,MPOTHM
-        CALL    PSTR
+        CALL    PSTRK
 SCPOT1: CALL    CIN
         CALL    UPCASE
         CP      '1'
@@ -2462,7 +2601,7 @@ SCPDEF: LD      A,PKSIO
 SCPSIO: CALL    CLS
         CALL    CRLF
         LD      HL,MPSIOM
-        CALL    PSTR
+        CALL    PSTRK
 SCPSI1: CALL    CIN
         CALL    UPCASE
         CP      '1'
@@ -2503,7 +2642,7 @@ SCPSSE: LD      (PBASE),A
 SCPACI: CALL    CLS
         CALL    CRLF
         LD      HL,MPACIM
-        CALL    PSTR
+        CALL    PSTRK
 SCPAC1: CALL    CIN
         CALL    UPCASE
         CP      '1'
@@ -2541,7 +2680,7 @@ SCPASE: LD      (PBASE),A
 SCP88:  CALL    CLS
         CALL    CRLF
         LD      HL,MP88M
-        CALL    PSTR
+        CALL    PSTRK
 SCP881: CALL    CIN
         CALL    UPCASE
         CP      '1'
@@ -2582,8 +2721,12 @@ SCPHB:  LD      A,(0008H)       ; the RST 8 vector
         JP      TWAIT           ; Settings clears on return: hold it here
 SCPHB1: CALL    CLS
         CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
         LD      HL,MHBUNM       ; heading, then one line per unit
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
         CALL    HBCNT           ; how many units does the firmware have?
         JR      NC,SCPHBC
         LD      A,4             ; it would not say: offer the four we can pick
@@ -2658,7 +2801,7 @@ SCPASF: CALL    ASCAUT          ; let the firmware fill the base in, if it can
 ; could be read.  The screen is short enough to redraw under it.
 SCPAS2: CALL    CRLF
         LD      HL,MPASCM
-        CALL    PSTR
+        CALL    PSTRK
         LD      HL,MASCBAS      ; the base in force, so it is never a mystery
         CALL    PSTR
         LD      A,(PABASE)
@@ -2949,8 +3092,12 @@ HEXBAD: SCF
 ;-----------------------------------------------------------------------
 SCSETT: CALL    CLS
         CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
         LD      HL,MSETT
         CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
         CALL    SHMODE
         LD      HL,MSPORT       ; the port lives here now, so show it here
         CALL    PSTR
@@ -2963,7 +3110,7 @@ SCSETT: CALL    CLS
         CALL    PSTR
         CALL    SHCLS
         LD      HL,MSETT2
-        CALL    PSTR
+        CALL    PSTRK
 SCSET1: CALL    CIN
         CALL    UPCASE
         CP      'P'
@@ -3087,8 +3234,12 @@ SHCLS1: CALL    PSTR
 ;-----------------------------------------------------------------------
 SCLINE: CALL    CLS
         CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
         LD      HL,MLINE
         CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
         LD      HL,MSPORT
         CALL    PSTR
         CALL    SHPORT
@@ -3100,7 +3251,7 @@ SCLINE: CALL    CLS
         CALL    SHFMT
         CALL    SHAPP
         LD      HL,MLINE2
-        CALL    PSTR
+        CALL    PSTRK
 SCLIN1: CALL    CIN
         CALL    UPCASE
         CP      'B'
@@ -3255,7 +3406,7 @@ SCBAUD: LD      A,(PKIND)
 SCBRAT: CALL    CLS
         CALL    CRLF
         LD      HL,MBAUDM
-        CALL    PSTR
+        CALL    PSTRK
 SCBRA1: CALL    CIN
         CALL    UPCASE
         CP      'Q'
@@ -3274,7 +3425,7 @@ SCBRA2: LD      A,BEL
 SCBACI: CALL    CLS
         CALL    CRLF
         LD      HL,MACIDM
-        CALL    PSTR
+        CALL    PSTRK
 SCBAC1: CALL    CIN
         CALL    UPCASE
         CP      'Q'
@@ -3309,7 +3460,7 @@ SCFMT:  CALL    CLS
         CALL    PSTR
         CALL    SHFMT
         LD      HL,MFMTM2
-        CALL    PSTR
+        CALL    PSTRK
 SCFMT2: CALL    CIN
         CALL    UPCASE
         CP      '7'
@@ -3929,7 +4080,10 @@ MTERM2: DB      ' for the terminal menu.',CR,LF
         DB      'To return to the main menu, press ',0
 MTERM3: DB      ' then E.',CR,LF,CR,LF,0
 MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
-MESCMN: DB      'E)xit H)elp S)et U)pload D)ownload (twice=send): ',0
+MESCMN: DB      'Menu: E)xit  H)elp  S)ettings  U)pload  D)ownload',CR,LF
+        DB      '      ',0
+MESCM2: DB      ' again sends ',0
+MESCM3: DB      ' itself.   Choice: ',0
 MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
         DB      'Press S for Settings, then P, and pick the one',CR,LF
         DB      'your machine uses.',CR,LF,0
