@@ -937,7 +937,25 @@ pub fn log_slave_link_summary(host: &str, port: u16) {
     if CPM_ANNOUNCED.load(Ordering::SeqCst) {
         lines.push("    CPM       emulator  announced — dialable as CPM@this-host".to_string());
     } else if cfg.cpm_emu_enabled {
-        lines.push("    CPM       emulator  not announced (needs allow_peer_dial)".to_string());
+        // Say the *actual* reason.  This line used to read "needs
+        // allow_peer_dial", which was true when the announcer was gated on that
+        // flag and is now simply misleading: it sent an operator looking for a
+        // setting to change when the answer is usually that nothing is running
+        // to announce yet.  The endpoint exists only while a CP/M session with
+        // its virtual modem is live — that is when something can answer a ring.
+        let why = if matches!(
+            crate::cpm::uart::resolve_access(&cfg.cpm_emu_uart),
+            crate::cpm::uart::ModemAccess::Off
+        ) {
+            "virtual modem off — set cpm_emu_uart to a port/AUX/HBIOS profile"
+        } else {
+            // The endpoint is registered for the whole server lifetime now, so
+            // reaching here means the registration itself is not up (master
+            // unreachable, or it is still connecting) — not that nobody has the
+            // emulator open.  An open session is only needed to *answer*.
+            "registration not up — see the CP/M emulator lines above"
+        };
+        lines.push(format!("    CPM       emulator  not announced ({why})"));
     }
     glog!("Slave link to master {}:{} —", host, port);
     for l in lines {

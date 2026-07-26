@@ -359,7 +359,13 @@ fn reject_insecure_ipv4(
         }
         // Fallback for a host where the router could not be determined: the
         // old convention, so the setting is never silently weaker than before.
-        if routers.is_empty() && octets[3] == 1 {
+        //
+        // Keyed on whether we know *this family's* router, not on the list
+        // being empty: a host where only an IPv6 default route was found still
+        // has an unknown IPv4 router, and dropping the fallback there would
+        // quietly stop enforcing what the operator asked for.
+        let know_v4_router = routers.iter().any(|r| r.is_ipv4());
+        if !know_v4_router && octets[3] == 1 {
             return Some(
                 "Connection refused: gateway addresses (*.*.*.1) are not allowed by this gateway's settings."
                     .to_string(),

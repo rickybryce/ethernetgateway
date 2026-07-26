@@ -230,6 +230,13 @@ const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
 /// directly.  Off by default: it lets any modem caller ring/connect to
 /// any addressable port, so it is opt-in even under the trusted-LAN
 /// threat model.  See `GatewayPeerDialPlan.md`.
+///
+/// It gates *dialing*, not *being registered*.  A slave announces its ports
+/// (and its CP/M endpoint) to its own master regardless of this flag — that
+/// pairing is already explicit, mutual and authenticated, and a slave its
+/// master could never reach would defeat the purpose of slave mode.  What stays
+/// gated is this gateway dialing an arbitrary peer, and a master accepting a
+/// *third party's* crossbar dial into a slave (`relay::run_master_relay_peer`).
 const DEFAULT_ALLOW_PEER_DIAL: bool = false;
 /// Standalone Kermit-server TCP listener.  When `true`, the gateway
 /// binds `kermit_server_port` and drops every connection straight into

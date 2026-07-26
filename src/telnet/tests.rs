@@ -371,6 +371,31 @@ fn test_detected_router_is_matched_through_v4_mapping() {
     assert!(reject_insecure_ip_with(mapped, true, &routers).is_some());
 }
 
+/// Knowing the IPv6 router tells us nothing about the IPv4 one, so the x.x.x.1
+/// fallback must still apply to IPv4 on such a host — otherwise detecting half
+/// the picture would quietly stop enforcing what the operator asked for.
+#[test]
+fn test_v4_fallback_survives_when_only_a_v6_router_is_known() {
+    let v6_only: Vec<IpAddr> = vec!["fe80::1".parse().unwrap()];
+    let v4_dot_one: IpAddr = "192.168.1.1".parse().unwrap();
+
+    // Off: allowed, as always.
+    assert!(reject_insecure_ip_with(v4_dot_one, false, &v6_only).is_none());
+    // On: the IPv4 router is still unknown, so the convention still applies.
+    let reason = reject_insecure_ip_with(v4_dot_one, true, &v6_only)
+        .expect("x.x.x.1 must still be refused when only a v6 router is known");
+    assert!(reason.contains("gateway addresses"), "reason was: {reason}");
+
+    // Once the IPv4 router IS known, the convention stops applying and only
+    // the real address is refused.
+    let both: Vec<IpAddr> = vec![
+        "fe80::1".parse().unwrap(),
+        "192.168.1.254".parse().unwrap(),
+    ];
+    assert!(reject_insecure_ip_with(v4_dot_one, true, &both).is_none());
+    assert!(reject_insecure_ip_with("192.168.1.254".parse().unwrap(), true, &both).is_some());
+}
+
 /// An IPv6 router is refused by the same rule.  There is no `.1` convention in
 /// IPv6, so this can only ever fire when detection worked.
 #[test]

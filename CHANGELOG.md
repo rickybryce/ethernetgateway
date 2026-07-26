@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - Unreleased
+## [0.8.0] - Unreleased
 
 ### Added
 - **CP/M emulator (Flavor B) — Z80 CPU + interactive console (in progress).** A
@@ -310,6 +310,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   third party reaching the port through the master's crossbar is still gated, on
   the master. The announcer's log lines now describe registration rather than
   peer-dial.
+- **The slave's CP/M endpoint is registered for the server's lifetime**, the way
+  Ports A and B are — not only while someone happens to have the emulator open.
+  It used to announce per CP/M session, so `CPM@<slave-ip>` blinked in and out of
+  the master's Serial Gateway list and the master could not see that the endpoint
+  existed at all. A call arriving with no session running rings the answer pool,
+  finds it empty and is reported unanswered — exactly like dialing a modem port
+  whose device is switched off. Declines to register when the emulator is off or
+  its virtual modem is `off`, since nothing could ever answer.
+- **The slave-link summary stopped giving a stale reason.** It printed
+  `CPM  emulator  not announced (needs allow_peer_dial)` — true when the
+  announcer was gated on that flag, and after the fix below merely misleading: it
+  sent an operator hunting for a setting to change. It now names the real reason.
+- **The router-block fallback is per address family.** The `x.x.x.1` fallback
+  keyed off "no router detected at all", so a host where only an *IPv6* default
+  route was found would stop applying it to IPv4 — quietly weaker than the
+  operator asked for, since the IPv4 router was still unknown. It now keys off
+  whether *that family's* router is known.
+- **Two config keys were in no documentation table:** `allow_peer_dial` (a
+  security-relevant one) and `kermit_wait_for_receiver`, though Appendix A claims
+  to list every key the parser recognises. Both are documented now, along with
+  the auto-managed `gui_window_geometry`, and `allow_peer_dial`'s description
+  states what it does *not* gate (registration).
 - **The slave's CP/M endpoint registers with the master too.** Same wrong gate
   as the serial ports: `cpm_slave_announce` and its spawn site both required
   `allow_peer_dial`, so on a default slave the `CPM` endpoint never announced and
@@ -781,7 +803,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata are still returned for the post-session summary; no behavior change
   for callers (all committing already went through `on_file`).
 - **CP/M emulator — correctness/stability fixes from a full review of the new
-  emulator.** None affect a released version (the emulator is new in 1.0.0):
+  emulator.** None affect a released version (the emulator is new in 0.8.0):
   - **Interactive programs no longer hang on console-status polling.** BDOS 11
     (console status) and BDOS 6 sub-function `0xFE` reported "no key ready"
     even when a keystroke was already buffered, so the standard
@@ -2787,7 +2809,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[1.0.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.7.0...HEAD
+[0.8.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
 [0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3

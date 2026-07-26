@@ -151,6 +151,11 @@ fn main() {
                     lockouts.clone(),
                 );
                 let serial_handles = serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
+                // On a slave, offer the CP/M endpoint to the master for the whole
+                // server lifetime, the way Ports A and B are offered — not only
+                // while someone has the emulator open.  No-ops unless the role,
+                // the master host, and the emulator's virtual modem all apply.
+                serial::spawn_cpm_slave_announcer(shutdown_rt.clone());
                 telnet::start_kermit_server(
                     shutdown_rt.clone(),
                     notify_rt.clone(),

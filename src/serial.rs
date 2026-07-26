@@ -742,6 +742,47 @@ struct ModemState {
 /// runtime is dropped would panic on its next `block_on`.  Their blocking work
 /// is abort-aware (reads time out in 100 ms; the dial connect is raced against
 /// `wait_for_serial_abort`), so they exit within ~100 ms of the shutdown flag.
+/// Register this slave's CP/M endpoint with the master for the lifetime of the
+/// server, the way Ports A and B are registered.
+///
+/// It used to be announced only *while* a CP/M session with its virtual modem
+/// was open — logical, since only a running guest program can answer a ring, but
+/// it meant `CPM@<slave-ip>` blinked in and out of the master's Serial Gateway
+/// list depending on whether someone happened to have the emulator open, and the
+/// master had no way to see that the endpoint exists at all.  Ports A and B are
+/// listed whether or not the attached device is powered on; the emulator is now
+/// listed on the same terms.
+///
+/// A call that arrives with no session running rings the answer pool, finds it
+/// empty, and is reported unanswered — exactly what happens when you dial a
+/// modem port whose device is switched off.  Start the emulator (with a comms
+/// program, `ATS0=` or `ATA`) for the call to be picked up.
+///
+/// Spawned once per server cycle; stops on the shutdown flag.  A per-session
+/// announcer still exists for the case this one declines to run, and
+/// `cpm_announce_claim` arbitrates so only one ever holds the registration.
+pub fn spawn_cpm_slave_announcer(shutdown: Arc<AtomicBool>) {
+    let cfg = config::get_config();
+    if cfg.gateway_role != "slave" || cfg.slave_master_host.is_empty() {
+        return;
+    }
+    if !cfg.cpm_emu_enabled {
+        return; // the emulator is off; there is no endpoint to offer
+    }
+    // No virtual modem means nothing in the guest can ever answer, so an
+    // endpoint would be a listing that always fails.
+    if matches!(
+        crate::cpm::uart::resolve_access(&cfg.cpm_emu_uart),
+        crate::cpm::uart::ModemAccess::Off
+    ) {
+        return;
+    }
+    if !cpm_announce_claim() {
+        return; // a session's announcer already holds it
+    }
+    tokio::spawn(cpm_slave_announce(shutdown));
+}
+
 pub fn start_serial(
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
@@ -1950,7 +1991,16 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
         // whose own master can't reach its CP/M endpoint is the case slave mode
         // exists to serve.  (The master still gates a *third party* reaching it
         // through the crossbar.)
-        if cfg.gateway_role != "slave" || cfg.slave_master_host.is_empty() {
+        if cfg.gateway_role != "slave"
+            || cfg.slave_master_host.is_empty()
+            || !cfg.cpm_emu_enabled
+            || matches!(
+                crate::cpm::uart::resolve_access(&cfg.cpm_emu_uart),
+                crate::cpm::uart::ModemAccess::Off
+            )
+        {
+            crate::relay::set_cpm_announced(false);
+            cpm_announce_release();
             return; // config no longer makes this applicable
         }
         let registered_as = slave_master_fingerprint(&cfg);

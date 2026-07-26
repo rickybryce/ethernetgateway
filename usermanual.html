@@ -226,7 +226,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <div class="cover">
     <div class="title">Ethernet Gateway</div>
     <div class="subtitle">User Manual</div>
-    <div class="version">Version 1.0.0</div>
+    <div class="version">Version 0.8.0</div>
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
@@ -424,7 +424,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernetgateway-v1.0.0-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernetgateway-v0.8.0-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -757,6 +757,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the standalone Kermit-server TCP listener at startup.</td></tr>
         <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>Kermit-server listen port.</td></tr>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>Allow the serial-modem dial target <code>ATDT KERMIT</code> (or <code>kermit-server</code>) to drop into the Kermit server. Off by default — bypasses the telnet auth gate.</td></tr>
+        <tr><td><code>allow_peer_dial</code></td><td>bool</td><td><code>false</code></td><td>Let a modem port dial another serial port directly (<code>ATD&nbsp;&lt;Port&gt;@&lt;IP&gt;</code>, or pick a modem port in the Serial Gateway) instead of always landing on the gateway menu. Off by default — it lets any modem caller ring any addressable port. Gates <em>dialing</em> only: a slave still announces its ports and CP/M endpoint to its own master without it (§9.14.3). See §9.2.3.</td></tr>
+        <tr><td><code>kermit_wait_for_receiver</code></td><td>bool</td><td><code>true</code></td><td>On an interactive Kermit <em>download</em>, wait for the receiver's first NAK before sending our Send-Init, so the packet doesn't land on the terminal as on-screen garbage before the client is ready. Falls through and sends anyway after the negotiation timeout. Server and test paths never wait.</td></tr>
         <tr><td><code>punter_block_size</code></td><td>u16</td><td><code>255</code></td><td>Punter C1 block size in bytes (8–255). 248-byte payload + 7-byte header at the default; lower toward ~40 on noisy lines.</td></tr>
         <tr><td><code>punter_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the file-type handshake to complete.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block read timeout once a transfer is live.</td></tr>
@@ -1926,7 +1928,7 @@ received files.
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed. The optional second &sect;6.7 field (a per-directory password) is <strong>accepted and ignored</strong> &mdash; see the note below.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
-        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 1.0.0</code>).</td></tr>
+        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.8.0</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
         <tr><td><code>remote delete &lt;file&gt;</code> / <code>remote era</code></td><td>G E</td><td>Delete a file in the current effective directory. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call &mdash; no wildcard expansion.</td></tr>
         <tr><td><code>remote rename &lt;old&gt; &lt;new&gt;</code></td><td>G R</td><td>Rename a file in place. Both names field-encoded per spec &sect;6.7. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -2230,7 +2232,7 @@ shows where you are: <code>A&gt;</code> at the drive root, and
         <tr><td><code>PWD</code></td><td>&mdash;</td><td>Print the current drive-A path.</td></tr>
         <tr><td><code>STAT [file]</code></td><td>&mdash;</td><td>With no argument, summarise the directory (file count, bytes used, disk-space indicator); with a file, show its size and 128-byte record count.</td></tr>
         <tr><td><code>CLS</code></td><td><code>CLEAR</code></td><td>Clear the screen.</td></tr>
-        <tr><td><code>VER</code></td><td><code>VERSION</code></td><td>Show the shell identity and gateway version (e.g. <code>Ethernet Gateway Shell 1.0.0</code>).</td></tr>
+        <tr><td><code>VER</code></td><td><code>VERSION</code></td><td>Show the shell identity and gateway version (e.g. <code>Ethernet Gateway Shell 0.8.0</code>).</td></tr>
         <tr><td><code>HELP</code></td><td><code>?</code></td><td>Show the command reference.</td></tr>
         <tr><td><code>EXIT</code></td><td><code>BYE</code>, <code>QUIT</code>, <span class="kbd">ESC</span></td><td>Return to the File Transfer menu.</td></tr>
     </tbody>
@@ -3197,10 +3199,10 @@ crossbar dial needs the master's.
 <table>
     <thead><tr><th>Command</th><th>Response</th></tr></thead>
     <tbody>
-        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v1.0.0</code></td></tr>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v0.8.0</code></td></tr>
         <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
         <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
-        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v1.0.0 (Hayes-compatible)</code></td></tr>
+        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v0.8.0 (Hayes-compatible)</code></td></tr>
         <tr><td><code>ATI4</code></td><td>Product description: <code>Hayes-compatible virtual modem over TCP</code></td></tr>
         <tr><td><code>ATI5</code></td><td>OEM / country code: <code>B00</code></td></tr>
         <tr><td><code>ATI6</code></td><td>Link diagnostics: <code>No link diagnostics available</code></td></tr>
@@ -4426,6 +4428,8 @@ numeric values fall back to the default.
     </thead>
     <tbody>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit</code> / <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
+        <tr><td><code>allow_peer_dial</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Peer-dial: let a modem-mode port call another serial port directly (<code>ATD&nbsp;&lt;Port&gt;@&lt;IP&gt;</code>, or select a modem port in the Serial Gateway picker) and bridge to the device on it; a dialed modem port rings and answers per its own S0/<code>ATA</code>, a console port connects directly. <strong>Off by default</strong> — it lets any modem caller ring or connect to any addressable port, so it is opt-in even under the trusted-LAN threat model. It gates <em>dialing</em>, not registration: a slave announces its ports and its CP/M endpoint to its own master regardless (see §9.14.3), and a master needs it on to accept a third party's crossbar dial into a slave. See §9.2.3.</td></tr>
+        <tr><td><code>kermit_wait_for_receiver</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Wait for the receiver's initiating NAK before sending our Send-Init on an interactive Kermit download, so the Send-Init doesn't appear as garbage on a terminal whose client isn't in receive mode yet. Sends anyway if no NAK arrives within the negotiation timeout, so peers that never NAK still work. Only the interactive telnet download consults it — server and test paths never wait.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/P</code> under <code>transfer_dir</code>. <strong>On by default</strong>: the guest is jailed to those folders, bounded by <code>cpm_emu_max_minstr</code>, always escapable with a double-<code>ESC</code>, and has no path to a host command. Set <code>false</code> to hide the item and reject the key. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
@@ -4434,6 +4438,7 @@ numeric values fall back to the default.
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
+        <tr><td><code>gui_window_geometry</code></td><td>string</td><td>empty</td><td><code>x,y,w,h</code></td><td>Last desktop-GUI window position and size, written automatically so the window reopens where you left it. <strong>Auto-managed — not a setting</strong>: it appears in no configuration UI and is normally never hand-edited. Empty = default size and window-manager placement.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>0 = disabled</td><td>Per-session idle timeout. Applies to every prompt, including login.</td></tr>
         <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Bind a dedicated TCP listener that drops every accepted connection straight into Kermit server mode. Bypasses the telnet menu and auth gate (same risk profile as <code>allow_atdt_kermit</code>). See chapter 8 and the standalone <code>kermit.html</code> reference. The full <code>kermit_*</code> family is documented in <code>kermit.html</code>.</td></tr>
         <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>&ge; 1</td><td>TCP port for the standalone Kermit-server listener.</td></tr>
@@ -4656,7 +4661,7 @@ including Claude Code.
 <hr>
 
 <p class="small" style="margin-top: 1.5em; text-align: center;">
-Ethernet Gateway v1.0.0 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Ethernet Gateway v0.8.0 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
 Licensed under GPL-3.0-or-later.
 </p>
 
