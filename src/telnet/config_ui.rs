@@ -659,7 +659,7 @@ impl TelnetSession {
                 self.green("Allowed")
             };
             self.send_line(&format!(
-                "  Connections from gateway: {}",
+                "  Connections from x.x.x.1: {}",
                 gw_status
             ))
             .await?;
@@ -686,7 +686,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle blocking connections from gateway",
+                "  {}  Toggle blocking connections from x.x.x.1",
                 self.cyan("G")
             ))
             .await?;

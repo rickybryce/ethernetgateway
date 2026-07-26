@@ -2401,7 +2401,7 @@ impl eframe::App for App {
                                     if ui
                                         .checkbox(
                                             &mut self.cfg.disable_gateway_connections,
-                                            "Block connections from gateway",
+                                            "Block connections from x.x.x.1",
                                         )
                                         .changed()
                                     {

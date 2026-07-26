@@ -1222,7 +1222,7 @@ fn frame_security(cfg: &Config) -> String {
         ),
         gwblock_chk = checkbox(
             "disable_gateway_connections",
-            "Block connections from gateway",
+            "Block connections from x.x.x.1",
             cfg.disable_gateway_connections,
         ),
         user = textfield("username", "User", &cfg.username, false, 12),
