@@ -550,34 +550,44 @@ impl CpmModem {
     async fn feed_online_byte(&mut self, b: u8, out: &mut Vec<u8>) {
         let now = Instant::now();
         if b == b'+' {
-            if self.plus_run == 0 {
-                // Candidate first '+': require a preceding idle gap (guard).
-                let idle = self
+            // A candidate first '+' needs a preceding idle gap (the S12
+            // guard); once a run has started, the rest continue it.
+            let starts = self.plus_run > 0
+                || self
                     .last_online_at
                     .map(|t| now.duration_since(t) >= self.escape_guard())
                     .unwrap_or(true);
-                if idle {
-                    self.plus_run = 1;
-                }
-                // else: mid-stream '+', leave plus_run at 0 (it's data).
-            } else {
+            if starts {
+                // Held back, not forwarded - which is what a real modem does,
+                // and what this gateway's *physical* modem already did (see
+                // the escape handling in `serial.rs`, which holds and only
+                // flushes on a broken sequence).  Sending them on meant every
+                // peer saw "+++" whenever a guest hung up, and a guest that
+                // hangs up on exit - EGT80 now does - makes that every
+                // session.  If the run turns out not to be an escape, the held
+                // characters are flushed below in order, so nothing is lost;
+                // only delayed by the byte that breaks the run.
                 self.plus_run += 1;
+                if self.plus_run >= 3 {
+                    self.plus_run = 0;
+                    self.mode = Mode::Command;
+                    self.result(out, "OK"); // escaped to command mode, call held
+                }
+                return;
             }
-        } else {
-            self.plus_run = 0;
+            // A '+' inside a data stream: ordinary data, so fall through.
         }
+        // Not an escape, or the run broke: flush anything held, then this byte.
+        let held = std::mem::replace(&mut self.plus_run, 0) as usize;
+        let mut bytes = vec![b'+'; held];
+        bytes.push(b);
         if let Some(conn) = self.conn.as_mut() {
-            if conn.write_all(&[b]).await.is_err() {
+            if conn.write_all(&bytes).await.is_err() {
                 self.hangup(out, true);
                 return;
             }
         }
         self.last_online_at = Some(now);
-        if self.plus_run >= 3 {
-            self.plus_run = 0;
-            self.mode = Mode::Command;
-            self.result(out, "OK"); // escaped to command mode, call held
-        }
     }
 
     /// The `+++` escape guard time from S12 (in 1/50-second units; default
@@ -1101,6 +1111,52 @@ mod tests {
         let mut buf = [0u8; 5];
         near.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hi+++");
+    }
+
+    /// The escape characters must not reach the peer.  A real modem swallows
+    /// `+++` and only sends the characters on if the sequence turns out not to
+    /// be an escape; this gateway's physical modem already did that, and the
+    /// virtual one did not — so every peer saw "+++" whenever a guest hung up,
+    /// which a guest that hangs up on exit makes every session.
+    #[tokio::test]
+    async fn test_escape_characters_are_not_forwarded_to_the_peer() {
+        use tokio::io::AsyncReadExt;
+        let (mut near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536).await;
+        let _ = m.service(b"ATA\r".to_vec(), 65536).await; // online, no data yet
+        let out = m.service(b"+++".to_vec(), 65536).await;
+        assert!(String::from_utf8_lossy(&out).contains("OK"), "should escape");
+        // Nothing may have reached the peer.
+        let mut buf = [0u8; 8];
+        let n = tokio::time::timeout(Duration::from_millis(50), near.read(&mut buf))
+            .await
+            .map(|r| r.unwrap_or(0))
+            .unwrap_or(0);
+        assert_eq!(n, 0, "peer received {:?}", &buf[..n]);
+    }
+
+    /// A broken run is not lost: the held characters are flushed in order,
+    /// followed by the byte that broke it.
+    #[tokio::test]
+    async fn test_broken_escape_run_flushes_the_held_characters() {
+        use tokio::io::AsyncReadExt;
+        let (mut near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536).await;
+        let _ = m.service(b"ATA\r".to_vec(), 65536).await;
+        // Two plus signs then a letter: not an escape, so all three go out.
+        let _ = m.service(b"++x".to_vec(), 65536).await;
+        let mut buf = [0u8; 8];
+        let n = tokio::time::timeout(Duration::from_millis(200), near.read(&mut buf))
+            .await
+            .expect("peer should receive the flushed run")
+            .unwrap();
+        assert_eq!(&buf[..n], b"++x", "held characters must flush in order");
     }
 
     #[tokio::test]

@@ -1203,6 +1203,7 @@ DORECV: CALL    XRECV
         CALL    TWAIT
         JR      MAINLP
 DOEXIT: CALL    CRLF
+        CALL    XHUP            ; don't leave a call up behind us
         LD      HL,MBYE
         CALL    PSTR
         JP      WBOOT
@@ -1953,6 +1954,65 @@ XGETB1: PUSH    BC
 XGETB2: CALL    PIN
         POP     BC
         OR      A               ; carry clear: a byte is in A
+        RET
+
+;-----------------------------------------------------------------------
+; XHUP - hang up on the way out, the only way a terminal can.
+;
+; There is no DTR line to drop here: the SIO and ACIA drivers do not touch
+; the modem-control bits, HBIOS does not expose them, and CP/M AUX: has no
+; notion of them.  So the modem has to be *asked*, which means the Hayes
+; escape - and the escape only counts if the line was idle before it.
+; Hence: settle, '+++', settle, ATH.
+;
+; The settle is a drain, not a busy-wait, so it doubles as tidying up
+; whatever the far end was still saying.  It runs four timeout passes
+; rather than one because the one-second guard has to be cleared on a fast
+; machine too: a poll loop that takes a second on a 4 MHz Z80 takes a
+; fifth of that on an 18 MHz Z180, and an escape sent too early is not an
+; escape - it is three plus signs typed at the far end.
+;
+; If there is no modem on the port at all - a null-modem cable to another
+; machine - the far end receives these characters as text.  That is the
+; price of not being able to tell, and it is smaller than walking away
+; from a live call: the gateway would hold the session open, and on a real
+; phone line it would hold the line.
+;-----------------------------------------------------------------------
+XHUP:   LD      A,(PKIND)
+        OR      A
+        RET     Z               ; no port selected: nothing to hang up
+        LD      HL,MHUP
+        CALL    PSTR
+        CALL    XHGRD           ; guard time before the escape
+        LD      A,'+'
+        CALL    PSEND
+        LD      A,'+'
+        CALL    PSEND
+        LD      A,'+'
+        CALL    PSEND
+        CALL    XHGRD           ; guard after it, and swallow the OK
+        LD      A,'A'
+        CALL    PSEND
+        LD      A,'T'
+        CALL    PSEND
+        LD      A,'H'
+        CALL    PSEND
+        LD      A,CR
+        CALL    PSEND
+        CALL    XHGRD           ; let NO CARRIER arrive, and drop it
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; XHGRD - wait for the line to fall quiet, draining what arrives.
+;
+; Returns once nothing has come for four timeout passes.  Anything that
+; does arrive is discarded and the wait restarts, so a talkative far end
+; delays the escape rather than corrupting it.
+;-----------------------------------------------------------------------
+XHGRD:  LD      A,4
+        LD      (XTMO),A
+        CALL    XGETB
+        JR      NC,XHGRD        ; a byte came: drain it and start over
         RET
 
 ;-----------------------------------------------------------------------
@@ -4272,6 +4332,7 @@ MKEY:   DB      CR,LF,'Press any key. ',0
 MCTRLC: DB      CR,LF,'Press Ctrl-C for the menu.  Anything else you',CR,LF
         DB      'type here is ignored, so a half-typed line cannot',CR,LF
         DB      'run a menu command by accident. ',0
+MHUP:   DB      'Hanging up...',0
 MBYE:   DB      'EGT80 done.',CR,LF,0
 
 MHELP:  DB      'Help - the serial port',CR,LF

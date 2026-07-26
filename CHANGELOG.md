@@ -378,6 +378,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     now scramble `HL` (`CIOQUERY` and `CIODEVICE` are exempt: they return `L`).
     Verified afterwards with an independent XMODEM peer over TCP: a download and
     an upload on the port drivers are both byte-identical.
+  - **EGT80 hangs up when it exits.** Leaving the program used to leave the call
+    up: the gateway held the session open, and on a real phone line it would hold
+    the line. There is no DTR to drop — the SIO and ACIA drivers do not touch the
+    modem-control bits, HBIOS does not expose them, and CP/M `AUX:` has no notion
+    of them — so the modem is asked, with the Hayes escape. That means honouring
+    the guard time, and the guard is a *duration*, not an instruction count: the
+    settle runs four timeout passes rather than one, because a poll loop that
+    takes a second on a 4 MHz Z80 takes a fifth of that on an 18 MHz Z180, and an
+    escape sent too early is not an escape — it is three plus signs typed at the
+    far end. If there is no modem at all (a null-modem cable to another machine)
+    the far end receives the characters as text; that is the price of not being
+    able to tell, and it is smaller than walking away from a live call.
+  - **The virtual modem no longer forwards the `+++` escape to the peer.** A real
+    modem swallows those characters and only sends them on if the sequence turns
+    out not to be an escape — and this gateway's *physical* modem already did
+    exactly that. The CP/M one forwarded them as they arrived, so every peer saw
+    `+++` whenever a guest hung up, which a guest that hangs up on exit makes
+    every session. Held characters are flushed in order if the run breaks, so
+    nothing is lost; a `+` inside a data stream is still ordinary data, protected
+    by the same guard as before.
   - **After an in-session transfer, EGT80 says a key is needed.** Settling the
     line throws away whatever the far end said as the transfer ended — that burst
     is where a truncated escape sequence comes from, and a BBS's "press any key"
