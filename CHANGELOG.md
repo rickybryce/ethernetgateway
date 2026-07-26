@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - Unreleased
+## [0.8.0] - 2026-07-26
 
 ### Added
 - **CP/M emulator (Flavor B) — Z80 CPU + interactive console (in progress).** A
@@ -2809,7 +2809,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[0.8.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
 [0.6.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.3
