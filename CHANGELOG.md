@@ -325,6 +325,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **On a RomWBW machine EGT80 asks the firmware instead of guessing.** The
+    HBIOS unit prompt now lists the character units that actually exist, each
+    with the device type and base I/O address RomWBW reports for it
+    (`CIOCNT` + `CIODEVICE`, both published calls), so "which unit?" is read off
+    the screen rather than guessed; a unit that does not exist says so. The Z180
+    ASCI menu gained `R`, which takes the register base from that same answer —
+    necessary because `C0` is only mostly right (RomWBW uses `C0` on the Small
+    Computer, RC2014-Z180, SZ180, GMZ180, DYNO and EPITX platforms, but `40` on
+    N8, MK4, N8PC and RPH). The reported base belongs to a physical channel and
+    channel 1 sits one address above channel 0, so the channel is subtracted to
+    recover the block base.
+  - **The emulator's HBIOS no longer claims to be a 16C550.** `CIODEVICE`
+    reported device type `0x00` on the reasoning that zero meant "no driver" —
+    but `0x00` is `CIODEV_UART` in the published list, so the answer was a
+    definite claim to be a chip we are not. Nothing noticed until EGT80 began
+    displaying that field and the virtual modem listed itself as
+    `UART base 00`. It now reports a type outside the published range, which
+    decodes as "not one of the known drivers" — the truth for a TCP connection.
   - **The Z180 ASCI menu offers the RomWBW I/O base by name.** The Z180's serial
     registers live inside the CPU and the register block is relocatable; RomWBW
     puts it at `C0` on Small Computer Central boards, so EGT80's default of `00`

@@ -1496,8 +1496,14 @@ mod egt80_tests {
         let src = include_str!("../../EGT80/EGT80.Z80");
         let mut label = String::new();
         let mut text = String::new();
-        let check = |label: &str, text: &str| {
-            if label.is_empty() {
+        // Only *printable* blocks are screens.  Every string EGT80 prints ends
+        // with a zero terminator, because that is what its string-output
+        // routine stops on; a `DB` block without one is a lookup table indexed
+        // a few bytes at a time (the HBIOS device-type names, say) and its
+        // total length means nothing on a screen.  Checking for the terminator
+        // is what separates the two — a name-based exception list would rot.
+        let check = |label: &str, text: &str, terminated: bool| {
+            if label.is_empty() || !terminated {
                 return;
             }
             let rows = text.matches('\n').count();
@@ -1518,17 +1524,24 @@ mod egt80_tests {
             );
         };
 
+        let mut terminated = false;
         for line in src.lines() {
             let body = line.split(';').next().unwrap_or("");
+            let ends_with_zero = |operands: &str| {
+                let t = operands.trim().trim_end_matches(',');
+                t == "0" || t.ends_with(",0")
+            };
             // A new label starts a new message; an indented DB continues one.
             if let Some((name, rest)) = body.split_once(":") {
                 if !name.starts_with(char::is_whitespace)
                     && !name.is_empty()
                     && rest.trim_start().starts_with("DB")
                 {
-                    check(&label, &text);
+                    check(&label, &text, terminated);
                     label = name.to_string();
-                    text = render_db(rest.trim_start().trim_start_matches("DB"));
+                    let operands = rest.trim_start().trim_start_matches("DB");
+                    text = render_db(operands);
+                    terminated = ends_with_zero(operands);
                     continue;
                 }
             }
@@ -1536,14 +1549,16 @@ mod egt80_tests {
                 let t = body.trim_start();
                 if let Some(rest) = t.strip_prefix("DB") {
                     text.push_str(&render_db(rest));
+                    terminated = ends_with_zero(rest);
                     continue;
                 }
             }
-            check(&label, &text);
+            check(&label, &text, terminated);
             label.clear();
             text.clear();
+            terminated = false;
         }
-        check(&label, &text);
+        check(&label, &text, terminated);
     }
 
     /// Render one `DB` operand list the way the console would see it: quoted

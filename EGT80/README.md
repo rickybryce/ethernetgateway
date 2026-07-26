@@ -132,6 +132,18 @@ byte when the port is selected — the same self-patching the vectors use, one l
 down. Since no test here can reach that code, it was hardened by reading rather
 than by running:
 
+- **The firmware is asked, rather than guessed at.** On a RomWBW machine
+  `CIODEVICE` reports each character unit's device type and base I/O address, and
+  `CIOCNT` how many there are. The HBIOS unit prompt therefore *lists what is
+  really there* — `1  ASCI    base C0` — instead of offering a bare `0-3`, and
+  the ASCI menu's `R` takes the base from that answer instead of assuming one.
+  This matters because `C0` is only *mostly* right: RomWBW puts the Z180 block at
+  `C0` on the Small Computer, RC2014-Z180, SZ180, GMZ180, DYNO and EPITX
+  platforms but at `40` on the N8, MK4, N8PC and RPH ones. The reported base
+  belongs to a physical channel, and channel 1 sits one address above channel 0
+  (`ASCI1_BASE = Z180_BASE + 1`), so the channel number is subtracted to recover
+  the block base — the number this program adds the channel back to. Off by one
+  there would put every register one byte out.
 - **The internal I/O base is offered by name, not just as hex.** The Z180's
   serial registers live inside the CPU and the whole internal register block is
   relocatable — the ICR decides where. RomWBW moves it to `C0` on Small Computer

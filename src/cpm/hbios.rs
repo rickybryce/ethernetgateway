@@ -77,12 +77,19 @@ const LINE_KEEP: u16 = 0xFFFF;
 /// re-interpreting a rate no real UART is clocking here.
 const LINE_DEFAULT: u16 = 0x0000;
 
-/// Device type we report for the virtual modem.  Every real value in the API's
-/// list names a specific chip driver, none of which is running: reporting one
-/// would be a false claim about the hardware, so the virtual modem reports 0 —
-/// "no physical serial driver" — with the RS-232 attribute a comms program
-/// cares about and a base I/O address of 0 (there is no port to read).
-const DEVICE_TYPE_NONE: u8 = 0x00;
+/// Device type we report for the virtual modem.  Every value in the published
+/// list names a specific chip driver, none of which is running here, so we
+/// report one that is *not* in that list.
+///
+/// It used to report 0 on the reasoning that zero meant "no driver" — but 0 is
+/// `CIODEV_UART`, the 16C550 driver, so the answer read as a definite claim to
+/// be a chip we are not.  Nothing caught it until EGT80 started *displaying*
+/// what this call returns, at which point the emulator's own modem listed
+/// itself as "UART base 00".  An out-of-range type is the honest answer: a
+/// program that decodes it learns "not one of the known drivers", which is
+/// exactly the situation.  The RS-232 attribute a comms program actually cares
+/// about is still set, and the base I/O address stays 0 — there is no port.
+const DEVICE_TYPE_NONE: u8 = 0xFF;
 /// Serial device attributes: bit 7 clear = RS-232 (rather than a terminal).
 const DEVICE_ATTR_RS232: u8 = 0x00;
 /// Device mode: no chip variant to report.

@@ -599,6 +599,93 @@ HBOUT:  LD      E,A             ; the byte goes out in E
 
 
 ;-----------------------------------------------------------------------
+; HBCNT - how many character units does HBIOS have?  Count in A, carry set
+; if there is no HBIOS to ask.
+;
+; SYSGET (0F8H) sub-function 00H, the published CIOCNT call: count in E.
+;-----------------------------------------------------------------------
+HBCNT:  LD      A,(0008H)
+        CP      0C3H            ; no RST 8 vector: not a RomWBW machine
+        JR      NZ,HBCNTN
+        LD      B,0F8H
+        LD      C,00H
+        RST     8
+        OR      A
+        JR      NZ,HBCNTN
+        LD      A,E             ; LD leaves the flags alone, so the carry
+        RET                     ; stays clear from the OR above
+HBCNTN: XOR     A
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; HBDEV - ask HBIOS to describe character unit A (CIODEVICE, 06H).
+;
+; Carry set if there is no HBIOS or it refuses the unit - which is how a
+; unit that does not exist answers, so a caller can list what is really
+; there instead of offering a fixed 0-3.  On success HBTYPE holds the
+; device type, and HBBASE / HBPHYS the base I/O address and physical
+; channel the firmware reports.
+;
+; The unit number travels through memory rather than a register because
+; RST 8 is someone else's code: nothing but the documented return
+; registers can be assumed to survive it.
+;-----------------------------------------------------------------------
+HBDEV:  LD      (HBUNIT),A
+        LD      A,(0008H)
+        CP      0C3H
+        JR      NZ,HBDEVN
+        LD      A,(HBUNIT)
+        LD      C,A
+        LD      B,06H
+        RST     8
+        OR      A
+        JR      NZ,HBDEVN
+        LD      A,D
+        LD      (HBTYPE),A
+        LD      A,E
+        LD      (HBPHYS),A
+        LD      A,L
+        LD      (HBBASE),A
+        OR      A               ; clears carry whatever A holds
+        RET
+HBDEVN: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; SHTYPE - print the device-type name HBIOS reported, from the published
+; list of character-device drivers.  An unknown type prints as a hex
+; number rather than a guess - the gateway's own virtual modem is one,
+; being no real chip at all.
+;-----------------------------------------------------------------------
+SHTYPE: LD      A,(HBTYPE)
+        CP      HBTMAX
+        JR      NC,SHTYPU
+        LD      E,A             ; five bytes per name: A*4 + A
+        ADD     A,A
+        ADD     A,A
+        ADD     A,E
+        LD      E,A
+        LD      D,0
+        LD      HL,HBTNAM
+        ADD     HL,DE
+        LD      B,5
+SHTYP1: LD      A,(HL)
+        CALL    COUT
+        INC     HL
+        DEC     B
+        JR      NZ,SHTYP1
+        RET
+SHTYPU: LD      A,'?'
+        CALL    COUT
+        LD      A,(HBTYPE)
+        CALL    PHEX
+        LD      A,' '
+        CALL    COUT
+        LD      A,' '
+        JP      COUT
+
+;-----------------------------------------------------------------------
 ; Z180 ASCI driver (SC126 and other Z180 boards).
 ;
 ; The ASCI registers are Z180 *internal* I/O, reached with IN0/OUT0 -
@@ -617,10 +704,13 @@ HBOUT:  LD      E,A             ; the byte goes out in E
 ; STAT: bit 7 RDRF, bit 6 OVRN, bit 5 PE, bit 4 FE, bit 1 TDRE.
 ; CNTLA: bit 3 EFR - writing a 0 there resets the three error flags.
 ;
-; Baud rate and framing are deliberately left alone: they live in CNTLA
-; and CNTLB, the system set them, and a terminal has no business
-; re-timing a port that is already working.  The only write to CNTLA here
-; is the error reset, and it is read-modify-write so nothing else changes.
+; Baud rate and framing are left alone by the *driver*: they live in CNTLA
+; and CNTLB, the system set them, and a terminal has no business re-timing
+; a port that is already working.  The only write to CNTLA here is the
+; error reset, and it is read-modify-write so nothing else changes.  Line
+; settings can be programmed deliberately from the Settings screen
+; (LSASCI), which is a different thing from a driver doing it behind the
+; user's back.
 ;-----------------------------------------------------------------------
 ASCST:  DB      0EDH,38H
 ASCS1:  DB      00H             ; IN0 A,(STATn)  - operand patched
@@ -2344,8 +2434,39 @@ SCPHB:  LD      A,(0008H)       ; the RST 8 vector
         LD      HL,MNOHB
         CALL    PSTR
         JP      TWAIT           ; Settings clears on return: hold it here
-SCPHB1: CALL    CRLF
-        LD      HL,MPHBM
+SCPHB1: CALL    CLS
+        CALL    CRLF
+        LD      HL,MHBUNM       ; heading, then one line per unit
+        CALL    PSTR
+        XOR     A
+        LD      (HBSCAN),A
+SCPHBL: LD      HL,MHBIND       ; '  n  '
+        CALL    PSTR
+        LD      A,(HBSCAN)
+        ADD     A,'0'
+        CALL    COUT
+        LD      A,' '
+        CALL    COUT
+        LD      A,' '
+        CALL    COUT
+        LD      A,(HBSCAN)
+        CALL    HBDEV           ; ask the firmware what this unit is
+        JR      C,SCPHBN
+        CALL    SHTYPE
+        LD      HL,MHBBAS
+        CALL    PSTR
+        LD      A,(HBBASE)
+        CALL    PHEX
+        CALL    CRLF
+        JR      SCPHBI
+SCPHBN: LD      HL,MHBNON       ; refused: not present on this machine
+        CALL    PSTR
+SCPHBI: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4               ; units 0-3, as before
+        JR      C,SCPHBL
+        LD      HL,MPHBM        ; the prompt itself
         CALL    PSTR
 SCPHB2: CALL    CIN
         CALL    UPCASE
@@ -2384,9 +2505,11 @@ SCPAS1: CALL    CIN
         CP      '1'
         JR      Z,SCPASA
         CP      'C'
-        JR      Z,SCASC0
+        JP      Z,SCASC0
+        CP      'R'
+        JP      Z,SCASCR
         CP      'B'
-        JR      Z,SCPASB
+        JP      Z,SCPASB
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
@@ -2395,9 +2518,9 @@ SCPAS1: CALL    CIN
         CALL    COUT
         JR      SCPAS1
 SCPAS0: XOR     A
-        JR      SCPASS
+        JP      SCPASS
 SCPASA: LD      A,1
-        JR      SCPASS
+        JP      SCPASS
 ;-----------------------------------------------------------------------
 ; SCASC0 - the base RomWBW uses on Small Computer Central boards.
 ;
@@ -2419,12 +2542,65 @@ SCASC0: LD      A,0C0H
         CALL    PSTR
         JP      SCPAS2          ; then still ask for the channel
 
+;-----------------------------------------------------------------------
+; SCASCR - ask RomWBW where the ASCI registers are, rather than assume.
+;
+; C0 is right for most RomWBW Z180 platforms but not all - the N8, MK4 and
+; RPH configurations put the block at 40 - so guessing a constant is only
+; ever nearly right.  The firmware knows: CIODEVICE reports each unit's
+; device type and base address, so scan the units for an ASCI one and take
+; the base it names.
+;
+; The reported base belongs to that *physical channel*, and channel 1 sits
+; one address above channel 0 (RomWBW: ASCI1_BASE = Z180_BASE + 1), so the
+; channel number it also reports is subtracted to recover the block base -
+; which is what this program adds the channel to when it addresses a
+; register.  Getting that wrong would put every register one byte out.
+;-----------------------------------------------------------------------
+SCASCR: XOR     A
+        LD      (HBSCAN),A
+SCASR1: LD      A,(HBSCAN)
+        CALL    HBDEV
+        JR      C,SCASR2
+        LD      A,(HBTYPE)
+        CP      01H             ; the published ASCI device type
+        JR      Z,SCASR3
+SCASR2: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4
+        JR      C,SCASR1
+        CALL    CRLF            ; nothing to ask, or no ASCI unit listed
+        LD      HL,MASCNOR
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCPAS2
+SCASR3: LD      A,(HBBASE)
+        LD      E,A
+        LD      A,(HBPHYS)
+        CP      E               ; a channel above its own base is nonsense
+        JR      Z,SCASR4
+        JR      NC,SCASR2
+SCASR4: LD      A,E             ; the base of that physical channel...
+        LD      HL,HBPHYS
+        SUB     (HL)            ; ...less the channel, giving the block base
+        CP      0F0H            ; base+9 must stay inside the I/O space
+        JR      NC,SCASR2
+        LD      (PABASE),A
+        CALL    XDIRTS
+        CALL    CRLF
+        LD      HL,MASCGOT
+        CALL    PSTR
+        LD      A,(PABASE)
+        CALL    PHEX
+        CALL    CRLF
+        JP      SCPAS2
 SCPASB: CALL    HEXASK          ; internal I/O base
         RET     C
         CP      0F0H            ; base+9 must not run off the top of the
         JR      NC,SCPASB       ; I/O space: ask again
         LD      (PABASE),A
-        JR      SCPAS2          ; then still ask for the channel
+        JP      SCPAS2          ; then still ask for the channel
 SCPASS: LD      (PCHAN),A
         LD      A,PKASCI
         LD      (PKIND),A
@@ -3194,6 +3370,15 @@ LSASNO: LD      HL,MNOZ180
 ;-----------------------------------------------------------------------
 RATEN   EQU     10              ; entries in each table below
 
+; Character-device driver names, five bytes each, indexed by the device
+; type HBIOS reports.  The order is the published one and must not be
+; rearranged; HBTMAX is one past the last entry.
+HBTNAM: DB      'UART ','ASCI ','TERM ','PRP  ','PPP  '
+        DB      'SIO  ','ACIA ','PIO  ','UF   ','DUART'
+        DB      'Z2U  ','LPT  ','ESPC ','ESPS ','SCON '
+        DB      'SSER ','EZ80U'
+HBTMAX  EQU     17
+
 RATEPT: DW      MR300,MR600,MR1200,MR2400,MR4800
         DW      MR9600,MR19K,MR38K,MR57K,MR115K
 RATEHB: DB      2,3,4,5,6,7,8,9,24,25
@@ -3279,7 +3464,7 @@ MPACIM: DB      '6850 ACIA port',CR,LF
         DB      '  B  some other address',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
-MPHBM:  DB      'RomWBW HBIOS serial unit (0-3), Q to go back: ',0
+MPHBM:  DB      CR,LF,'Which unit (0-3), Q to go back: ',0
 MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
         DB      'running RomWBW - HBIOS is not available here.',CR,LF
         DB      'Pick the chip your board uses instead.',CR,LF,0
@@ -3288,12 +3473,22 @@ MNOZ180: DB     'This processor is not a Z180, so it has no ASCI',CR,LF
 MPASCM: DB      'Z180 ASCI channel',CR,LF
         DB      '  0  channel 0  (ASCI0 - usually the console)',CR,LF
         DB      '  1  channel 1  (ASCI1 - the second port)',CR,LF
+        DB      '  R  read the I/O base from RomWBW (best)',CR,LF
         DB      '  C  I/O base C0 - RomWBW on Small Computer',CR,LF
         DB      '     boards (SC126 and friends)',CR,LF
         DB      '  B  set the internal I/O base by hand',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
+MASCGOT: DB     'RomWBW reports the ASCI block at base ',0
+MASCNOR: DB     'There is no RomWBW here to ask, or it lists no ASCI',CR,LF
+        DB      'port.  Press C for C0 (what RomWBW uses on Small',CR,LF
+        DB      'Computer boards) or B to enter the base yourself.',CR,LF,0
+MHBUNM: DB      'RomWBW HBIOS serial units',CR,LF
+        DB      '-------------------------',CR,LF,0
+MHBIND: DB      '  ',0
+MHBBAS: DB      '   base ',0
+MHBNON: DB      '(not present)',CR,LF,0
 MAUXW:  DB      'CP/M AUX: selected.  Note that CP/M 2.2 has no way',CR,LF
         DB      'to ask whether a byte is waiting, so this family',CR,LF
         DB      'reads ahead and cannot receive a literal ^Z.  Use a',CR,LF
@@ -3574,6 +3769,11 @@ XLINE:  DS      24              ; console line buffer for a filename
 XFCB:   DS      36              ; FCB for the file being transferred
 XBUF:   DS      128             ; the block, which is also the CP/M record
 LSQUIT: DB      0               ; non-zero while an apply must not print
+HBUNIT: DB      0               ; unit number handed to HBDEV
+HBTYPE: DB      0               ; device type it reported
+HBPHYS: DB      0               ; physical channel it reported
+HBBASE: DB      0               ; base I/O address it reported
+HBSCAN: DB      0               ; unit being listed / scanned
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 
