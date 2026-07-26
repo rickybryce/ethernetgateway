@@ -2303,7 +2303,12 @@ SCPORT: CALL    CLS
         CALL    PSTR
         CALL    SHPORT
         CALL    CRLF
-        LD      HL,MPORTS
+        LD      A,(0008H)       ; is there firmware here to ask?
+        CP      0C3H
+        JR      NZ,SCPOR0
+        LD      HL,MHBHER
+        CALL    PSTR
+SCPOR0: LD      HL,MPORTS
         CALL    PSTR
 SCPOR1: CALL    CIN
         CALL    UPCASE
@@ -2618,6 +2623,37 @@ ASCFN4: LD      A,E
         RET
 
 ;-----------------------------------------------------------------------
+; ASCHBU - which HBIOS unit serves ASCI channel A?  Unit in A, carry set if
+; the firmware does not serve that channel (or is not there at all).
+;
+; Matching is on both the device type and the physical channel the firmware
+; reports, so channel 1 gets unit 1's port and not unit 0's console.
+;-----------------------------------------------------------------------
+ASCHBU: LD      (HBWANT),A
+        XOR     A
+        LD      (HBSCAN),A
+ASCHB1: LD      A,(HBSCAN)
+        CALL    HBDEV
+        JR      C,ASCHB2
+        LD      A,(HBTYPE)
+        CP      01H             ; the published ASCI device type
+        JR      NZ,ASCHB2
+        LD      A,(HBPHYS)
+        LD      HL,HBWANT
+        CP      (HL)            ; the channel the user asked for?
+        JR      Z,ASCHB3
+ASCHB2: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4
+        JR      C,ASCHB1
+        SCF
+        RET
+ASCHB3: LD      A,(HBSCAN)      ; carry clear: A is the unit to use
+        OR      A
+        RET
+
+;-----------------------------------------------------------------------
 ; SCASCR - ask RomWBW where the ASCI registers are, rather than assume.
 ;
 ; C0 is right for most RomWBW Z180 platforms but not all - the N8, MK4 and
@@ -2656,8 +2692,42 @@ SCPASB: CALL    HEXASK          ; internal I/O base
         JR      NC,SCPASB       ; I/O space: ask again
         LD      (PABASE),A
         JP      SCPAS2          ; then still ask for the channel
+;-----------------------------------------------------------------------
+; SCPASS - a channel has been chosen.  Now decide *how* to reach it.
+;
+; On a RomWBW machine the firmware owns these ports: its build for an SC126
+; enables the ASCI driver with interrupts in mode 2, so an interrupt handler
+; is draining the receiver into RomWBW's own buffer continuously.  A program
+; that polls the same registers is not merely addressing them - it is racing
+; that handler, which reads the data register first.  The symptom is a few
+; random characters and no error, because the transmitter still accepts
+; bytes.  This is exactly why QTERM ships a separate RomWBW build.
+;
+; So when the firmware serves this channel, EGT80 reaches it the way QTERM's
+; RomWBW build does, through HBIOS, and says so.  Direct register access
+; stays for a Z180 whose ports the firmware is *not* driving - a plain
+; monitor, or a RomWBW built without the ASCI driver - where it is the only
+; way in.  Choosing between them is not something a user should have to
+; know, so it is not asked: the machine is asked instead.
+;-----------------------------------------------------------------------
 SCPASS: LD      (PCHAN),A
-        LD      A,PKASCI
+        CALL    ASCHBU          ; does the firmware serve this channel?
+        JR      C,SCPASD
+        LD      (PBASE),A       ; yes: use it, as QTERMH1 does
+        LD      A,PKHBIO
+        LD      (PKIND),A
+        CALL    CRLF
+        LD      HL,MASCHB
+        CALL    PSTR
+        LD      A,(PBASE)
+        ADD     A,'0'
+        CALL    COUT
+        CALL    CRLF
+        LD      HL,MASCHB2
+        CALL    PSTR
+        CALL    TWAIT
+        JP      PDONE
+SCPASD: LD      A,PKASCI        ; no firmware here: drive the chip ourselves
         LD      (PKIND),A
         JP      PDONE
 
@@ -3507,6 +3577,8 @@ MPORTS: DB      'Select serial port',CR,LF
         DB      '  Q  Leave unchanged  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MPDEF:  DB      'Back to the default port.',CR,LF,0
+MHBHER: DB      'This machine has RomWBW.  Options 3 and 4 both use',CR,LF
+        DB      'it, so the chip and its address need not be known.',CR,LF,CR,LF,0
 MPNOW:  DB      'Currently selected: ',0
 MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
         DB      '  1  board 1 channel A - 80/81',CR,LF
@@ -3543,6 +3615,12 @@ MASCPR: DB      CR,LF,'Channel (0/1), or R C B Q: ',0
 MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
 MASCGOT: DB     'RomWBW reports the ASCI block at base ',0
 MASCPIK: DB     'Now pick the channel: 0 or 1.',CR,LF,0
+MASCHB: DB      'RomWBW drives this port itself, with interrupts, so',CR,LF
+        DB      'EGT80 will reach it through the firmware instead of',CR,LF
+        DB      'the registers - the way QTERM RomWBW builds do.',CR,LF
+        DB      'HBIOS unit ',0
+MASCHB2: DB     'Polling the chip directly here would race the',CR,LF
+        DB      'firmware for each byte and read noise.',CR,LF,0
 MASCNOR: DB     'There is no RomWBW here to ask, or it lists no ASCI',CR,LF
         DB      'port.  Press C for C0 (what RomWBW uses on Small',CR,LF
         DB      'Computer boards) or B to enter the base yourself.',CR,LF,0
@@ -3836,6 +3914,7 @@ HBTYPE: DB      0               ; device type it reported
 HBPHYS: DB      0               ; physical channel it reported
 HBBASE: DB      0               ; base I/O address it reported
 HBSCAN: DB      0               ; unit being listed / scanned
+HBWANT: DB      0               ; ASCI channel being looked for
 AUXHLD: DB      0               ; byte read ahead by the AUX status call
 AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
 

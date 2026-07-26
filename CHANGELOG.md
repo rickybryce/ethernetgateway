@@ -328,6 +328,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **Z180 ASCI reaches the port the way the machine actually works.** Reported
+    from an SC126: `atdt` produced no error but a few random characters, while
+    QTERMH1 on the same wire was fine. The reason is not addressing — it is
+    ownership. RomWBW's SC126 build enables its ASCI driver with interrupts in
+    mode 2, so an interrupt handler is draining the receiver into the firmware's
+    own buffer; a program polling the same registers races that handler, which
+    reads the data register first. The transmitter still accepts bytes, hence no
+    error. This is precisely why QTERM ships a separate RomWBW build.
+    Choosing a channel under option 4 therefore now asks the firmware whether it
+    serves that channel, and if it does, reaches it through HBIOS exactly as
+    QTERM's RomWBW build does — saying so, and naming the unit. Direct register
+    access remains for a Z180 the firmware is *not* driving, where it is the only
+    way in. The port menu also states when RomWBW is detected, so a user need not
+    know which of the two options applies to their machine.
   - **Setting the ASCI I/O base no longer looks like selecting the port.**
     Reported from real use: choose Z180 ASCI, set the base, back out — and the
     port menu still showed the old port, because the family is only selected
