@@ -1335,10 +1335,30 @@ TESCST: CALL    SCSETT
 ; so nothing is lost by going straight back.
 TESCU:  CALL    XSEND           ; transfer without leaving the session
         CALL    XSETL
+        CALL    XBACK
         JP      TLOOP
 TESCD:  CALL    XRECV
         CALL    XSETL
+        CALL    XBACK
         JP      TLOOP
+
+;-----------------------------------------------------------------------
+; XBACK - say the transfer is over and wait for one key.
+;
+; Settling the line (XSETL) throws away whatever the far end said as the
+; transfer ended, because that burst is where a truncated escape sequence
+; would have come from - and a BBS says "press any key" in exactly that
+; burst.  So the screen went quiet with the result on it and nothing to
+; explain what to do next, which reads as a hang.
+;
+; One line, and one key.  The key is not forwarded: the far end may not be
+; waiting for anything, and a stray byte pushed into somebody's menu is
+; worse than pressing a key twice.
+;-----------------------------------------------------------------------
+XBACK:  LD      HL,MXBACK
+        CALL    PSTR
+        CALL    CIN
+        JP      CRLF
 TESCEX: CALL    CRLF
         LD      HL,MTEXIT
         CALL    PSTR
@@ -4221,6 +4241,7 @@ MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF,0
 MXCAN:  DB      'The other end cancelled the transfer.',CR,LF,0
 MXSCRAP: DB     'The incomplete file has been deleted.',CR,LF,0
 MXUSER: DB      'Stopped at this end.',CR,LF,0
+MXBACK: DB      'Press a key to return to the session. ',0
 MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
 MUNSAVE: DB    CR,LF,'  (changed - press V to keep it for next time)',CR,LF

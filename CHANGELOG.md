@@ -378,6 +378,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     now scramble `HL` (`CIOQUERY` and `CIODEVICE` are exempt: they return `L`).
     Verified afterwards with an independent XMODEM peer over TCP: a download and
     an upload on the port drivers are both byte-identical.
+  - **After an in-session transfer, EGT80 says a key is needed.** Settling the
+    line throws away whatever the far end said as the transfer ended — that burst
+    is where a truncated escape sequence comes from, and a BBS's "press any key"
+    lives in the same burst. The result was a screen showing `Received.` and then
+    silence, with nothing to explain what to do, which reads as a hang. Both
+    directions now end with `Press a key to return to the session.` and wait for
+    one key. The key is *not* forwarded: the far end may not be waiting for
+    anything, and a stray byte pushed into someone's menu is worse than pressing
+    a key twice.
   - **The line is settled after a transfer, so a lost `ESC` cannot print as
     litter.** Reported from an SC126: after a download the screen showed `2J`
     and did not clear — on a terminal that is definitely ANSI. The cause is the
