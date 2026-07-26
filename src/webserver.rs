@@ -879,6 +879,9 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart",
+        // The CP/M virtual modem's saved AT profile (what AT&W writes), the
+        // same fields the serial ports expose for theirs.
+        "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
         "ssh_gateway_auth",
         "gateway_role", "slave_master_host", "slave_master_port",
         "slave_master_username", "slave_master_password",
@@ -914,6 +917,7 @@ fn collect_form_updates(
         "punter_hangup_on_failure",
         "master_accept_relays",
         "serial_a_enabled", "serial_b_enabled",
+        "cpm_emu_echo", "cpm_emu_verbose", "cpm_emu_quiet",
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
         "serial_a_petscii_translate", "serial_b_petscii_translate",
@@ -1594,6 +1598,10 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <div class=\"row\">{cpm}</div>\
          <div class=\"row\">{cpmmax}</div>\
+         <div class=\"row\">{cpmprof}</div>\
+         <div class=\"row\">{cpmecho}{cpmverb}{cpmquiet}</div>\
+         <div class=\"row\">{cpmx}{cpmdcd}</div>\
+         <div class=\"row\">{cpmsregs}</div>\
          <div class=\"row\">{cpmuart}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
@@ -1610,6 +1618,22 @@ fn render_more_popups(cfg: &Config) -> String {
             "cpm_emu_max_minstr",
             "CP/M runaway ceiling (M-instr)",
             cfg.cpm_emu_max_minstr,
+        ),
+        // The CP/M virtual modem's saved AT profile — the same fields the
+        // serial ports expose for theirs, so a profile can be inspected or
+        // repaired here instead of only from inside the emulator.
+        cpmprof = "<span class=\"label\">CP/M modem saved profile (AT&amp;W):</span>",
+        cpmecho = checkbox("cpm_emu_echo", "Echo (E1)", cfg.cpm_emu_modem.echo),
+        cpmverb = checkbox("cpm_emu_verbose", "Verbose (V1)", cfg.cpm_emu_modem.verbose),
+        cpmquiet = checkbox("cpm_emu_quiet", "Quiet (Q1)", cfg.cpm_emu_modem.quiet),
+        cpmx = numfield("cpm_emu_x_code", "Result-code level (X)", cfg.cpm_emu_modem.x_code),
+        cpmdcd = numfield("cpm_emu_dcd_mode", "DCD mode (&amp;C)", cfg.cpm_emu_modem.dcd_mode),
+        cpmsregs = textfield(
+            "cpm_emu_s_regs",
+            "S-registers S0..S27 (blank = power-on)",
+            &cfg.cpm_emu_modem.s_regs,
+            false,
+            40,
         ),
         cpmuart = format_args!(
             "<span class=\"label\">CP/M virtual modem port:</span>\

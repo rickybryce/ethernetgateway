@@ -377,6 +377,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:port` defaults to telnet's 23, so `ATDT bbs.example.com` dials instead of
   failing), and a **phone number is looked up in the dialup phonebook** as on
   the physical modem.
+- **The CP/M virtual modem's AT settings now persist, as the physical ports'
+  always have.** `AT&W` was swallowed by the command parser's catch-all: it
+  answered `OK` having stored nothing, and the modem was rebuilt at factory
+  defaults on every entry to the emulator, so a comms program's init string had
+  to be retyped each time. `AT&W` now writes the profile — echo, verbose, quiet,
+  result-code level, DCD mode and all 28 S-registers — to new `cpm_emu_*` keys,
+  and the modem powers up with it. `ATZ` restores the saved profile rather than
+  the factory one, matching both a real modem and this gateway's serial ports,
+  while `AT&F` remains the command that ignores it. Values are clamped and an
+  unparsable S-register list falls back to the power-on registers, so a
+  hand-edited file cannot produce a state the AT layer never would. The profile
+  is editable in the web and GUI config editors beside the other CP/M settings —
+  the same treatment the ports' `AT&W` fields get, and for the same reason.
+  Verified end to end: `ATE0 S0=3 S7=20 &C0` then `AT&W`, gateway restarted, and
+  the emulator came back with echo off, `S0=3`, `S7=20`.
 - **`ATD <host>` no longer eats the first letter of the hostname.** The CP/M
   modem stripped a leading tone/pulse modifier *after* trimming, so any host
   beginning with `T` or `P` lost that letter when dialled without a modifier:

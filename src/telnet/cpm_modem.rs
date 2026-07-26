@@ -86,6 +86,11 @@ pub(in crate::telnet) struct CpmModem {
     /// own menu, handed over by the CP/M session that owns this modem.  `None`
     /// in unit tests, where that dial reports NO CARRIER.
     menu: Option<MenuContext>,
+    /// This modem's view of its own NVRAM: the profile it powered up with, or
+    /// the one `AT&W` last wrote.  `ATZ` restores *this*, not the file, which
+    /// is both what a real modem does and what keeps the reset independent of
+    /// whatever else may have edited the config since.
+    saved: crate::config::CpmModemProfile,
 }
 
 /// The session-owned handles a locally-dialed gateway menu session needs.
@@ -96,8 +101,12 @@ pub(in crate::telnet) struct MenuContext {
 }
 
 impl CpmModem {
+    /// Power up the modem with its **saved** profile, exactly as a real one
+    /// comes up with whatever was last written to its NVRAM — here the
+    /// `cpm_emu_*` keys that `AT&W` writes.  A comms program's init string
+    /// therefore survives leaving the emulator, and the gateway restarting.
     pub(in crate::telnet) fn new(enabled: bool) -> Self {
-        CpmModem {
+        let mut m = CpmModem {
             enabled,
             mode: Mode::Command,
             line: Vec::new(),
@@ -116,7 +125,58 @@ impl CpmModem {
             s_regs: default_s_regs(),
             relay_keepalive: None,
             menu: None,
+            saved: crate::config::CpmModemProfile::default(),
+        };
+        m.saved = crate::config::get_config().cpm_emu_modem;
+        let p = m.saved.clone();
+        m.apply_profile(&p);
+        m
+    }
+
+    /// Adopt a stored AT profile (power-up, and `ATZ`).  Out-of-range values
+    /// are clamped and an unparsable S-register list falls back to the
+    /// power-on registers, so a hand-edited config cannot leave the modem in a
+    /// state the AT layer itself would never produce.
+    fn apply_profile(&mut self, p: &crate::config::CpmModemProfile) {
+        self.echo = p.echo;
+        self.verbose = p.verbose;
+        self.quiet = p.quiet;
+        self.x_level = p.x_code.min(4);
+        self.dcd_mode = p.dcd_mode.min(1);
+        self.s_regs = parse_s_regs(&p.s_regs);
+        self.autoanswer = self.s_regs[0]; // S0 mirrors auto-answer
+    }
+
+    /// The current settings as a storable profile — what `AT&W` writes.
+    fn profile(&self) -> crate::config::CpmModemProfile {
+        crate::config::CpmModemProfile {
+            echo: self.echo,
+            verbose: self.verbose,
+            quiet: self.quiet,
+            x_code: self.x_level,
+            dcd_mode: self.dcd_mode,
+            s_regs: format_s_regs(&self.s_regs),
         }
+    }
+
+    /// `AT&W` — write the current settings to the config file, the same thing
+    /// the physical modem's `AT&W` does to its `serial_*` keys.
+    ///
+    /// Like that one it reports success unconditionally: `update_config_values`
+    /// has no error channel and logs a failed write itself.  Matching the
+    /// physical modem matters more here than inventing a second contract for
+    /// the same command.
+    fn save_profile(&mut self) {
+        self.saved = self.profile();
+        let p = &self.saved;
+        crate::config::update_config_values(&[
+            ("cpm_emu_echo", if p.echo { "true" } else { "false" }),
+            ("cpm_emu_verbose", if p.verbose { "true" } else { "false" }),
+            ("cpm_emu_quiet", if p.quiet { "true" } else { "false" }),
+            ("cpm_emu_x_code", &p.x_code.to_string()),
+            ("cpm_emu_dcd_mode", &p.dcd_mode.to_string()),
+            ("cpm_emu_s_regs", &p.s_regs),
+        ]);
     }
 
     /// Give the modem what it needs to answer `ATDT ethernetgateway` with a
@@ -292,8 +352,12 @@ impl CpmModem {
                     self.hangup(out, false);
                 }
                 b'Z' => {
+                    // ATZ restores the *saved* profile, as on a real modem
+                    // (and as the physical port's ATZ does); AT&F below is
+                    // the one that ignores it and goes back to factory.
                     let _ = read_digit(b, &mut i);
-                    self.reset_defaults();
+                    let p = self.saved.clone();
+                    self.apply_profile(&p);
                 }
                 b'I' => {
                     let _ = read_digit(b, &mut i);
@@ -308,6 +372,12 @@ impl CpmModem {
                         b'C' => self.dcd_mode = n, // &C DCD handling
                         b'D' => {}                 // &D DTR: accepted, not modeled
                         b'F' => self.reset_defaults(), // &F factory reset
+                        // &W used to fall into the catch-all below: it
+                        // answered OK having stored nothing, which is the
+                        // worst of both — the guest believed its init string
+                        // was kept, and every return to the emulator quietly
+                        // started over at factory defaults.
+                        b'W' => self.save_profile(), // &W save the profile
                         _ => {}
                     }
                 }
@@ -673,6 +743,30 @@ fn menu_session(
         let mut w = writer.lock().await;
         let _ = w.shutdown().await;
     })
+}
+
+/// Parse the saved `S0,S1,...` list, leaving any register the string does not
+/// cover (or cannot be read as a byte) at its power-on value.
+fn parse_s_regs(s: &str) -> [u8; 28] {
+    let mut regs = default_s_regs();
+    if s.trim().is_empty() {
+        return regs;
+    }
+    for (i, part) in s.split(',').enumerate() {
+        if i >= regs.len() {
+            break;
+        }
+        if let Ok(v) = part.trim().parse::<u8>() {
+            regs[i] = v;
+        }
+    }
+    regs
+}
+
+/// Format the S-registers for the config file: the same comma-separated shape
+/// `serial_a_s_regs` uses.
+fn format_s_regs(regs: &[u8; 28]) -> String {
+    regs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
 }
 
 /// Power-on S-register defaults (S0..S27); mirrors a typical Hayes modem.
@@ -1056,6 +1150,92 @@ mod tests {
         assert_eq!(m.s_regs[7], 45);
         let out = m.service(b"ATS7?\r".to_vec(), 65536).await;
         assert!(String::from_utf8_lossy(&out).contains("045"));
+    }
+
+    /// What `AT&W` stores must restore the modem exactly — otherwise a saved
+    /// init string comes back subtly different, which is worse than not
+    /// saving at all.  Drives real AT commands, then round-trips the profile
+    /// through a second modem.
+    #[tokio::test]
+    async fn test_at_and_w_profile_round_trips() {
+        let mut m = CpmModem::new(true);
+        let _ = m.service(b"ATE0V0Q1X2&C0S0=3S7=20\r".to_vec(), 65536).await;
+        let stored = m.profile();
+
+        let mut fresh = CpmModem::new(true);
+        fresh.apply_profile(&stored);
+        assert!(!fresh.echo);
+        assert!(!fresh.verbose);
+        assert!(fresh.quiet);
+        assert_eq!(fresh.x_level, 2);
+        assert_eq!(fresh.dcd_mode, 0);
+        assert_eq!(fresh.s_regs[0], 3);
+        assert_eq!(fresh.s_regs[7], 20);
+        assert_eq!(fresh.autoanswer, 3, "S0 must still drive auto-answer");
+        assert_eq!(fresh.profile(), stored, "a round trip must be lossless");
+    }
+
+    /// A hand-edited or truncated profile must not produce a modem state the
+    /// AT layer could never reach: values are clamped and missing registers
+    /// keep their power-on defaults.
+    #[test]
+    fn test_saved_profile_is_sanitised_on_load() {
+        let mut m = CpmModem::new(true);
+        m.apply_profile(&crate::config::CpmModemProfile {
+            echo: true,
+            verbose: true,
+            quiet: false,
+            x_code: 9,    // out of range
+            dcd_mode: 7,  // out of range
+            s_regs: "1,,x,4".to_string(), // short, blank and non-numeric fields
+        });
+        assert_eq!(m.x_level, 4, "X level clamps to 4");
+        assert_eq!(m.dcd_mode, 1, "DCD mode clamps to 1");
+        assert_eq!(m.s_regs[0], 1);
+        assert_eq!(m.s_regs[1], default_s_regs()[1], "blank field keeps default");
+        assert_eq!(m.s_regs[2], default_s_regs()[2], "junk field keeps default");
+        assert_eq!(m.s_regs[3], 4);
+        assert_eq!(m.s_regs[7], default_s_regs()[7], "unlisted keeps default");
+        // An empty list is the documented "use the power-on values" case.
+        m.apply_profile(&crate::config::CpmModemProfile::default());
+        assert_eq!(m.s_regs, default_s_regs());
+    }
+
+    /// `ATZ` restores the saved profile, not the factory one — the behaviour
+    /// of a real modem and of this gateway's physical ports.  `AT&F` is the
+    /// command that ignores the profile.
+    #[tokio::test]
+    async fn test_atz_restores_the_saved_profile_and_atf_does_not() {
+        let mut m = CpmModem::new(true);
+        // Stand in for a profile written by an earlier `AT&W`.
+        m.saved = crate::config::CpmModemProfile {
+            echo: false,
+            verbose: true,
+            quiet: false,
+            x_code: 1,
+            dcd_mode: 0,
+            s_regs: "2".to_string(), // S0=2: auto-answer after two rings
+        };
+        let _ = m.service(b"ATE1X4&C1S0=0\r".to_vec(), 65536).await;
+        let _ = m.service(b"ATZ\r".to_vec(), 65536).await;
+        assert!(!m.echo, "ATZ must bring back the saved echo setting");
+        assert_eq!(m.x_level, 1);
+        assert_eq!(m.dcd_mode, 0);
+        assert_eq!(m.autoanswer, 2);
+        // AT&F ignores the saved profile and goes back to the factory state.
+        let _ = m.service(b"AT&F\r".to_vec(), 65536).await;
+        assert!(m.echo);
+        assert_eq!(m.x_level, 4);
+        assert_eq!(m.autoanswer, 0);
+    }
+
+    #[test]
+    fn test_s_reg_list_round_trips() {
+        let mut regs = default_s_regs();
+        regs[0] = 2;
+        regs[7] = 45;
+        assert_eq!(parse_s_regs(&format_s_regs(&regs)), regs);
+        assert_eq!(parse_s_regs(""), default_s_regs());
     }
 
     #[tokio::test]

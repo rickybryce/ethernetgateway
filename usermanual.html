@@ -2617,6 +2617,21 @@ serial semantics, so no telnet negotiation bytes reach the CP/M program.
 </p>
 
 <p>
+<strong>Settings persist, as they do on the physical ports.</strong>
+<code>AT&amp;W</code> writes the current profile &mdash; echo, verbose, quiet,
+result-code level, DCD mode and all 28 S-registers &mdash; to the
+<code>cpm_emu_*</code> keys in <code>egateway.conf</code>, and the modem powers
+up with it every time you enter the emulator, so a comms program&rsquo;s init
+string survives leaving CP/M and restarting the gateway. <code>ATZ</code>
+restores that saved profile (the behaviour of a real modem, and of this
+gateway&rsquo;s serial ports); <code>AT&amp;F</code> is the command that ignores it
+and returns to factory defaults. The profile is also editable in the web and GUI
+config editors, next to the other CP/M settings, exactly as each serial
+port&rsquo;s own <code>AT&amp;W</code> block is &mdash; so a profile can be
+inspected or repaired without booting CP/M.
+</p>
+
+<p>
 The command layer understands a chained Hayes init string
 (<code>ATE0Q0V1X4S0=1</code> applies each clause): <code>E</code> echo,
 <code>Q</code> quiet, <code>V</code> verbose vs numeric result codes,
@@ -4120,6 +4135,12 @@ numeric values fall back to the default.
         <tr><td><code>serial_<em>x</em>_petscii_translate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Saved <code>AT+PETSCII</code> state &mdash; PETSCII translation on direct-TCP dials (Appendix&nbsp;B). Editable from the AT command and the telnet / web / GUI config surfaces.</td></tr>
         <tr><td><code>serial_<em>x</em>_port</code></td><td>string</td><td>empty</td><td>OS-specific path</td><td>Serial device. <code>/dev/ttyUSB0</code>, <code>COM3</code>, etc.</td></tr>
         <tr><td><code>serial_<em>x</em>_quiet</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Saved <code>ATQ</code> quiet mode.</td></tr>
+        <tr><td><code>cpm_emu_echo</code></td><td>bool</td><td><code>true</code></td><td><code>true</code>/<code>false</code></td><td>CP/M virtual modem saved profile: command echo (<code>ATE</code>). Written by <code>AT&amp;W</code> inside the emulator, reloaded on power-up and <code>ATZ</code>.</td></tr>
+        <tr><td><code>cpm_emu_verbose</code></td><td>bool</td><td><code>true</code></td><td><code>true</code>/<code>false</code></td><td>Saved profile: word result codes rather than digits (<code>ATV</code>).</td></tr>
+        <tr><td><code>cpm_emu_quiet</code></td><td>bool</td><td><code>false</code></td><td><code>true</code>/<code>false</code></td><td>Saved profile: suppress result codes (<code>ATQ</code>).</td></tr>
+        <tr><td><code>cpm_emu_x_code</code></td><td>u8</td><td><code>4</code></td><td>0–4</td><td>Saved profile: result-code level (<code>ATX</code>). Out-of-range values are clamped on load.</td></tr>
+        <tr><td><code>cpm_emu_dcd_mode</code></td><td>u8</td><td><code>1</code></td><td>0–1</td><td>Saved profile: DCD handling (<code>AT&amp;C</code>). 0 = forced on, 1 = follows carrier.</td></tr>
+        <tr><td><code>cpm_emu_s_regs</code></td><td>string</td><td>empty</td><td>CSV of up to 28 u8 values</td><td>Saved profile: S0–S27, comma-separated. Empty means the power-on registers; a missing or unparsable field keeps that register's default.</td></tr>
         <tr><td><code>serial_<em>x</em>_s_regs</code></td><td>string</td><td>see note</td><td>CSV of 27 u8 values</td><td>S0–S26, comma-separated. Default: <code>5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1</code>.</td></tr>
         <tr><td><code>serial_<em>x</em>_stopbits</code></td><td>u8</td><td><code>1</code></td><td>1 or 2</td><td>Stop bits.</td></tr>
         <tr><td><code>serial_<em>x</em>_stored_0</code> … <code>serial_<em>x</em>_stored_3</code></td><td>string</td><td>empty</td><td>any</td><td>Stored phone-number slots, per-port.</td></tr>

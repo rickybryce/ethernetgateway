@@ -411,6 +411,37 @@ impl SerialPortId {
 /// loop over both ports without re-listing the enum variants.
 pub const SERIAL_PORT_IDS: [SerialPortId; 2] = [SerialPortId::A, SerialPortId::B];
 
+/// The CP/M virtual modem's saved AT profile (`AT&W`).
+///
+/// Deliberately the fields the physical modem persists, minus the ones with no
+/// meaning without a wire: `&D` DTR handling and `&K` flow control are accepted
+/// by the AT layer but not modelled, and there are no stored dial slots (`&Z`)
+/// yet.  `s_regs` uses the same comma-separated form the serial ports use, so
+/// someone reading `egateway.conf` meets one format rather than two.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpmModemProfile {
+    pub echo: bool,
+    pub verbose: bool,
+    pub quiet: bool,
+    pub x_code: u8,
+    pub dcd_mode: u8,
+    /// S0..S27, comma-separated; empty means the power-on values.
+    pub s_regs: String,
+}
+
+impl Default for CpmModemProfile {
+    fn default() -> Self {
+        CpmModemProfile {
+            echo: true,
+            verbose: true,
+            quiet: false,
+            x_code: 4,
+            dcd_mode: 1,
+            s_regs: String::new(),
+        }
+    }
+}
+
 /// Per-port serial settings.  Each `Config` owns two of these — one for
 /// Port A, one for Port B — and the persisted file keys those fields
 /// under `serial_a_*` and `serial_b_*` respectively.
@@ -695,6 +726,12 @@ pub struct Config {
     /// `hbios_2`), or `off`.  Validated against
     /// `crate::cpm::uart::UART_CHOICES`.
     pub cpm_emu_uart: String,
+    /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
+    /// inside the emulator and reloaded when the modem powers up or the guest
+    /// issues `ATZ` — the same arrangement the physical ports have under their
+    /// `serial_*` keys.  Without it every visit to the emulator started at
+    /// factory defaults, so a comms program's init string had to be retyped.
+    pub cpm_emu_modem: CpmModemProfile,
     /// Settings for Serial Port A (the legacy single port).  Persisted
     /// under `serial_a_*` keys; legacy `serial_*` keys auto-migrate here
     /// on first read.
@@ -802,6 +839,7 @@ impl Default for Config {
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
+            cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
@@ -1307,6 +1345,31 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .filter(|v| crate::cpm::uart::is_valid_uart_key(v))
             .cloned()
             .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
+        cpm_emu_modem: CpmModemProfile {
+            echo: map
+                .get("cpm_emu_echo")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
+            verbose: map
+                .get("cpm_emu_verbose")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
+            quiet: map
+                .get("cpm_emu_quiet")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            x_code: map
+                .get("cpm_emu_x_code")
+                .and_then(|v| v.parse().ok())
+                .filter(|&v: &u8| v <= 4)
+                .unwrap_or(4),
+            dcd_mode: map
+                .get("cpm_emu_dcd_mode")
+                .and_then(|v| v.parse().ok())
+                .filter(|&v: &u8| v <= 1)
+                .unwrap_or(1),
+            s_regs: map.get("cpm_emu_s_regs").cloned().unwrap_or_default(),
+        },
         serial_a: read_serial_port_config(&map, "serial_a", true),
         serial_b: read_serial_port_config(&map, "serial_b", false),
         ssh_enabled: map
@@ -1928,6 +1991,19 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
+    content.push_str("\
+# The CP/M virtual modem's saved AT profile, written by AT&W from inside the
+# emulator and reloaded on power-up and on ATZ - exactly as the physical ports
+# save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
+# modem to factory defaults.  cpm_emu_s_regs is S0..S27 comma-separated, and
+# empty means the power-on values.
+");
+    write_kv(&mut content, "cpm_emu_echo", cfg.cpm_emu_modem.echo);
+    write_kv(&mut content, "cpm_emu_verbose", cfg.cpm_emu_modem.verbose);
+    write_kv(&mut content, "cpm_emu_quiet", cfg.cpm_emu_modem.quiet);
+    write_kv(&mut content, "cpm_emu_x_code", cfg.cpm_emu_modem.x_code);
+    write_kv(&mut content, "cpm_emu_dcd_mode", cfg.cpm_emu_modem.dcd_mode);
+    write_kv(&mut content, "cpm_emu_s_regs", &cfg.cpm_emu_modem.s_regs);
     content.push('\n');
 
     content.push_str("\
@@ -2413,6 +2489,20 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.cpm_emu_uart = value.to_string();
             }
         }
+        "cpm_emu_echo" => cfg.cpm_emu_modem.echo = value.eq_ignore_ascii_case("true"),
+        "cpm_emu_verbose" => cfg.cpm_emu_modem.verbose = value.eq_ignore_ascii_case("true"),
+        "cpm_emu_quiet" => cfg.cpm_emu_modem.quiet = value.eq_ignore_ascii_case("true"),
+        "cpm_emu_x_code" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 4 {
+                cfg.cpm_emu_modem.x_code = v;
+            }
+        }
+        "cpm_emu_dcd_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 1 {
+                cfg.cpm_emu_modem.dcd_mode = v;
+            }
+        }
+        "cpm_emu_s_regs" => cfg.cpm_emu_modem.s_regs = value.to_string(),
         "web_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.web_port = v;
@@ -2997,6 +3087,14 @@ mod tests {
             disable_gateway_connections: true,
             cpm_emu_max_minstr: 500,
             cpm_emu_uart: "rc2014_1b".to_string(),
+            cpm_emu_modem: CpmModemProfile {
+                echo: false,
+                verbose: false,
+                quiet: true,
+                x_code: 2,
+                dcd_mode: 0,
+                s_regs: "3,0,43,13,10,8,2,20".to_string(),
+            },
             serial_a: SerialPortConfig {
                 enabled: true,
                 mode: "console".into(),

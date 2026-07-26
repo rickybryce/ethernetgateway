@@ -483,6 +483,11 @@ struct App {
     punter_max_bad_rounds_buf: String,
     punter_negotiation_retry_interval_buf: String,
     cpm_emu_max_minstr_buf: String,
+    /// Numeric text buffers for the CP/M modem profile, same pattern as every
+    /// other numeric field here: edited as text, parsed back on sync so a
+    /// half-typed value never becomes a config value.
+    cpm_emu_x_code_buf: String,
+    cpm_emu_dcd_mode_buf: String,
     /// Per-port baud text buffer, indexed by `SerialPortId::index()`.
     /// Two slots — one each for Port A and Port B — let the user type
     /// freely without their input being clobbered by a partial parse.
@@ -570,6 +575,8 @@ impl App {
         let punter_negotiation_retry_interval_buf =
             cfg.punter_negotiation_retry_interval.to_string();
         let cpm_emu_max_minstr_buf = cfg.cpm_emu_max_minstr.to_string();
+        let cpm_emu_x_code_buf = cfg.cpm_emu_modem.x_code.to_string();
+        let cpm_emu_dcd_mode_buf = cfg.cpm_emu_modem.dcd_mode.to_string();
         let serial_baud_buf = [
             cfg.serial_a.baud.to_string(),
             cfg.serial_b.baud.to_string(),
@@ -617,6 +624,8 @@ impl App {
             punter_max_bad_rounds_buf,
             punter_negotiation_retry_interval_buf,
             cpm_emu_max_minstr_buf,
+            cpm_emu_x_code_buf,
+            cpm_emu_dcd_mode_buf,
             serial_baud_buf,
             serial_ports,
             dirty: false,
@@ -665,6 +674,10 @@ impl App {
         if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
         if let Ok(v) = self.cpm_emu_max_minstr_buf.parse::<u32>() && v >= 1 { self.cfg.cpm_emu_max_minstr = v; }
+        // Clamped to the ranges the AT layer itself produces (ATX0-4, AT&C0/1),
+        // so a typo here cannot leave the modem in a state no command could set.
+        if let Ok(v) = self.cpm_emu_x_code_buf.parse::<u8>() && v <= 4 { self.cfg.cpm_emu_modem.x_code = v; }
+        if let Ok(v) = self.cpm_emu_dcd_mode_buf.parse::<u8>() && v <= 1 { self.cfg.cpm_emu_modem.dcd_mode = v; }
         for id in crate::config::SERIAL_PORT_IDS {
             if let Ok(v) = self.serial_baud_buf[id.index()].parse::<u32>()
                 && v >= 300
@@ -911,6 +924,37 @@ impl App {
                 ));
             }
         });
+        // The CP/M virtual modem's saved AT profile — the counterpart of the
+        // per-port AT&W block on the Serial page.  The guest writes it with
+        // AT&W from inside the emulator; it is editable here for the same
+        // reason the ports' is: to inspect or repair one without booting CP/M.
+        ui.horizontal(|ui| {
+            ui.label("CP/M modem profile (AT&W):");
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.echo, "Echo")
+                .on_hover_text("ATE1 — the modem echoes the command line");
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.verbose, "Verbose")
+                .on_hover_text("ATV1 — word result codes rather than digits");
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.quiet, "Quiet")
+                .on_hover_text("ATQ1 — suppress result codes entirely");
+        });
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Result level (X):", &mut self.cpm_emu_x_code_buf, 40.0);
+            labeled_field(ui, "DCD (&C):", &mut self.cpm_emu_dcd_mode_buf, 40.0);
+            labeled_field(
+                ui,
+                "S-registers S0..S27:",
+                &mut self.cfg.cpm_emu_modem.s_regs,
+                240.0,
+            );
+        });
+        ui.label(
+            egui::RichText::new(
+                "Comma-separated decimal values; blank means the power-on registers.  \
+                 ATZ inside the emulator restores this profile, AT&F ignores it.",
+            )
+            .italics()
+            .small(),
+        );
     }
 
     /// Render the Server frame's advanced options — outbound Telnet and
@@ -1891,6 +1935,8 @@ impl App {
         self.punter_negotiation_retry_interval_buf =
             self.cfg.punter_negotiation_retry_interval.to_string();
         self.cpm_emu_max_minstr_buf = self.cfg.cpm_emu_max_minstr.to_string();
+        self.cpm_emu_x_code_buf = self.cfg.cpm_emu_modem.x_code.to_string();
+        self.cpm_emu_dcd_mode_buf = self.cfg.cpm_emu_modem.dcd_mode.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
             self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
         }
@@ -3016,6 +3062,8 @@ impl eframe::App for App {
                 || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
                 || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
                 || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
+                || self.cpm_emu_x_code_buf != self.last_synced_cfg.cpm_emu_modem.x_code.to_string()
+                || self.cpm_emu_dcd_mode_buf != self.last_synced_cfg.cpm_emu_modem.dcd_mode.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
                 || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
         }
@@ -3238,6 +3286,28 @@ mod tests {
                 good.parse::<u8>().unwrap()
             );
         }
+    }
+
+    /// The CP/M modem profile's two numeric fields follow the same
+    /// edited-as-text, parsed-on-sync pattern as every other numeric field
+    /// here, and are clamped to the ranges the AT layer itself can produce
+    /// (`ATX0`-`ATX4`, `AT&C0`/`AT&C1`) so a typo cannot store a state no
+    /// command could set.
+    #[test]
+    fn test_sync_cpm_modem_profile_fields() {
+        let mut app = test_app();
+        app.cpm_emu_x_code_buf = "2".into();
+        app.cpm_emu_dcd_mode_buf = "0".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_modem.x_code, 2);
+        assert_eq!(app.cfg.cpm_emu_modem.dcd_mode, 0);
+
+        // Out of range and unparsable both leave the stored value alone.
+        app.cpm_emu_x_code_buf = "9".into();
+        app.cpm_emu_dcd_mode_buf = "banana".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_modem.x_code, 2);
+        assert_eq!(app.cfg.cpm_emu_modem.dcd_mode, 0);
     }
 
     #[test]
