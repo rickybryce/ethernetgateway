@@ -14,6 +14,8 @@ use egui::{Color32, Stroke};
 use crate::config::{self, Config};
 use crate::logger;
 
+mod wizard;
+
 // ── Retro amber-on-dark color palette (telnetbible.com inspired) ──
 
 const BG_DARKEST: Color32 = Color32::from_rgb(0x00, 0x05, 0x10); // matches logo background
@@ -535,6 +537,12 @@ struct App {
     /// cancelled).  While `Some`, the button is disabled to prevent
     /// spawning duplicate pickers.
     pending_dir_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// First-run setup wizard.  `Some` while it owns the window — on a fresh
+    /// install (`setup_wizard_completed = false`) or when the operator asks for
+    /// it again from the Server "More" popup.  It edits its own draft copy of
+    /// the answers, so nothing here or in the live config changes until it
+    /// finishes; see [`wizard`].
+    wizard: Option<wizard::Wizard>,
 }
 
 impl App {
@@ -542,6 +550,9 @@ impl App {
         // Seed saved_geom from the config so we don't rewrite the identical
         // geometry we just restored on first launch.
         let saved_geom = parse_window_geometry(&cfg.gui_window_geometry);
+        // A config that has never been through setup owns the window until the
+        // operator finishes or skips the wizard.
+        let wizard = (!cfg.setup_wizard_completed).then(|| wizard::Wizard::new(&cfg));
         let telnet_port_buf = cfg.telnet_port.to_string();
         let ssh_port_buf = cfg.ssh_port.to_string();
         let kermit_server_port_buf = cfg.kermit_server_port.to_string();
@@ -638,6 +649,7 @@ impl App {
             kermit_server_warn_open: false,
             disable_ip_safety_warn_open: false,
             pending_dir_pick: None,
+            wizard,
         }
     }
 
@@ -1770,6 +1782,65 @@ impl App {
         }
     }
 
+    /// Render the first-run setup wizard and act on its result.  Called
+    /// instead of the normal editor while `self.wizard` is `Some`.
+    fn draw_wizard(&mut self, ui: &mut egui::Ui) {
+        let outcome = {
+            // Disjoint field borrows: the wizard needs a read-only view of the
+            // live config (for the settings it doesn't edit) plus the detected
+            // server IP for its connect instructions.
+            let cfg = &self.cfg;
+            let ip = &self.local_ip;
+            let Some(w) = self.wizard.as_mut() else { return };
+            w.draw(ui, cfg, ip)
+        };
+
+        match outcome {
+            wizard::Outcome::Continue => {}
+            // Skipped/exited: record only that the wizard has run, so it
+            // doesn't reappear on every launch, and leave every other setting
+            // exactly as it was.  No restart — nothing that matters changed.
+            wizard::Outcome::Exit => {
+                self.wizard = None;
+                // Pick up anything another surface (telnet/web) changed while
+                // the wizard held the window, so saving the one flag below
+                // can't write our stale snapshot back over it.  Honours the
+                // dirty flag, so in-progress edits here still win.
+                self.refresh_from_global();
+                self.cfg.setup_wizard_completed = true;
+                self.save_config_now();
+                logger::log("Setup wizard closed — existing settings kept.".into());
+            }
+            // Finished: fold the draft into the config, then save and restart
+            // so the chosen ports actually take effect.
+            wizard::Outcome::Finish => {
+                if let Some(w) = self.wizard.take() {
+                    // Same reason as the Exit arm: apply the answers on top of
+                    // the config as it stands now, not the copy we opened with.
+                    self.refresh_from_global();
+                    w.apply_to(&mut self.cfg);
+                    // The numeric text buffers back-feed into cfg on save
+                    // (sync_numeric_fields), so they must be refreshed from the
+                    // values the wizard just wrote or they'd overwrite them.
+                    self.sync_buffers_from_cfg();
+                    self.dirty = false;
+                    logger::log("Setup wizard finished.".into());
+                    self.save_and_restart_all();
+                }
+            }
+        }
+    }
+
+    /// Refresh the numeric text buffers the wizard can change from `self.cfg`.
+    /// Narrower than `refresh_from_global`'s buffer rebuild on purpose — it is
+    /// driven by our own config, not by an external update.
+    fn sync_buffers_from_cfg(&mut self) {
+        self.telnet_port_buf = self.cfg.telnet_port.to_string();
+        self.ssh_port_buf = self.cfg.ssh_port.to_string();
+        self.web_port_buf = self.cfg.web_port.to_string();
+        self.slave_master_port_buf = self.cfg.slave_master_port.to_string();
+    }
+
     /// Render the console panel as a single read-only multiline `TextEdit`.
     /// Doing this (instead of one label per line) gives us native mouse-drag
     /// selection plus our standard right-click menu — including the
@@ -2182,6 +2253,18 @@ impl eframe::App for App {
 
         self.poll_logs();
         self.poll_dir_pick();
+
+        // First-run setup wizard: it owns the whole window while open, and
+        // deliberately runs before refresh_from_global — its draft must never
+        // be disturbed by a config change from another surface, and none of the
+        // editor's own fields are on screen to be refreshed.
+        if self.wizard.is_some() {
+            self.track_window_geometry(ui.ctx());
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            self.draw_wizard(ui);
+            return;
+        }
+
         self.refresh_from_global();
         self.track_window_geometry(ui.ctx());
 
@@ -2573,6 +2656,11 @@ impl eframe::App for App {
             .stroke(Stroke::new(1.5_f32, WARN_BORDER));
 
         let mut server_open = self.server_popup_open;
+        // Set by the "Run setup wizard..." button inside the popup below.  It
+        // can't open the wizard in place: `server_open` is mutably borrowed by
+        // the window's `.open()` for the duration of the closure, and closing
+        // the popup is part of handing the window to the wizard.
+        let mut wizard_requested = false;
         egui::Window::new(egui::RichText::new("Server — More").strong().color(AMBER_BRIGHT))
             .open(&mut server_open)
             .resizable(true)
@@ -2604,6 +2692,22 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
+                // Re-run the first-run wizard.  Opens on the next frame with
+                // the current settings pre-filled and changes nothing unless
+                // the operator walks it through to Save; this popup closes so
+                // the wizard has the window to itself.  GUI-only by design —
+                // the telnet and web config UIs have no equivalent.
+                if ui
+                    .button(
+                        egui::RichText::new("Run setup wizard...")
+                            .strong()
+                            .color(AMBER_BRIGHT),
+                    )
+                    .clicked()
+                {
+                    wizard_requested = true;
+                }
+                ui.add_space(6.0);
                 if ui
                     .add(egui::Button::new(
                         egui::RichText::new("Save and Restart")
@@ -2616,6 +2720,10 @@ impl eframe::App for App {
                     self.save_and_restart_all();
                 }
             });
+        if wizard_requested {
+            self.wizard = Some(wizard::Wizard::new(&self.cfg));
+            server_open = false;
+        }
         self.server_popup_open = server_open;
 
         // AI, Browser & Weather — More popup.  Surfaces every option in the

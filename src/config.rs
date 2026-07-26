@@ -68,6 +68,19 @@ const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
 /// without restarting the program.
 const DEFAULT_GATEWAY_DEBUG: bool = false;
 const DEFAULT_ENABLE_CONSOLE: bool = true;
+/// Whether the desktop GUI's first-run setup wizard has already been shown.
+///
+/// **False in `Config::default()`** — the default config is exactly what a
+/// genuinely fresh install gets (no config file on disk), and that install is
+/// the one that should see the wizard.
+///
+/// An *existing* config file that lacks the key resolves to **true** instead
+/// (see the reader), because a file on disk means the gateway has been
+/// configured before: an operator upgrading into this version must not be
+/// dropped into a wizard that could rewrite settings they already chose.  The
+/// two directions are deliberately different, and
+/// `test_missing_wizard_key_in_existing_file_reads_completed` pins it.
+const DEFAULT_SETUP_WIZARD_COMPLETED: bool = false;
 const DEFAULT_SECURITY_ENABLED: bool = false;
 /// When `security_enabled` is false, the telnet listener restricts
 /// inbound connections to RFC 1918 / loopback / link-local / ULA
@@ -552,6 +565,12 @@ pub struct Config {
     pub gateway_debug: bool,
     /// Show the GUI configuration/console window on startup.
     pub enable_console: bool,
+    /// Set once the desktop GUI's first-run setup wizard has been completed
+    /// (or skipped).  Purely a GUI concern — no server behaviour reads it, and
+    /// it is the only thing standing between a fresh install and the wizard.
+    /// See [`DEFAULT_SETUP_WIZARD_COMPLETED`] for why a missing key in an
+    /// existing file reads as `true` while the struct default is `false`.
+    pub setup_wizard_completed: bool,
     pub security_enabled: bool,
     /// When true, the telnet listener accepts connections from every
     /// source IP, including public addresses and `*.*.*.1` gateway
@@ -783,6 +802,7 @@ impl Default for Config {
             telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
             gateway_debug: DEFAULT_GATEWAY_DEBUG,
             enable_console: DEFAULT_ENABLE_CONSOLE,
+            setup_wizard_completed: DEFAULT_SETUP_WIZARD_COMPLETED,
             security_enabled: DEFAULT_SECURITY_ENABLED,
             disable_ip_safety: DEFAULT_DISABLE_IP_SAFETY,
             username: DEFAULT_USERNAME.into(),
@@ -1078,6 +1098,13 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("enable_console")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_ENABLE_CONSOLE),
+        // Missing key on an existing file => already-configured install: do NOT
+        // run the wizard (see DEFAULT_SETUP_WIZARD_COMPLETED).  Only a config
+        // file we create ourselves carries `false`.
+        setup_wizard_completed: map
+            .get("setup_wizard_completed")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true),
         security_enabled: map
             .get("security_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1708,6 +1735,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "enable_console", cfg.enable_console);
     content.push('\n');
 
+    content.push_str("\
+# Set true once the desktop GUI's first-run setup wizard has been completed or
+# skipped; the wizard only appears while this is false.  Set it back to false
+# (or use \"Run setup wizard...\" in the GUI's Server \"More\" window) to walk
+# through the initial configuration again.  A pre-existing config file with no
+# such key is treated as already-configured, so upgrades never see the wizard.
+");
+    write_kv(&mut content, "setup_wizard_completed", cfg.setup_wizard_completed);
+    content.push('\n');
+
     content.push_str("# Security: set to true to require username/password login\n");
     write_kv(&mut content, "security_enabled", cfg.security_enabled);
     content.push('\n');
@@ -2286,6 +2323,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "gateway_debug" => cfg.gateway_debug = value.eq_ignore_ascii_case("true"),
         "enable_console" => cfg.enable_console = value.eq_ignore_ascii_case("true"),
+        "setup_wizard_completed" => {
+            cfg.setup_wizard_completed = value.eq_ignore_ascii_case("true")
+        }
         "security_enabled" => cfg.security_enabled = value.eq_ignore_ascii_case("true"),
         "disable_ip_safety" => cfg.disable_ip_safety = value.eq_ignore_ascii_case("true"),
         "username" => cfg.username = value.to_string(),
@@ -3031,6 +3071,7 @@ mod tests {
             telnet_gateway_raw: true,
             gateway_debug: true,
             enable_console: true,
+            setup_wizard_completed: true,
             security_enabled: true,
             disable_ip_safety: true,
             username: "bob".into(),
@@ -3170,6 +3211,10 @@ mod tests {
         assert_eq!(loaded.telnet_gateway_raw, original.telnet_gateway_raw);
         assert_eq!(loaded.gateway_debug, original.gateway_debug);
         assert_eq!(loaded.enable_console, original.enable_console);
+        assert_eq!(
+            loaded.setup_wizard_completed,
+            original.setup_wizard_completed
+        );
         assert_eq!(loaded.security_enabled, original.security_enabled);
         assert_eq!(loaded.username, original.username);
         assert_eq!(loaded.password, original.password);
@@ -3292,6 +3337,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The two directions of the wizard flag are deliberately asymmetric: a
+    /// config file that predates the key belongs to an already-configured
+    /// gateway and must NOT be dropped into the setup wizard, while the
+    /// defaults a first run writes must.  See DEFAULT_SETUP_WIZARD_COMPLETED.
+    #[test]
+    fn test_missing_wizard_key_in_existing_file_reads_completed() {
+        let dir = std::env::temp_dir().join("xmodem_test_wizard_key");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("upgrade.conf");
+
+        // An old config file: real settings, no setup_wizard_completed key.
+        std::fs::write(&path, "telnet_enabled = true\ntelnet_port = 2323\n").unwrap();
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert!(
+            cfg.setup_wizard_completed,
+            "an upgrade must not be sent through the first-run wizard"
+        );
+
+        // An explicit false still means "run it".
+        std::fs::write(&path, "setup_wizard_completed = false\n").unwrap();
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert!(!cfg.setup_wizard_completed);
+
+        // A fresh install has no file at all, and takes its value from the
+        // struct default — which is the one that shows the wizard.  Flipping
+        // DEFAULT_SETUP_WIZARD_COMPLETED would silence it on every fresh
+        // install, so this assertion is the guard on that constant.
+        assert!(!Config::default().setup_wizard_completed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_read_nonexistent_file_returns_defaults() {
         let cfg = read_config_file("/tmp/xmodem_nonexistent_12345.conf");
@@ -3326,6 +3403,7 @@ mod tests {
             "telnet_gateway_raw",
             "gateway_debug",
             "enable_console",
+            "setup_wizard_completed",
             "security_enabled",
             "disable_ip_safety",
             "username",
