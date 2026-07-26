@@ -320,8 +320,11 @@ impl TelnetSession {
         let _peer_reg = if modem.enabled() {
             crate::serial::cpm_peer_listen_enter();
             let cfg = config::get_config();
+            // Announcing to our own master is not gated on `allow_peer_dial`
+            // (see serial::cpm_slave_announce): that setting governs dialing
+            // arbitrary peers, and without the announcement the master cannot
+            // reach this slave's CP/M endpoint at all.
             let announce = if cfg.gateway_role == "slave"
-                && cfg.allow_peer_dial
                 && !cfg.slave_master_host.is_empty()
                 && crate::serial::cpm_announce_claim()
             {

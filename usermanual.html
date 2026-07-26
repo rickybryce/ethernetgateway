@@ -2860,7 +2860,10 @@ the master, which rings its own endpoint. CP/M running on a <strong>slave</stron
 is reachable through the master crossbar the same way A/B ports are: while a
 modem CP/M shell is active, the slave registers <code>CPM</code> with the
 master, so <code>CPM@&lt;slave‑ip&gt;</code> dialed on the master (or another
-slave) rings that slave's endpoint. In short, <code>CPM@&lt;ip&gt;</code> works
+slave) rings that slave's endpoint. That registration happens as soon as a
+modem-enabled CP/M session starts &mdash; like the serial ports, it is not gated
+on <code>allow_peer_dial</code> &mdash; and it re-forms within about a second if
+the master's address or credentials change. In short, <code>CPM@&lt;ip&gt;</code> works
 wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 </p>
 
@@ -3180,9 +3183,13 @@ slave has &mdash; a <strong>console</strong> port connects directly, a
 <strong>modem</strong> port rings the attached device &mdash; from the master
 or, with the master as a crossbar, from another slave
 (<code>device&nbsp;&harr;&nbsp;slave-A&nbsp;&harr;&nbsp;master&nbsp;&harr;&nbsp;slave-B&nbsp;&harr;&nbsp;device</code>).
-A slave modem port becomes dialable by announcing itself to the master
-(automatic when <code>gateway_role = slave</code> and <code>allow_peer_dial</code>
-are set).
+A slave's ports announce themselves to the master automatically whenever
+<code>gateway_role&nbsp;=&nbsp;slave</code> and a master host is set &mdash; this
+is <em>not</em> gated on <code>allow_peer_dial</code>, because a slave its own
+master cannot reach defeats the purpose of the mode. The gate above still
+applies to the <em>dialing</em>: relaying a call out through the master needs the
+slave's <code>allow_peer_dial</code>, and the master accepting a third party's
+crossbar dial needs the master's.
 </p>
 
 <h2 id="ch9-info">9.3 Identification (ATI)</h2>

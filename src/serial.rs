@@ -1777,15 +1777,25 @@ fn modem_slave_announce_tick(
 fn slave_link_fingerprint(cfg: &config::Config, id: SerialPortId) -> String {
     let p = cfg.port(id);
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}",
+        slave_master_fingerprint(cfg),
+        p.enabled,
+        p.mode,
+        p.port
+    )
+}
+
+/// The half of a registration that is about the *master*: who it is and how we
+/// authenticate to it.  Shared by the per-port fingerprint above and the CP/M
+/// endpoint's (which has no serial port of its own), so the two can't drift.
+fn slave_master_fingerprint(cfg: &config::Config) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
         cfg.gateway_role,
         cfg.slave_master_host,
         cfg.slave_master_port,
         cfg.slave_master_username,
-        cfg.slave_master_password,
-        p.enabled,
-        p.mode,
-        p.port
+        cfg.slave_master_password
     )
 }
 
@@ -1864,17 +1874,34 @@ enum CpmActivate {
     Activated,
     Closed,
     Aborted,
+    /// A master setting changed while the endpoint sat registered — drop the
+    /// channel and announce again with the new settings.
+    Reconfigured,
 }
 
-async fn cpm_wait_activate<S>(stream: &mut S, stop: &Arc<AtomicBool>) -> CpmActivate
+async fn cpm_wait_activate<S>(
+    stream: &mut S,
+    stop: &Arc<AtomicBool>,
+    registered_as: &str,
+) -> CpmActivate
 where
     S: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
     let mut b = [0u8; 1];
+    // Checked once a second, not every 250 ms wake: `get_config()` clones the
+    // whole config, and re-registering a second late is indistinguishable from
+    // re-registering at once.
+    let mut ticks: u32 = 0;
     loop {
         if stop.load(Ordering::SeqCst) {
             return CpmActivate::Aborted;
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks.is_multiple_of(4)
+            && slave_master_fingerprint(&config::get_config()) != registered_as
+        {
+            return CpmActivate::Reconfigured;
         }
         match tokio::time::timeout(Duration::from_millis(250), stream.read(&mut b)).await {
             Ok(Ok(0)) => return CpmActivate::Closed,
@@ -1918,9 +1945,15 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
             return;
         }
         let cfg = config::get_config();
-        if cfg.gateway_role != "slave" || !cfg.allow_peer_dial || cfg.slave_master_host.is_empty() {
+        // Not gated on `allow_peer_dial`, for the same reason the serial ports
+        // aren't: that setting is about dialing arbitrary peers, and a slave
+        // whose own master can't reach its CP/M endpoint is the case slave mode
+        // exists to serve.  (The master still gates a *third party* reaching it
+        // through the crossbar.)
+        if cfg.gateway_role != "slave" || cfg.slave_master_host.is_empty() {
             return; // config no longer makes this applicable
         }
+        let registered_as = slave_master_fingerprint(&cfg);
         let host = cfg.slave_master_host.clone();
         let mport = cfg.slave_master_port;
         let user = cfg.slave_master_username.clone();
@@ -1946,7 +1979,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                     mport
                 );
                 crate::relay::log_slave_link_summary(&host, mport);
-                match cpm_wait_activate(&mut stream, &stop).await {
+                match cpm_wait_activate(&mut stream, &stop, &registered_as).await {
                     CpmActivate::Activated => {
                         glog!("CP/M emulator: remote peer-dial in — ringing local endpoint");
                         tokio::select! {
@@ -1968,6 +2001,12 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                         drop(_session);
                     }
                     CpmActivate::Closed => {
+                        drop(stream);
+                        drop(_session);
+                    }
+                    CpmActivate::Reconfigured => {
+                        glog!("CP/M emulator: master settings changed; re-announcing");
+                        crate::relay::set_cpm_announced(false);
                         drop(stream);
                         drop(_session);
                     }
@@ -6492,6 +6531,43 @@ mod tests {
         let mut c = base.clone();
         c.port_mut(id).port = "/dev/ttyUSB1".into();
         assert_ne!(slave_link_fingerprint(&c, id), start, "device path");
+    }
+
+    /// The CP/M endpoint has no serial port of its own, so its registration
+    /// depends on the master half only — and must react to all of it.
+    #[test]
+    fn test_slave_master_fingerprint_covers_the_master_half() {
+        let base = cfg_with_serial(SerialPortId::A, true, "modem", "/dev/ttyUSB0");
+        let start = slave_master_fingerprint(&base);
+        assert_eq!(slave_master_fingerprint(&base), start);
+
+        for mutate in [
+            (|c: &mut config::Config| c.gateway_role = "master".into()) as fn(&mut config::Config),
+            |c: &mut config::Config| c.slave_master_host = "10.0.0.9".into(),
+            |c: &mut config::Config| c.slave_master_port = 2299,
+            |c: &mut config::Config| c.slave_master_username = "other".into(),
+            |c: &mut config::Config| c.slave_master_password = "other".into(),
+        ] {
+            let mut c = base.clone();
+            mutate(&mut c);
+            assert_ne!(slave_master_fingerprint(&c), start);
+        }
+
+        // A serial port's own settings are not part of the CP/M endpoint's
+        // registration, so they must not force it to re-announce.
+        let mut c = base.clone();
+        c.port_mut(SerialPortId::A).mode = "console".into();
+        c.port_mut(SerialPortId::B).enabled = true;
+        assert_eq!(slave_master_fingerprint(&c), start);
+
+        // ...but the per-port fingerprint still builds on this one, so a change
+        // to the master half moves both.
+        let mut c = base.clone();
+        c.slave_master_host = "10.0.0.9".into();
+        assert_ne!(
+            slave_link_fingerprint(&c, SerialPortId::A),
+            slave_link_fingerprint(&base, SerialPortId::A)
+        );
     }
 
     /// ...and nothing else may, or every unrelated edit (a weather location, a

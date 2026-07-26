@@ -310,6 +310,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   third party reaching the port through the master's crossbar is still gated, on
   the master. The announcer's log lines now describe registration rather than
   peer-dial.
+- **The slave's CP/M endpoint registers with the master too.** Same wrong gate
+  as the serial ports: `cpm_slave_announce` and its spawn site both required
+  `allow_peer_dial`, so on a default slave the `CPM` endpoint never announced and
+  `CPM@<slave-ip>` was unreachable from the master. Registration is now
+  automatic whenever the role is `slave` and a master host is set (the CP/M
+  guest *dialing out* to a peer port stays gated, in `cpm_modem.rs`), and it
+  re-announces on a master-settings change like the ports do.
 - **A config change re-registers both slave ports.** A registration is a
   standing claim — the master holds an idle channel and rings it later — so one
   made under settings that have since changed is worse than none. Both the
