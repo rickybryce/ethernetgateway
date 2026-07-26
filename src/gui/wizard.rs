@@ -893,8 +893,54 @@ impl Wizard {
         note(
             ui,
             "The master must have its SSH server running and \"accept relay connections\" \
-             enabled — which its own setup wizard turns on when you pick the Master role.",
+             enabled — its own setup wizard offers both when you pick the Master role there.",
         );
+
+        // The mirror of the master's SSH offer — but for the opposite reason,
+        // and the difference matters enough to spell out.  The link itself is
+        // outbound (this slave logs into the master), so this machine's own SSH
+        // server plays no part in it.  What it does buy is a way to administer
+        // the slave from your desk, which is worth offering to someone who is,
+        // by definition, putting this box in another room.
+        if !self.ssh_enabled {
+            ui.add_space(6.0);
+            body(
+                ui,
+                "This slave's own SSH server is off. The link to the master does not need \
+                 it — the slave dials out to the master's SSH server, so nothing has to \
+                 listen here for that.",
+            );
+            indent(
+                ui,
+                "It is still worth having: a slave keeps its own menus, so its SSH server \
+                 is how you change this machine's settings, or reach the gateway menu on \
+                 it, without walking over to it. That is the whole reason to turn it on \
+                 here.",
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                if ui
+                    .button(
+                        egui::RichText::new(format!(
+                            "Enable this slave's SSH server on port {}",
+                            self.ssh_port.trim()
+                        ))
+                        .strong()
+                        .color(AMBER_BRIGHT),
+                    )
+                    .clicked()
+                {
+                    self.ssh_enabled = true;
+                }
+            });
+            ui.add_space(2.0);
+            indent(
+                ui,
+                "Leave it off and the slave still works exactly as described — you will \
+                 just configure it at the machine, or over telnet if you enabled that.",
+            );
+        }
     }
 
     fn draw_finish(&mut self, ui: &mut egui::Ui, cfg: &Config, local_ip: &str) {
@@ -1453,6 +1499,11 @@ mod tests {
         assert_eq!(cfg.slave_master_password, "secret");
         // A slave must not silently become a relay-accepting master.
         assert!(!cfg.master_accept_relays);
+        // Nor is its own SSH server switched on for it: the relay link is
+        // outbound (this slave logs into the master), so nothing needs to
+        // listen here.  The slave screen offers it as a convenience for
+        // administering the box, and that offer is the operator's to take.
+        assert!(!cfg.ssh_enabled);
     }
 
     #[test]
