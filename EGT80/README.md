@@ -284,10 +284,14 @@ this default and the gateway's ever drift apart.
 entering terminal mode, so it is always clear which program you are talking to
 once a remote system has filled the screen. There is no portable clear on CP/M —
 the terminal is not the computer's and the BIOS offers nothing — so Settings → `C`
-picks the dialect: the ADM-3A's `^Z` (the default, and what the gateway's own
-terminal translation recognises and re-renders for whatever is really connected,
-PETSCII C64 included), the ANSI `ESC [ 2 J` for a VT100, or off for a printing
-terminal, where clearing the screen means feeding paper. Clearing the screen also
+picks the dialect: the ANSI `ESC [ 2 J` (**the default** — what the terminals
+people actually sit at understand, whether a terminal emulator over USB serial or
+the gateway's own ANSI clients), the ADM-3A's `^Z` for a period terminal or a
+PETSCII C64 through the gateway (whose translation re-renders it for the client),
+or off for a printing terminal, where clearing the screen means feeding paper.
+The default was `^Z` at first, on the reasoning that its failure mode is "nothing
+happens" rather than `[2J` printed as litter; it moved to ANSI because "nothing
+happens" is what a modern terminal on real hardware actually got. Clearing the screen also
 means a message can be wiped before it is read, so the places where a message is
 the only feedback — a damaged settings block, a save, a refused port family —
 now pause for a keypress.

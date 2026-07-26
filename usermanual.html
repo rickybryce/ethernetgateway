@@ -2546,11 +2546,12 @@ is the symptom that sent you to this screen.
 and on entering terminal mode, which also names the menu key and says that the key
 followed by <code>E</code> returns to the main menu. CP/M has no standard
 clear-screen &mdash; the terminal is not the computer&rsquo;s and the BIOS offers
-nothing &mdash; so Settings&nbsp;&rarr;&nbsp;<code>C</code> picks the dialect: the
-ADM-3A&rsquo;s <code>^Z</code> (the default, and the one the gateway&rsquo;s own
-terminal translation recognises and re-renders for whatever client is really
-connected, PETSCII C64 included), the ANSI <code>ESC&nbsp;[&nbsp;2&nbsp;J</code>
-for a VT100, or off for a printing terminal.
+nothing &mdash; so Settings&nbsp;&rarr;&nbsp;<code>C</code> picks the dialect: the ANSI
+<code>ESC&nbsp;[&nbsp;2&nbsp;J</code> (<strong>the default</strong> &mdash; what a
+terminal emulator over USB serial and the gateway&rsquo;s own ANSI clients
+understand), the ADM-3A&rsquo;s <code>^Z</code> for a period terminal or a
+PETSCII C64 through the gateway, whose translation re-renders it for the client,
+or off for a printing terminal.
 </p>
 
 <p>

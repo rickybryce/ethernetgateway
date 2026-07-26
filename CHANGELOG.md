@@ -309,10 +309,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which program you are talking to once a remote system has filled the screen;
   the terminal-mode banner now also names the menu key *and* says that the key
   followed by `E` returns to the main menu. CP/M has no standard clear-screen, so
-  a new Settings item picks the dialect: ADM-3A `^Z` (the default &mdash; the
-  gateway's own terminal translation recognises it and re-renders the clear for
-  whatever client is connected, PETSCII included), ANSI `ESC [ 2 J`, or off for a
-  printing terminal. Because a clear can wipe a message before it is read, the
+  a new Settings item picks the dialect: ANSI `ESC [ 2 J` (the default &mdash;
+  what a terminal emulator over USB serial and the gateway's own ANSI clients
+  understand), ADM-3A `^Z` (a period terminal, or a PETSCII C64 through the
+  gateway, whose translation re-renders it), or off for a printing terminal. `^Z`
+  was the first default, on the reasoning that its failure mode is silent rather
+  than `[2J` printed as litter; it moved to ANSI because silent-failure is what a
+  modern terminal on real CP/M hardware actually got. Because a clear can wipe a message before it is read, the
   places where a message is the only feedback — a damaged settings block, a save,
   a refused port family — now pause for a keypress.
 
