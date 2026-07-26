@@ -30,6 +30,15 @@ menu, dialled from inside EGT80: a file uploaded from CP/M arrived byte-identica
 matched the original for its whole length with `^Z` padding to the block
 boundary — which is what CP/M's record granularity means for XMODEM.
 
+**And then on real hardware**, which is where it counts: an SC126 running RomWBW,
+EGT80 on HBIOS unit 1, over the gateway's serial modem at 9600 8N1. A 8,704-byte
+`.COM` and a 104,960-byte `.DAT` — 820 XMODEM blocks — round-tripped
+**byte-identical in both directions**. That pairing is also what found the
+register-discipline bug documented below: before it, those same files arrived the
+correct length and entirely zero, with no error reported at either end. Emulator
+tests could not see it, because our HBIOS preserved a register that real firmware
+does not.
+
 ## Getting it
 
 Nothing to install: EGT80 is compiled into the gateway binary and placed on CP/M
