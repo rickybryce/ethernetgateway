@@ -246,9 +246,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands to connect with, and **the inbound TCP ports to allow on the
   firewall**. Beyond password-match it validates port syntax and refuses a port
   another listener already claims (including the standalone Kermit server it
-  never asks about), warns about sub-1024 ports and about an unauthenticated
-  gateway with IP safety off, and treats the Master role as SSH-enabled
-  everywhere since that is what it configures. The wizard edits a draft, so
+  never asks about), and warns about sub-1024 ports and about an unauthenticated
+  gateway with IP safety off. Choosing the Master role arms
+  `master_accept_relays` but never silently enables the SSH server the relay
+  needs: the role screen explains why a master wants it and offers a button, and
+  the review screen warns if it is still off. The wizard edits a draft, so
   nothing reaches the config or the running server until its final *Save and
   Restart Server*; exiting or skipping writes exactly one key. Re-runnable from
   *Server — More… → Run setup wizard…*. It is deliberately GUI-only — telnet and

@@ -751,7 +751,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>5. Web configuration server</td><td>On/off and port (default <code>8080</code>), plus the URL you'll use.</td></tr>
                     <tr><td>6. Transfer directory</td><td>Typed or picked with a folder browser. Holds the CP/M drives and the Gateway Shell's drive A:.</td></tr>
                     <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT80.COM is placed on drive A: for you.</td></tr>
-                    <tr><td>8. Gateway role</td><td>Standalone, Master, or Slave. Master also enables SSH and relay acceptance (slave links ride the SSH port); Slave adds a screen for the master's host, port, and credentials.</td></tr>
+                    <tr><td>8. Gateway role</td><td>Standalone, Master, or Slave. Master arms relay acceptance and, if you left SSH off, explains that slave links ride the master's SSH port &mdash; with a button to enable it, and a warning if you decline. Slave adds a screen for the master's host, port, and credentials.</td></tr>
                     <tr><td>9. Review and finish</td><td>A summary, the exact <code>telnet</code> / <code>ssh</code> / <code>http://</code> commands for what you chose, and the inbound TCP ports to allow on your firewall &mdash; then <em>Save and Restart Server</em>.</td></tr>
                 </table>
                 <p class="dim-text">

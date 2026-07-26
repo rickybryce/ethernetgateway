@@ -185,12 +185,14 @@ impl Wizard {
 
         cfg.gateway_role = self.role.clone();
         match self.role.as_str() {
-            // A master exists to accept slaves, and the relay rides the SSH
-            // server — so arm both rather than leave a master that silently
-            // can't be reached (main.rs warns about exactly this pairing).
+            // A master exists to accept slaves, so arm the accept-relays gate
+            // with the role.  The SSH server it needs is NOT forced on here:
+            // the Role screen explains why a master wants it and offers a
+            // button, and the review screen warns if it is still off — an
+            // operator who declines keeps their choice (main.rs logs the same
+            // warning at startup).
             "master" => {
                 cfg.master_accept_relays = true;
-                cfg.ssh_enabled = true;
             }
             "slave" => {
                 cfg.slave_master_host = self.master_host.trim().to_string();
@@ -313,15 +315,6 @@ impl Wizard {
         }
     }
 
-    /// Will the SSH server actually be running?  The Master role turns it on in
-    /// `apply_to` whatever the checkbox said (slave links ride the SSH port), and
-    /// everything user-facing has to agree with that — otherwise the review
-    /// screen can warn "no network logins are possible" about a gateway that is
-    /// about to start an SSH server.
-    fn ssh_effective(&self) -> bool {
-        self.ssh_enabled || self.role == "master"
-    }
-
     /// The inbound TCP ports this configuration will listen on, with what each
     /// one is for — the firewall list on the final screen.  Includes listeners
     /// the wizard doesn't ask about (the standalone Kermit server) so the
@@ -334,7 +327,7 @@ impl Wizard {
                 out.push((p, "telnet server"));
             }
         }
-        if self.ssh_effective() {
+        if self.ssh_enabled {
             if let Some(p) = parse_port(&self.ssh_port) {
                 out.push((
                     p,
@@ -361,7 +354,7 @@ impl Wizard {
     /// never worth blocking Save over.
     fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if !self.telnet_enabled && !self.ssh_effective() {
+        if !self.telnet_enabled && !self.ssh_enabled {
             out.push(
                 "Telnet and SSH are both off — no network logins will be possible. \
                  (Serial ports, if you enable them, still work.)"
@@ -377,7 +370,7 @@ impl Wizard {
         }
         for (enabled, port, what) in [
             (self.telnet_enabled, &self.telnet_port, "Telnet"),
-            (self.ssh_effective(), &self.ssh_port, "SSH"),
+            (self.ssh_enabled, &self.ssh_port, "SSH"),
             (self.web_enabled, &self.web_port, "The web server"),
         ] {
             if enabled && parse_port(port).is_some_and(|p| p < 1024) {
@@ -390,8 +383,9 @@ impl Wizard {
         }
         if self.role == "master" && !self.ssh_enabled {
             out.push(
-                "Master role selected: the SSH server will be enabled, because slave links \
-                 ride the SSH port."
+                "Master role with the SSH server off — slave links ride the SSH port, so NO \
+                 slave will be able to connect until you enable it. Go back to the role \
+                 screen to turn it on."
                     .into(),
             );
         }
@@ -401,6 +395,7 @@ impl Wizard {
     /// Render the current screen.  Returns what the host should do next.
     pub(super) fn draw(&mut self, ui: &mut egui::Ui, cfg: &Config, local_ip: &str) -> Outcome {
         self.poll_dir_pick();
+        apply_type_scale(ui);
 
         let mut outcome = Outcome::Continue;
 
@@ -418,7 +413,7 @@ impl Wizard {
                 );
                 ui.label(
                     egui::RichText::new(self.step_title())
-                        .size(15.0)
+                        .size(HEADING)
                         .strong()
                         .color(AMBER),
                 );
@@ -479,7 +474,7 @@ impl Wizard {
                         .add(egui::Button::new(
                             egui::RichText::new("Save and Restart Server")
                                 .strong()
-                                .size(16.0)
+                                .size(WIDGET + 2.0)
                                 .color(AMBER_BRIGHT),
                         ))
                         .clicked()
@@ -812,8 +807,7 @@ impl Wizard {
                 "Master",
                 "Accepts links from slave gateways elsewhere on the network and presents \
                  their serial ports as if they were local. Transferred files land here. \
-                 Selecting this enables the SSH server, because slave links ride the SSH \
-                 port.",
+                 Needs the SSH server running, because slave links ride the SSH port.",
             ),
             (
                 "slave",
@@ -826,6 +820,46 @@ impl Wizard {
             ui.radio_value(&mut self.role, value.to_string(), label);
             indent(ui, explanation);
             ui.add_space(4.0);
+        }
+
+        // A master with no SSH server is inert — it will accept relay channels
+        // that no slave can ever open.  Say so where the choice is made, and
+        // offer the fix, rather than silently switching SSH on (which would
+        // reopen a port the operator deliberately left closed on the SSH
+        // screen) or letting them find out from a startup warning.
+        if self.role == "master" && !self.ssh_enabled {
+            ui.add_space(2.0);
+            warn(
+                ui,
+                "You turned the SSH server off on step 3, but a master needs it: a slave \
+                 links to its master by logging into the master's SSH server, so with SSH \
+                 off no slave can ever connect. Nothing else about the master role uses \
+                 that port — it is not a second way into the menus beyond the SSH access \
+                 you already chose.",
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                if ui
+                    .button(
+                        egui::RichText::new(format!(
+                            "Enable the SSH server on port {}  (recommended)",
+                            self.ssh_port.trim()
+                        ))
+                        .strong()
+                        .color(AMBER_BRIGHT),
+                    )
+                    .clicked()
+                {
+                    self.ssh_enabled = true;
+                }
+            });
+            ui.add_space(2.0);
+            indent(
+                ui,
+                "Leave it off and the role is still saved — the gateway will just log the \
+                 same warning at every startup until SSH is enabled.",
+            );
         }
     }
 
@@ -911,7 +945,10 @@ impl Wizard {
                 any = true;
             }
         }
-        if self.ssh_enabled || self.role == "master" {
+        // Only offer commands that will actually work: a master with SSH still
+        // off has no ssh line, and the role-screen block + the warning below
+        // are what tell the operator about it.
+        if self.ssh_enabled {
             if let Some(p) = parse_port(&self.ssh_port) {
                 connect_line(
                     ui,
@@ -1056,6 +1093,36 @@ fn collision_msg(port: u16, other: &str) -> String {
     )
 }
 
+// ── Type scale ─────────────────────────────────────────────────
+//
+// The wizard is read once, at arm's length from a console that may be across
+// the room, by someone who has not used this program before — so it runs a
+// larger scale than the configuration editor, which is a dense grid of controls
+// for someone who already knows what they mean.  Every size below is derived
+// from BODY so the whole wizard can be re-scaled from one number.
+
+/// Body text: sentences the operator is expected to actually read.
+const BODY: f32 = 16.0;
+/// Secondary text — indented explanations, notes, warnings, summary rows.
+const SMALL: f32 = 15.0;
+/// The screen heading under the window title.
+const HEADING: f32 = 18.0;
+/// Widget text (checkbox and radio labels, buttons, text fields).  Set on the
+/// wizard's own `Ui` style so egui's widgets scale with the prose instead of
+/// staying at the editor's default.
+const WIDGET: f32 = 16.0;
+
+/// Raise the text styles for everything drawn inside the wizard's `Ui`.  Child
+/// `Ui`s (the scroll area, every row) inherit this style, so one call covers
+/// the whole screen; the editor's own style is untouched.
+fn apply_type_scale(ui: &mut egui::Ui) {
+    use egui::{FontFamily, FontId, TextStyle};
+    let styles = &mut ui.style_mut().text_styles;
+    styles.insert(TextStyle::Body, FontId::new(WIDGET, FontFamily::Proportional));
+    styles.insert(TextStyle::Button, FontId::new(WIDGET, FontFamily::Proportional));
+    styles.insert(TextStyle::Monospace, FontId::new(SMALL, FontFamily::Monospace));
+}
+
 /// Parse a listener port: a number in 1..=65535.  Port 0 is rejected because
 /// it means "any free port" to the OS, which is never what an operator wants
 /// for a service they have to connect back to.
@@ -1066,15 +1133,15 @@ fn parse_port(s: &str) -> Option<u16> {
 // ── Small text helpers, so every screen reads the same ─────────
 
 fn body(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(TEXT_PRIMARY).size(14.0));
+    ui.label(egui::RichText::new(text).color(TEXT_PRIMARY).size(BODY));
 }
 
 fn note(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(SCRIPTURE).size(13.0));
+    ui.label(egui::RichText::new(text).color(SCRIPTURE).size(SMALL));
 }
 
 fn warn(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(format!("⚠  {}", text)).color(AMBER_BRIGHT).size(13.0));
+    ui.label(egui::RichText::new(format!("⚠  {}", text)).color(AMBER_BRIGHT).size(SMALL));
 }
 
 /// An indented, *wrapping* paragraph.  The wrap is the point: a plain label in
@@ -1101,7 +1168,7 @@ fn indent(ui: &mut egui::Ui, text: &str) {
     wrapped_at(
         ui,
         24.0,
-        egui::RichText::new(text).color(TEXT_PRIMARY).size(13.0),
+        egui::RichText::new(text).color(TEXT_PRIMARY).size(SMALL),
     );
 }
 
@@ -1111,7 +1178,7 @@ fn bullet(ui: &mut egui::Ui, text: &str) {
         12.0,
         egui::RichText::new(format!("• {}", text))
             .color(TEXT_PRIMARY)
-            .size(13.0),
+            .size(SMALL),
     );
 }
 
@@ -1120,7 +1187,7 @@ fn summary(ui: &mut egui::Ui, label: &str, value: &str) {
     // layout, and centre alignment would drop it half a line below its label.
     ui.horizontal_top(|ui| {
         ui.add_space(12.0);
-        ui.label(egui::RichText::new(format!("{}:", label)).color(AMBER).size(13.0));
+        ui.label(egui::RichText::new(format!("{}:", label)).color(AMBER).size(SMALL));
         // The value can be long (a full filesystem path), so give it the rest of
         // the row as a wrapping block rather than letting it run off the edge.
         let w = ui.available_width().max(120.0);
@@ -1132,7 +1199,7 @@ fn summary(ui: &mut egui::Ui, label: &str, value: &str) {
                     egui::RichText::new(value)
                         .color(TEXT_PRIMARY)
                         .monospace()
-                        .size(13.0),
+                        .size(SMALL),
                 );
             },
         );
@@ -1142,7 +1209,7 @@ fn summary(ui: &mut egui::Ui, label: &str, value: &str) {
 fn connect_line(ui: &mut egui::Ui, text: &str) {
     ui.horizontal(|ui| {
         ui.add_space(24.0);
-        ui.label(egui::RichText::new(text).color(AMBER_BRIGHT).monospace().size(14.0));
+        ui.label(egui::RichText::new(text).color(AMBER_BRIGHT).monospace().size(BODY));
     });
 }
 
@@ -1370,21 +1437,6 @@ mod tests {
     }
 
     #[test]
-    fn test_master_role_arms_ssh_and_relays() {
-        let mut w = wiz();
-        w.role = "master".into();
-        w.ssh_enabled = false;
-        let mut cfg = Config {
-            ssh_enabled: false,
-            master_accept_relays: false,
-            ..Config::default()
-        };
-        w.apply_to(&mut cfg);
-        assert!(cfg.ssh_enabled, "a master's relay rides the SSH server");
-        assert!(cfg.master_accept_relays);
-    }
-
-    #[test]
     fn test_slave_role_writes_master_details() {
         let mut w = wiz();
         w.role = "slave".into();
@@ -1435,7 +1487,24 @@ mod tests {
         let mut w = wiz();
         w.role = "master".into();
         w.ssh_enabled = false;
-        assert!(w.warnings().iter().any(|s| s.contains("SSH server will be enabled")));
+        assert!(w.warnings().iter().any(|s| s.contains("NO slave")));
+        w.ssh_enabled = true;
+        assert!(!w.warnings().iter().any(|s| s.contains("NO slave")));
+    }
+
+    /// The review screen must not print a command that cannot work.
+    #[test]
+    fn test_master_with_ssh_off_advertises_no_ssh_anywhere() {
+        let mut w = wiz();
+        w.role = "master".into();
+        w.telnet_enabled = false;
+        w.web_enabled = false;
+        w.ssh_enabled = false;
+        // inbound_ports is the firewall list; the connect lines in draw_finish
+        // are gated on the same flag, so this is the testable half of the pair.
+        assert!(w.inbound_ports(&Config::default()).is_empty());
+        w.ssh_enabled = true;
+        assert!(!w.inbound_ports(&Config::default()).is_empty());
     }
 
     #[test]
@@ -1460,14 +1529,18 @@ mod tests {
             vec![(2424, "standalone Kermit server")]
         );
 
-        // Master implies SSH inbound even with the checkbox left clear, matching
-        // what apply_to() does.
+        // A master with SSH still off has no port to advertise — the wizard no
+        // longer enables it behind the operator's back.
         let mut w = wiz();
         w.telnet_enabled = false;
         w.web_enabled = false;
         w.ssh_enabled = false;
         w.ssh_port = "2222".into();
         w.role = "master".into();
+        assert!(w.inbound_ports(&Config::default()).is_empty());
+
+        // Once SSH is on, the master's port is labelled for what it carries.
+        w.ssh_enabled = true;
         let ports = w.inbound_ports(&Config::default());
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].0, 2222);
@@ -1482,34 +1555,47 @@ mod tests {
         assert!(w.inbound_ports(&Config::default()).is_empty());
     }
 
-    /// The Master role turns SSH on in apply_to, so nothing user-facing may
-    /// claim the gateway will have no logins, and the low-port warning has to
-    /// look at the same effective value.
+    /// A Master needs SSH but is no longer given it silently: the role screen
+    /// explains and offers the switch, the review screen warns, and the
+    /// operator's choice survives.
     #[test]
-    fn test_master_role_is_treated_as_ssh_enabled_everywhere() {
+    fn test_master_role_never_silently_enables_ssh() {
         let mut w = wiz();
         w.telnet_enabled = false;
         w.ssh_enabled = false;
         w.role = "master".into();
-        w.ssh_port = "22".into();
 
-        assert!(w.ssh_effective());
+        let warnings = w.warnings();
         assert!(
-            !w.warnings().iter().any(|s| s.contains("no network logins")),
-            "a master DOES get an SSH server: {:?}",
-            w.warnings()
+            warnings.iter().any(|s| s.contains("NO slave")),
+            "the review screen must say no slave can connect: {:?}",
+            warnings
         );
-        assert!(
-            w.warnings().iter().any(|s| s.contains("require running as root")),
-            "port 22 on a master still needs root: {:?}",
-            w.warnings()
-        );
-        assert_eq!(w.inbound_ports(&Config::default()).len(), 1);
+        // With no listener at all, the both-off warning is also correct now.
+        assert!(warnings.iter().any(|s| s.contains("no network logins")));
+        // An SSH port nobody will bind is not advertised to the firewall.
+        assert!(w.inbound_ports(&Config::default()).is_empty());
 
-        // Standalone with both off is still the real "no logins" case.
-        w.role = "standalone".into();
-        assert!(!w.ssh_effective());
-        assert!(w.warnings().iter().any(|s| s.contains("no network logins")));
+        let mut cfg = Config {
+            ssh_enabled: false,
+            master_accept_relays: false,
+            ..Config::default()
+        };
+        w.apply_to(&mut cfg);
+        assert!(cfg.master_accept_relays, "the role's own gate is still armed");
+        assert!(
+            !cfg.ssh_enabled,
+            "the operator turned SSH off; the wizard must not turn it back on"
+        );
+
+        // Once they accept the offer, everything follows.
+        w.ssh_enabled = true;
+        assert!(!w.warnings().iter().any(|s| s.contains("NO slave")));
+        let ports = w.inbound_ports(&Config::default());
+        assert_eq!(ports.len(), 1);
+        assert!(ports[0].1.contains("slave links"));
+        w.apply_to(&mut cfg);
+        assert!(cfg.ssh_enabled);
     }
 
     #[test]

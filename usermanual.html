@@ -603,10 +603,14 @@ The screens, in order:
     (<code>cpm_emu_uart</code>). Notes that EGT80.COM is placed on drive A: for
     you.</li>
     <li><strong>Gateway role</strong> — Standalone, Master, or Slave, with a
-    description of each. Choosing Master also enables the SSH server and
-    <code>master_accept_relays</code>, because slave links ride the SSH port.
-    Choosing Slave adds one more screen for the master's host, SSH port,
-    username, and password.</li>
+    description of each. Choosing Master arms
+    <code>master_accept_relays</code>. It does <em>not</em> silently switch the
+    SSH server on: if you turned SSH off on step 3, the screen explains that a
+    slave links to its master by logging into the master's SSH server &mdash; so
+    with SSH off no slave can ever connect &mdash; and offers a button to enable
+    it. Decline and the role is still saved; the review screen and every startup
+    then carry the warning. Choosing Slave adds one more screen for the master's
+    host, SSH port, username, and password.</li>
     <li><strong>Review and finish</strong> — see below.</li>
 </ol>
 
