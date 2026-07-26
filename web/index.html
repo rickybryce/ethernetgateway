@@ -731,6 +731,51 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     Set <code>enable_console = false</code> for headless operation.
                 </div>
 
+                <div class="cat">The Setup Wizard</div>
+                <p class="dim-text">
+                    On a fresh install the GUI window opens into a short setup wizard rather
+                    than the configuration editor. It walks through the decisions a new
+                    gateway needs &mdash; a login, which servers to start, where transferred
+                    files go, and whether this machine is standalone or part of a
+                    master/slave pair &mdash; and finishes by telling you how to connect and
+                    which ports to open. Nothing is written until the last screen, and
+                    <em>Skip setup &mdash; use defaults</em> on the first screen leaves every
+                    default in place.
+                </p>
+                <table class="data-table">
+                    <tr><th>Screen</th><th>What it asks</th></tr>
+                    <tr><td>1. Username and password</td><td>Typed twice and checked; a checkbox reveals what you type. Warns that the password is stored in cleartext in <code>egateway.conf</code>. Used by telnet, SSH, and the web UI alike.</td></tr>
+                    <tr><td>2. Telnet server</td><td>On/off and port (default <code>2323</code>), with the cleartext warning.</td></tr>
+                    <tr><td>3. SSH server</td><td>On/off and port (default <code>2222</code>). Uses the same login, and always authenticates.</td></tr>
+                    <tr><td>4. Access control</td><td>Require login, disable IP safety, block connections from the router address &mdash; each explained in plain language.</td></tr>
+                    <tr><td>5. Web configuration server</td><td>On/off and port (default <code>8080</code>), plus the URL you'll use.</td></tr>
+                    <tr><td>6. Transfer directory</td><td>Typed or picked with a folder browser. Holds the CP/M drives and the Gateway Shell's drive A:.</td></tr>
+                    <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT80.COM is placed on drive A: for you.</td></tr>
+                    <tr><td>8. Gateway role</td><td>Standalone, Master, or Slave. Master also enables SSH and relay acceptance (slave links ride the SSH port); Slave adds a screen for the master's host, port, and credentials.</td></tr>
+                    <tr><td>9. Review and finish</td><td>A summary, the exact <code>telnet</code> / <code>ssh</code> / <code>http://</code> commands for what you chose, and the inbound TCP ports to allow on your firewall &mdash; then <em>Save and Restart Server</em>.</td></tr>
+                </table>
+                <p class="dim-text">
+                    <em>Next</em> validates as it goes: it refuses mismatched or empty
+                    passwords, a port that isn't a number from 1 to 65535, and a port another
+                    listener already claims &mdash; including the standalone Kermit server it
+                    never asks about. The review screen also warns (without blocking) about
+                    both listeners left off, IP safety off with no login required, or a port
+                    below 1024 that will need root. Serial ports are deliberately not part of
+                    the wizard &mdash; configure Port A / Port B afterwards in the GUI or over
+                    telnet.
+                </p>
+                <div class="callout callout-tip">
+                    <strong>Re-running it:</strong> the wizard is tracked by a single config
+                    key, <code>setup_wizard_completed</code>, and appears only while that is
+                    <code>false</code>. Open it again any time from the GUI's
+                    <em>Server &mdash; More&#8230;</em> window &rarr;
+                    <em>Run setup wizard&#8230;</em>; it pre-fills from your current settings
+                    except the password, which is never echoed back. It is a desktop-GUI
+                    feature only &mdash; the telnet menu and web UI already expose every
+                    setting it touches. An existing config file with no such key is treated
+                    as already configured, so upgrading never lands you in the wizard.
+                </div>
+
                 <div class="cat">Connecting</div>
                 <div class="instructions">
                     <h3>Telnet (default port 2323)</h3>
@@ -1561,6 +1606,7 @@ browser_homepage = http://telnetbible.com
 weather_zip =
 verbose = false
 enable_console = true
+setup_wizard_completed = false   # the setup wizard runs while this is false
 
 # Serial Port A
 serial_a_enabled = false
@@ -1878,6 +1924,10 @@ relay_transport = ssh</span></code></pre>
                     <tr>
                         <td class="name-col">Settings Sync</td>
                         <td class="desc-col">Configuration changes from telnet/SSH sessions are reflected in the GUI.</td>
+                    </tr>
+                    <tr>
+                        <td class="name-col">Setup Wizard</td>
+                        <td class="desc-col">On a fresh install the window opens into the first-run setup wizard instead of the editor; re-runnable from <em>Server &mdash; More&#8230;</em> &rarr; <em>Run setup wizard&#8230;</em>. See <a href="#getting-started">Getting Started</a>.</td>
                     </tr>
                 </table>
 

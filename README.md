@@ -30,8 +30,14 @@ cargo build --release
 ./target/release/ethernetgateway
 ```
 
-On first run a default `egateway.conf` is created in the working directory. The
-telnet server listens on **port 2323** by default (SSH on **2222** when
+On first run a default `egateway.conf` is created in the working directory, and
+the desktop GUI opens into a short **setup wizard** — a login, which servers to
+start, where transferred files go, and whether the machine is standalone or part
+of a master/slave pair. It ends with the commands to connect with and the
+inbound ports to open on your firewall. Skip it and the defaults below apply;
+it can be re-run later from the GUI's *Server → More…* window.
+
+The telnet server listens on **port 2323** by default (SSH on **2222** when
 enabled). Connect from anywhere on your network (open the firewall port first):
 
 ```sh
@@ -110,12 +116,17 @@ notifying connected sessions first.
 ## Configuration
 
 All settings live in `egateway.conf` (auto-created on first run; plain
-`key = value`, `#` comments). You can edit them three ways, all writing the same
-file:
+`key = value`, `#` comments). A fresh install is walked through the essentials by
+the **first-run setup wizard** in the desktop GUI (see [Quick Start](#quick-start));
+after that, you can edit everything three ways, all writing the same file:
 
 - **In-session menu** — press **C** (Configuration) over telnet/SSH.
 - **Desktop GUI** — shown on startup when `enable_console = true`; edit
   everything and *Save and Restart*. Set `enable_console = false` for headless.
+  On a fresh install it opens into the setup wizard; *Server → More… → Run setup
+  wizard…* brings it back (the `setup_wizard_completed` key tracks this, and an
+  existing config file without that key is treated as already configured, so
+  upgrades never see the wizard).
 - **Web UI** — set `web_enabled = true` (default off), then browse to
   `http://<server-ip>:8080`.
 

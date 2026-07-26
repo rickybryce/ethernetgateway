@@ -236,6 +236,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current directory) for files whose name matches a wildcard, printing each
   hit's A: path. The `FIND` walk is bounded (scan and result caps) and never
   follows symlinks, so it stays inside the transfer-directory jail.
+- **First-run setup wizard (desktop GUI).** A fresh install now opens the GUI
+  window into a nine-screen wizard instead of a configuration editor the
+  operator has to reverse-engineer: credentials (typed twice, with a
+  show-password toggle and the cleartext-storage warning), telnet, SSH, access
+  control, the web server, the transfer directory, the CP/M emulator and its
+  virtual modem, and the gateway role — with a master-connection screen on the
+  slave path. It closes with a review listing what will be saved, the actual
+  commands to connect with, and **the inbound TCP ports to allow on the
+  firewall**. Beyond password-match it validates port syntax and refuses a port
+  another listener already claims (including the standalone Kermit server it
+  never asks about), warns about sub-1024 ports and about an unauthenticated
+  gateway with IP safety off, and treats the Master role as SSH-enabled
+  everywhere since that is what it configures. The wizard edits a draft, so
+  nothing reaches the config or the running server until its final *Save and
+  Restart Server*; exiting or skipping writes exactly one key. Re-runnable from
+  *Server — More… → Run setup wizard…*. It is deliberately GUI-only — telnet and
+  the web UI already expose every key it touches. New key
+  `setup_wizard_completed`, asymmetric on purpose: `false` for a config the
+  gateway creates itself (a fresh install sees the wizard), but a config file
+  that *lacks* the key reads as `true`, so an upgrade is never dropped into it.
 
 ### Changed
 - **Gateway Shell now surfaces the CP/M "destination first" operand order.**
