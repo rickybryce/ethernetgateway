@@ -328,6 +328,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **The line is settled after a transfer, so a lost `ESC` cannot print as
+    litter.** Reported from an SC126: after a download the screen showed `2J`
+    and did not clear — on a terminal that is definitely ANSI. The cause is the
+    boundary, not the terminal. The far end starts talking the moment the last
+    block is acknowledged (a BBS prints its own prompt, then redraws its menu)
+    while this end is still closing the file — a BDOS close is disk I/O — and a
+    polled UART holds exactly one byte, so those first bytes are overwritten and
+    lost. `ESC [ 2 J` arriving without its first two bytes *is* the text `2J`.
+    EGT80 already had a line-purge routine, used before a receive and after a bad
+    block but never at the end of a transfer; it now settles the line on every
+    transfer exit, in both directions and from both the menu and terminal mode,
+    and clears any half-seen escape sequence out of the filter so the session
+    resumes on a boundary the far end will send whole.
   - **A transfer inside a session no longer asks for a key.** Reported from real
     use: after a download EGT80 said "Received.", waited for a key, and then
     *something asked again*. The second prompt was the far end's — the gateway's

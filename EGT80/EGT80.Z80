@@ -1114,9 +1114,11 @@ DOSAVE: CALL    SAVCFG
         CALL    TWAIT           ; the menu redraw clears the screen, and
         JR      MAINLP          ; whether it saved is worth reading
 DOSEND: CALL    XSEND
+        CALL    XSETL           ; leave nothing in flight for the next session
         CALL    TWAIT
         JR      MAINLP
 DORECV: CALL    XRECV
+        CALL    XSETL
         CALL    TWAIT
         JR      MAINLP
 DOEXIT: CALL    CRLF
@@ -1251,8 +1253,10 @@ TESCST: CALL    SCSETT
 ; The result line stays on screen - returning to the session clears nothing -
 ; so nothing is lost by going straight back.
 TESCU:  CALL    XSEND           ; transfer without leaving the session
+        CALL    XSETL
         JP      TLOOP
 TESCD:  CALL    XRECV
+        CALL    XSETL
         JP      TLOOP
 TESCEX: CALL    CRLF
         LD      HL,MTEXIT
@@ -1848,6 +1852,29 @@ XGETB1: PUSH    BC
 XGETB2: CALL    PIN
         POP     BC
         OR      A               ; carry clear: a byte is in A
+        RET
+
+;-----------------------------------------------------------------------
+; XSETL - settle the line after a transfer, before the session resumes.
+;
+; The far end starts talking the moment the last block is acknowledged: a
+; BBS prints its own "press any key" and then redraws its menu.  This end
+; is meanwhile closing the file - a BDOS close is disk I/O - and printing
+; its result, and a polled UART holds exactly one byte.  Every byte that
+; arrives in that window is overwritten and lost, so what survives is a
+; fragment; an ESC [ 2 J whose first two bytes went missing arrives as the
+; text "2J", which prints as litter while the screen does not clear.  It
+; looks like a broken terminal and is nothing of the kind.
+;
+; So discard whatever is in flight until the line goes quiet, and clear any
+; half-seen escape sequence out of the filter, so the session resumes on a
+; boundary the far end will send whole.  This is what a terminal has to do
+; at the end of a transfer; the alternative is litter no setting can fix.
+;-----------------------------------------------------------------------
+XSETL:  CALL    XPURGE
+        XOR     A
+        LD      (FSTATE),A      ; no half-finished sequence on either
+        LD      (ESTATE),A      ; stream
         RET
 
 ;-----------------------------------------------------------------------
