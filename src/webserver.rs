@@ -75,14 +75,17 @@ pub fn start_web_server(
     }
     let port = cfg.web_port;
 
+    crate::bindwatch::expect("web", port);
     tokio::spawn(async move {
         let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
             Ok(l) => l,
             Err(e) => {
                 glog!("Web server: failed to bind port {}: {}", port, e);
+                crate::bindwatch::failed("web", &e);
                 return;
             }
         };
+        crate::bindwatch::bound("web");
         glog!("Web server listening on port {}", port);
 
         // Atomic claim/release counter — matches the TOCTOU-safe

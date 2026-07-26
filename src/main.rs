@@ -10,6 +10,7 @@
 //! Author: Ricky Bryce
 
 mod aichat;
+mod bindwatch;
 mod config;
 mod cpm;
 mod gui;
@@ -131,6 +132,10 @@ fn main() {
                 let lockouts: telnet::LockoutMap = Arc::new(
                     std::sync::Mutex::new(std::collections::HashMap::new()),
                 );
+                // Fresh slate for this server cycle: each listener registers
+                // below and reports whether it bound, and the watcher then says
+                // out loud if none of them did (see bindwatch).
+                bindwatch::reset();
                 telnet::start_server(
                     shutdown_rt.clone(),
                     restart_rt.clone(),
@@ -156,6 +161,11 @@ fn main() {
                     notify_rt.clone(),
                     lockouts,
                 );
+                // Every listener has registered by now (registration is
+                // synchronous; only the bind itself is spawned), so the watcher
+                // knows the full roster.  3 s is far longer than a bind takes
+                // and is only an upper bound on how long it waits.
+                bindwatch::spawn_watch(3_000);
 
                 // Wait for shutdown signal
                 loop {

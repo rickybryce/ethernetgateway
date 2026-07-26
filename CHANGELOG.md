@@ -278,6 +278,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist. Every parser is a pure function tested from captured output on all
   three platforms, including a localised (German) Windows route table.
 
+- **A loud warning when the listeners don't come up.** Each listener already
+  logged its own bind failure, but one line in the startup chatter is easy to
+  miss and the process kept running afterwards, quietly serving nothing — the
+  failure mode being a second copy of the gateway started without stopping the
+  first, where the old process holds the ports and everything you connect to is
+  still served by the old binary. It looks exactly like "my settings changed
+  nothing". `src/bindwatch.rs` now collects each listener's outcome and, once
+  they have all reported, says so: **NONE of the N configured listener(s) could
+  bind**, which ports, that the process is serving nothing, that another copy is
+  almost certainly holding them, and the commands to find and stop it
+  (`pgrep`/`ss`/`pkill`, or `netstat`/Task Manager on Windows). A partial
+  failure gets a shorter note; a total failure that is *not* address-in-use
+  (e.g. ports below 1024 without root) warns without blaming a second copy; a
+  serial-only setup with no listeners stays quiet.
+- **The SSH server binds its own socket** (`run_on_socket` rather than
+  `run_on_address`, which is literally bind-then-run_on_socket). A bind failure
+  is now reported as one: the old form logged "SSH server listening on port
+  2222" *first* and then surfaced "Address already in use" as a generic
+  post-hoc "SSH server error", which read as though the port had come up.
+
 ### Changed
 - **Gateway Shell now surfaces the CP/M "destination first" operand order.**
   `COPY` and `MOVE` take the destination *before* the source (`COPY dst src`) —

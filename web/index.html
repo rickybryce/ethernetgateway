@@ -2115,6 +2115,28 @@ relay_transport = ssh</span></code></pre>
                     to see detailed XMODEM protocol diagnostics. Useful for debugging
                     file transfer issues.
                 </p>
+
+                <div class="cat">"Address already in use" / nothing is listening</div>
+                <p class="dim-text">
+                    On startup the gateway warns when <strong>none</strong> of its configured
+                    listeners could bind &mdash; naming the ports, saying the process is
+                    serving nothing, and pointing at the usual cause: a second copy started
+                    without stopping the first. The older copy keeps the ports, so everything
+                    you connect to is still being served by <em>it</em> &mdash; old binary, old
+                    settings &mdash; which makes a rebuild or a "Save and Restart" look like it
+                    did nothing. On Linux the underlying error is <code>os error 98</code>.
+                </p>
+                <div class="instructions">
+                    <h3>Find and stop the other copy</h3>
+                    <ol>
+                        <li><code>pgrep -a -x ethernetgateway</code> &mdash; lists every copy</li>
+                        <li><code>ss -ltnp | grep 2323</code> &mdash; names the PID holding a port</li>
+                        <li>A copy whose <code>/proc/&lt;pid&gt;/exe</code> shows <code>(deleted)</code> is running a binary you have since rebuilt</li>
+                        <li><code>pkill -x ethernetgateway</code>, then start the copy you want</li>
+                        <li>On Windows: <code>netstat -ano | findstr :2323</code>, then stop that PID in Task Manager</li>
+                    </ol>
+                    <p style="margin-top: 8px;">Restarting from the GUI, the telnet menu, or SIGHUP does <em>not</em> leak a listener &mdash; the old ones are torn down before the new ones bind. A warning right after a restart is reporting a conflict that was already there.</p>
+                </div>
             </div>
 
             <hr class="divider">

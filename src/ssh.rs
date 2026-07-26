@@ -41,12 +41,19 @@ pub fn start_ssh_server(
     }
 
     let port = cfg.ssh_port;
+    crate::bindwatch::expect("SSH", port);
 
     tokio::spawn(async move {
         let key = match load_or_generate_host_key() {
             Ok(k) => k,
             Err(e) => {
                 glog!("SSH server: failed to load/generate host key: {}", e);
+                // Not a bind failure, but this listener is not coming up, so
+                // say so rather than leaving the watcher waiting on it.
+                crate::bindwatch::failed(
+                    "SSH",
+                    &std::io::Error::other("host key unavailable"),
+                );
                 return;
             }
         };
@@ -76,11 +83,26 @@ pub fn start_ssh_server(
             lockouts: lockouts.clone(),
         };
 
+        // Bind the socket ourselves and hand it to russh (`run_on_address` is
+        // literally bind-then-run_on_socket).  Two reasons: a bind failure is
+        // then reported as one — the old form surfaced "Address in use" as a
+        // generic post-hoc "SSH server error" *after* logging "listening on
+        // port", which read as if the port had come up — and it lets this
+        // listener report its outcome like the other three (see bindwatch).
         let addr = format!("0.0.0.0:{}", port);
+        let socket = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                glog!("SSH server: failed to bind port {}: {}", port, e);
+                crate::bindwatch::failed("SSH", &e);
+                return;
+            }
+        };
+        crate::bindwatch::bound("SSH");
         glog!("SSH server listening on port {}", port);
 
         tokio::select! {
-            result = server.run_on_address(config, &*addr) => {
+            result = server.run_on_socket(config, &socket) => {
                 if let Err(e) = result {
                     glog!("SSH server error: {}", e);
                 }

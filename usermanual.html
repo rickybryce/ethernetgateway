@@ -4319,6 +4319,61 @@ answer.
     wizard doesn&rsquo;t show).</li>
 </ul>
 
+<h2 id="ch16-inuse">16.13 &ldquo;Address already in use&rdquo; / No Listeners Came Up</h2>
+
+<p>
+On startup the gateway now says so plainly when nothing came up:
+</p>
+
+<pre><code>WARNING: NONE of the 4 configured listener(s) could bind (Kermit 2424, SSH 2222, telnet 2323, web 8080).
+         This process is serving no network connections at all.
+         The ports are already in use — another copy of the gateway is
+         almost certainly still running and holding them, which means
+         anything you connect to is being served by that older copy.
+         Check:  pgrep -a -x ethernetgateway     (and: ss -ltnp | grep &lt;port&gt;)
+         Stop it with:  pkill -x ethernetgateway   then start this one again.</code></pre>
+
+<p>
+Almost always this is exactly what it says: a second copy of the gateway was
+started without stopping the first. The consequence is worth spelling out,
+because it is genuinely confusing &mdash; the older copy still holds the ports,
+so everything you telnet or SSH into is being served by <em>it</em>, running
+whatever binary and configuration it started with. A rebuild, a new setting, or
+a <em>Save and Restart</em> in the newer copy changes nothing you can see. On
+Linux the underlying error is <code>os error 98</code>.
+</p>
+
+<ul>
+    <li><strong>Find it:</strong> <code>pgrep -a -x ethernetgateway</code> lists
+    every copy; <code>ss -ltnp | grep 2323</code> names the PID holding a port.
+    A copy whose <code>/proc/&lt;pid&gt;/exe</code> link says
+    <code>(deleted)</code> is running a binary that has since been rebuilt
+    &mdash; a sure sign it predates your current build. On Windows,
+    <code>netstat -ano | findstr :2323</code> gives the PID, and Task Manager
+    stops it.</li>
+    <li><strong>Stop it:</strong> <code>pkill -x ethernetgateway</code>, then
+    start the copy you want. Note this stops <em>every</em> copy, which is
+    usually what you want.</li>
+    <li><strong>Not a second copy?</strong> If the warning appears but no other
+    copy exists, something else on the machine has the port &mdash; check the
+    PID that <code>ss -ltnp</code> reports. A total failure that is <em>not</em>
+    an in-use error (ports below 1024 without root, for instance) prints the
+    same first two lines without blaming another copy.</li>
+    <li><strong>One listener only:</strong> a partial failure prints a shorter
+    note (<code>1 of 4 listeners could not bind …; the rest are running</code>)
+    &mdash; the gateway is up, just missing that one service.</li>
+</ul>
+
+<aside class="note">
+<span class="label">A restart does not leak a listener</span>
+Restarting from the GUI (<em>Save and Restart</em>, including the setup
+wizard's), from the telnet menu, or with <code>systemctl reload</code> /
+<code>SIGHUP</code> tears the old listeners down before binding the new ones. If
+this warning appears right after such a restart, it is reporting a conflict that
+was already there &mdash; the restart re-ran the binds and put the failure back
+in front of you.
+</aside>
+
 <!-- ═══════════════════ Appendix A ═══════════════════ -->
 <h1 id="appA">Appendix A — Configuration Key Reference</h1>
 

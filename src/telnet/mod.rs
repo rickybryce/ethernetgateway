@@ -1389,14 +1389,17 @@ pub fn start_server(
     // toggles take effect immediately on the next inbound connection
     // without requiring a server restart.
 
+    crate::bindwatch::expect("telnet", port);
     tokio::spawn(async move {
         let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
             Ok(l) => l,
             Err(e) => {
                 glog!("Telnet server: failed to bind port {}: {}", port, e);
+                crate::bindwatch::failed("telnet", &e);
                 return;
             }
         };
+        crate::bindwatch::bound("telnet");
         glog!("Telnet server listening on port {}", port);
 
         let session_count = Arc::new(AtomicUsize::new(0));
@@ -1611,14 +1614,17 @@ pub fn start_kermit_server(
     }
     let port = cfg.kermit_server_port;
 
+    crate::bindwatch::expect("Kermit", port);
     tokio::spawn(async move {
         let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
             Ok(l) => l,
             Err(e) => {
                 glog!("Kermit server: failed to bind port {}: {}", port, e);
+                crate::bindwatch::failed("Kermit", &e);
                 return;
             }
         };
+        crate::bindwatch::bound("Kermit");
         glog!(
             "Kermit server listening on port {} (auth + IP filter bypassed)",
             port
