@@ -328,6 +328,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing, and `ESC` begins the arrow-key sequences, so a cursor key would open the
   menu. A saved key is validated at startup too, since an invalid one would trap
   that key for ever.
+  - **A transfer inside a session no longer asks for a key.** Reported from real
+    use: after a download EGT80 said "Received.", waited for a key, and then
+    *something asked again*. The second prompt was the far end's — the gateway's
+    own File Transfer menu ends with "Press any key to continue." — so two
+    programs each wanted a keystroke, back to back, which reads as a bug however
+    it is explained. Every EGT80 transfer exit path was checked: none of them
+    waits internally, the wait was in the caller. A transfer started from inside
+    terminal mode now prints its result and returns straight to the session,
+    which is what period terminals do and what a BBS expects: the BBS's own
+    prompt and menu redraw follow naturally, and nothing is lost because
+    returning to a session clears nothing. A transfer started from EGT80's *own*
+    menu still waits for one key, because the menu redraw clears the screen and
+    the result would otherwise vanish.
   - **Coloured menus, and a terminal menu that explains itself.** Headings,
     labels, values and the key letter of every menu line are now coloured.
     Colour follows the ANSI/ASCII setting already in Settings — that setting

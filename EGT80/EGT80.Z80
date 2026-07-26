@@ -1245,11 +1245,14 @@ TESCHL: CALL    SCHELP
         JP      TLOOP
 TESCST: CALL    SCSETT
         JP      TLOOP
+; A transfer started from inside the session does NOT wait for a key: the
+; far end has its own "press any key" right behind ours, and two prompts in
+; a row from two different programs is exactly as confusing as it sounds.
+; The result line stays on screen - returning to the session clears nothing -
+; so nothing is lost by going straight back.
 TESCU:  CALL    XSEND           ; transfer without leaving the session
-        CALL    TWAIT
         JP      TLOOP
 TESCD:  CALL    XRECV
-        CALL    TWAIT
         JP      TLOOP
 TESCEX: CALL    CRLF
         LD      HL,MTEXIT
