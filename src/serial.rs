@@ -3899,7 +3899,7 @@ fn parse_dial_string(raw: &str, s_regs: &[u8; NUM_S_REGS]) -> ParsedDial {
 /// ASCII, which the parser refuses on its own.  Case-insensitive, and the
 /// index from the upper-cased copy is valid in the original because
 /// `to_ascii_uppercase` only flips ASCII letters in place.
-fn skip_to_at(cmd: &str) -> Option<&str> {
+pub(crate) fn skip_to_at(cmd: &str) -> Option<&str> {
     if !cmd.is_ascii() {
         return None;
     }

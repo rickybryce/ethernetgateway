@@ -312,6 +312,15 @@ impl CpmModem {
         if s.is_empty() {
             return;
         }
+        // Tolerate debris in front of the command, using the same rule as the
+        // physical modem (`serial::skip_to_at`).  A guest that was mid-transfer
+        // when the call ended leaves protocol bytes in flight, and the
+        // printable ones land at the front of the next command line - an XMODEM
+        // receiver asking for CRC mode sends 'C', so a stopped download turns
+        // the next line into "CCATDT ethernetgateway".  Refusing that is
+        // correct by the Hayes grammar and useless to the user, whose spelling
+        // was right; nothing legitimate precedes AT.
+        let s = crate::serial::skip_to_at(&s).unwrap_or(&s).to_string();
         let Some(body) = s.strip_prefix("AT") else {
             self.result(out, "ERROR");
             return;
@@ -889,6 +898,19 @@ mod tests {
         let s = String::from_utf8_lossy(&out);
         assert!(s.contains("AT")); // echoed
         assert!(s.contains("OK"));
+    }
+
+    /// The same debris tolerance the physical modem has: an XMODEM `C` left in
+    /// flight by a stopped transfer must not cost the user a refused command.
+    #[tokio::test]
+    async fn test_debris_before_at_is_skipped() {
+        let mut m = CpmModem::new(true);
+        let out = m.service(b"CCATZ\r".to_vec(), 65536).await;
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("OK") && !s.contains("ERROR"), "{s:?}");
+        // A line with no AT in it at all is still an error.
+        let out = m.service(b"CCCC\r".to_vec(), 65536).await;
+        assert!(String::from_utf8_lossy(&out).contains("ERROR"));
     }
 
     #[tokio::test]
