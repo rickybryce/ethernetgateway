@@ -897,7 +897,11 @@ impl TelnetSession {
             self.send_line(&format!("  {}...", self.dim("Detecting ports"))).await?;
             self.flush().await?;
 
-            let ports = tokio::task::spawn_blocking(crate::serial::list_serial_ports)
+            // Detailed, so each row can name the hardware ("-- FTDI") next to
+            // the path.  Two identical-looking `/dev/ttyUSB*` entries are
+            // otherwise impossible to tell apart from here, and picking wrong
+            // yields a port that is simply silent.
+            let ports = tokio::task::spawn_blocking(crate::serial::list_serial_ports_detailed)
                 .await
                 .unwrap_or_default();
 
@@ -972,7 +976,7 @@ impl TelnetSession {
                 self.send_line(&format!(
                     "  {:>2}. {}",
                     i + 1,
-                    truncate_to_width(port, max_w)
+                    crate::serial::port_row(&port.name, &port.summary, max_w)
                 ))
                 .await?;
             }
@@ -1019,7 +1023,9 @@ impl TelnetSession {
 
             if let Ok(idx) = input.parse::<usize>() {
                 if idx >= 1 && idx <= ports.len() {
-                    let port_name = ports[idx - 1].clone();
+                    // The *path* is what gets saved — the row's description is
+                    // for reading only.
+                    let port_name = ports[idx - 1].name.clone();
                     let k = port_key.clone();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value(&k, &port_name);

@@ -1027,31 +1027,44 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// Hand-rolled JSON encoder for the `/serial-ports` response.  Serial
-/// device paths are ASCII and quote-free in practice on Linux/macOS/
-/// Windows, but escape defensively so a hostile or oddly-named device
-/// can't break the JSON parse on the client.
-fn serial_ports_json(ports: &[String]) -> String {
+/// Escape one string as a JSON string body (no surrounding quotes).  Serial
+/// device paths are ASCII and quote-free in practice on Linux/macOS/Windows,
+/// but a USB descriptor is whatever the device claims it is — so escape
+/// defensively and a hostile or oddly-named device can't break the parse.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Hand-rolled JSON encoder for the `/serial-ports` response.
+///
+/// Each entry carries the device path plus its descriptions, so the refresh
+/// button can rebuild both the options *and* their hover text without a page
+/// reload — otherwise a refresh would silently strip the names the page was
+/// rendered with.
+fn serial_ports_json(ports: &[crate::serial::DetectedPort]) -> String {
     let mut out = String::from("{\"ports\":[");
     for (i, p) in ports.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push('"');
-        for ch in p.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => out.push(c),
-            }
-        }
-        out.push('"');
+        out.push_str(&format!(
+            "{{\"name\":\"{}\",\"summary\":\"{}\",\"detail\":\"{}\"}}",
+            json_escape(&p.name),
+            json_escape(&p.summary),
+            json_escape(&p.detail),
+        ));
     }
     out.push_str("]}");
     out
@@ -1382,7 +1395,8 @@ fn serial_row(prefix: &str, label: &str, port: &config::SerialPortConfig) -> Str
     // the half-width frame.
     format!(
         "<div class=\"row serial-row\"><span class=\"label\">{label}:</span>\
-         <select name=\"{prefix}_port\" class=\"serial-port-select\" data-current=\"{dev}\">\
+         <select name=\"{prefix}_port\" class=\"serial-port-select\" data-current=\"{dev}\" \
+         title=\"{tip}\">\
          {options}\
          </select>\
          <button type=\"button\" class=\"refresh\" title=\"Refresh ports\" \
@@ -1392,6 +1406,10 @@ fn serial_row(prefix: &str, label: &str, port: &config::SerialPortConfig) -> Str
         label = label,
         prefix = prefix,
         dev = html_escape(&port.port),
+        // Hovering the closed selector lists every detected port with the
+        // hardware behind it — the answer to "which ttyUSB is my adapter?"
+        // without having to open the list and read it item by item.
+        tip = html_escape(&crate::gui::serial_ports_tooltip(&detected)),
         options = serial_port_options(&port.port, &detected),
         baud = numfield(&format!("{}_baud", prefix), "Baud", port.baud),
     )
@@ -1404,7 +1422,7 @@ fn serial_row(prefix: &str, label: &str, port: &config::SerialPortConfig) -> Str
 /// list (cable unplugged, device temporarily gone), it gets its own
 /// option with a "(saved)" suffix so the operator can still see and
 /// keep their pinned value.
-fn serial_port_options(current: &str, detected: &[String]) -> String {
+fn serial_port_options(current: &str, detected: &[crate::serial::DetectedPort]) -> String {
     let mut out = String::new();
     let sel_none = if current.is_empty() { " selected" } else { "" };
     out.push_str(&format!(
@@ -1413,14 +1431,24 @@ fn serial_port_options(current: &str, detected: &[String]) -> String {
     ));
     let mut current_in_detected = false;
     for p in detected {
-        let sel = if p == current { " selected" } else { "" };
-        if p == current {
+        let sel = if p.name == current { " selected" } else { "" };
+        if p.name == current {
             current_in_detected = true;
         }
+        // The option's *value* stays the bare path — that is what gets saved.
+        // Only the visible text carries the short label, and the full
+        // description rides along as the per-option tooltip.
+        let text = if p.summary.is_empty() {
+            html_escape(&p.name)
+        } else {
+            format!("{} \u{2014} {}", html_escape(&p.name), html_escape(&p.summary))
+        };
         out.push_str(&format!(
-            "<option value=\"{v}\"{sel}>{v}</option>",
-            v = html_escape(p),
+            "<option value=\"{v}\"{sel} title=\"{t}\">{text}</option>",
+            v = html_escape(&p.name),
             sel = sel,
+            t = html_escape(&p.detail),
+            text = text,
         ));
     }
     if !current.is_empty() && !current_in_detected {
@@ -2236,9 +2264,19 @@ setInterval(refreshLogs, 2000);
 // Refresh-ports button on each Serial Port row.  Fetches the live
 // device list and rewrites both selects' option children — matches
 // the GUI's single refresh that re-scans for both port pickers.
+function escAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+}
 function refreshSerialPorts() {
   fetch('/serial-ports').then(function(r) { return r.json(); }).then(function(data) {
     var detected = data.ports || [];
+    // Same tooltip the server renders on first paint, rebuilt here so a
+    // refresh doesn't strip the descriptions off the selector.
+    var tip = detected.length
+      ? 'Detected serial ports:\\n' + detected.map(function(p) { return p.detail; }).join('\\n')
+      : 'No serial ports detected.';
     document.querySelectorAll('select.serial-port-select').forEach(function(sel) {
       // Preserve the operator's current choice — they may have just
       // picked a value, and a background refresh shouldn't reset it.
@@ -2248,18 +2286,19 @@ function refreshSerialPorts() {
       var html = '<option value=\"\"' + (keep === '' ? ' selected' : '') + '>(none)</option>';
       var inList = false;
       detected.forEach(function(p) {
-        var esc = p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                   .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
-        var sm = (p === keep) ? ' selected' : '';
-        if (p === keep) inList = true;
-        html += '<option value=\"' + esc + '\"' + sm + '>' + esc + '</option>';
+        var esc = escAttr(p.name);
+        var sm = (p.name === keep) ? ' selected' : '';
+        if (p.name === keep) inList = true;
+        var text = p.summary ? esc + ' \\u2014 ' + escAttr(p.summary) : esc;
+        html += '<option value=\"' + esc + '\"' + sm +
+                ' title=\"' + escAttr(p.detail) + '\">' + text + '</option>';
       });
       if (keep && !inList) {
-        var esc = keep.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                      .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+        var esc = escAttr(keep);
         html += '<option value=\"' + esc + '\" selected>' + esc + ' (saved)</option>';
       }
       sel.innerHTML = html;
+      sel.title = tip;
     });
   }).catch(function() {});
 }
@@ -2833,6 +2872,25 @@ mod tests {
         );
     }
 
+    /// Build a `DetectedPort` for a test: path only, as an unlabelled
+    /// built-in UART would report.
+    fn dp(name: &str) -> crate::serial::DetectedPort {
+        crate::serial::DetectedPort {
+            name: name.to_string(),
+            summary: String::new(),
+            detail: name.to_string(),
+        }
+    }
+
+    /// A described port, as a USB adapter reports.
+    fn dp_usb(name: &str, summary: &str, detail: &str) -> crate::serial::DetectedPort {
+        crate::serial::DetectedPort {
+            name: name.to_string(),
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
     #[test]
     fn test_serial_ports_json_empty() {
         assert_eq!(serial_ports_json(&[]), r#"{"ports":[]}"#);
@@ -2840,10 +2898,13 @@ mod tests {
 
     #[test]
     fn test_serial_ports_json_typical_paths() {
-        let ports = vec!["/dev/ttyS0".to_string(), "/dev/ttyUSB0".to_string()];
+        // Each entry carries the path plus its descriptions, so the refresh
+        // button can rebuild the options *and* their hover text.
+        let ports = vec![dp("/dev/ttyS0"), dp_usb("/dev/ttyUSB0", "FTDI", "FT232R \u{2014} FTDI")];
         assert_eq!(
             serial_ports_json(&ports),
-            r#"{"ports":["/dev/ttyS0","/dev/ttyUSB0"]}"#
+            r#"{"ports":[{"name":"/dev/ttyS0","summary":"","detail":"/dev/ttyS0"},"#.to_string()
+                + r#"{"name":"/dev/ttyUSB0","summary":"FTDI","detail":"FT232R — FTDI"}]}"#
         );
     }
 
@@ -2854,7 +2915,7 @@ mod tests {
         // the browser side.  Most real serial paths are ASCII and
         // quote-free, but escaping per RFC 8259 §7 keeps a Windows
         // COM-port-like path with backslashes safe too.
-        let weird = vec!["a\"b".to_string(), "c\\d".to_string(), "e\nf".to_string()];
+        let weird = vec![dp("a\"b"), dp("c\\d"), dp("e\nf")];
         let out = serial_ports_json(&weird);
         assert!(out.contains(r#""a\"b""#));
         assert!(out.contains(r#""c\\d""#));
@@ -2863,22 +2924,71 @@ mod tests {
 
     #[test]
     fn test_serial_port_options_none_selected_when_empty_current() {
-        let opts = serial_port_options("", &["/dev/ttyS0".into()]);
+        let opts = serial_port_options("", &[dp("/dev/ttyS0")]);
         // First option is "(none)" with the selected attribute.
         assert!(opts.starts_with(r#"<option value="" selected>(none)</option>"#));
-        // The detected port is present but not selected.
-        assert!(opts.contains(r#"<option value="/dev/ttyS0">"#));
+        // The detected port is present but not selected.  Each option now
+        // carries its description as a hover title; an undescribed port falls
+        // back to the path so the tooltip is never blank.
+        assert!(
+            opts.contains(r#"<option value="/dev/ttyS0" title="/dev/ttyS0">/dev/ttyS0</option>"#),
+            "got {opts}"
+        );
     }
 
     #[test]
     fn test_serial_port_options_marks_current_detected() {
-        let opts = serial_port_options("/dev/ttyUSB0", &[
-            "/dev/ttyS0".into(),
-            "/dev/ttyUSB0".into(),
-        ]);
-        assert!(opts.contains(r#"<option value="/dev/ttyUSB0" selected>"#));
+        let opts = serial_port_options("/dev/ttyUSB0", &[dp("/dev/ttyS0"), dp("/dev/ttyUSB0")]);
+        assert!(
+            opts.contains(r#"<option value="/dev/ttyUSB0" selected title="/dev/ttyUSB0">"#),
+            "got {opts}"
+        );
         // The (none) option is NOT selected when a real port is chosen.
         assert!(opts.starts_with(r#"<option value="">(none)</option>"#));
+    }
+
+    /// A described adapter shows its short label in the visible text and its
+    /// full description on hover — while the option's *value* stays the bare
+    /// device path, which is what gets saved.  Two identical-looking
+    /// `/dev/ttyUSB*` entries are otherwise impossible to tell apart.
+    #[test]
+    fn test_serial_port_options_label_and_tooltip_keep_value_a_bare_path() {
+        let opts = serial_port_options(
+            "",
+            &[dp_usb("/dev/ttyUSB0", "FTDI", "FT232R USB UART \u{2014} FTDI [USB 0403:6001]")],
+        );
+        assert!(
+            opts.contains(r#"value="/dev/ttyUSB0""#),
+            "the saved value must stay a bare path: {opts}"
+        );
+        assert!(
+            opts.contains(r#"title="FT232R USB UART &#8212; FTDI [USB 0403:6001]""#)
+                || opts.contains("title=\"FT232R USB UART \u{2014} FTDI [USB 0403:6001]\""),
+            "full description belongs in the hover title: {opts}"
+        );
+        assert!(
+            opts.contains("/dev/ttyUSB0 \u{2014} FTDI</option>"),
+            "visible text should carry the short label: {opts}"
+        );
+    }
+
+    /// The selector itself gets a tooltip listing every port, so an operator
+    /// can answer "which ttyUSB is my adapter?" without opening the list.
+    #[test]
+    fn test_serial_row_selector_tooltip_lists_every_port() {
+        let ports = vec![
+            dp_usb("/dev/ttyUSB0", "FTDI", "/dev/ttyUSB0 \u{2014} FT232R \u{2014} FTDI"),
+            dp("/dev/ttyAMA0"),
+        ];
+        let tip = crate::gui::serial_ports_tooltip(&ports);
+        assert!(tip.starts_with("Detected serial ports:"), "got {tip}");
+        assert!(tip.contains("/dev/ttyUSB0 \u{2014} FT232R \u{2014} FTDI"), "got {tip}");
+        assert!(tip.contains("/dev/ttyAMA0"), "got {tip}");
+        // An empty list still produces something a tooltip can show.
+        assert_eq!(
+            crate::gui::serial_ports_tooltip(&[]),
+            "No serial ports detected."
+        );
     }
 
     #[test]
@@ -2886,7 +2996,7 @@ mod tests {
         // Saved port path that isn't currently plugged in: keep it
         // visible with a "(saved)" suffix so the operator's choice
         // is preserved across reboots / cable unplugs.
-        let opts = serial_port_options("/dev/ttyUSB99", &["/dev/ttyS0".into()]);
+        let opts = serial_port_options("/dev/ttyUSB99", &[dp("/dev/ttyS0")]);
         assert!(opts.contains(r#"<option value="/dev/ttyUSB99" selected>/dev/ttyUSB99 (saved)</option>"#));
     }
 

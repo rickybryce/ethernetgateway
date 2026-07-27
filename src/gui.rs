@@ -423,18 +423,38 @@ fn spawn_folder_picker(
     rx
 }
 
-/// Enumerate available serial ports, returning their device paths.
+/// Enumerate available serial ports with their hardware descriptions.
 /// `pub(crate)` so the web server's serial-port dropdown can populate
 /// from the same source the desktop GUI uses — both surfaces show
-/// the same list and refresh through the same code path.
-pub(crate) fn detect_serial_ports() -> Vec<String> {
-    match serialport::available_ports() {
-        Ok(ports) => ports.into_iter().map(|p| p.port_name).collect(),
-        Err(e) => {
-            logger::log(format!("Could not detect serial ports: {}", e));
-            Vec::new()
-        }
+/// the same list and refresh through the same code path, and both can
+/// therefore name the adapter behind a path on hover.
+///
+/// Delegates to [`crate::serial::list_serial_ports_detailed`] so there is one
+/// implementation for all three UIs rather than one per surface.
+pub(crate) fn detect_serial_ports() -> Vec<crate::serial::DetectedPort> {
+    let ports = crate::serial::list_serial_ports_detailed();
+    if ports.is_empty() {
+        // The detailed helper folds an enumeration error into an empty list
+        // (it is called from contexts with nowhere to report one).  An empty
+        // list is also the perfectly normal "no adapters plugged in" answer,
+        // so this is not logged as a failure.
+        logger::log("No serial ports detected.".to_string());
     }
+    ports
+}
+
+/// One tooltip listing every detected port and what it is — the answer to
+/// "which `/dev/ttyUSB*` is my adapter?" without leaving the config screen.
+pub(crate) fn serial_ports_tooltip(ports: &[crate::serial::DetectedPort]) -> String {
+    if ports.is_empty() {
+        return "No serial ports detected.".to_string();
+    }
+    let mut out = String::from("Detected serial ports:");
+    for p in ports {
+        out.push('\n');
+        out.push_str(&p.detail);
+    }
+    out
 }
 
 struct App {
@@ -494,8 +514,9 @@ struct App {
     /// Two slots — one each for Port A and Port B — let the user type
     /// freely without their input being clobbered by a partial parse.
     serial_baud_buf: [String; 2],
-    // Detected serial ports for the dropdown (shared between both ports).
-    serial_ports: Vec<String>,
+    // Detected serial ports for the dropdown (shared between both ports),
+    // each carrying the hardware description shown on hover.
+    serial_ports: Vec<crate::serial::DetectedPort>,
     /// Set when the user edits any field; prevents refresh_from_global from
     /// overwriting in-progress edits. Cleared on save.
     dirty: bool,
@@ -1138,6 +1159,7 @@ impl App {
                 self.cfg.port(id).port.clone()
             };
             // Per-port salt so the two ComboBoxes don't share state.
+            let tooltip = serial_ports_tooltip(&self.serial_ports);
             egui::ComboBox::from_id_salt(format!("serial_port_{}", id.label()))
                 .width(180.0)
                 .selected_text(&selected)
@@ -1148,13 +1170,26 @@ impl App {
                         "(none)",
                     );
                     for port in &self.serial_ports {
+                        // The row shows the path plus a short label; the full
+                        // description is on hover.  A path alone cannot tell
+                        // two identical adapters apart.
+                        let label = if port.summary.is_empty() {
+                            port.name.clone()
+                        } else {
+                            format!("{}  \u{2014} {}", port.name, port.summary)
+                        };
                         ui.selectable_value(
                             &mut self.cfg.port_mut(id).port,
-                            port.clone(),
-                            port,
-                        );
+                            port.name.clone(),
+                            label,
+                        )
+                        .on_hover_text(&port.detail);
                     }
-                });
+                })
+                // Hovering the closed selector lists every port with its name,
+                // which is what an operator needs *before* opening it.
+                .response
+                .on_hover_text(&tooltip);
             if ui
                 .small_button("\u{21bb}")
                 .on_hover_text("Refresh ports")
@@ -3591,10 +3626,14 @@ mod tests {
     fn test_detect_serial_ports_returns_vec() {
         // Should not panic regardless of hardware present
         let ports = detect_serial_ports();
-        // Each entry should be a non-empty path
+        // Each entry needs a non-empty path and a non-empty tooltip (the
+        // detail falls back to the path), since the pickers rely on both.
         for port in &ports {
-            assert!(!port.is_empty());
+            assert!(!port.name.is_empty());
+            assert!(!port.detail.is_empty());
         }
+        // The tooltip is safe to build from any list, including an empty one.
+        assert!(!serial_ports_tooltip(&ports).is_empty());
     }
 
     // ── Color palette constants ──────────────────────────────

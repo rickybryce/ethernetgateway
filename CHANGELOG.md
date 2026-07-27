@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Serial-port pickers now name the hardware behind a device path.** A bare
+  `/dev/ttyUSB0` or `COM3` says nothing about *which* adapter it is, and the
+  moment a machine has two, picking the wrong one produces a port that is simply
+  silent with nothing on screen to distinguish them.
+  - **Telnet** summarises inline, fitted to the terminal:
+    `/dev/ttyUSB0 -- FTDI`. The path is never sacrificed to make room — the
+    description is trimmed first, dropped entirely rather than shown as a stub,
+    and only a path that overflows on its own is truncated (unchanged
+    behaviour). Widths still respected: 30 columns PETSCII, 50 ANSI/ASCII.
+  - **Web and GUI** put the short label in the visible row and the full
+    description on hover, and hovering the *closed* selector lists every
+    detected port with its hardware — the answer to "which ttyUSB is my
+    adapter?" without opening the list and reading it item by item.
+  - In every UI the value that gets **saved is still the bare device path**; the
+    descriptions are display-only.
+  - One implementation for all three surfaces: new `serial::DetectedPort` plus
+    `list_serial_ports_detailed()`, which `gui::detect_serial_ports` (the web
+    server's source too) delegates to. The paths-only `list_serial_ports` is
+    gone, having lost its last caller. The list is sorted by path so it cannot
+    reshuffle under the cursor between scans — the OS promises no order.
+  - The manufacturer leads the short label because that is the word an operator
+    recognises ("FTDI", "Prolific"); product strings often repeat across a whole
+    family. Full detail reads
+    `FT232R USB UART — FTDI (SN A5XK3RJT) [USB 0403:6001]`.
+  - An unlabelled built-in UART (a Pi's `ttyAMA0`, an ISA 16550) reports no
+    summary on purpose, so its row stays the bare path instead of being labelled
+    "Unknown".
+  - The `/serial-ports` refresh JSON carries the descriptions now, because
+    otherwise clicking refresh silently stripped the names off a page that had
+    rendered with them. USB descriptor strings are whatever the device claims,
+    so they are JSON-escaped on the wire and HTML-escaped into attributes.
+  - `describe_port_type` is pure and unit-tested across the cases a developer's
+    desk will not reproduce on demand: manufacturer-only, product-only, neither,
+    a maker that merely repeats the product, an unlabelled port, PCI and
+    Bluetooth.
+
 ### Documentation
 - **New `web/cpmreference.html`** — a CP/M emulator reference so this material
   doesn't have to be rediscovered from the source each time: the `cpm_emu_*`

@@ -834,13 +834,133 @@ pub fn restart_all_serial() {
     }
 }
 
-/// List available serial ports (cross-platform).  Returns an empty vec on
-/// error.  Safe to call from `spawn_blocking`.
-pub fn list_serial_ports() -> Vec<String> {
-    match serialport::available_ports() {
-        Ok(ports) => ports.into_iter().map(|p| p.port_name).collect(),
-        Err(_) => Vec::new(),
+/// One detected serial port: the device path plus whatever the OS could tell
+/// us about the hardware behind it.
+///
+/// A bare `/dev/ttyUSB0` or `COM3` says nothing about *which* adapter it is,
+/// which is a real problem the moment a machine has two: picking the wrong one
+/// produces a port that is simply silent, and nothing on screen distinguishes
+/// them.  Both strings here are for humans only — the device path stays the
+/// value that gets saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedPort {
+    /// The device path — what goes in `serial_a_port` / `serial_b_port`.
+    pub name: String,
+    /// Short label for a one-line list: `FTDI`.  Empty when the OS told us
+    /// nothing, so a caller appends nothing rather than a stray separator.
+    pub summary: String,
+    /// Everything known, for a tooltip: product, maker, serial number, VID:PID.
+    /// Falls back to the path itself so a tooltip is never blank.
+    pub detail: String,
+}
+
+/// Build the short and long descriptions for a port type.
+///
+/// Pure, so it is testable without any serial hardware attached — which
+/// matters, because CI has none and the interesting cases (a USB adapter that
+/// reports only a manufacturer, or only a product, or nothing at all) are
+/// exactly the ones a developer's desk won't reproduce on demand.
+///
+/// The manufacturer leads the summary because it is the part an operator
+/// recognises ("FTDI", "Prolific") when telling two adapters apart; the product
+/// string is often the same across a whole family.
+pub fn describe_port_type(kind: &serialport::SerialPortType) -> (String, String) {
+    use serialport::SerialPortType;
+    match kind {
+        SerialPortType::UsbPort(info) => {
+            let maker = info.manufacturer.as_deref().unwrap_or("").trim().to_string();
+            let product = info.product.as_deref().unwrap_or("").trim().to_string();
+            let ids = format!("{:04x}:{:04x}", info.vid, info.pid);
+
+            let summary = if !maker.is_empty() {
+                maker.clone()
+            } else if !product.is_empty() {
+                product.clone()
+            } else {
+                format!("USB {ids}")
+            };
+
+            // Detail reads product-first ("FT232R USB UART — FTDI"), because
+            // that is the order the two read naturally as a description.
+            let mut detail = String::new();
+            if !product.is_empty() {
+                detail.push_str(&product);
+            }
+            if !maker.is_empty() && maker != product {
+                if !detail.is_empty() {
+                    detail.push_str(" \u{2014} ");
+                }
+                detail.push_str(&maker);
+            }
+            if let Some(sn) = info.serial_number.as_deref().map(str::trim) {
+                if !sn.is_empty() {
+                    if !detail.is_empty() {
+                        detail.push(' ');
+                    }
+                    detail.push_str(&format!("(SN {sn})"));
+                }
+            }
+            if !detail.is_empty() {
+                detail.push(' ');
+            }
+            detail.push_str(&format!("[USB {ids}]"));
+            (summary, detail)
+        }
+        SerialPortType::PciPort => ("PCI".to_string(), "PCI serial port".to_string()),
+        SerialPortType::BluetoothPort => {
+            ("Bluetooth".to_string(), "Bluetooth serial port".to_string())
+        }
+        // A built-in UART (a Pi's `/dev/ttyAMA0`, an ISA 16550) reports
+        // Unknown.  An empty summary is deliberate: callers then show the bare
+        // path rather than labelling a perfectly ordinary port "Unknown".
+        SerialPortType::Unknown => (String::new(), String::new()),
     }
+}
+
+/// List available serial ports with their hardware descriptions, sorted by
+/// device path so the order is stable between scans (the OS does not promise
+/// one, and a list that reshuffles under the cursor is its own bug).
+///
+/// Returns an empty vec on error.  Safe to call from `spawn_blocking`.
+pub fn list_serial_ports_detailed() -> Vec<DetectedPort> {
+    let mut ports: Vec<DetectedPort> = match serialport::available_ports() {
+        Ok(ports) => ports
+            .into_iter()
+            .map(|p| {
+                let (summary, detail) = describe_port_type(&p.port_type);
+                let detail = if detail.is_empty() {
+                    p.port_name.clone()
+                } else {
+                    format!("{} \u{2014} {}", p.port_name, detail)
+                };
+                DetectedPort { name: p.port_name, summary, detail }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    ports.sort_by(|a, b| a.name.cmp(&b.name));
+    ports
+}
+
+/// Compose one list row for a width-limited terminal: `/dev/ttyUSB0 -- FTDI`,
+/// fitted into `max_w` columns.
+///
+/// The path is what identifies the port, so it is never sacrificed to keep the
+/// description: the summary is trimmed first, and dropped entirely rather than
+/// shown as a useless stub. Only if the path alone overflows is *it* truncated
+/// — which is the pre-existing behaviour for a long path.
+pub fn port_row(path: &str, summary: &str, max_w: usize) -> String {
+    const SEP: &str = " -- ";
+    // Below this many characters a description conveys nothing, so the row is
+    // better off without it.
+    const MIN_SUMMARY: usize = 3;
+
+    if summary.is_empty() || path.chars().count() + SEP.len() + MIN_SUMMARY > max_w {
+        return crate::webbrowser::truncate_to_width(path, max_w);
+    }
+    let room = max_w - path.chars().count() - SEP.len();
+    let summary: String = summary.chars().take(room).collect();
+    format!("{path}{SEP}{summary}")
 }
 
 /// Request a ring emulator session on `id`.  The sender receives
@@ -6499,12 +6619,131 @@ mod tests {
         assert_eq!(forward, b"hello world");
     }
 
+    // ─── Serial-port descriptions ────────────────────────
+
+    /// Build a `SerialPortType::UsbPort` with the fields a test cares about.
+    fn usb(
+        manufacturer: Option<&str>,
+        product: Option<&str>,
+        serial_number: Option<&str>,
+    ) -> serialport::SerialPortType {
+        serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: 0x0403,
+            pid: 0x6001,
+            serial_number: serial_number.map(str::to_string),
+            manufacturer: manufacturer.map(str::to_string),
+            product: product.map(str::to_string),
+            // `UsbPortInfo::interface` exists only under serialport's
+            // `usbportinfo-interface` feature, which we do not enable — so the
+            // field is absent here and must not be named.
+        })
+    }
+
+    /// The manufacturer leads the short label, because that is the word an
+    /// operator recognises when telling two adapters apart.  This is the case
+    /// that produced the `/dev/ttyUSB0 -- FTDI` row.
+    #[test]
+    fn test_describe_usb_port_prefers_manufacturer_for_summary() {
+        let (summary, detail) = describe_port_type(&usb(
+            Some("FTDI"),
+            Some("FT232R USB UART"),
+            Some("A5XK3RJT"),
+        ));
+        assert_eq!(summary, "FTDI");
+        assert_eq!(detail, "FT232R USB UART \u{2014} FTDI (SN A5XK3RJT) [USB 0403:6001]");
+    }
+
+    /// A descriptor with only a product still yields a useful label rather than
+    /// falling through to the hex ids.
+    #[test]
+    fn test_describe_usb_port_falls_back_to_product() {
+        let (summary, detail) = describe_port_type(&usb(None, Some("CP2102 UART"), None));
+        assert_eq!(summary, "CP2102 UART");
+        assert_eq!(detail, "CP2102 UART [USB 0403:6001]");
+    }
+
+    /// A descriptor with neither string is still distinguishable by VID:PID,
+    /// which beats showing the operator nothing at all.
+    #[test]
+    fn test_describe_usb_port_with_no_strings_uses_ids() {
+        let (summary, detail) = describe_port_type(&usb(None, None, None));
+        assert_eq!(summary, "USB 0403:6001");
+        assert_eq!(detail, "[USB 0403:6001]");
+    }
+
+    /// A maker that merely repeats the product must not be printed twice.
+    #[test]
+    fn test_describe_usb_port_does_not_repeat_identical_maker_and_product() {
+        let (_, detail) = describe_port_type(&usb(Some("FTDI"), Some("FTDI"), None));
+        assert_eq!(detail, "FTDI [USB 0403:6001]");
+    }
+
+    /// A built-in UART (a Pi's ttyAMA0, an ISA 16550) reports Unknown.  An
+    /// empty summary is deliberate — the row shows the bare path instead of
+    /// labelling an ordinary port "Unknown".
+    #[test]
+    fn test_describe_unknown_port_has_no_summary() {
+        let (summary, detail) = describe_port_type(&serialport::SerialPortType::Unknown);
+        assert!(summary.is_empty(), "got {summary:?}");
+        assert!(detail.is_empty(), "got {detail:?}");
+    }
+
+    #[test]
+    fn test_describe_pci_and_bluetooth_ports() {
+        let (s, _) = describe_port_type(&serialport::SerialPortType::PciPort);
+        assert_eq!(s, "PCI");
+        let (s, _) = describe_port_type(&serialport::SerialPortType::BluetoothPort);
+        assert_eq!(s, "Bluetooth");
+    }
+
+    /// The path identifies the port, so it survives; the description is what
+    /// gets trimmed to fit a narrow terminal.
+    #[test]
+    fn test_port_row_fits_width_without_sacrificing_the_path() {
+        // Comfortable width: both parts intact.
+        assert_eq!(port_row("/dev/ttyUSB0", "FTDI", 50), "/dev/ttyUSB0 -- FTDI");
+
+        // A PETSCII-width row (30) still fits this pair exactly.
+        let row = port_row("/dev/ttyUSB0", "FTDI", 30);
+        assert_eq!(row, "/dev/ttyUSB0 -- FTDI");
+        assert!(row.chars().count() <= 30);
+
+        // Tight: the summary is clipped, the path is not.  12-char path + the
+        // 4-char separator leaves exactly 6 columns of description.
+        let row = port_row("/dev/ttyUSB0", "Silicon Labs", 22);
+        assert_eq!(row, "/dev/ttyUSB0 -- Silico");
+        assert_eq!(row.chars().count(), 22, "should fill the width exactly");
+        assert!(row.starts_with("/dev/ttyUSB0"));
+
+        // Too tight for any useful description: drop it, keep the path whole.
+        assert_eq!(port_row("/dev/ttyUSB0", "FTDI", 15), "/dev/ttyUSB0");
+
+        // No description at all: just the path, no dangling separator.
+        assert_eq!(port_row("/dev/ttyAMA0", "", 40), "/dev/ttyAMA0");
+
+        // Only when the path itself overflows is it truncated (prior behaviour).
+        let row = port_row("/dev/serial/by-id/usb-FTDI-if00-port0", "FTDI", 20);
+        assert!(row.chars().count() <= 20, "{row:?}");
+        assert!(row.ends_with("..."), "{row:?}");
+    }
+
     // ─── Misc ────────────────────────────────────────────
 
     #[test]
     fn test_list_serial_ports_no_panic() {
-        // Just verify it doesn't crash — result depends on hardware
-        let _ = list_serial_ports();
+        // Just verify it doesn't crash — result depends on hardware.  Whatever
+        // it returns must be sorted by path and carry a non-empty detail (the
+        // tooltip falls back to the path), since both are contracts the three
+        // config UIs rely on.
+        let ports = list_serial_ports_detailed();
+        assert!(
+            ports.windows(2).all(|w| w[0].name <= w[1].name),
+            "detected ports must come back sorted: {ports:?}"
+        );
+        assert!(
+            ports.iter().all(|p| !p.detail.is_empty()),
+            "every port needs a tooltip string: {ports:?}"
+        );
     }
 
     #[test]
