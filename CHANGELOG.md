@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **New `web/cpmreference.html`** — a CP/M emulator reference so this material
+  doesn't have to be rediscovered from the source each time: the `cpm_emu_*`
+  config keys, the CCP built-in commands, every `cpm_emu_uart` profile with its
+  port addresses, the bundled EGT80 terminal (menu, and the keystrokes that
+  select each profile), which driver to pick for which machine, the RomWBW HBIOS
+  calls we service and the two return-convention details that bit us, BDOS/BIOS
+  coverage including what is deliberately absent, and the virtual modem's AT
+  commands and dial targets. Linked from the user manual and added to the
+  References grid on every sibling reference page.
+
 ### Fixed
 - **The CP/M emulator ran at roughly 150 baud, and none of it was the CPU.** Two
   tokio timers sat on the emulator's *per-character* path. The driver loop

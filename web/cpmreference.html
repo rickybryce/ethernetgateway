@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CP/M Emulator Reference &mdash; Ethernet Gateway v0.8.0</title>
+    <meta name="description" content="Reference for the Ethernet Gateway CP/M 2.2 emulator: the cpm_emu_* config keys, the CCP built-in commands, every cpm_emu_uart access profile (Z80 SIO/2, 6850 ACIA, Altair 88-SIO, BDOS AUX:, RomWBW HBIOS), the bundled EGT80 terminal and which driver to pick for which machine, the RomWBW HBIOS calls we service, BDOS/BIOS coverage, and the virtual modem AT command set.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">CP/M Emulator Reference</p>
+            <div class="hdr-version">v0.8.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">CP/M 2.2</span>
+                <span class="hdr-badge">Z80</span>
+                <span class="hdr-badge">Virtual Modem</span>
+                <span class="hdr-badge">RomWBW HBIOS</span>
+                <span class="hdr-badge">EGT80</span>
+                <span class="hdr-badge">Drives A:&ndash;P:</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#config">Config Keys</a>
+            <a href="#ccp">CCP Commands</a>
+            <a href="#uart">UART Profiles</a>
+            <a href="#egt80">EGT80</a>
+            <a href="#machines">Which Driver</a>
+            <a href="#hbios">HBIOS Calls</a>
+            <a href="#bdos">BDOS / BIOS</a>
+            <a href="#at">AT Commands</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">The CP/M emulator runs real Z80 <code>.COM</code> software against an emulated CP/M 2.2, with a virtual Hayes modem the guest can dial out through.</p>
+
+                <p>
+                    Two separate features in this gateway both say &ldquo;CP/M&rdquo;, and it is
+                    worth being clear which is which before reading on:
+                </p>
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Feature</th><th>What it is</th><th>Where</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>CP/M emulator</strong><br><span class="dim-text">(this page)</span></td>
+                            <td>A real Z80 CPU emulator running actual <code>.COM</code> programs against an emulated CP/M 2.2 &mdash; BDOS, BIOS, optional RomWBW HBIOS, and a virtual modem.</td>
+                            <td><code>src/cpm/</code> + <code>telnet/cpm_emu.rs</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Gateway Shell</strong></td>
+                            <td>A pure-Rust CP/M-<em>styled</em> file manager over the transfer directory. An <code>A&gt;</code> prompt and familiar commands, but no Z80 and no guest code.</td>
+                            <td><code>telnet/kernel.rs</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The emulator runs arbitrary code, so it is bounded on three axes.</strong>
+                        Every file call is jailed under <code>transfer_dir/CPM</code>; a runaway program is
+                        stopped by <code>cpm_emu_max_minstr</code>; and a double-<code>ESC</code> always
+                        returns you to the <code>A&gt;</code> prompt, even from a program that never reads
+                        the console. It services BDOS/BIOS only &mdash; there is no path from guest code to
+                        a host command.
+                    </p>
+                </div>
+
+                <p>
+                    Reaching it: from the main menu choose <strong>K &mdash; CP/M System</strong>. The
+                    emulator is enabled by default (<code>cpm_emu_enabled</code>); the drive folders
+                    <code>transfer_dir/CPM/A</code> &hellip; <code>P</code> are created on first launch, and the
+                    bundled <a href="#egt80">EGT80</a> terminal is placed on drive A: at the same time.
+                </p>
+
+                <div class="callout callout-info">
+                    <p>
+                        <strong>Performance note.</strong> The Z80 core is not the limiting factor &mdash; it
+                        steps at roughly <strong>33&nbsp;MIPS</strong> (about 65&times; a 4&nbsp;MHz Z80) and
+                        services around <strong>6.4&nbsp;million</strong> console-output traps per second. What
+                        governs perceived speed is the async driver loop, which regains control at
+                        <em>every</em> BDOS/BIOS/HBIOS trap. Anything that loop waits on is therefore paid
+                        once per emulated character, which is why neither the readiness probe nor the peer
+                        poll may sit on a timer.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CONFIG KEYS                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="config">
+                <div class="section-title">Configuration Keys</div>
+                <p class="intro">All <code>cpm_emu_*</code> keys live in <code>egateway.conf</code> and are editable from all three config UIs (telnet, web, GUI).</p>
+
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>cpm_emu_enabled</code></td><td><code>true</code></td><td>Whether the CP/M System menu item exists at all. Set <code>false</code> to refuse guest code entirely.</td></tr>
+                        <tr><td><code>cpm_emu_max_minstr</code></td><td><code>2000</code></td><td>Instruction ceiling in <em>millions</em> before a running program is stopped. The runaway guard.</td></tr>
+                        <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
+                        <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
+                        <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>
+                        <tr><td><code>cpm_emu_quiet</code></td><td><code>false</code></td><td>Virtual modem <code>ATQ</code> &mdash; suppress result codes.</td></tr>
+                        <tr><td><code>cpm_emu_x_code</code></td><td><code>4</code></td><td>Virtual modem <code>ATX</code> result-code level (0&ndash;4).</td></tr>
+                        <tr><td><code>cpm_emu_dcd_mode</code></td><td><code>1</code></td><td>Virtual modem <code>AT&amp;C</code> &mdash; 0 forces DCD on, 1 tracks real carrier.</td></tr>
+                        <tr><td><code>cpm_emu_s_regs</code></td><td><span class="dim-text">S0&hellip;S27</span></td><td>Saved S-register list. <code>AT&amp;W</code> writes it; <code>ATZ</code> restores it.</td></tr>
+                    </tbody>
+                </table>
+
+                <p>
+                    <code>cpm_emu_uart</code> defaults to a live port rather than <code>off</code> because it is
+                    the port most CP/M software here expects, and it is what EGT80 defaults to &mdash; so the
+                    emulator and its terminal agree out of the box. That is a deliberate widening: with a port
+                    selected, guest code can open a socket with <code>ATDT</code>. An operator who does not want
+                    that sets <code>cpm_emu_uart = off</code>; peer dialling additionally requires
+                    <code>allow_peer_dial</code>.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CCP COMMANDS                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="ccp">
+                <div class="section-title">CCP Commands</div>
+                <p class="intro">The built-in commands at the <code>A&gt;</code> prompt. Anything else is treated as a program name and loaded as <code>name.COM</code> from the current drive.</p>
+
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Command</th><th>Does</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>DIR</code></td><td>List files on the current drive.</td></tr>
+                        <tr><td><code>ERA</code> <em>name</em><br><span class="dim-text">also <code>DEL</code></span></td><td>Erase file(s); wildcards accepted.</td></tr>
+                        <tr><td><code>REN</code> <em>new</em>=<em>old</em><br><span class="dim-text">also <code>RENAME</code></span></td><td>Rename a file.</td></tr>
+                        <tr><td><code>TYPE</code> <em>file</em></td><td>Show a text file.</td></tr>
+                        <tr><td><code>SAVE</code> <em>n</em> <em>file</em></td><td>Save <em>n</em> pages of the TPA to a file.</td></tr>
+                        <tr><td><code>USER</code> <em>n</em></td><td>Select user area.</td></tr>
+                        <tr><td><code>A:</code> &hellip; <code>P:</code></td><td>Change drive. All sixteen CP/M 2.2 drives exist, each a folder under <code>transfer_dir/CPM</code>.</td></tr>
+                        <tr><td><code>VER</code><br><span class="dim-text">also <code>VERSION</code></span></td><td>Emulator version and TPA size.</td></tr>
+                        <tr><td><code>HELLO</code></td><td>BDOS print-string demo (function 9).</td></tr>
+                        <tr><td><code>ECHO</code></td><td>Interactive console demo.</td></tr>
+                        <tr><td><code>HELP</code><br><span class="dim-text">also <code>?</code></span></td><td>This command list.</td></tr>
+                        <tr><td><code>EXIT</code><br><span class="dim-text">also <code>BYE</code>, <code>QUIT</code></span></td><td>Leave CP/M and return to the gateway menu.</td></tr>
+                        <tr><td><em>name</em></td><td>Run <code>name.COM</code> from the drive. A drive prefix works (<code>B:PIP</code>); the extension is always forced to <code>COM</code>, as the real CCP does.</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>Double-<code>ESC</code> always gets you back.</strong> The driver drains the wire
+                        between CPU batches, so two <code>ESC</code> keys break out even of a program that never
+                        reads the console &mdash; a compute-bound loop included. On a PETSCII terminal
+                        <code>0x5F</code> counts as <code>ESC</code> too.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- UART PROFILES                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="uart">
+                <div class="section-title">UART Profiles &mdash; <code>cpm_emu_uart</code></div>
+                <p class="intro">Three ways a guest can reach the virtual modem, all selected by this one key. Software that pokes a UART wants a <strong>port</strong>; software that asks the OS wants <strong>AUX:</strong>; software that asks the firmware wants <strong>HBIOS</strong>.</p>
+
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Value</th><th>Access</th><th>Addresses / unit</th><th>Matches</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>off</code></td><td>&mdash;</td><td>&mdash;</td><td>No virtual modem; guest code cannot open a socket.</td></tr>
+                        <tr><td><code>rc2014_1a</code></td><td>Port (Z80 SIO/2)</td><td>status <code>0x80</code> / data <code>0x81</code></td><td>RC2014 SIO/2 board 1, channel A</td></tr>
+                        <tr><td><code>rc2014_1b</code> <span class="dim-text">(default)</span></td><td>Port (Z80 SIO/2)</td><td>status <code>0x82</code> / data <code>0x83</code></td><td>RC2014 SIO/2 board 1, channel B &mdash; the usual <code>AUX:</code> port; <code>qterm82</code></td></tr>
+                        <tr><td><code>rc2014_2a</code></td><td>Port (Z80 SIO/2)</td><td>status <code>0x84</code> / data <code>0x85</code></td><td>RC2014 SIO/2 board 2, channel A &mdash; <code>qterm84</code></td></tr>
+                        <tr><td><code>rc2014_2b</code></td><td>Port (Z80 SIO/2)</td><td>status <code>0x86</code> / data <code>0x87</code></td><td>RC2014 SIO/2 board 2, channel B</td></tr>
+                        <tr><td><code>altair_2sio1</code></td><td>Port (6850 ACIA)</td><td>status <code>0x10</code> / data <code>0x11</code></td><td>Altair 88-2SIO port 1 &mdash; IMP8</td></tr>
+                        <tr><td><code>altair_2sio2</code></td><td>Port (6850 ACIA)</td><td>status <code>0x12</code> / data <code>0x13</code></td><td>Altair 88-2SIO port 2</td></tr>
+                        <tr><td><code>altair_sio</code></td><td>Port (88-SIO)</td><td>status <code>0x00</code> / data <code>0x01</code></td><td>Altair 88-SIO, the original MITS board</td></tr>
+                        <tr><td><code>aux</code></td><td>BDOS <code>AUX:</code></td><td>functions 3 / 4</td><td>Hardware-independent; SC126 / RomWBW</td></tr>
+                        <tr><td><code>hbios_1</code></td><td>RomWBW HBIOS</td><td>unit 1, via <code>RST 8</code></td><td><code>qtermh1</code> and RomWBW software generally</td></tr>
+                        <tr><td><code>hbios_2</code></td><td>RomWBW HBIOS</td><td>unit 2, via <code>RST 8</code></td><td><code>qtermh2</code></td></tr>
+                    </tbody>
+                </table>
+
+                <p>
+                    The HBIOS entries exist because a good deal of RomWBW software &mdash; the QTERM
+                    <code>h</code> builds among them &mdash; never touches a port at all, so no port address
+                    could ever have served it. <strong>HBIOS answers only when an <code>hbios_*</code> profile is
+                    selected</strong>: on any other setting the guest sees the page zero of a plain CP/M 2.2
+                    machine, with no <code>RST 8</code> vector, and well-behaved software detects its absence
+                    and says so rather than hanging.
+                </p>
+
+                <div class="callout callout-info">
+                    <p>
+                        <strong>The <code>aux</code> caveat.</strong> CP/M 2.2 has no way to ask whether an
+                        <code>AUX:</code> byte is waiting, so this family must read ahead and cannot receive a
+                        literal <code>^Z</code>. Prefer a chip family or HBIOS when one fits the machine.
+                    </p>
+                </div>
+
+                <p class="dim-text">
+                    Single source of truth: <code>src/cpm/uart.rs</code> &mdash; config validation and all
+                    three UIs enumerate that same list, so this table cannot drift from one UI to another.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- EGT80                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="egt80">
+                <div class="section-title">EGT80 &mdash; the bundled CP/M terminal</div>
+                <p class="intro">EGT80 (&ldquo;Ethernet Gateway Terminal&rdquo;) is this project's own CP/M terminal, written in Z80 assembly. One binary asks which port it is on instead of shipping one build per machine.</p>
+
+                <p>
+                    Every period terminal we tried was built for one machine's serial port &mdash; QTERM ships
+                    a separate binary per port, IMP8 is an Altair 2SIO build, and KERCPM22's generic overlay has
+                    no serial driver at all. Get the pairing wrong and the program is simply silent. EGT80 asks
+                    instead: pick the port from a menu, and it remembers.
+                </p>
+
+                <p>
+                    It ships <em>inside</em> the gateway binary and is placed on CP/M drive A: the first time the
+                    drive folders are created, then <strong>never overwritten</strong> &mdash; it saves its settings
+                    inside its own <code>.COM</code>, so refreshing it would discard your configuration. Deleting
+                    <code>EGT80.COM</code> restores the shipped copy on the next launch.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Main menu</h3>
+                <table class="data-table">
+                    <thead><tr><th>Key</th><th>Does</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>T</code></td><td>Terminal mode &mdash; the wire, with the menu key to get back.</td></tr>
+                        <tr><td><code>S</code></td><td>Settings: serial port, line settings, display.</td></tr>
+                        <tr><td><code>U</code></td><td>Upload a file to the far end (XMODEM).</td></tr>
+                        <tr><td><code>D</code></td><td>Download a file from the far end (XMODEM).</td></tr>
+                        <tr><td><code>H</code></td><td>Help.</td></tr>
+                        <tr><td><code>V</code></td><td>Save settings into <code>EGT80.COM</code> itself.</td></tr>
+                        <tr><td><code>X</code></td><td>Exit to CP/M.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Selecting a port &mdash; keys from <code>S</code> &rarr; <code>P</code></h3>
+                <p>
+                    The top level names <strong>machines, not chips</strong>, because which chip a board uses is a
+                    question only someone who already knows the board can answer. &ldquo;Other hardware&rdquo; is the
+                    old chip list, one level down, with the free-form address prompts intact.
+                </p>
+                <table class="data-table">
+                    <thead>
+                        <tr><th>To match this profile</th><th>Press</th><th>EGT80 then reports</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>rc2014_1b</code> <span class="dim-text">(default)</span></td><td><code>1</code></td><td><code>Z80 SIO/2 at 82/83</code></td></tr>
+                        <tr><td><code>rc2014_1a</code></td><td><code>5</code> <code>1</code> <code>1</code></td><td><code>Z80 SIO/2 at 80/81</code></td></tr>
+                        <tr><td><code>rc2014_2a</code></td><td><code>5</code> <code>1</code> <code>3</code></td><td><code>Z80 SIO/2 at 84/85</code></td></tr>
+                        <tr><td><code>rc2014_2b</code></td><td><code>5</code> <code>1</code> <code>4</code></td><td><code>Z80 SIO/2 at 86/87</code></td></tr>
+                        <tr><td><code>altair_2sio1</code></td><td><code>3</code> <code>1</code></td><td><code>6850 ACIA at 10/11</code></td></tr>
+                        <tr><td><code>altair_2sio2</code></td><td><code>3</code> <code>2</code></td><td><code>6850 ACIA at 12/13</code></td></tr>
+                        <tr><td><code>altair_sio</code></td><td><code>4</code> <code>1</code></td><td><code>Altair 88-SIO at 00/01</code></td></tr>
+                        <tr><td><code>aux</code></td><td><code>6</code> <span class="dim-text">then any key</span></td><td><code>CP/M AUX: device (BDOS 3/4)</code></td></tr>
+                        <tr><td><code>hbios_1</code></td><td><code>2</code> <code>1</code> <code>RETURN</code></td><td><code>RomWBW HBIOS unit 1</code></td></tr>
+                        <tr><td><code>hbios_2</code></td><td><code>2</code> <code>2</code> <code>RETURN</code></td><td><code>RomWBW HBIOS unit 2</code></td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    <code>6</code> (AUX:) pauses on a &ldquo;Press any key&rdquo; note about the missing
+                    status call before the pick completes. <code>D</code> sets the gateway default and clears the
+                    rest; <code>N</code> selects no port; <code>Q</code> leaves the port unchanged.
+                </p>
+
+                <div class="callout callout-info">
+                    <p>
+                        <strong>All ten profiles verified against EGT80</strong> in the emulator: each pick was
+                        confirmed by the <code>Port:</code> line EGT80 redraws, then <code>AT</code> &rarr;
+                        <code>OK</code> through that port, then a real burst dialled with
+                        <code>ATDT ethernetgateway</code>. Throughput came out even across all ten
+                        (&asymp;1.4&ndash;1.5&nbsp;KB/s), which is the point &mdash; no family is a slow path.
+                    </p>
+                </div>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong><code>EGT80.COM</code> is committed and CI cannot rebuild it.</strong> It is built by
+                        running the real period assembler (SLR <code>Z80ASM</code>) under <code>zxcc</code> via
+                        <code>EGT80/Makefile</code>, with M80+L80 and ZMAC as portability gates. Do not edit
+                        <code>EGT80.Z80</code> without re-running <code>make</code> &mdash; the compiled-in copy is
+                        what ships.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- WHICH DRIVER FOR WHICH MACHINE                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="machines">
+                <div class="section-title">Which Driver for Which Machine</div>
+                <p class="intro">EGT80's five port families, what selects each, and how far each one has been proven.</p>
+
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Machine</th><th>EGT80 driver</th><th>Emulator profile</th><th>Verified</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>This gateway's emulator</strong></td>
+                            <td>Z80 SIO/2 &mdash; 82/83</td>
+                            <td><code>rc2014_1b</code></td>
+                            <td>yes &mdash; the default pairing, works untouched</td>
+                        </tr>
+                        <tr>
+                            <td><strong>RC2014</strong> and most Z80 boards</td>
+                            <td>Z80 SIO/2 &mdash; four channels (0x80/0x82/0x84/0x86) or any address</td>
+                            <td><code>rc2014_1a</code> &hellip; <code>rc2014_2b</code></td>
+                            <td>yes</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Any RomWBW machine</strong> <span class="dim-text">(incl. SC126)</span></td>
+                            <td>RomWBW HBIOS &mdash; unit 0&ndash;3 via <code>RST 8</code></td>
+                            <td><code>hbios_1</code>, <code>hbios_2</code></td>
+                            <td>yes</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Altair 88-2SIO</strong>, RC2014 ACIA</td>
+                            <td>6850 ACIA &mdash; 0x10 / 0x12, or any address</td>
+                            <td><code>altair_2sio1</code>, <code>altair_2sio2</code></td>
+                            <td>yes</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Altair 88-SIO</strong> <span class="dim-text">(original MITS board)</span></td>
+                            <td>Altair 88-SIO &mdash; 0x00/0x01, or any address</td>
+                            <td><code>altair_sio</code></td>
+                            <td>yes</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Z180 boards</strong> without RomWBW</td>
+                            <td>Z180 ASCI &mdash; channel 0/1, internal I/O base</td>
+                            <td><span class="dim-text">not reachable here</span></td>
+                            <td><strong>real iron only</strong> &mdash; our Z80 core has no <code>IN0</code>/<code>OUT0</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Portable fallback</strong>, any CP/M</td>
+                            <td>CP/M BDOS <code>AUX:</code> &mdash; functions 3/4, no parameters</td>
+                            <td><code>aux</code></td>
+                            <td>yes &mdash; but cannot receive a literal <code>^Z</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <p>
+                    <strong>Why the 88-SIO is its own item</strong> rather than an address on the 6850 screen: it
+                    is a different board. It reports ready by pulling a bit <em>low</em>, so an 88-2SIO driver
+                    aimed at it reads every test inverted and the port looks permanently busy and permanently
+                    empty at once. The addresses were never the only difference.
+                </p>
+
+                <p>
+                    <strong>Why the firmware is asked rather than guessed</strong> on a Z180: RomWBW relocates the
+                    Z180's internal I/O block, so a fixed guess addresses nothing on some boards. EGT80 asks the
+                    firmware where the block is and offers <code>C0</code> by name for Small Computer Central
+                    boards (SC126 and friends), where RomWBW puts it.
+                </p>
+
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>Two EGT80 paths are reasoned, not run</strong>, because nothing here can reach
+                        them: the Z180 ASCI driver (the emulated Z80 has no <code>IN0</code>/<code>OUT0</code>, and
+                        a Z80 assembler cannot even encode them) and the CP/M&nbsp;3 console path. Both are
+                        documented as such in <code>EGT80/README.md</code>.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- HBIOS                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="hbios">
+                <div class="section-title">RomWBW HBIOS Calls</div>
+                <p class="intro">A clean-room implementation of the RomWBW HBIOS serial group, written from the published API. Reached by <code>RST 8</code> with the function in <code>B</code> and the unit in <code>C</code>.</p>
+
+                <p>
+                    Only present when an <code>hbios_*</code> profile is selected. On any other
+                    <code>cpm_emu_uart</code> setting there is no <code>RST 8</code> vector at all, and
+                    <em>every</em> function is refused &mdash; so software that checks for RomWBW correctly
+                    concludes this is not a RomWBW machine.
+                </p>
+
+                <table class="data-table">
+                    <thead>
+                        <tr><th>Fn (B)</th><th>Name</th><th>Behaviour here</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>0x00</code></td><td>CIOIN<br><span class="dim-text">serial input</span></td><td>Returns the next byte in <code>E</code>. <strong>Blocking:</strong> with nothing waiting the call is left <em>unanswered</em> and the guest's PC stays parked on the trap, so it is re-reported next batch &mdash; one blocking call to the guest, a responsive host.</td></tr>
+                        <tr><td><code>0x01</code></td><td>CIOOUT<br><span class="dim-text">serial output</span></td><td>Sends the byte in <code>E</code>. Parks the same way when the TX ring is full, rather than dropping the byte &mdash; which is the whole point of a blocking send.</td></tr>
+                        <tr><td><code>0x02</code></td><td>CIOIST<br><span class="dim-text">input status</span></td><td>Count of waiting characters, in <strong>both</strong> <code>A</code> and <code>E</code>, flags following, so <code>Z</code> means &ldquo;nothing waiting&rdquo;. Capped at <code>0x7F</code>.</td></tr>
+                        <tr><td><code>0x03</code></td><td>CIOOST<br><span class="dim-text">output status</span></td><td>Free output space, same convention, also capped at <code>0x7F</code>.</td></tr>
+                        <tr><td><code>0x04</code></td><td>CIOINIT<br><span class="dim-text">initialise</span></td><td>Accepts the line characteristics in <code>DE</code> and remembers them so QUERY reports them back. There is no UART to program &mdash; a TCP connection has no baud rate &mdash; but refusing would stop software before it starts; this is the first call QTERM's overlay makes. <code>DE = 0xFFFF</code> means &ldquo;reset, keep the current line&rdquo;.</td></tr>
+                        <tr><td><code>0x05</code></td><td>CIOQUERY</td><td>Reports the stored line characteristics in <code>DE</code>, with no terminal type.</td></tr>
+                        <tr><td><code>0x06</code></td><td>CIODEVICE</td><td>Describes the unit: RS-232 attribute, this unit number, no device type / mode / base.</td></tr>
+                        <tr><td><code>0xF1</code></td><td>SYSVER</td><td>Firmware version, returned in <code>DE</code> with the platform id in <code>L</code>.</td></tr>
+                        <tr><td><code>0xF8</code></td><td>SYSGET</td><td>Sub-function in <code>C</code>. Only <code>CIOCNT</code> (<code>0x00</code>, the serial-unit count) is answered.</td></tr>
+                        <tr><td colspan="3" class="dim-text">Every other serial function, and every other HBIOS group &mdash; disk, RTC, video, sound, DSKY, bank management &mdash; returns a failure result (<code>0xFF</code>).</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-info">
+                    <p>
+                        <strong>Two deliberate details that bit us.</strong> First, the status calls return the
+                        count in <code>A</code> as well as <code>E</code>: the API labels <code>A</code> a result
+                        code, but RomWBW's own drivers put the count there and callers rely on it &mdash; QTERM's
+                        overlay hands <code>A</code> straight to a <code>JR&nbsp;Z</code>. Second, that count is
+                        capped at <code>0x7F</code> rather than <code>0xFF</code>, because the API reserves bit 7
+                        for an error result; a larger count reads as a failure to any guest that checks, and one
+                        did hang on exactly that ambiguity.
+                    </p>
+                </div>
+
+                <p class="dim-text">
+                    The disk / RTC / video counts under SYSGET are <em>refused</em> rather than answered with
+                    zero, since a caller would read a successful zero as &ldquo;none present&rdquo; and a refusal
+                    as &ldquo;not that kind of machine&rdquo; &mdash; which is the truth here.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- BDOS / BIOS                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="bdos">
+                <div class="section-title">BDOS and BIOS Coverage</div>
+                <p class="intro">What the emulated CP/M 2.2 answers. Guest calls reach the live telnet/SSH session for console work, and a directory-backed filesystem for disk work.</p>
+
+                <h3 style="color: var(--cyan); margin: 6px 0 10px;">BDOS &mdash; console and system</h3>
+                <table class="data-table">
+                    <thead><tr><th>Fn (C)</th><th>Name</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>0</code></td><td>System Reset</td><td>Warm boot &mdash; returns to the <code>A&gt;</code> prompt.</td></tr>
+                        <tr><td><code>1</code></td><td>Console Input</td><td>Blocking read, echoed.</td></tr>
+                        <tr><td><code>2</code></td><td>Console Output</td><td>Character in <code>E</code>.</td></tr>
+                        <tr><td><code>3</code></td><td>Reader Input</td><td><code>AUX:</code> in &mdash; the virtual modem.</td></tr>
+                        <tr><td><code>4</code></td><td>Punch Output</td><td><code>AUX:</code> out &mdash; the virtual modem.</td></tr>
+                        <tr><td><code>5</code></td><td>List Output</td><td>Printer, routed to the console.</td></tr>
+                        <tr><td><code>6</code></td><td>Direct Console I/O</td><td>Non-blocking read / write.</td></tr>
+                        <tr><td><code>7</code> / <code>8</code></td><td>Get / Set IOBYTE</td><td>Backed by the page-zero IOBYTE.</td></tr>
+                        <tr><td><code>9</code></td><td>Print String</td><td><code>$</code>-terminated string at <code>DE</code>.</td></tr>
+                        <tr><td><code>10</code></td><td>Read Console Buffer</td><td>Line input with editing.</td></tr>
+                        <tr><td><code>11</code></td><td>Console Status</td><td>Non-blocking &ldquo;is a key waiting&rdquo;.</td></tr>
+                        <tr><td><code>12</code></td><td>Return Version</td><td><code>0x22</code> &mdash; CP/M 2.2.</td></tr>
+                        <tr><td><code>32</code></td><td>Get / Set User</td><td><code>E = 0xFF</code> gets, otherwise sets.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">BDOS &mdash; disk and file</h3>
+                <table class="data-table">
+                    <thead><tr><th>Fn (C)</th><th>Name</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>13</code></td><td>Reset Disk System</td><td>Back to drive A:, DMA <code>0x0080</code>.</td></tr>
+                        <tr><td><code>14</code></td><td>Select Disk</td><td>Also maintains the page-zero CDISK byte, which some transients read directly to find their login drive.</td></tr>
+                        <tr><td><code>15</code> / <code>16</code></td><td>Open / Close File</td><td>Writes are write-through, so close has nothing to flush.</td></tr>
+                        <tr><td><code>17</code> / <code>18</code></td><td>Search First / Next</td><td>Wildcard directory search.</td></tr>
+                        <tr><td><code>19</code></td><td>Delete File</td><td></td></tr>
+                        <tr><td><code>20</code> / <code>21</code></td><td>Read / Write Sequential</td><td></td></tr>
+                        <tr><td><code>22</code></td><td>Make File</td><td></td></tr>
+                        <tr><td><code>23</code></td><td>Rename File</td><td></td></tr>
+                        <tr><td><code>24</code></td><td>Return Login Vector</td><td>All sixteen bits set &mdash; every drive A:&ndash;P: exists, since its folder is auto-created. Returning 0 here used to confuse drive-enumeration utilities.</td></tr>
+                        <tr><td><code>25</code></td><td>Return Current Disk</td><td></td></tr>
+                        <tr><td><code>26</code></td><td>Set DMA Address</td><td></td></tr>
+                        <tr><td><code>27</code></td><td>Get Allocation Vector</td><td>A real bitmap &mdash; reserved directory blocks plus the blocks this drive's files occupy &mdash; so STAT's free count reflects actual usage.</td></tr>
+                        <tr><td><code>31</code></td><td>Get Disk Parameters</td><td>Returns a synthesised DPB.</td></tr>
+                        <tr><td><code>33</code></td><td>Read Random</td><td></td></tr>
+                        <tr><td><code>35</code></td><td>Compute File Size</td><td>Sets <code>R0</code>&ndash;<code>R2</code> to the record count.</td></tr>
+                        <tr><td><code>36</code></td><td>Set Random Record</td><td>From the current sequential position.</td></tr>
+                        <tr><td colspan="3" class="dim-text">Not implemented, by decision: <code>28</code> (write-protect disk), <code>30</code> (set file attributes) and <code>37</code> (reset drive). The attribute bits would need sidecar metadata a directory-backed drive has nowhere to keep.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">BIOS jump table</h3>
+                <p>
+                    A real jump table is installed, and both the ways a guest reaches it work: calling a table
+                    slot, and calling the extracted operand address directly &mdash; which is what MBASIC does.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Vector</th><th>Name</th><th>Behaviour</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>1</code></td><td>WBOOT</td><td>Warm boot to the <code>A&gt;</code> prompt.</td></tr>
+                        <tr><td><code>2</code></td><td>CONST</td><td><code>0xFF</code> if a key is buffered, else <code>0</code>.</td></tr>
+                        <tr><td><code>3</code></td><td>CONIN</td><td>Blocking keyboard read, no echo.</td></tr>
+                        <tr><td><code>4</code> / <code>5</code></td><td>CONOUT / LIST</td><td>Character in <code>C</code> to the console.</td></tr>
+                        <tr><td><code>6</code></td><td>PUNCH</td><td>Character in <code>C</code> to the virtual modem.</td></tr>
+                        <tr><td><code>7</code></td><td>READER</td><td>Next modem byte, or <code>^Z</code> if none.</td></tr>
+                        <tr><td><code>15</code></td><td>LISTST</td><td>List device always ready.</td></tr>
+                        <tr><td colspan="3" class="dim-text">BOOT, HOME, SELDSK, SETTRK, SETSEC, SETDMA, READ, WRITE and SECTRAN stub to 0 &mdash; there is no raw-sector disk emulation, because the drives are host directories rather than disk images.</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Every file call is jailed.</strong> Drives A:&ndash;P: are folders under
+                        <code>transfer_dir/CPM</code>, and no FCB can name a path outside it. There is no BDOS
+                        function that reaches a host command.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- AT COMMANDS                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="at">
+                <div class="section-title">Virtual Modem &mdash; AT Commands</div>
+                <p class="intro">The guest talks to a Hayes-compatible modem through whichever <code>cpm_emu_uart</code> access mode is selected. Both directions work: it dials out, and it can be dialled.</p>
+
+                <table class="data-table">
+                    <thead><tr><th>Command</th><th>Does</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>AT</code></td><td>Attention &mdash; answers <code>OK</code>.</td></tr>
+                        <tr><td><code>ATD</code><em>target</em></td><td>Dial. See the target table below.</td></tr>
+                        <tr><td><code>ATA</code></td><td>Answer a ringing inbound call.</td></tr>
+                        <tr><td><code>ATH</code></td><td>Hang up.</td></tr>
+                        <tr><td><code>ATO</code></td><td>Return online after a <code>+++</code> escape.</td></tr>
+                        <tr><td><code>ATE</code><em>n</em></td><td>Command echo off / on.</td></tr>
+                        <tr><td><code>ATQ</code><em>n</em></td><td>Suppress result codes.</td></tr>
+                        <tr><td><code>ATV</code><em>n</em></td><td>Word (<code>1</code>) or numeric (<code>0</code>) result codes.</td></tr>
+                        <tr><td><code>ATX</code><em>n</em></td><td>Result-code level 0&ndash;4. Low levels collapse BUSY / NO ANSWER to NO CARRIER, as a modem without call-progress detection does.</td></tr>
+                        <tr><td><code>ATI</code><em>n</em></td><td>Identify.</td></tr>
+                        <tr><td><code>ATZ</code></td><td>Reset to the saved profile &mdash; <em>this modem's</em> NVRAM, not the file, as a real modem does.</td></tr>
+                        <tr><td><code>ATS</code><em>r</em><code>=</code><em>n</em>, <code>ATS</code><em>r</em><code>?</code></td><td>Set / query S-register.</td></tr>
+                        <tr><td><code>AT&amp;C</code><em>n</em></td><td>DCD handling: 0 forces it on, 1 tracks carrier.</td></tr>
+                        <tr><td><code>AT&amp;D</code><em>n</em></td><td>DTR handling &mdash; accepted, not modelled.</td></tr>
+                        <tr><td><code>AT&amp;F</code></td><td>Factory reset.</td></tr>
+                        <tr><td><code>AT&amp;W</code></td><td>Write the current settings to the <code>cpm_emu_*</code> keys.</td></tr>
+                        <tr><td><code>+++</code></td><td>Escape to command mode. Guarded by an idle gap (S12) so a <code>+++</code> inside binary data is not mistaken for it.</td></tr>
+                    </tbody>
+                </table>
+
+                <p>Commands chain left to right, so <code>ATE0Q0V1X4S0=1</code> works as one line.</p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Dial targets</h3>
+                <table class="data-table">
+                    <thead><tr><th>Target</th><th>Reaches</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>ATD A</code> / <code>ATD B</code></td><td>This gateway's own serial Port A / Port B.</td></tr>
+                        <tr><td><code>ATD A@</code><em>host</em></td><td>A port on another gateway, via the master/slave crossbar. Requires <code>allow_peer_dial</code>.</td></tr>
+                        <tr><td><code>ATDT</code> <em>host</em>[<code>:</code><em>port</em>]</td><td>A TCP host; port 23 by default.</td></tr>
+                        <tr><td><code>ATDT ethernetgateway</code></td><td>This gateway's own menu, as though you had telnetted in. Handy for testing without leaving CP/M.</td></tr>
+                    </tbody>
+                </table>
+
+                <p>
+                    <strong>Inbound:</strong> the emulator is dialable as <code>CPM@</code><em>ip</em>. The guest sees
+                    <code>RING</code> and answers with <code>ATA</code>, or automatically once <code>S0</code>
+                    rings have passed. Only one session claims each call &mdash; the take is atomic, so there is
+                    no double-answer.
+                </p>
+
+                <p class="dim-text">
+                    These are the same dial targets the physical serial modem answers; for the full Hayes
+                    command set and S-register detail see the
+                    <a href="atcommandreference.html">AT Command Reference</a>.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PROTOCOL REFERENCES                            -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">CP/M Emulator <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>UART profiles, EGT80, HBIOS calls, BDOS/BIOS coverage.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter</a></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH</a></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.8.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>
