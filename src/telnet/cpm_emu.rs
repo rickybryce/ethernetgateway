@@ -5,8 +5,9 @@
 //! (`kernel.rs`), which is a pure-Rust CP/M-*styled* file manager with no CPU
 //! emulation.  The emulator runs actual user-supplied `.COM` software in an
 //! emulated CP/M 2.2 machine, sandboxed to a `CPM/` directory under
-//! `transfer_dir` (one folder per drive A:–P:).  See `kernelplan.md` §13 for
-//! the full design and the phased plan.
+//! `transfer_dir` (one folder per drive A:–P:).  The design lives in these
+//! module docs and in `src/cpm/mod.rs`; the CHANGELOG records how it was
+//! built up in stages.
 //!
 //! ## Naming
 //! The Gateway Shell owns the `cpm_` identifier prefix; the emulator uses

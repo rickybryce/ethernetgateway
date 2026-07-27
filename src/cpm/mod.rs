@@ -4,9 +4,10 @@
 //!
 //! This is a **completely separate** feature from the Gateway Shell
 //! (`telnet/kernel.rs`), which is a pure-Rust CP/M-*styled* file manager
-//! with no CPU emulation.  See `kernelplan.md` §13 for the full
-//! design and the phased plan (B0 scaffold → B1 CPU/console → B2 CCP-lite
-//! → B3 filesystem → B4 run `.COM` → B5 harden).
+//! with no CPU emulation.  The design is documented here and in
+//! `telnet/cpm_emu.rs`; the emulator was built in stages (scaffold → CPU and
+//! console → CCP-lite → filesystem → running `.COM` → hardening), and the
+//! CHANGELOG records what each one delivered.
 //!
 //! ## Design of the run loop (B1)
 //! CP/M software reaches the operating system with `CALL 5` (the BDOS
