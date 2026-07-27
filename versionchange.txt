@@ -49,3 +49,22 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #   grep -n  '0\.6\.0' usermanual.html  # expect: ONLY the two historical refs
 #   cargo build                          # confirms Cargo.toml parsed + new version
 #                                        # compiled, and updates Cargo.lock
+#
+# ── BEFORE TAGGING: check CI, not just the local suite ─────────
+#   gh run list --workflow=ci.yml --limit 5
+#     Every recent master run must be `success`.  A local `cargo test` is NOT a
+#     substitute: CI runs the suite on ubuntu, macOS AND Windows, and a
+#     platform-specific failure is invisible here.  0.8.0 was tagged with the
+#     Windows job red for three pushes because only the local suite and the
+#     *release* workflow were checked — release.yml builds and signs, it never
+#     runs the tests, so it is green regardless.
+#   gh run view <id> --log-failed        # if red, before doing anything else
+#
+# ── AFTER TAGGING: watch the release pipeline ──────────────────
+#   gh run list --workflow=release.yml --limit 3
+#   until [ "$(gh run view <id> --json status -q .status)" = completed ]; \
+#       do sleep 30; done; gh run view <id> --json conclusion -q .conclusion
+#   gh release view vX.Y.Z --json assets -q '.assets | length'   # expect 24
+#   Then spot-check one artifact: download it with `gh release download`,
+#   `sha256sum -c` its .sha256, and run the extracted binary to confirm it
+#   prints the new version.
