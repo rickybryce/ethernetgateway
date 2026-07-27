@@ -741,7 +741,7 @@ impl TelnetSession {
             "  TYPE file  show a text file",
             "  SAVE n file  save n TPA pages",
             "  USER n     select user area (0)",
-            "  A: .. H:   change drive",
+            "  A: .. P:   change drive",
             "  VER        emulator version",
             "  HELLO      BDOS print-string demo",
             "  ECHO       interactive console demo",
