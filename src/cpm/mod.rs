@@ -1,10 +1,10 @@
-//! CP/M 2.2 emulator core (Flavor B) — a real Z80 CPU (the BSD-licensed
-//! `iz80` crate) driven by our own CP/M 2.2 BDOS/BIOS, sandboxed to a
-//! `CPM/` directory under `transfer_dir`.
+//! CP/M 2.2 emulator core — a real Z80 CPU (the BSD-licensed `iz80` crate)
+//! driven by our own CP/M 2.2 BDOS/BIOS, sandboxed to a `CPM/` directory
+//! under `transfer_dir`.
 //!
 //! This is a **completely separate** feature from the Gateway Shell
-//! (`telnet/kernel.rs`, "Flavor A", a pure-Rust CP/M-*flavored* file
-//! manager with no CPU emulation).  See `kernelplan.md` §13 for the full
+//! (`telnet/kernel.rs`), which is a pure-Rust CP/M-*styled* file manager
+//! with no CPU emulation.  See `kernelplan.md` §13 for the full
 //! design and the phased plan (B0 scaffold → B1 CPU/console → B2 CCP-lite
 //! → B3 filesystem → B4 run `.COM` → B5 harden).
 //!

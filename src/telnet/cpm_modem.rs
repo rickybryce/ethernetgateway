@@ -1,4 +1,4 @@
-//! Virtual-modem "brain" for the CP/M emulator (Flavor B).
+//! Virtual-modem "brain" for the CP/M emulator.
 //!
 //! The emulator's [`crate::cpm::CpmMachine`] exposes a byte channel (a TX ring
 //! the guest writes and an RX ring it reads, via UART ports or the BDOS `AUX:`

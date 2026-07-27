@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - 2026-07-26
 
 ### Added
-- **CP/M emulator (Flavor B) — Z80 CPU + interactive console (in progress).** A
+- **CP/M emulator — Z80 CPU + interactive console (in progress).** A
   new default-off config key `cpm_emu_enabled` (wired into the telnet, web, and
   GUI config UIs) gates a `K  CP/M System` main-menu item. Selecting it boots a
   real Z80 CPU (the BSD-licensed [`iz80`](https://crates.io/crates/iz80) crate)
@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercise it. Works correctly on PETSCII (C64) terminals as well as ANSI/ASCII.
   On launch it creates the drive folders `CPM/A`..`CPM/H` under `transfer_dir`.
   An interactive program can be aborted with a double-`ESC`, and a runaway is
-  bounded by an instruction budget. Completely separate from the Gateway Shell
-  (Flavor A); the item is hidden and the key rejected while the toggle is off.
+  bounded by an instruction budget. Completely separate from the Gateway Shell,
+  which emulates no CPU; the item is hidden and the key rejected while the
+  toggle is off.
   - **Filesystem, part 1 — FCB + drives + sequential file I/O.** The emulator
     now has a directory-backed CP/M filesystem: each drive A:–H: is a folder in
     the `CPM/` container, and the BDOS file calls for opening, creating,
@@ -86,9 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     uses). The modem is a self-contained async layer bridged to the guest's
     synchronous UART/AUX byte rings at the CPU batch seam.
 - **EGT80 — "Ethernet Gateway Terminal", a CP/M terminal of our own.** Every
-  period CP/M terminal is built for one machine's serial port: QTERM ships a
-  separate binary per port, IMP8 is an Altair 2SIO build, KERCPM22's generic
-  overlay has no serial driver at all, and pairing one with the wrong port
+  period CP/M terminal is built for one machine's serial port — commonly a
+  separate binary per port, or a build for one specific card, and some generic
+  builds carry no serial driver at all — and pairing one with the wrong port
   produces silence rather than an error. `EGT80.COM` (new `EGT80/` directory,
   Z80 assembly, CP/M 2.2 and CP/M 3) asks instead: a menu picks the port at run
   time, from **five families** — Z80 SIO/2, 6850 ACIA, RomWBW HBIOS (`RST 8`),
@@ -132,8 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the firmware to move the byte, issuing an `RST 8` with a function number in
     `B` and a serial unit in `C`. On a port profile such a program hangs before
     printing anything — its first call goes nowhere — which no port address can
-    fix; the QTERM `h` builds (`QTERMH1.COM`/`QTERMH2.COM`, "Version for RomWBW
-    HBIOS") are exactly this case. Two new `cpm_emu_uart` choices answer that
+    fix; RomWBW-targeted builds of period comms software are exactly this
+    case. Two new `cpm_emu_uart` choices answer that
     API for one serial unit (the virtual modem), so those builds now run: `AT` →
     `OK`, `ATDT host:port` → `CONNECT`, with data flowing both ways. The `RST 8`
     vector is installed *only* for these profiles, so every other setting keeps
@@ -151,9 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     description (function numbers and register conventions); no RomWBW code is
     included. New `src/cpm/hbios.rs` with 11 unit tests, plus a fidelity fix the
     guests depend on: an HBIOS return now sets the flags from the result byte
-    (as `OR A` leaves them) instead of leaving the guest's stale flags — QTERM's
-    overlay hands the status straight to a `JR Z`, so stale flags read as
-    "transmitter not ready" and it waited forever.
+    (as `OR A` leaves them) instead of leaving the guest's stale flags. A guest
+    that hands the status straight to a `JR Z` was reading our stale flags as
+    "transmitter not ready" and waiting forever.
   - **Virtual modem — dialable as `CPM@<ip>` (inbound).** The CP/M emulator is
     now a third dialable peer endpoint named `CPM`, alongside Ports A/B: from
     another modem on the gateway, `ATD CPM@<ip>` rings it exactly as
@@ -258,25 +259,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `setup_wizard_completed`, asymmetric on purpose: `false` for a config the
   gateway creates itself (a fresh install sees the wizard), but a config file
   that *lacks* the key reads as `true`, so an upgrade is never dropped into it.
-
-- **The router-blocking rule now asks the OS which address the router is.**
-  `disable_gateway_connections` used to assume `x.x.x.1` — a convention, not a
-  fact, which both missed a router living on `.254` and refused an ordinary
-  machine that happened to sit on `.1`. The new `src/router.rs` reads the
-  default route's next hop (Linux: `/proc/net/route` + `/proc/net/ipv6_route`
-  directly, no subprocess; macOS/BSD: `route -n get default`; Windows:
-  `route print`, matched on the addresses rather than the localised column
-  headings) and the rule blocks exactly that, IPv4 and IPv6, including both
-  routers on a multi-homed host. The query runs on a background thread at
-  startup and re-runs when the cached answer ages past five minutes, so a DHCP
-  change is picked up without a restart; it is **never** run on the connection
-  path, which only reads the cache. The detected address is logged at startup
-  and named in the checkbox label in all three config UIs ("Block connections
-  from the router (192.168.1.1)"). Where the address cannot be determined the
-  rule falls back to the historical `.1` behaviour, so it is never silently
-  weaker; loopback stays exempt, and no detected address can widen the
-  allowlist. Every parser is a pure function tested from captured output on all
-  three platforms, including a localised (German) Windows route table.
 
 - **A loud warning when the listeners don't come up.** Each listener already
   logged its own bind failure, but one line in the startup chatter is easy to
@@ -387,14 +369,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connect”. Guarded by a test that fails if EGT80's own default port and the
   gateway's default profile ever drift apart, since that pairing is the whole
   point and neither build would otherwise notice.
-- **“Block connections from gateway” (`disable_gateway_connections`)** in all
+- **“Block connections from the router” (`disable_gateway_connections`)** in all
   three UIs, on the row under the login checkmarks. Off by default, which
-  **changes behaviour**: a connection whose source address ends in `.1` — usually
-  the local router — is now allowed while the IP allowlist stays in force. It
-  used to be refused outright, which left `disable_ip_safety` (dropping the
-  allowlist entirely) as an operator's only way in; the narrow rule is now the
-  opt-in. Loopback is exempt either way, public addresses are still refused, and
-  the toggle applies on the next connection with no restart.
+  **changes behaviour**: a connection from the local router is now allowed while
+  the IP allowlist stays in force. It used to be refused outright, which left
+  `disable_ip_safety` (dropping the allowlist entirely) as an operator's only way
+  in; the narrow rule is now the opt-in. Loopback is exempt either way, public
+  addresses are still refused, and the toggle applies on the next connection with
+  no restart.
+  - **The router's address is queried from the OS, not guessed.** Earlier work
+    assumed the router was `x.x.x.1` — a convention, not a fact, which both
+    missed a router living on `.254` and refused an ordinary machine that
+    happened to sit on `.1`. `src/router.rs` reads the default route's next hop
+    (Linux: `/proc/net/route` + `/proc/net/ipv6_route` directly, no subprocess;
+    macOS/BSD: `route -n get default`; Windows: `route print`, matched on the
+    addresses rather than the localised column headings) and the rule blocks
+    exactly that, IPv4 and IPv6, including both routers on a multi-homed host.
+    The query runs on a background thread at startup and re-runs when the cached
+    answer ages past five minutes, so a DHCP change is picked up without a
+    restart; it is **never** run on the connection path, which only reads the
+    cache. The detected address is logged at startup and named in the checkbox
+    label in every UI — "Block connections from the router (192.168.1.1)". Where
+    it cannot be determined the rule falls back to the `x.x.x.1` convention (per
+    address family), so it is never silently weaker; loopback stays exempt, and
+    no detected address can widen the allowlist. Every parser is a pure function
+    tested from captured output on all three platforms, including a localised
+    (German) Windows route table.
 - **A slave's log now tells the whole story.** Each attempt to reach the master
   is logged with its number (`announcing to master 10.1.2.3:2223 as 'relay'
   (attempt 5)`), so a slave that cannot connect no longer looks identical to one
@@ -607,15 +607,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     modem.
   - **Z180 ASCI reaches the port the way the machine actually works.** Reported
     from an SC126: `atdt` produced no error but a few random characters, while
-    QTERMH1 on the same wire was fine. The reason is not addressing — it is
+    other comms software on the same wire was fine. The reason is not addressing — it is
     ownership. RomWBW's SC126 build enables its ASCI driver with interrupts in
     mode 2, so an interrupt handler is draining the receiver into the firmware's
     own buffer; a program polling the same registers races that handler, which
     reads the data register first. The transmitter still accepts bytes, hence no
-    error. This is precisely why QTERM ships a separate RomWBW build.
+    error. This is exactly why RomWBW-targeted builds of such software exist.
     Choosing a channel under option 4 therefore now asks the firmware whether it
-    serves that channel, and if it does, reaches it through HBIOS exactly as
-    QTERM's RomWBW build does — saying so, and naming the unit. Direct register
+    serves that channel, and if it does, reaches it through HBIOS the way
+    RomWBW-targeted software does — saying so, and naming the unit. Direct register
     access remains for a Z180 the firmware is *not* driving, where it is the only
     way in. The port menu also states when RomWBW is detected, so a user need not
     know which of the two options applies to their machine.
@@ -656,8 +656,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     silently. `C` now sets `C0` with the boards named on the menu, `B` still
     takes any base by hand, and the help says which is which. (On a RomWBW
     machine the HBIOS family sidesteps the question entirely: the firmware knows
-    where its own registers are. That remains the recommended path, and is the
-    one the QTERM `h` builds use.)
+    where its own registers are. That remains the recommended path, and the one
+    RomWBW-targeted builds use.)
   - **Every EGT80 screen is now checked to fit a 24×80 terminal**, by a new test
     that parses the `DB` strings out of `EGT80.Z80` — a source-level check, so it
     runs in CI even though the binary itself cannot be rebuilt there. It found
@@ -753,8 +753,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequence is now a regression test.
 - **Kermit refuses a binary file declared as text, even with no length given.**
   The length check added earlier can only fire when the peer declares a size,
-  and the two CP/M clients that hit this in practice do not: kercpm3 sends the
-  file type but no length, and QTERM sends no attribute packets at all. A peer
+  and the CP/M clients that hit this in practice do not: some send the file
+  type but no length, and others send no attribute packets at all. A peer
   that declares TEXT mode and then sends bytes plain text never contains (NUL,
   and the other C0 codes that are not `BEL`/`BS`/`TAB`/`LF`/`VT`/`FF`/`CR`/`ESC`
   /`^Z`) is sending a binary file that stopped at the first `^Z`, so the upload
@@ -932,8 +932,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Gateway Shell — a CP/M-inspired file manager over telnet/SSH.** A new
   `S  Gateway Shell` item on the File Transfer menu opens an `A>` command prompt
-  that presents the transfer directory as drive A: (flavor A: pure Rust, **no**
-  Z80/`.COM` emulation). Resident commands `DIR`/`LS`, `TYPE`, `DUMP`, `ERA`
+  that presents the transfer directory as drive A: (pure Rust, **no** Z80 or
+  `.COM` emulation). Resident commands `DIR`/`LS`, `TYPE`, `DUMP`, `ERA`
   (`DEL`/`RM`), `REN`, `COPY` (`PIP`/`CP`), `MOVE` (`MV`), `MKDIR` (`MD`),
   `RMDIR` (`RD`), `CD`, `PWD`, `STAT`, `HELP` (`?`), and `EXIT` cover full file
   management, including **cross-directory** copy/move via a `/`-separated path
@@ -943,7 +943,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (validated + canonicalized; `..`/absolute/symlink escapes are refused); copy/
   move honor the 8 MB transfer cap and the `TYPE`/`DUMP` viewers cap reads at
   1 MiB. Works identically over telnet and SSH. Documented in user manual §8.10.
-  (Flavor B — a real Z80 CP/M 2.2 emulator — remains deferred.)
+  (A real Z80 CP/M 2.2 emulator remains deferred.)
 - **Third-party license notices and a license-policy gate.** `THIRD-PARTY-NOTICES.md`
   (generated by [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) from
   `about.toml` + `about.hbs`) reproduces every dependency's copyright notice and

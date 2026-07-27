@@ -293,7 +293,7 @@ const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// whether login is required (M-9; the page renders secrets).
 const DEFAULT_WEB_ENABLED: bool = false;
 const DEFAULT_WEB_PORT: u16 = 8080;
-/// CP/M emulator (Flavor B) — a real CP/M 2.2 Z80 environment reachable from
+/// CP/M emulator — a real CP/M 2.2 Z80 environment reachable from
 /// the main menu.  **On by default.**
 ///
 /// It was default-off while it was being built out, on the same cautious
@@ -732,7 +732,7 @@ pub struct Config {
     /// Port for the configuration web server.  Only consulted when
     /// `web_enabled` is true.
     pub web_port: u16,
-    /// Enable the CP/M emulator (Flavor B) main-menu item.  Default-off: it
+    /// Enable the CP/M emulator main-menu item.  Default-off: it
     /// runs arbitrary user-supplied Z80 `.COM` software in an emulated CP/M
     /// 2.2 environment, sandboxed to a `CPM/` directory under `transfer_dir`.
     /// When false the main-menu item is hidden and the `K` key is rejected.
@@ -2011,7 +2011,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
-# CP/M emulator (Flavor B).  When enabled, the main menu offers a 'CP/M
+# CP/M emulator.  When enabled, the main menu offers a 'CP/M
 # System' item that runs a real CP/M 2.2 environment in an emulated Z80,
 # executing arbitrary user-supplied .COM software sandboxed to a CPM/
 # directory under transfer_dir.  Default-off (it runs arbitrary code); when

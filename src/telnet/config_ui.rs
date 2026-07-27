@@ -367,7 +367,7 @@ impl TelnetSession {
                     .ok();
                 }
                 "e" => {
-                    // CP/M emulator (Flavor B) has two settings now (enable +
+                    // The CP/M emulator has two settings now (enable +
                     // runaway ceiling), so `E` opens their own submenu rather
                     // than toggling in place — keeps this menu inside the
                     // 22-row PETSCII budget.
@@ -493,7 +493,7 @@ impl TelnetSession {
 
     // ─── CP/M EMULATOR SETTINGS ──────────────────────────────
 
-    /// CP/M-emulator (Flavor B) submenu, reached from Other Settings → `E`.
+    /// CP/M-emulator submenu, reached from Other Settings → `E`.
     /// Holds the default-off enable toggle and the runaway instruction
     /// ceiling (millions of Z80 instructions per program run).  Its own
     /// screen so both fit comfortably inside the 22-row PETSCII budget.

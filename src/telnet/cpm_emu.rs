@@ -1,17 +1,17 @@
-//! CP/M emulator (Flavor B) — a real CP/M 2.2 environment running in an
-//! emulated Z80, reachable as its own main-menu item over telnet/SSH.
+//! CP/M emulator — a real CP/M 2.2 environment running in an emulated Z80,
+//! reachable as its own main-menu item over telnet/SSH.
 //!
 //! This is a **completely separate** feature from the Gateway Shell
-//! (`kernel.rs`, "Flavor A", a pure-Rust CP/M-*flavored* file manager with
-//! no CPU emulation).  Flavor B runs actual user-supplied `.COM` software
-//! in an emulated CP/M 2.2 machine, sandboxed to a `CPM/` directory under
-//! `transfer_dir` (one folder per drive A:–P:).  See `kernelplan.md` §13
-//! for the full design and the phased plan.
+//! (`kernel.rs`), which is a pure-Rust CP/M-*styled* file manager with no CPU
+//! emulation.  The emulator runs actual user-supplied `.COM` software in an
+//! emulated CP/M 2.2 machine, sandboxed to a `CPM/` directory under
+//! `transfer_dir` (one folder per drive A:–P:).  See `kernelplan.md` §13 for
+//! the full design and the phased plan.
 //!
 //! ## Naming
-//! Flavor A owns the `cpm_` identifier prefix; Flavor B uses `cpmemu_` /
-//! the `cpm_emu_*` names (and the config key `cpm_emu_enabled`) to keep the
-//! two unambiguous.
+//! The Gateway Shell owns the `cpm_` identifier prefix; the emulator uses
+//! `cpmemu_` / the `cpm_emu_*` names (and the config key `cpm_emu_enabled`) to
+//! keep the two unambiguous.
 //!
 //! ## Security (finalized B5)
 //! The feature runs arbitrary Z80 code, so it stays gated behind
@@ -160,7 +160,7 @@ enum ArrowPeek {
 }
 
 impl TelnetSession {
-    /// Flavor-B entry point, invoked from the gated `K` main-menu handler.
+    /// Emulator entry point, invoked from the gated `K` main-menu handler.
     ///
     /// B2: ensure the `CPM/` drive folders exist, print the boot banner,
     /// then run the Rust CCP-lite `A>` REPL until the user types

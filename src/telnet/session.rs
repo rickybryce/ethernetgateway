@@ -680,7 +680,7 @@ impl TelnetSession {
             self.cyan("G")
         ))
         .await?;
-        // CP/M emulator (Flavor B) — gated behind `cpm_emu_enabled`
+        // CP/M emulator — gated behind `cpm_emu_enabled`
         // (default-off, runs arbitrary Z80 code).  Hidden when disabled;
         // the `k` handler and the error hint are gated the same way.
         if config::get_config().cpm_emu_enabled {

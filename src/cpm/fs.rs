@@ -145,7 +145,7 @@ impl CpmFs {
         // existing file that matches case-insensitively (so a lowercase
         // `foo.txt` placed by the operator is openable, not just listed) and
         // fall back to the canonical uppercased name for a to-be-created file.
-        // Matches Flavor A's case-insensitive resolution [[project_session_bookmark_2026-07-15]].
+        // Matches the Gateway Shell's case-insensitive resolution [[project_session_bookmark_2026-07-15]].
         let path = Self::existing_ci(&dir, &filename).unwrap_or_else(|| dir.join(&filename));
         if !Self::is_within(&self.base, &path) {
             return None;

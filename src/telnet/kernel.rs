@@ -1,5 +1,5 @@
-//! Gateway Shell — a CP/M-inspired file-management shell (flavor A, no CPU
-//! emulation).  ("CP/M-inspired" describes the command style + `A>` prompt;
+//! Gateway Shell — a CP/M-inspired file-management shell, with no CPU
+//! emulation.  ("CP/M-inspired" describes the command style + `A>` prompt;
 //! it is deliberately *not* a CP/M-compatible shell, hence the neutral
 //! user-facing name.  Internal identifiers keep the `cpm_` codename.)
 //!
@@ -8,8 +8,9 @@
 //! file-management commands (DIR, TYPE, ERA, REN, COPY, MOVE, MKDIR,
 //! RMDIR, CD, PWD, STAT, DUMP, HELP).  Everything is implemented purely
 //! in Rust over the host filesystem; there is **no** Z80 / BDOS / BIOS
-//! emulation and **no** `.COM` execution (that is "flavor B", deferred to a
-//! later effort — a real CP/M 2.2 emulator that runs `.COM` software).
+//! emulation and **no** `.COM` execution — that is the separate CP/M
+//! emulator (`cpm_emu.rs`), which runs real `.COM` software on an emulated
+//! Z80.
 //!
 //! ## Jailing
 //! Every command resolves names under `transfer_dir` and can never touch

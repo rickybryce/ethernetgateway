@@ -1,4 +1,4 @@
-//! ADM-3A terminal translation for the CP/M emulator (Flavor B).
+//! ADM-3A terminal translation for the CP/M emulator.
 //!
 //! CP/M full-screen software (WordStar, Turbo Pascal, dBASE, …) is installed
 //! for one specific terminal and emits that terminal's control codes.  The

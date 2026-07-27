@@ -1,4 +1,4 @@
-//! Virtual-modem UART profiles for the CP/M emulator (Flavor B).
+//! Virtual-modem UART profiles for the CP/M emulator.
 //!
 //! A CP/M communications program reaches its "modem" by doing `IN`/`OUT` to a
 //! UART at a fixed I/O port address — a *status/command* register and a *data*

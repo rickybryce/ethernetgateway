@@ -271,7 +271,7 @@ impl Drop for PeerSlotGuard {
 
 // ─── CP/M-emulator peer endpoint ("CPM@<ip>") ─────────────
 //
-// The CP/M emulator (Flavor B) is dialable as a *third* peer port named
+// The CP/M emulator is dialable as a *third* peer port named
 // `CPM`, in parallel with the two physical ports A/B.  It uses the same
 // `PeerCall` handshake (`progress`: 0 RING, 1 answer, 2 error), but a single
 // global slot rather than the per-port `PEER_CALL_REQUEST` array — a CP/M
@@ -1968,7 +1968,7 @@ async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
     }
 }
 
-/// Slave-side announcer for the CP/M-emulator endpoint (Flavor B).  While a
+/// Slave-side announcer for the CP/M-emulator endpoint.  While a
 /// modem-enabled CP/M shell runs on a **slave** gateway, this registers the
 /// label `CPM` with the master (`serial-register CPM`, like a physical port)
 /// so a remote `CPM@<this-slave-ip>` dial reaches it through the master

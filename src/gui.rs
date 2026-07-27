@@ -887,7 +887,7 @@ impl App {
                     }
                 });
         });
-        // CP/M emulator (Flavor B) lives here rather than on the main screen
+        // The CP/M emulator lives here rather than on the main screen
         // (no room left there): its default-off enable + the runaway ceiling.
         ui.separator();
         ui.checkbox(
