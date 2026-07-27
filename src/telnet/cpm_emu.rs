@@ -70,6 +70,28 @@ use std::sync::atomic::AtomicBool;
 /// yield to the async runtime.
 const CPM_RUN_BATCH: u64 = 200_000;
 
+/// Poll `fut` exactly once: `Some(output)` if it is ready *right now*,
+/// `None` if it would have to wait.  The future is dropped either way, so only
+/// pass a cancel-safe one.
+///
+/// This exists because there is no cheap timer-free way to ask tokio "is this
+/// ready?".  `timeout(Duration::ZERO, …)` is the obvious spelling and is what
+/// [`TelnetSession::cpmemu_oob_drain`] used to use, but a zero deadline still
+/// rounds up to the next timer tick — ~1.1 ms a call, on a path that runs once
+/// per emulated console character.  See that function for the full measurement.
+///
+/// The no-op waker means a `Pending` future's wakeup is discarded, which is
+/// correct here: the caller re-polls a fresh future on its next pass rather
+/// than waiting to be woken.
+pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match fut.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(v) => Some(v),
+        std::task::Poll::Pending => None,
+    }
+}
+
 /// Highest emulated drive letter (A:–P:, the 16 drives CP/M 2.2 allows).
 const CPM_LAST_DRIVE: u8 = b'P';
 
@@ -1044,7 +1066,10 @@ impl TelnetSession {
                     }
                 }
                 let tx = cpm.modem_drain_tx();
-                let rx = modem.service(tx, cpm.modem_rx_free()).await;
+                // Unread bytes already in the ring mean the guest is mid-burst,
+                // which makes the peer poll non-blocking (see poll_connection).
+                let guest_has_rx = cpm.modem_rx_len() > 0;
+                let rx = modem.service(tx, cpm.modem_rx_free(), guest_has_rx).await;
                 if !rx.is_empty() {
                     cpm.modem_queue_rx(&rx);
                 }
@@ -1307,23 +1332,35 @@ impl TelnetSession {
     }
 
     /// Out-of-band input drain, run between CPU batches.  Reads every wire
-    /// byte that is *immediately* available (a zero-length timeout, so it never
-    /// blocks the CPU), detecting a double-`ESC` break-out even while the guest
+    /// byte that is *immediately* available (a single poll, so it never blocks
+    /// the CPU), detecting a double-`ESC` break-out even while the guest
     /// is computing and buffering the rest for the next `CONIN`.  This is what
     /// makes a compute-bound program (one that never reads the console)
     /// escapable at once instead of only at the instruction ceiling.  It runs
     /// only *between* batches, and `cpmemu_conin` runs only *during* a console
     /// read, so the two escape trackers never overlap.
     ///
-    /// Cancel-safety note: the zero-timeout read is resumable across the
-    /// `IAC`→command split (via `session_read_byte`'s `mid_iac_cmd`), which is
-    /// the common case.  It is *not* resumable deeper inside a telnet
-    /// negotiation (a subnegotiation payload, or between a `WILL/WONT/DO/DONT`
-    /// command and its option byte).  A negotiation split across TCP segments
-    /// that lands exactly on a between-batch drain could therefore desync the
-    /// telnet parser — rare (LAN, mid-run, segment-split) and non-fatal (no
-    /// panic/security impact); the resume point is intentionally shallow so
-    /// this hot path stays simple.
+    /// The readiness probe is a *single poll*, not the
+    /// `tokio::time::timeout(Duration::ZERO, …)` this used to be.  A zero
+    /// duration reads like "don't wait", but tokio rounds every deadline up to
+    /// the next timer tick, so each call actually cost ~1.1 ms.  This drain runs
+    /// once per CPU batch, and a batch ends at every BDOS/BIOS trap — so a guest
+    /// paid that 1.1 ms *per console character*, capping output at ~840 char/s
+    /// however fast the CPU core ran (it manages 6.4 M CONOUT traps/s).  A
+    /// screen-painting program like EGT80 issues many writes per update, so it
+    /// crawled at what looked like 150 baud.  One poll answers the same
+    /// question — is a byte ready right now? — in nanoseconds.
+    ///
+    /// Cancel-safety note: an unready read is dropped exactly as the zero
+    /// timeout dropped it, so the semantics are unchanged.  It is resumable
+    /// across the `IAC`→command split (via `session_read_byte`'s
+    /// `mid_iac_cmd`), which is the common case.  It is *not* resumable deeper
+    /// inside a telnet negotiation (a subnegotiation payload, or between a
+    /// `WILL/WONT/DO/DONT` command and its option byte).  A negotiation split
+    /// across TCP segments that lands exactly on a between-batch drain could
+    /// therefore desync the telnet parser — rare (LAN, mid-run, segment-split)
+    /// and non-fatal (no panic/security impact); the resume point is
+    /// intentionally shallow so this hot path stays simple.
     async fn cpmemu_oob_drain(
         &mut self,
         pending: &mut VecDeque<u8>,
@@ -1331,8 +1368,12 @@ impl TelnetSession {
     ) -> Result<OobDrain, std::io::Error> {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         loop {
-            match tokio::time::timeout(std::time::Duration::ZERO, self.session_read_byte()).await {
-                Ok(Ok(Some(b))) => {
+            // `None` ⇒ still pending ⇒ nothing waiting on the wire right now.
+            let Some(read) = poll_once(self.session_read_byte()) else {
+                return Ok(OobDrain::Continue);
+            };
+            match read {
+                Ok(Some(b)) => {
                     // Escape tracking uses the SAME `last_esc` as cpmemu_conin,
                     // so a double-`ESC` split across the two still pairs.
                     if is_esc_key(b, is_petscii) {
@@ -1349,9 +1390,8 @@ impl TelnetSession {
                         pending.push_back(b);
                     }
                 }
-                Ok(Ok(None)) => return Ok(OobDrain::Disconnect),
-                Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => return Ok(OobDrain::Continue), // nothing waiting
+                Ok(None) => return Ok(OobDrain::Disconnect),
+                Err(e) => return Err(e),
             }
         }
     }

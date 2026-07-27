@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The CP/M emulator ran at roughly 150 baud, and none of it was the CPU.** Two
+  tokio timers sat on the emulator's *per-character* path. The driver loop
+  regains control at every BDOS/BIOS/HBIOS trap, so anything it does per pass is
+  paid per emulated character — and both of these waited on a clock:
+  - `cpmemu_oob_drain` (the double-`ESC` break-out probe) asked "is a byte
+    waiting?" with `tokio::time::timeout(Duration::ZERO, …)`. A zero duration
+    reads like "don't wait", but tokio rounds every deadline up to its next timer
+    tick, so each call really cost **~1.1 ms** — measured at 1.118 ms against
+    ~6 ns for a non-blocking probe. Replaced with a single poll of the future
+    (`poll_once`), which has the same cancellation semantics: the timeout already
+    dropped an unready read, and `session_read_byte` is explicitly resumable at
+    this seam. Console output went from **840 to 47,000–81,000 char/s**.
+  - the virtual modem's `poll_connection` waited `READ_POLL` (3 ms) on every
+    pass, *including* while the guest was working through a burst that had
+    already arrived — capping the display of received text at a few hundred
+    char/s however fast the peer delivered it. It now probes without waiting when
+    the guest still holds unread bytes (`guest_has_rx`). The wait is deliberately
+    kept for the empty-ring case: that is what stops a guest polling in a tight
+    trap loop from spinning on the socket and burning a core.
+  - Measured end to end with EGT80 in terminal mode dialing the gateway's own
+    menu, which is the case that felt like 150 baud: **111 bytes/s** before.
+    A screen-painting program suffered most because it traps several times per
+    character (`CONST` to poll the keyboard, `CONOUT` to print), and that is
+    independent of the `cpm_emu_uart` profile — a port profile's `IN` polling is
+    handled inside the CPU core and never reaches this loop.
+  - For scale, the Z80 core was never the constraint: it steps at **33.7 MIPS**
+    (~65× a 4 MHz Z80) and services **6.4 M CONOUT traps/s**.
+  - Both fixes carry a regression test whose timing bound is keyed to the bug's
+    cost (~1.1 s and ~60 ms for the respective call counts) rather than to
+    jitter, so a timer creeping back onto either path fails loudly without the
+    test being flaky.
+
 ### Added
 - **A slave's Kermit-server-mode port is served by the master.** Previously such
   a port ran a Kermit server on the slave, so a user at the attached machine saw

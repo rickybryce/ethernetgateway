@@ -5846,3 +5846,40 @@ fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
         PETSCII_WIDTH
     );
 }
+
+/// The emulator's out-of-band drain probes the wire once per CPU batch — and a
+/// batch ends at every BDOS/BIOS trap, so this runs once per console character
+/// a guest writes.  It must therefore be a *poll*, not a timed wait.
+///
+/// This used to be `tokio::time::timeout(Duration::ZERO, …)`, which reads like
+/// "don't wait" but rounds up to tokio's next timer tick: ~1.1 ms a call,
+/// capping emulated console output at ~840 char/s no matter how fast the Z80
+/// core ran.  A screen-painting program (EGT80) crawled at what looked like 150
+/// baud.  The bound below is deliberately loose — the real cost is nanoseconds
+/// and the bug's was ~1.1 s for this many calls, so there is no borderline case
+/// to be flaky about; it only has to catch a timer creeping back onto the path.
+#[tokio::test]
+async fn test_poll_once_probes_without_arming_a_timer() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (mut client, _server) = tokio::join!(
+        async { tokio::net::TcpStream::connect(addr).await.unwrap() },
+        async { listener.accept().await.unwrap() }
+    );
+
+    // Nothing has been written, so every probe must come back "not ready"
+    // rather than blocking or waiting out a tick.
+    let calls = 1_000;
+    let started = std::time::Instant::now();
+    for _ in 0..calls {
+        let mut buf = [0u8; 1];
+        let probe = poll_once(tokio::io::AsyncReadExt::read(&mut client, &mut buf));
+        assert!(probe.is_none(), "an idle socket must probe as not-ready");
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "{calls} readiness probes took {elapsed:?} — a timer is back on the \
+         per-character emulator path (the zero-timeout bug cost ~1.1s here)"
+    );
+}

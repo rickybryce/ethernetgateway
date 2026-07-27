@@ -977,6 +977,7 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
 mod tests {
     use super::*;
 
+
     /// Drive a program to completion the way the async session will, but
     /// synchronously: service BDOS console-output calls into a byte buffer
     /// and stop on warm boot.  Returns (console_output, stop_reason).
