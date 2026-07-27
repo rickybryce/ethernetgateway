@@ -1098,6 +1098,12 @@ impl App {
                 &mut self.cfg.master_accept_relays,
                 "Master: accept relay connections from slaves",
             );
+            // Off by default: Kermit server mode has no authentication of its
+            // own, so serving it to a slave's wire is the operator's decision.
+            ui.checkbox(
+                &mut self.cfg.allow_relay_kermit,
+                "Master: serve Kermit to a slave's Kermit-mode port",
+            );
         });
         ui.add_enabled_ui(is_slave, |ui| {
             ui.horizontal(|ui| {

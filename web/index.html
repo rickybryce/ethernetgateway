@@ -1250,6 +1250,27 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         (<code>host:port</code>) targets must be a hostname or IPv4
                         address (no bracketed IPv6).</li>
                 </ul>
+            
+                <div class="cat">Kermit-Server-Mode Ports</div>
+                <p class="dim-text">
+                    A slave port set to <strong>Kermit server</strong> mode pipes its wire to
+                    the master, and the <em>master</em> runs the Kermit server on it. So a user
+                    at the attached machine is talking to the master's server: <code>remote
+                    dir</code> lists the <strong>master's</strong> transfer directory, an upload
+                    lands there, and a download comes from there. The slave never serves Kermit
+                    itself and keeps no copy — "files always land on the master" is true by
+                    construction, not by syncing two directories.
+                </p>
+                <div class="callout callout-tip">
+                    <strong>Off by default:</strong> the master needs
+                    <code>allow_relay_kermit</code> (telnet <em>Server &rsaquo; Master/Slave
+                    &rsaquo; K</em>, the web <em>Master/Slave</em> card, or the GUI Server
+                    <em>More…</em>). Kermit's server mode has no authentication of its own, so
+                    this hands a remote wire unauthenticated access to the transfer directory.
+                    While the master is unreachable the port serves <strong>nothing</strong> —
+                    a local fallback would let a transfer appear to succeed with the file on the
+                    wrong machine.
+                </div>
             </div>
 
             <hr class="divider">

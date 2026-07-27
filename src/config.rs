@@ -238,6 +238,18 @@ const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
 /// gated is this gateway dialing an arbitrary peer, and a master accepting a
 /// *third party's* crossbar dial into a slave (`relay::run_master_relay_peer`).
 const DEFAULT_ALLOW_PEER_DIAL: bool = false;
+/// Let a **slave's** Kermit-server-mode port be served by *this* master's
+/// Kermit server over the relay, so the device on the slave's wire lists,
+/// uploads to and downloads from the master's transfer directory.
+///
+/// Off by default.  Kermit's server mode has no authentication of its own —
+/// the same reason `allow_atdt_kermit` and the standalone listener are opt-in —
+/// so this hands a remote wire unauthenticated read and write access to the
+/// transfer directory.  It is the best-placed of those three paths (the peer is
+/// a slave that authenticated to this master over SSH, and
+/// `master_accept_relays` is already required), but it is still the operator's
+/// decision.  Master-side only; a slave with it set is unaffected.
+const DEFAULT_ALLOW_RELAY_KERMIT: bool = false;
 /// Standalone Kermit-server TCP listener.  When `true`, the gateway
 /// binds `kermit_server_port` and drops every connection straight into
 /// Kermit server mode — no telnet menu, no auth gate, no private-IP
@@ -784,6 +796,10 @@ pub struct Config {
     /// Master gate — accept inbound relay channels from slaves.  Has no
     /// effect unless `gateway_role == "master"`.
     pub master_accept_relays: bool,
+    /// Master gate — serve this master's Kermit server to a slave's
+    /// Kermit-server-mode port (see [`DEFAULT_ALLOW_RELAY_KERMIT`]).  Off by
+    /// default; Kermit server mode is unauthenticated.
+    pub allow_relay_kermit: bool,
     /// Slave → the master's hostname/IP to connect to.  Empty until the
     /// operator configures slave mode.
     pub slave_master_host: String,
@@ -874,6 +890,7 @@ impl Default for Config {
             ssh_gateway_auth: DEFAULT_SSH_GATEWAY_AUTH.into(),
             gateway_role: DEFAULT_GATEWAY_ROLE.into(),
             master_accept_relays: DEFAULT_MASTER_ACCEPT_RELAYS,
+            allow_relay_kermit: DEFAULT_ALLOW_RELAY_KERMIT,
             slave_master_host: String::new(),
             slave_master_port: DEFAULT_SLAVE_MASTER_PORT,
             slave_master_username: String::new(),
@@ -1429,6 +1446,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("master_accept_relays")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_MASTER_ACCEPT_RELAYS),
+        allow_relay_kermit: map
+            .get("allow_relay_kermit")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_ALLOW_RELAY_KERMIT),
         slave_master_host: map
             .get("slave_master_host")
             .map(|v| v.trim().to_string())
@@ -2110,6 +2131,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # by enabling SSH for normal logins.
 ");
     write_kv(&mut content, "master_accept_relays", cfg.master_accept_relays);
+    content.push_str("\
+# allow_relay_kermit: a MASTER serves its own Kermit server to a slave port
+#   that is in Kermit-server mode, so the device on the slave's wire lists,
+#   uploads to and downloads from THIS machine's transfer directory.  Off by
+#   default: Kermit server mode has no authentication of its own (same reason
+#   allow_atdt_kermit and kermit_server_enabled are opt-in).
+");
+    write_kv(&mut content, "allow_relay_kermit", cfg.allow_relay_kermit);
     content.push('\n');
 
     content.push_str("\
@@ -2584,6 +2613,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.gateway_role = lower;
             }
         }
+        "allow_relay_kermit" => cfg.allow_relay_kermit = value.eq_ignore_ascii_case("true"),
         "master_accept_relays" => {
             cfg.master_accept_relays = value.eq_ignore_ascii_case("true")
         }
@@ -3200,6 +3230,7 @@ mod tests {
             ssh_gateway_auth: "password".into(),
             gateway_role: "slave".into(),
             master_accept_relays: true,
+            allow_relay_kermit: true,
             slave_master_host: "192.168.1.10".into(),
             slave_master_port: 2200,
             slave_master_username: "relay-user".into(),

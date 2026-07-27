@@ -919,6 +919,7 @@ fn collect_form_updates(
         "allow_peer_dial",
         "punter_hangup_on_failure",
         "master_accept_relays",
+        "allow_relay_kermit",
         "serial_a_enabled", "serial_b_enabled",
         "cpm_emu_echo", "cpm_emu_verbose", "cpm_emu_quiet",
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
@@ -932,7 +933,7 @@ fn collect_form_updates(
         // it there instead of clobbering the stored value to false.  This
         // matches the GUI/telnet, which preserve it (it is inert outside master
         // anyway, and is re-defaulted on when the role is switched to master).
-        if *key == "master_accept_relays"
+        if matches!(*key, "master_accept_relays" | "allow_relay_kermit")
             && fields.get("gateway_role").map(String::as_str) != Some("master")
         {
             continue;
@@ -1271,6 +1272,7 @@ fn master_slave_rows(cfg: &Config) -> String {
          <option value=\"slave\" {sl_sel}>Slave</option>\
          </select> {accept_chk}</div>\
          <div class=\"row\">{host} {port}</div>\
+         <div class=\"row\">{relay_kermit_chk}</div>\
          <div class=\"row\">{user} {pass}</div>",
         st_sel = role_sel("standalone"),
         ma_sel = role_sel("master"),
@@ -1279,6 +1281,12 @@ fn master_slave_rows(cfg: &Config) -> String {
             "master_accept_relays",
             "Master: accept relays",
             cfg.master_accept_relays,
+            dis_accept,
+        ),
+        relay_kermit_chk = checkbox_with_attr(
+            "allow_relay_kermit",
+            "Master: serve Kermit to slave ports",
+            cfg.allow_relay_kermit,
             dis_accept,
         ),
         host = textfield_attr("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16, dis_slave),

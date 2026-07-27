@@ -169,6 +169,73 @@ where
 /// the telnet Serial Gateway picker's peer-call wait.
 pub const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Master-side **Kermit server** for a slave's Kermit-server-mode port.
+///
+/// The slave pipes its UART to this channel and serves nothing itself, so the
+/// device on that wire is talking to *this* machine's Kermit server: `remote
+/// dir` lists the master's transfer directory, an upload lands in it, and a
+/// download is read from it.  Nothing has to synchronise two directories,
+/// because only one of them was ever involved.
+///
+/// Gated by `allow_relay_kermit`, off by default.  The Kermit server has no
+/// authentication of its own — that is inherent to the protocol's server mode,
+/// and the same reason `allow_atdt_kermit` and the standalone listener are
+/// opt-in.  This path is the better-placed of the three (the peer is a slave
+/// that authenticated to this master over SSH, and `master_accept_relays` is
+/// already required), but it still hands a remote wire unauthenticated read and
+/// write access to the transfer directory, so the operator opts in.
+pub async fn run_master_relay_kermit<S>(mut relay: S, port_label: String, peer: Option<IpAddr>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    let cfg = crate::config::get_config();
+    if !cfg.allow_relay_kermit {
+        glog!(
+            "Relay: Kermit server for slave port {} refused (allow_relay_kermit=false)",
+            port_label
+        );
+        let _ = relay.shutdown().await;
+        return;
+    }
+
+    // Name the far end the way the operator sees it in the Serial Gateway
+    // list, so a log line ties the transfer to a machine and a port.
+    let who = match peer {
+        Some(ip) => format!("{}@{}", port_label, ip),
+        None => port_label.clone(),
+    };
+    let target_dir = std::path::PathBuf::from(&cfg.transfer_dir);
+    if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+        glog!(
+            "Relay: Kermit server ({}) cannot create transfer dir {:?}: {}",
+            who, target_dir, e
+        );
+        let _ = relay.shutdown().await;
+        return;
+    }
+    glog!("Relay: Kermit server serving slave port {} from {:?}", who, target_dir);
+
+    let (mut read_half, mut write_half) = tokio::io::split(relay);
+    let result = crate::kermit::kermit_server_with_outcome(
+        &mut read_half,
+        &mut write_half,
+        false, // raw relay channel — no telnet IAC escaping
+        false, // not PETSCII
+        cfg.verbose,
+        // The same disk-commit hook the serial Kermit paths use: validated
+        // filename, safe subdir, collision-safe rename rather than clobber.
+        |rx| crate::serial::commit_kermit_upload(&who, &target_dir, rx),
+    )
+    .await;
+    let _ = write_half.shutdown().await;
+    match result {
+        Ok(_) => glog!("Relay: Kermit server ({}) session ended", who),
+        Err(e) => glog!("Relay: Kermit server ({}) session error: {}", who, e),
+    }
+}
+
 /// Master-side **peer-dial** (Phase 2): a slave relayed a device that dialed
 /// `<Port>@<host>`.  The master resolves the address either to one of its
 /// *own* ports (rings a modem port / connects a console port, reusing the
@@ -273,6 +340,15 @@ pub enum RelayTarget {
     /// ports and bridges (ringing a modem port, or connecting a console
     /// port).  `addr` is the raw address the device dialed.
     Peer { addr: String },
+    /// A **Kermit-server-mode** port: the master runs its Kermit server on
+    /// this channel, so the device on the slave's wire is talking to the
+    /// *master's* server and every file operation — `remote dir`, uploads,
+    /// downloads — resolves against the master's transfer directory.
+    ///
+    /// The slave is a pipe here: it never serves Kermit itself in this mode,
+    /// which is what makes "files always land on the master" true by
+    /// construction rather than by synchronising two directories.
+    Kermit,
 }
 
 impl RelayTarget {
@@ -297,6 +373,7 @@ impl RelayTarget {
             RelayTarget::Peer { addr } => {
                 format!("serial-relay {} peer {}", port_label, addr)
             }
+            RelayTarget::Kermit => format!("serial-relay {} kermit", port_label),
         }
     }
 }
@@ -314,6 +391,10 @@ pub struct ParsedRelay {
     /// `Some(addr)` ⇒ peer-dial the master's port addressed as
     /// `<Port>@<host>` (Phase 2).  Mutually exclusive with `dial`.
     pub peer: Option<String>,
+    /// `true` ⇒ the slave's port is in Kermit-server mode and wants the
+    /// master's Kermit server on this channel.  Mutually exclusive with
+    /// `dial` and `peer`.
+    pub kermit: bool,
 }
 
 /// Parse a `serial-relay …` exec command.  Returns `None` for anything
@@ -362,6 +443,7 @@ pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
     let port_label = toks.next().unwrap_or("?").to_string();
     let mut dial = None;
     let mut peer = None;
+    let mut kermit = false;
     match toks.next().unwrap_or("menu") {
         "menu" => {}
         "dial" => {
@@ -374,9 +456,10 @@ pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
             }
             peer = Some(addr.to_string());
         }
+        "kermit" => kermit = true,
         _ => return None,
     }
-    Some(ParsedRelay { port_label, dial, peer })
+    Some(ParsedRelay { port_label, dial, peer, kermit })
 }
 
 /// SSH client handler for the slave→master relay connection.  The
@@ -925,11 +1008,22 @@ pub fn log_slave_link_summary(host: &str, port: u16) {
         .enumerate()
     {
         let state = slave_link_state(idx);
+        // A Kermit-mode port is never "picked" by a user: the master's Kermit
+        // server is simply on the wire whenever the link is up, and serves
+        // nothing when it isn't.  Saying "a master user is attached" there
+        // would describe the wrong feature.
+        let kermit_mode = pc.mode == "kermit";
         let detail = match state {
             SlaveLinkState::Registered => "registered — awaiting a pick from the master",
+            SlaveLinkState::Bridging if kermit_mode => {
+                "the master's Kermit server is on this wire — files live on the master"
+            }
             SlaveLinkState::Bridging => "bridging — a master user is attached",
             SlaveLinkState::Connecting => "connecting to the master",
             SlaveLinkState::Down if !pc.enabled => "port disabled",
+            SlaveLinkState::Down if kermit_mode => {
+                "down — serving nothing until the master is reachable"
+            }
             SlaveLinkState::Down => "down — not connected to the master",
         };
         lines.push(format!("    Port {label}  mode={:<7} {detail}", pc.mode));

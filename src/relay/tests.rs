@@ -293,6 +293,7 @@ fn test_relay_command_round_trip() {
             port_label: "A".into(),
             dial: None,
             peer: None,
+            kermit: false,
         })
     );
 
@@ -309,6 +310,7 @@ fn test_relay_command_round_trip() {
             port_label: "B".into(),
             dial: Some(("bbs.example.com".into(), 6400)),
             peer: None,
+            kermit: false,
         })
     );
 
@@ -322,6 +324,7 @@ fn test_relay_command_round_trip() {
             port_label: "A".into(),
             dial: None,
             peer: Some("B@192.168.1.50".into()),
+            kermit: false,
         })
     );
 
@@ -376,8 +379,206 @@ fn test_parse_relay_command_rejects_garbage() {
             port_label: "?".into(),
             dial: None,
             peer: None,
+            kermit: false,
         })
     );
+}
+
+/// Serializes the tests that flip `allow_relay_kermit` + `transfer_dir`.
+static RELAY_KERMIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Sets `allow_relay_kermit` and points `transfer_dir` at a temp directory for
+/// the guard's lifetime, restoring both on drop.  Written to the config FILE
+/// for the same reason `PeerDialGuard` is: `update_config_value` re-reads it,
+/// so an in-memory-only value can be clobbered by a concurrent config write.
+struct RelayKermitGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    prev_allow: bool,
+    prev_dir: String,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for RelayKermitGuard {
+    fn drop(&mut self) {
+        crate::config::update_config_value(
+            "allow_relay_kermit",
+            if self.prev_allow { "true" } else { "false" },
+        );
+        crate::config::update_config_value("transfer_dir", &self.prev_dir);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+async fn relay_kermit_env(enabled: bool, tag: &str) -> RelayKermitGuard {
+    let lock = RELAY_KERMIT_TEST_LOCK.lock().await;
+    let cfg = crate::config::get_config();
+    let dir = std::env::temp_dir().join(format!("xmodem_relay_kermit_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let guard = RelayKermitGuard {
+        _lock: lock,
+        prev_allow: cfg.allow_relay_kermit,
+        prev_dir: cfg.transfer_dir.clone(),
+        dir: dir.clone(),
+    };
+    crate::config::update_config_value(
+        "allow_relay_kermit",
+        if enabled { "true" } else { "false" },
+    );
+    crate::config::update_config_value("transfer_dir", dir.to_str().unwrap());
+    guard
+}
+
+/// The whole point of the feature, end to end: a device on a slave's wire
+/// uploads, and the file lands in the **master's** transfer directory.
+///
+/// The slave is a pipe, so the test stands in for it with a duplex: our Kermit
+/// *client* plays the device on one end, `run_master_relay_kermit` is the master
+/// on the other.  Nothing here writes to a slave-side directory because in this
+/// design there is no slave-side directory to write to.
+#[tokio::test]
+async fn test_relay_kermit_upload_lands_in_the_masters_transfer_dir() {
+    let env = relay_kermit_env(true, "upload").await;
+    let (device, master) = tokio::io::duplex(64 * 1024);
+
+    let server = tokio::spawn(async move {
+        crate::relay::run_master_relay_kermit(master, "B".to_string(), None).await;
+    });
+
+    let (mut dev_read, mut dev_write) = tokio::io::split(device);
+    let body = b"files live on the master
+".to_vec();
+    let files = vec![crate::kermit::KermitSendFile {
+        name: "PROOF.TXT",
+        data: &body,
+        modtime: None,
+        mode: None,
+    }];
+    crate::kermit::kermit_send(&mut dev_read, &mut dev_write, &files, false, false, false)
+        .await
+        .expect("device's upload should be accepted by the master's server");
+    drop(dev_write);
+    drop(dev_read);
+    let _ = server.await;
+
+    let landed = env.dir.join("PROOF.TXT");
+    assert!(
+        landed.is_file(),
+        "expected the upload in the master's transfer dir, found: {:?}",
+        std::fs::read_dir(&env.dir)
+            .map(|d| d.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    assert_eq!(std::fs::read(&landed).unwrap(), body);
+}
+
+/// `remote dir` and a download must resolve against the **master's** directory
+/// too, not only uploads — that is what "the slave is a pipe" has to mean in
+/// practice.  Both are proved against files that exist ONLY on the master.
+#[tokio::test]
+async fn test_relay_kermit_commands_resolve_on_the_master() {
+    let env = relay_kermit_env(true, "commands").await;
+    // Exists only in the master's transfer dir; the device has no filesystem
+    // in this test at all, so anything it sees came from the master.
+    std::fs::write(env.dir.join("ONMASTER.TXT"), b"master copy\r\n").unwrap();
+
+    let (device, master) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        crate::relay::run_master_relay_kermit(master, "B".to_string(), None).await;
+    });
+    let (mut dev_read, mut dev_write) = tokio::io::split(device);
+
+    // `remote dir` (G D) — the listing is the master's.
+    let listing = crate::kermit::kermit_client_dir(
+        &mut dev_read, &mut dev_write, false, false, false,
+    )
+    .await
+    .expect("remote dir should be served by the master");
+    assert!(
+        listing.contains("ONMASTER.TXT"),
+        "the listing must be the master's directory; got: {listing}"
+    );
+
+    // A download (R-pull) — the bytes are the master's.
+    let got = crate::kermit::kermit_client_get(
+        &mut dev_read, &mut dev_write, "ONMASTER.TXT", false, false, false,
+    )
+    .await
+    .expect("a download should come from the master");
+    assert_eq!(got.len(), 1, "expected exactly the one file");
+    assert_eq!(got[0].data, b"master copy\r\n");
+
+    let _ = crate::kermit::kermit_client_finish(
+        &mut dev_read, &mut dev_write, false, false, false,
+    )
+    .await;
+    drop(dev_write);
+    drop(dev_read);
+    let _ = server.await;
+}
+
+/// With the gate off the master refuses and closes the channel, so the device
+/// gets no server at all rather than a silent local one.
+#[tokio::test]
+async fn test_relay_kermit_refused_when_gate_is_off() {
+    let env = relay_kermit_env(false, "refused").await;
+    let (device, master) = tokio::io::duplex(64 * 1024);
+
+    let server = tokio::spawn(async move {
+        crate::relay::run_master_relay_kermit(master, "B".to_string(), None).await;
+    });
+
+    // The refusal closes the channel: a client's send fails rather than hanging.
+    let (mut dev_read, mut dev_write) = tokio::io::split(device);
+    let body = b"nope".to_vec();
+    let files = vec![crate::kermit::KermitSendFile {
+        name: "NOPE.TXT",
+        data: &body,
+        modtime: None,
+        mode: None,
+    }];
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        crate::kermit::kermit_send(&mut dev_read, &mut dev_write, &files, false, false, false),
+    )
+    .await;
+    let _ = server.await;
+    assert!(
+        matches!(result, Ok(Err(_))) || result.is_err(),
+        "a refused relay must not accept a transfer"
+    );
+    assert!(
+        !env.dir.join("NOPE.TXT").exists(),
+        "nothing may be written when the gate is off"
+    );
+}
+
+/// The `kermit` verb round-trips: what a slave's Kermit-mode port asks for is
+/// what the master parses.  Both halves of the grammar in one test, so they
+/// cannot drift.
+#[test]
+fn test_kermit_relay_target_round_trips_through_the_grammar() {
+    let cmd = RelayTarget::Kermit.exec_command("B");
+    assert_eq!(cmd, "serial-relay B kermit");
+    assert_eq!(
+        parse_relay_command(&cmd),
+        Some(ParsedRelay {
+            port_label: "B".into(),
+            dial: None,
+            peer: None,
+            kermit: true,
+        })
+    );
+    // It is exclusive with the other verbs: a menu relay is not a kermit relay.
+    let menu = parse_relay_command(&RelayTarget::Menu.exec_command("B")).unwrap();
+    assert!(!menu.kermit);
+    let dial = parse_relay_command(&RelayTarget::Dial {
+        host: "h".into(),
+        port: 23,
+    }
+    .exec_command("A"))
+    .unwrap();
+    assert!(!dial.kermit);
 }
 
 /// Phase 2b: parse a peer-dial address into a remote-registry key.

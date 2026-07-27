@@ -827,6 +827,7 @@ impl russh::server::Handler for SshHandler {
         let port_label = parsed.port_label;
         let dial_target = parsed.dial;
         let peer_target = parsed.peer;
+        let kermit_target = parsed.kermit;
 
         let cfg = config::get_config();
         if cfg.gateway_role != "master" || !cfg.master_accept_relays {
@@ -887,6 +888,11 @@ impl russh::server::Handler for SshHandler {
             return Err(e);
         }
         match (&dial_target, &peer_target) {
+            (None, None) if kermit_target => glog!(
+                "SSH: accepted serial relay (port {}, kermit server) from {:?}",
+                port_label,
+                self.peer_addr
+            ),
             (None, None) => glog!(
                 "SSH: accepted serial relay (port {}, menu) from {:?}",
                 port_label,
@@ -926,7 +932,20 @@ impl russh::server::Handler for SshHandler {
         let session_writers = self.session_writers.clone();
         let lockouts = self.lockouts.clone();
         let session_count = self.session_count.clone();
+        let port_label_for_kermit = port_label.clone();
         tokio::spawn(async move {
+            if kermit_target {
+                // The slave's port is in Kermit-server mode: serve OUR Kermit
+                // server on this channel, so its device's file operations
+                // resolve against this master's transfer directory.
+                crate::relay::run_master_relay_kermit(
+                    gateway_stream,
+                    port_label_for_kermit,
+                    peer_addr,
+                )
+                .await;
+                return;
+            }
             match (dial_target, peer_target) {
                 (Some((host, port)), _) => {
                     // Pass the WHOLE (unsplit) duplex so copy_bidirectional

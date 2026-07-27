@@ -918,6 +918,26 @@ pub fn console_relayed_to_master(cfg: &config::Config, id: SerialPortId) -> bool
     cfg.gateway_role == "slave" && port.enabled && port.mode == "console" && !port.port.is_empty()
 }
 
+/// Whether `id` is a **Kermit-server-mode** port on a *slave* that is served by
+/// the master rather than locally.
+///
+/// Such a port is a pipe: the master runs the Kermit server on the relay
+/// channel, so the device's `remote dir` / upload / download all resolve
+/// against the master's transfer directory.  It follows that the port is
+/// dedicated to the master — it is not offered in the slave's own pickers, and
+/// while the link is down it serves *nothing* rather than quietly falling back
+/// to a local server that would put files on the wrong machine.
+///
+/// Pure config predicate, like [`console_relayed_to_master`].
+pub fn kermit_relayed_to_master(cfg: &config::Config, id: SerialPortId) -> bool {
+    let port = cfg.port(id);
+    cfg.gateway_role == "slave"
+        && !cfg.slave_master_host.is_empty()
+        && port.enabled
+        && port.mode == "kermit"
+        && !port.port.is_empty()
+}
+
 /// Combined gate for `request_console_bridge`: eligibility first
 /// (so a misconfigured port produces a specific error), then the
 /// "another session" check.  Pure function — exercised by tests
@@ -1122,6 +1142,14 @@ fn serial_manager(
                 } else {
                     console_manager_tick(id, port, handle.clone(), shutdown.clone());
                 }
+            } else if port.mode == "kermit" && kermit_relayed_to_master(&cfg, id) {
+                // Kermit-server mode on a SLAVE: pipe the wire to the master
+                // and let the *master's* Kermit server serve it, so `remote
+                // dir`, uploads and downloads all resolve against the master's
+                // transfer directory.  This slave serves nothing itself — that
+                // is what keeps "files always land on the master" true without
+                // synchronising two directories.
+                kermit_slave_relay_tick(id, port, handle.clone(), shutdown.clone());
             } else if port.mode == "kermit" {
                 // Kermit-server mode: keep the port open and run a
                 // persistent Kermit server directly on the wire, reopening
@@ -1644,6 +1672,137 @@ fn console_slave_register_tick(
         }
         // Normal churn (bridge ended or channel closed cleanly) — brisk
         // re-register, not an outage backoff.
+        slave_backoff(idx, &shutdown, RECONNECT_BACKOFF_MIN);
+    }
+}
+
+/// Slave-side loop for a **Kermit-server-mode** port: hold the wire open to the
+/// master and let the master serve Kermit on it.
+///
+/// Unlike a console port there is no registration and no waiting to be picked:
+/// a Kermit server is only useful if it is *already* there when the device
+/// starts a transfer, so the channel is opened as soon as the link allows and
+/// the bridge runs for as long as it lasts.  The master answers with its own
+/// Kermit server (`relay::run_master_relay_kermit`), so a `remote dir` lists the
+/// master's transfer directory and files move to and from it.
+///
+/// While the master is unreachable this port serves **nothing**.  Falling back
+/// to a local Kermit server would be worse than useless: the device's transfer
+/// would appear to succeed and the file would land on the wrong machine, which
+/// is exactly the surprise this mode exists to remove.  The outage is logged
+/// once and retried with the usual backoff.
+fn kermit_slave_relay_tick(
+    id: SerialPortId,
+    port_cfg: SerialPortConfig,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+) {
+    let idx = id.index();
+    let label = id.label();
+    let aborted =
+        |idx: usize| shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst);
+
+    let mut net_backoff = RECONNECT_BACKOFF_MIN;
+    let mut attempt: u32 = 0;
+    let mut last_outage: Option<String> = None;
+
+    loop {
+        if aborted(idx) {
+            crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
+            return;
+        }
+        let cfg = config::get_config();
+        if !kermit_relayed_to_master(&cfg, id) {
+            return; // config changed under us; the manager re-reads and re-dispatches
+        }
+        let host = cfg.slave_master_host.clone();
+        let mport = cfg.slave_master_port;
+        let user = cfg.slave_master_username.clone();
+        let pass = cfg.slave_master_password.clone();
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
+
+        // Open the UART first: a channel to the master with no wire behind it
+        // would let the master's server answer a device that isn't there.
+        let port = match open_serial_port(&port_cfg) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("cannot open {}: {}", port_cfg.port, e);
+                if should_log_outage(&last_outage, &msg) {
+                    glog!("Serial Kermit server (Port {}): {} — retrying", label, msg);
+                    last_outage = Some(msg);
+                }
+                let delay = net_backoff;
+                net_backoff = next_network_backoff(net_backoff);
+                slave_backoff(idx, &shutdown, delay);
+                continue;
+            }
+        };
+
+        attempt = attempt.saturating_add(1);
+        glog!(
+            "Serial Kermit server (Port {}): slave mode — asking master {}:{} to serve Kermit (attempt {})",
+            label, host, mport, attempt
+        );
+        let connected = handle.block_on(async {
+            crate::relay::connect_master_relay(
+                &host,
+                mport,
+                &user,
+                &pass,
+                &crate::relay::RelayTarget::Kermit,
+                label,
+            )
+            .await
+        });
+        let relay = match connected {
+            Ok(r) => r,
+            Err(e) => {
+                let delay = relay_reconnect_delay(&e, &mut net_backoff);
+                let msg = e.to_string();
+                if should_log_outage(&last_outage, &msg) {
+                    glog!(
+                        "Serial Kermit server (Port {}): master {}:{} unreachable: {} — this port serves nothing until the link is up",
+                        label, host, mport, msg
+                    );
+                    last_outage = Some(msg);
+                }
+                drop(port);
+                slave_backoff(idx, &shutdown, delay);
+                continue;
+            }
+        };
+        if last_outage.is_some() {
+            glog!("Serial Kermit server (Port {}): reconnected to master", label);
+        }
+        last_outage = None;
+        net_backoff = RECONNECT_BACKOFF_MIN;
+        attempt = 0;
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
+        glog!(
+            "Serial Kermit server (Port {}): CONNECTED — the master's Kermit server is on this wire; files live on the master",
+            label
+        );
+        crate::relay::log_slave_link_summary(&host, mport);
+
+        // Bridge until the wire or the channel goes away.  `_session` must drop
+        // inside the runtime (its Drop talks to the reactor), and
+        // `run_console_bridge` moves the stream into a spawned task, so its
+        // halves already drop in-runtime.
+        let crate::relay::MasterRelay { _session, stream } = relay;
+        run_console_bridge(
+            id,
+            port,
+            stream,
+            handle.clone(),
+            shutdown.clone(),
+            "Serial Kermit server",
+        );
+        handle.block_on(async move { drop(_session) });
+        glog!(
+            "Serial Kermit server (Port {}): master link closed; reconnecting",
+            label
+        );
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
         slave_backoff(idx, &shutdown, RECONNECT_BACKOFF_MIN);
     }
 }
@@ -2377,13 +2536,18 @@ fn run_console_bridge<S>(
 /// collects bytes in memory, so without a real hook here every upload
 /// would be silently discarded.  The serial paths have no terminal
 /// summary UI, so each file's outcome is logged instead.
-fn commit_kermit_upload(
-    id: SerialPortId,
+/// Commit one Kermit-server upload to disk: validate the name, re-check the
+/// subdir, and save collision-safe rather than clobbering.
+///
+/// `label` only names the source in the log — a local port ("A"), or a slave's
+/// port as the master sees it ("A@192.168.1.141") when the master is serving
+/// Kermit on a slave's behalf (`relay::run_master_relay_kermit`).
+pub(crate) fn commit_kermit_upload(
+    label: &str,
     target_dir: &std::path::Path,
     rx: &crate::kermit::KermitReceive,
 ) {
     use crate::telnet::TelnetSession;
-    let label = id.label();
     if TelnetSession::validate_filename(&rx.filename).is_err() {
         glog!(
             "Serial Kermit server (Port {}): rejected upload — unsafe filename {:?}",
@@ -2490,7 +2654,7 @@ fn run_kermit_server_port(
             // silently dropped).
             match crate::kermit::kermit_server_with_outcome(
                 &mut r, &mut w, false, false, verbose,
-                |rx| commit_kermit_upload(id, &target_dir, rx),
+                |rx| commit_kermit_upload(id.label(), &target_dir, rx),
             )
             .await
             {
@@ -4778,7 +4942,7 @@ fn dial_kermit_server(state: &mut ModemState) {
             false,
             false,
             verbose,
-            |rx| commit_kermit_upload(port_id, &target_dir, rx),
+            |rx| commit_kermit_upload(port_id.label(), &target_dir, rx),
         )
         .await;
         if let Err(e) = result {
@@ -6712,7 +6876,7 @@ mod tests {
             resumed: false,
             subdir: String::new(),
         };
-        commit_kermit_upload(SerialPortId::A, &dir, &rx);
+        commit_kermit_upload(SerialPortId::A.label(), &dir, &rx);
 
         let saved = std::fs::read(dir.join("hello.txt")).expect("file should be saved");
         assert_eq!(saved, b"kermit upload payload");
@@ -6738,7 +6902,7 @@ mod tests {
             resumed: false,
             subdir: String::new(),
         };
-        commit_kermit_upload(SerialPortId::A, &dir, &rx);
+        commit_kermit_upload(SerialPortId::A.label(), &dir, &rx);
 
         // Nothing escaped the transfer dir.
         assert!(!dir.parent().unwrap().join("escape.txt").exists());
@@ -6766,9 +6930,9 @@ mod tests {
             resumed: false,
             subdir: String::new(),
         };
-        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"first"));
-        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"second"));
-        commit_kermit_upload(SerialPortId::A, &dir, &mk(b"third"));
+        commit_kermit_upload(SerialPortId::A.label(), &dir, &mk(b"first"));
+        commit_kermit_upload(SerialPortId::A.label(), &dir, &mk(b"second"));
+        commit_kermit_upload(SerialPortId::A.label(), &dir, &mk(b"third"));
 
         // Original untouched; the collisions land under dup0/dup1 (stem
         // is under 8 chars, so the number is appended).
@@ -6807,7 +6971,7 @@ mod tests {
                 false,
                 false,
                 false,
-                |rx| commit_kermit_upload(SerialPortId::A, &dir_for_server, rx),
+                |rx| commit_kermit_upload(SerialPortId::A.label(), &dir_for_server, rx),
             )
             .await
         });

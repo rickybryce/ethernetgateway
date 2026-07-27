@@ -1172,6 +1172,16 @@ impl TelnetSession {
                 };
                 self.send_line(&format!("  Accept relays: {}", accept_disp))
                     .await?;
+                // Serving Kermit to a slave's wire is a second, narrower
+                // master gate: it hands that wire unauthenticated access to
+                // this machine's transfer directory.
+                let kermit_disp = if cfg.allow_relay_kermit {
+                    self.green("ENABLED")
+                } else {
+                    self.red("Disabled")
+                };
+                self.send_line(&format!("  Kermit to slaves: {}", kermit_disp))
+                    .await?;
             } else {
                 self.send_line(&format!(
                     "  {}",
@@ -1271,6 +1281,11 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  {}  Kermit to slaves",
+                self.cyan("K")
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  {}  Master host      {}  Master port",
                 self.cyan("M"),
                 self.cyan("P")
@@ -1324,6 +1339,22 @@ impl TelnetSession {
                         self.relay_ssh_needed_notice().await?;
                     }
                     self.config_restart_notice().await?;
+                }
+                "k" => {
+                    if cfg.gateway_role != "master" {
+                        self.relay_field_not_applicable(
+                            "Kermit to slaves: Master role only.",
+                        )
+                        .await?;
+                    } else {
+                        let v = (!cfg.allow_relay_kermit).to_string();
+                        tokio::task::spawn_blocking(move || {
+                            config::update_config_value("allow_relay_kermit", &v);
+                        })
+                        .await
+                        .ok();
+                        self.config_restart_notice().await?;
+                    }
                 }
                 "a" => {
                     if cfg.gateway_role != "master" {
@@ -1451,6 +1482,7 @@ impl TelnetSession {
             "    to the master over SSH.",
             "",
             "  R Cycle role   A Accept relays",
+            "  K Serve Kermit to slave ports",
             "  M Host  P Port  U User  W Pass",
             "",
             "  Slave logs in with the master's",
