@@ -5728,8 +5728,16 @@ mod tests {
         }
 
         proptest! {
+            // 128 rather than proptest's default 256 because every case here
+            // builds a tokio runtime.  Written as a conditional so CI's
+            // deep-fuzz step still wins: a plain `cases: 128` field would
+            // override the PROPTEST_CASES env var that default() reads.
             #![proptest_config(ProptestConfig {
-                cases: 128,
+                cases: if std::env::var_os("PROPTEST_CASES").is_some() {
+                    ProptestConfig::default().cases
+                } else {
+                    128
+                },
                 ..ProptestConfig::default()
             })]
 

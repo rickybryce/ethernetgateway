@@ -6,10 +6,10 @@ Security fixes are applied to the latest released version of
 **ethernetgateway**.  Older versions do not receive patches; please
 upgrade before reporting.
 
-| Version | Supported |
-|---------|-----------|
-| 0.3.x   | ✅         |
-| < 0.3   | ❌         |
+| Version                | Supported |
+|------------------------|-----------|
+| Latest released 0.x    | ✅         |
+| Anything older         | ❌         |
 
 ## Reporting a Vulnerability
 

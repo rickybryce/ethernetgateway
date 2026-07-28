@@ -58,11 +58,22 @@ jobs:
       # Run the proptest fuzzers with an elevated case count on Linux.
       # Keeps CI fast on the other platforms while still getting
       # cross-platform coverage of the deterministic unit tests.
+      #
+      # The filter is the bare word "proptest", which cargo matches against the
+      # full test path: it catches the *_proptest modules (qmethod, punter,
+      # ymodem_parser, zmodem) and kermit's proptest_*_no_panic fns alike, i.e.
+      # every hand-rolled wire parser that reads untrusted bytes.  It used to
+      # read "qmethod_proptest", which reached only the telnet option-
+      # negotiation state machine — 3 of the 20 property tests.
+      #
+      # Note this only bites because no proptest! block sets `cases:` as a
+      # struct-literal field any more; such a field silently overrides
+      # PROPTEST_CASES, which is read by ProptestConfig::default().
       - name: cargo test (extended proptest cases)
         if: matrix.os == 'ubuntu-latest'
         env:
           PROPTEST_CASES: "4096"
-        run: cargo test qmethod_proptest --verbose
+        run: cargo test proptest --verbose
 
   rustfmt:
     name: rustfmt check

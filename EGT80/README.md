@@ -104,14 +104,27 @@ break by accident and impossible to notice in a modern assembler.
 **CI cannot rebuild this.** Assembling needs SLR's `Z80ASM.COM` and `zxcc`, and
 neither is in the repository — the assembler is third-party software we do not
 vendor. So `EGT80.COM` is a committed artifact, and the risk is drift: a source
-edit whose binary was never rebuilt. Three unit tests in `src/telnet/cpm_emu.rs`
-close most of that gap with no tooling at all — they check the bundled binary is
+edit whose binary was never rebuilt. Four unit tests in `src/telnet/cpm_emu.rs`
+close that gap with no tooling at all — they check the bundled binary is
 a whole number of 128-byte records, starts with the `JP` over the patch area,
 carries the `EGT80CFG` signature at file offset `0x80` (where the save routine
 rewrites record 1), and contains the version string that `EGT80.Z80` declares.
-The last one catches the realistic mistake of bumping the version without
-rebuilding. What they *cannot* catch is a code change made without touching the
-version, so run `make` (and `make check`) before a release cut.
+The version check catches the realistic mistake of bumping the version without
+rebuilding.
+
+The fourth, `test_bundled_egt80_matches_pinned_hash`, covers what the other
+three cannot: a code change made *without* touching the version. It asserts an
+explicit `sha256` of the committed binary, so the bytes users run cannot change
+unless someone edits the hash in the same commit — which puts it in front of a
+reviewer. **So after any legitimate rebuild:**
+
+```sh
+make && make check          # the real gate — three assemblers
+sha256sum EGT80.COM         # paste into PINNED in that test
+```
+
+The hash pins the artifact, not its correspondence to the source; only `make`
+proves that, so run it before a release cut.
 
 ## Design
 

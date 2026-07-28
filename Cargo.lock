@@ -1364,6 +1364,7 @@ dependencies = [
  "russh",
  "serde_json",
  "serialport",
+ "sha2 0.10.9",
  "signal-hook",
  "tokio",
  "ureq",

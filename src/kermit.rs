@@ -6085,7 +6085,15 @@ async fn kermit_server_dispatch(
 //
 // `#[allow(dead_code)]` keeps the function as intentional client-side
 // API surface even though no telnet.rs menu entry currently calls it.
-// The unit tests below exercise it end-to-end.
+//
+// This applies to the whole `kermit_client_*` family below, and the claim it
+// rests on is that tests stand in for the missing production caller — so all
+// fourteen are exercised end-to-end against our own server, which implements
+// the matching G subcommands.  Five of them (DELETE, RENAME, TYPE, MKDIR,
+// RMDIR) had no test at all until 2026-07-28, which made this note true of
+// its siblings but not of them: unreferenced *and* unverified code compiled
+// into every shipped binary.  If you add another client command, add its test
+// in the same commit or the note stops being true again.
 #[allow(dead_code)]
 pub(crate) async fn kermit_client_get(
     reader: &mut (impl AsyncRead + Unpin),
@@ -10546,7 +10554,230 @@ mod tests {
         assert_eq!(received[0].data, payload_clone);
     }
 
+    // ── Client G-subcommands that mutate the remote ──────────────
+    //
+    // DELETE / RENAME / TYPE / MKDIR / RMDIR round-trip against our own
+    // server, which implements the matching G letters (E, R, T, m, d).
+    // These five had no caller and no test, so the `#[allow(dead_code)]`
+    // note above the family — "the unit tests below exercise it end-to-end"
+    // — was true of their nine siblings but not of them.
+    //
+    // Every one ends with kermit_client_finish: the helper awaits the server
+    // task, and a session left open parks the test on kermit_idle_timeout.
+
+    /// Build a scratch transfer dir named after the test.
+    fn client_scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("xmodem_client_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[tokio::test]
+    async fn test_client_delete_removes_remote_file() {
+        let dir = client_scratch_dir("delete");
+        std::fs::write(dir.join("doomed.txt"), b"goodbye").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let (cleanup, victim) = (dir.clone(), dir.join("doomed.txt"));
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let res = kermit_client_delete(r, w, "doomed.txt", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let existed = victim.exists();
+        let _ = std::fs::remove_dir_all(&cleanup);
+
+        client_result.expect("DELETE of an existing file must succeed");
+        assert!(!existed, "DELETE must actually remove the remote file");
+    }
+
+    #[tokio::test]
+    async fn test_client_delete_missing_file_surfaces_server_error() {
+        // The server answers an absent file with an E-packet; the client
+        // must surface that as Err rather than reporting success.
+        let dir = client_scratch_dir("delete_missing");
+        let dir_str = dir.to_str().unwrap().to_string();
+        let cleanup = dir.clone();
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let res = kermit_client_delete(r, w, "not-there.txt", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&cleanup);
+        client_result.expect_err("DELETE of a missing file must be an error");
+    }
+
+    #[tokio::test]
+    async fn test_client_rename_moves_remote_file() {
+        let dir = client_scratch_dir("rename");
+        std::fs::write(dir.join("before.txt"), b"payload").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let (cleanup, old, new) =
+            (dir.clone(), dir.join("before.txt"), dir.join("after.txt"));
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let res =
+                kermit_client_rename(r, w, "before.txt", "after.txt", false, false, false)
+                    .await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let (old_gone, new_body) = (!old.exists(), std::fs::read(&new).ok());
+        let _ = std::fs::remove_dir_all(&cleanup);
+
+        client_result.expect("RENAME must succeed");
+        assert!(old_gone, "the old name must be gone after RENAME");
+        assert_eq!(
+            new_body.as_deref(),
+            Some(&b"payload"[..]),
+            "RENAME must preserve contents under the new name",
+        );
+    }
+
+    /// Both names are required, and the guard fires *before* anything reaches
+    /// the wire — so the session is still healthy afterwards.
+    #[tokio::test]
+    async fn test_client_rename_requires_both_names() {
+        let (client_result, server_result) = run_client_against_server(async move |r, w| {
+            let res = kermit_client_rename(r, w, "only-one.txt", "", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        let err = client_result.expect_err("RENAME with an empty new name must fail");
+        assert!(
+            err.to_ascii_lowercase().contains("both"),
+            "expected a both-names-required error, got: {}",
+            err,
+        );
+        server_result.expect("the guard must not have disturbed the session");
+    }
+
+    #[tokio::test]
+    async fn test_client_type_returns_remote_file_text() {
+        let dir = client_scratch_dir("type");
+        std::fs::write(dir.join("readme.txt"), b"line one\nline two\n").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let cleanup = dir.clone();
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let res = kermit_client_type(r, w, "readme.txt", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&cleanup);
+
+        let body = client_result.expect("TYPE must succeed");
+        assert!(
+            body.contains("line one") && body.contains("line two"),
+            "TYPE must return the file's text; got {:?}",
+            body,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_client_mkdir_then_rmdir_round_trip() {
+        // Paired deliberately: RMDIR needs a directory to remove, and doing
+        // it through MKDIR proves the two agree on where "here" is.
+        let dir = client_scratch_dir("mkdir");
+        let dir_str = dir.to_str().unwrap().to_string();
+        let (cleanup, made) = (dir.clone(), dir.join("newdir"));
+        let made_probe = made.clone();
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let created = kermit_client_mkdir(r, w, "newdir", false, false, false).await;
+            let existed_between = made_probe.is_dir();
+            let removed = kermit_client_rmdir(r, w, "newdir", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            (created, existed_between, removed)
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let still_there = made.exists();
+        let _ = std::fs::remove_dir_all(&cleanup);
+
+        let (created, existed_between, removed) = client_result;
+        created.expect("MKDIR must succeed");
+        assert!(existed_between, "MKDIR must actually create the directory");
+        removed.expect("RMDIR of an empty directory must succeed");
+        assert!(!still_there, "RMDIR must actually remove the directory");
+    }
+
+    #[tokio::test]
+    async fn test_client_rmdir_non_empty_surfaces_server_refusal() {
+        // The server refuses a non-empty directory; the client must report
+        // that as Err rather than swallowing it.
+        let dir = client_scratch_dir("rmdir_nonempty");
+        std::fs::create_dir_all(dir.join("full")).unwrap();
+        std::fs::write(dir.join("full").join("keep.txt"), b"x").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let (cleanup, kept) = (dir.clone(), dir.join("full"));
+
+        let (client_result, _) = run_client_against_server(async move |r, w| {
+            config::update_config_value("transfer_dir", &dir_str);
+            let res = kermit_client_rmdir(r, w, "full", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            res
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let survived = kept.is_dir();
+        let _ = std::fs::remove_dir_all(&cleanup);
+
+        client_result.expect_err("RMDIR of a non-empty directory must fail");
+        assert!(survived, "a refused RMDIR must leave the directory alone");
+    }
+
+    /// The three name-taking commands reject an empty argument locally,
+    /// without a round trip.
+    #[tokio::test]
+    async fn test_client_name_commands_reject_empty_argument() {
+        let (client_result, server_result) = run_client_against_server(async move |r, w| {
+            let type_err = kermit_client_type(r, w, "", false, false, false).await;
+            let mkdir_err = kermit_client_mkdir(r, w, "", false, false, false).await;
+            let rmdir_err = kermit_client_rmdir(r, w, "", false, false, false).await;
+            let _ = kermit_client_finish(r, w, false, false, false).await;
+            (type_err, mkdir_err, rmdir_err)
+        })
+        .await;
+
+        let (type_err, mkdir_err, rmdir_err) = client_result;
+        type_err.expect_err("TYPE with no filename must fail");
+        mkdir_err.expect_err("MKDIR with no name must fail");
+        rmdir_err.expect_err("RMDIR with no name must fail");
+        server_result.expect("local guards must not have disturbed the session");
+    }
+
+    // Paused clock: the server correctly *stays alive* after refusing an
+    // illegal CWD (see test_server_stays_alive_after_g_cwd_unsafe), so the
+    // `server_task.await` in the helper below blocks until the server idles
+    // out at kermit_idle_timeout (300s).  Every sibling test_client_* drives
+    // an op that ends the session, which is why only this one is affected.
+    // start_paused makes that idle window elapse in virtual time.
+    #[tokio::test(start_paused = true)]
     async fn test_client_cwd_unsafe_path_returns_error() {
         // An illegal CWD argument (a name with characters
         // is_safe_relative_subdir rejects): server emits E-packet, the
@@ -13214,8 +13445,16 @@ mod tests {
     // ---------- Proptest fuzzers (panic-only assertions) ----------
 
     proptest::proptest! {
+        // 128 rather than proptest's default 256 because the async cases here
+        // build a tokio runtime apiece.  Written as a conditional so CI's
+        // deep-fuzz step still wins: a plain `cases: 128` field would override
+        // the PROPTEST_CASES env var that Config::default() reads.
         #![proptest_config(proptest::test_runner::Config {
-            cases: 128,
+            cases: if std::env::var_os("PROPTEST_CASES").is_some() {
+                proptest::test_runner::Config::default().cases
+            } else {
+                128
+            },
             ..proptest::test_runner::Config::default()
         })]
 

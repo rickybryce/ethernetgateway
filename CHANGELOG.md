@@ -5,6 +5,99 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Acting on an external quality review of the tree at `6c2ed36`. No user-facing
+behaviour changes except the two host-key refusals noted under Fixed.
+
+### Fixed
+- **The test suite took nine minutes, and two tests were 96% of it.** Measured
+  before and after: `kermit::tests::test_client_cwd_unsafe_path_returns_error`
+  300.02s → 0.01s and
+  `xmodem::tests::test_xmodem_receive_nak_on_out_of_sequence_block`
+  220.02s → 0.01s, taking the whole suite from **539.53s to 53.51s**. Both now
+  use `#[tokio::test(start_paused = true)]`, already the house pattern. Neither
+  was a product bug — both were waiting out a real timeout that the code was
+  right to impose. The Kermit test is the only `test_client_*` that doesn't end
+  its session, and the shared helper awaits the server task, so it sat through
+  `kermit_idle_timeout`; the XMODEM one sends a single CAN, which is correctly
+  *not* an abort (CAN×2 is required), so the receiver spent its full retry
+  budget. CI runs this suite on three operating systems on every push.
+- **An unreadable known-hosts file no longer reads as "new host".**
+  `check_known_host` collapsed every `read_to_string` error into `Unknown`,
+  conflating "no file yet, pin on first contact" with "a file that exists,
+  may hold a pin for this host, and won't open". There is a new
+  `HostKeyStatus::Unreadable`, and only `ErrorKind::NotFound` still means first
+  contact. It matters most on the **relay** path, which auto-pins with no
+  prompt and then sends the master's unified credentials — a transient read
+  failure there silently re-pinned whatever key was presented. Both callers now
+  refuse: the relay with an `Auth`-class error (so it backs off rather than
+  hammers), the interactive SSH gateway with a message naming the real problem
+  instead of a "host key not recognized" prompt that would have been untrue.
+  `save_known_host` had the matching flaw — it read with `unwrap_or_default()`
+  and then rewrites the whole file, so an unreadable-but-present file would have
+  been treated as empty and replaced by a single entry, discarding every other
+  pinned host. It now declines to write and says why.
+- **`SECURITY.md` listed 0.3.x as the supported release**, five minor versions
+  behind, so a user on the current version didn't appear in the table at all.
+  Reworded to "latest released 0.x" so it cannot go stale again, and added to
+  `versionchange.txt`.
+- **`README.md` understated the minimum Rust version** as 1.85 against
+  `Cargo.toml`'s `rust-version = "1.87"`, so following it on 1.85 or 1.86 hit an
+  MSRV error at the first build. The README's toolchain line is now on the
+  `versionchange.txt` checklist too.
+- **`README.md` overstated Kermit client support.** It advertised "client **and**
+  server modes"; the client G-command state machine is real and tested but
+  reachable from no telnet, web or GUI surface. The bullet now describes what a
+  user can actually use — send/receive plus server mode.
+
+### Changed
+- **Release builds now keep integer overflow checks on**
+  (`[profile.release] overflow-checks = true`). The whole suite runs in the dev
+  profile, where an overflow panics, so every test validated semantics the
+  shipped binary did not have — and the load-bearing code here is five
+  hand-rolled wire parsers doing offset and length arithmetic on bytes from an
+  untrusted peer, exactly where a silent wrap becomes a wrong length instead of
+  a loud failure. Validated by running the full suite under `--release`: 1599
+  passed, 0 failed, no path overflows.
+- **CI's deep-fuzz step now covers all 20 property tests, not 3.** The step
+  filtered on `qmethod_proptest`, which reached only the telnet
+  option-negotiation state machine, leaving every hand-rolled wire parser at
+  proptest's default case count. Broadening the filter alone would not have
+  worked: `ProptestConfig { cases: N, ..default() }` *overrides*
+  `PROPTEST_CASES`, because the env var is only read inside `default()` and a
+  struct-literal field wins. The explicit `cases:` is gone where it merely
+  restated proptest's own default of 256, and the two deliberately-lower 128s
+  (Kermit and ZMODEM, which build a tokio runtime per case) now yield to the
+  env var when it is set.
+
+### Added
+- **`EGT80.COM` is pinned by hash.** It is compiled into every release with
+  `include_bytes!` but no CI runner can rebuild it, so the committed binary —
+  not `EGT80.Z80` — is what users actually run. The existing tests check the
+  artifact's shape and its version string, which by their own admission
+  "cannot catch a code change made without touching the version".
+  `test_bundled_egt80_matches_pinned_hash` closes that: the bytes cannot change
+  unless the same commit updates the hash. `EGT80/README.md` documents the
+  refresh step.
+- **Tests for the five Kermit client commands that had none.**
+  `kermit_client_delete`, `_rename`, `_type`, `_mkdir` and `_rmdir` had no
+  caller *and* no test while compiling into every binary — the
+  `#[allow(dead_code)]` note claiming "the unit tests below exercise it
+  end-to-end" was true of their nine siblings but not of them. All five now
+  round-trip against our own server, including the server-refusal paths
+  (missing file, non-empty directory) and the local argument guards.
+- **Tests for the CP/M emulator driver's own logic.** `src/telnet/cpm_emu.rs`
+  had the tree's thinnest coverage, and its existing tests all validated the
+  bundled EGT80 artifact rather than the module. Added coverage of the CCP-lite
+  built-ins — `DIR` (empty drive and 8.3 columns), `ERA` (silent success,
+  no-match, no-operand), `REN` (both `new=old` and `new old` forms, refusing to
+  clobber, missing source), `TYPE` (stops at `^Z`, refuses binary) — plus
+  `pending_csi_arrow`, whose split-sequence case matters because it runs on
+  buffered input where the rest of an arrow may not have arrived yet.
+  `cpmemu_run_program` and `cpmemu_oob_drain` remain uncovered; both need a
+  running guest.
+
 ## [0.8.1] - 2026-07-28
 
 ### Added

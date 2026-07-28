@@ -1011,6 +1011,29 @@ impl TelnetSession {
                     ))
                     .await?;
                 }
+                HostKeyStatus::Unreadable(e) => {
+                    // Unlike the relay, this path always prompts the operator
+                    // — but the prompt would say "not recognized", which is a
+                    // false statement when the file may hold a pin we simply
+                    // can't read.  Refuse and name the real problem instead.
+                    let _ = session
+                        .disconnect(
+                            russh::Disconnect::ByApplication,
+                            "known-hosts unreadable",
+                            "",
+                        )
+                        .await;
+                    glog!(
+                        "SSH gateway: refusing {}:{} — known-hosts unreadable: {}",
+                        host, port, e,
+                    );
+                    self.show_error(
+                        "Cannot verify host key: the known-hosts file exists \
+                         but could not be read. Check its permissions.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 HostKeyStatus::Changed => {
                     let fingerprint = key.fingerprint(russh::keys::HashAlg::Sha256);
                     let algo_str = key.algorithm().to_string();

@@ -249,6 +249,73 @@ fn test_check_known_host_unknown_no_file() {
     }
 }
 
+/// A *missing* known-hosts file is the first-run case and must pin, but a file
+/// that exists and won't read must not be mistaken for it.  Collapsing the two
+/// silently downgrades TOFU to trust-anything on the relay path, which
+/// auto-pins with no prompt and then sends the master's unified credentials.
+#[test]
+fn test_classify_known_host_distinguishes_missing_from_unreadable() {
+    let key_str = format_host_key(&make_test_key());
+    let lookup = "master.example:2222";
+
+    // Absent file → Unknown → caller pins on first contact.
+    let absent = Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+    assert!(
+        matches!(
+            classify_known_host(absent, lookup, &key_str),
+            HostKeyStatus::Unknown
+        ),
+        "a missing file is first contact and must stay Unknown",
+    );
+
+    // Present but unreadable → Unreadable, NOT Unknown.
+    for kind in [
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::InvalidData,
+    ] {
+        let unreadable = Err(std::io::Error::new(kind, "boom"));
+        assert!(
+            matches!(
+                classify_known_host(unreadable, lookup, &key_str),
+                HostKeyStatus::Unreadable(_)
+            ),
+            "{:?} must not be reported as Unknown — that would re-pin",
+            kind,
+        );
+    }
+}
+
+/// The ordinary decisions still hold through the extracted seam.
+#[test]
+fn test_classify_known_host_known_changed_and_absent_entry() {
+    let key_str = format_host_key(&make_test_key());
+    let lookup = "master.example:2222";
+
+    let stored = format!("# comment\n\n{} {}\n", lookup, key_str);
+    assert!(matches!(
+        classify_known_host(Ok(stored.clone()), lookup, &key_str),
+        HostKeyStatus::Known
+    ));
+
+    assert!(
+        matches!(
+            classify_known_host(Ok(stored), lookup, "ssh-ed25519 AAAAdifferent"),
+            HostKeyStatus::Changed
+        ),
+        "a stored entry that doesn't match must be Changed, never Unknown",
+    );
+
+    // A readable file with no entry for this host is still first contact.
+    assert!(matches!(
+        classify_known_host(
+            Ok("other.example:22 ssh-ed25519 AAAAother\n".to_string()),
+            lookup,
+            &key_str,
+        ),
+        HostKeyStatus::Unknown
+    ));
+}
+
 #[test]
 fn test_format_host_key_roundtrip() {
     let key = make_test_key();
@@ -589,7 +656,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
 /// Return the session plus the peer end: writing to `peer` feeds
 /// bytes to the session's reader, reading from `peer` returns what
 /// the session wrote. Used for end-to-end negotiation tests.
-fn make_test_session_with_peer(
+pub(in crate::telnet) fn make_test_session_with_peer(
     terminal_type: TerminalType,
 ) -> (TelnetSession, tokio::io::DuplexStream) {
     let (peer, session_stream) = tokio::io::duplex(512);

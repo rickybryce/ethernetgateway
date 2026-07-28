@@ -2965,7 +2965,12 @@ mod tests {
 
     /// Test 6: receiver NAKs when the sender transmits a block with
     /// the wrong block number (out of sequence).
-    #[tokio::test]
+    ///
+    /// Paused clock: the single CAN below is deliberately not an abort (CAN×2
+    /// is required — see is_can_abort), so the receiver correctly sits out its
+    /// retry/timeout budget before erroring.  start_paused spends that budget
+    /// in virtual time instead of ~220s of wall clock.
+    #[tokio::test(start_paused = true)]
     async fn test_xmodem_receive_nak_on_out_of_sequence_block() {
         let (sender_half, receiver_half) = tokio::io::duplex(16384);
         let (mut send_read, mut send_write) = tokio::io::split(sender_half);
@@ -5734,10 +5739,11 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 256,
-                ..ProptestConfig::default()
-            })]
+            // No explicit `cases:` — proptest's own default is already 256,
+            // and a struct-literal field would override the PROPTEST_CASES
+            // env var that ProptestConfig::default() reads, silently pinning
+            // CI's deep-fuzz step back to 256.
+            #![proptest_config(ProptestConfig::default())]
 
             /// 128-byte payloads sized exactly as the receiver sees
             /// them — must never panic regardless of content.

@@ -2069,7 +2069,10 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+            // No explicit `cases:` — proptest's default is already 256, and a
+            // struct-literal field would override the PROPTEST_CASES env var
+            // that ProptestConfig::default() reads (CI's deep-fuzz step).
+            #![proptest_config(ProptestConfig::default())]
 
             /// `checksum_ok` / `is_final_block` accept any byte slice without
             /// panicking, regardless of length or content.

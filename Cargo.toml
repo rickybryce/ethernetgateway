@@ -44,3 +44,21 @@ iz80 = "0.5.1"
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["test-util"] }
+# Only used to pin the checked-in EGT80.COM against an explicit hash (see
+# test_bundled_egt80_matches_pinned_hash).  Already in the tree via russh,
+# so this adds nothing to the build.
+sha2 = "0.10"
+
+[profile.release]
+# Integer overflow panics in the dev profile, so the whole test suite validates
+# wrapping-is-a-bug semantics — but cargo's release default turns the checks
+# off, meaning the binary we actually ship has different arithmetic from the
+# one we tested.  That matters here more than in most applications: the
+# load-bearing code is five hand-rolled wire-protocol parsers doing offset,
+# length and sequence arithmetic on bytes supplied by an untrusted peer, and
+# there a silent wrap becomes a wrong length rather than a loud failure.
+#
+# The cost is a branch per arithmetic op, which is noise for an I/O-bound
+# gateway, and a panic is confined to the tokio task handling that one session
+# rather than taking the process down.
+overflow-checks = true

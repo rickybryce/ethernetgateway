@@ -63,7 +63,8 @@ options, and the full AT command set.
 ## Features
 
 - **File transfer** — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with
-  autostart), Kermit (client **and** server modes), and Punter C1 (Commodore),
+  autostart), Kermit (send/receive plus **server mode**, which answers a remote
+  client's `get`/`send`/`dir`/`remote` commands), and Punter C1 (Commodore),
   with auto-detection on upload and a protocol prompt on download.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
@@ -85,7 +86,7 @@ options, and the full AT command set.
 
 ## Building from Source
 
-Requires the **Rust toolchain** (rustc 1.85+), a **C toolchain**, `cmake`,
+Requires the **Rust toolchain** (rustc 1.87+), a **C toolchain**, `cmake`,
 `pkg-config`, and (on Linux) `libudev`. Install Rust from
 [rustup.rs](https://rustup.rs), then:
 

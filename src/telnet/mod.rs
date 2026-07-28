@@ -502,6 +502,14 @@ pub(crate) enum HostKeyStatus {
     Unknown,
     /// Stored key does not match the presented key.
     Changed,
+    /// The known-hosts file exists but could not be read (permissions, I/O
+    /// error).  Deliberately distinct from `Unknown`: a file we cannot read
+    /// may well hold a pin for this host, so treating it as "never seen
+    /// before" would silently downgrade to trust-on-first-use — and on the
+    /// relay path, which auto-pins without prompting, that means re-pinning
+    /// whatever key is presented right before sending the master's
+    /// credentials.  Callers must fail rather than pin.
+    Unreadable(std::io::Error),
 }
 
 /// Format the key as "algorithm base64" for storage.
@@ -523,12 +531,33 @@ pub(crate) fn check_known_host(
     port: u16,
     key: &russh::keys::PublicKey,
 ) -> HostKeyStatus {
-    let lookup = format!("{}:{}", host, port);
-    let key_str = format_host_key(key);
+    classify_known_host(
+        std::fs::read_to_string(GATEWAY_HOSTS_FILE),
+        &format!("{}:{}", host, port),
+        &format_host_key(key),
+    )
+}
 
-    let content = match std::fs::read_to_string(GATEWAY_HOSTS_FILE) {
+/// The decision half of [`check_known_host`], split out so the
+/// file-read outcome can be supplied directly.
+///
+/// The read is passed in as its `Result` because the interesting cases are
+/// the *failures*, and `GATEWAY_HOSTS_FILE` is a process-relative path shared
+/// by every session — a test that chmod'ed the real file would race every
+/// other test in the binary.
+pub(in crate::telnet) fn classify_known_host(
+    read: Result<String, std::io::Error>,
+    lookup: &str,
+    key_str: &str,
+) -> HostKeyStatus {
+    let content = match read {
         Ok(c) => c,
-        Err(_) => return HostKeyStatus::Unknown,
+        // No file yet is the ordinary first-run case: pin on first contact.
+        // Anything else means a file that may hold a pin we just can't see.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return HostKeyStatus::Unknown;
+        }
+        Err(e) => return HostKeyStatus::Unreadable(e),
     };
 
     for line in content.lines() {
@@ -536,7 +565,7 @@ pub(crate) fn check_known_host(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix(&lookup)
+        if let Some(rest) = line.strip_prefix(lookup)
             && let Some(stored_key) = rest.strip_prefix(' ')
         {
             if stored_key == key_str {
@@ -558,7 +587,24 @@ pub(crate) fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKe
 
     let entry = format!("{}:{} {}\n", host, port, format_host_key(key));
 
-    let mut content = std::fs::read_to_string(GATEWAY_HOSTS_FILE).unwrap_or_default();
+    // An unreadable-but-present file must NOT be treated as empty: this
+    // function rewrites the whole file, so `unwrap_or_default()` here would
+    // replace every other pinned host with this single entry.  Only a missing
+    // file legitimately starts from empty.
+    let mut content = match std::fs::read_to_string(GATEWAY_HOSTS_FILE) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            glog!(
+                "Warning: not saving gateway host key — {} exists but could \
+                 not be read ({}); rewriting it would discard the host keys \
+                 already pinned there.",
+                GATEWAY_HOSTS_FILE,
+                e
+            );
+            return;
+        }
+    };
     // Remove any existing entry for this host:port
     let lookup = format!("{}:{} ", host, port);
     let filtered: Vec<&str> = content

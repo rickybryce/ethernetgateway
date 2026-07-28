@@ -693,6 +693,23 @@ async fn connect_master_relay_inner(
                     key.fingerprint(russh::keys::HashAlg::Sha256)
                 );
             }
+            crate::telnet::HostKeyStatus::Unreadable(e) => {
+                let _ = session
+                    .disconnect(russh::Disconnect::ByApplication, "known-hosts unreadable", "")
+                    .await;
+                // This path auto-pins without a prompt, so an unreadable
+                // known-hosts file must be a hard failure: falling through to
+                // the Unknown arm would re-pin whatever key is presented and
+                // then send the master's unified credentials to it.  Auth
+                // class so we back off rather than hammer — a permissions
+                // problem won't fix itself on a retry.
+                return Err(RelayConnectError::Auth(format!(
+                    "cannot verify master {}:{} host key — the known-hosts file \
+                     exists but could not be read ({}); refusing rather than \
+                     re-pinning. Fix its permissions and reconnect.",
+                    host, port, e
+                )));
+            }
             crate::telnet::HostKeyStatus::Changed => {
                 let _ = session
                     .disconnect(russh::Disconnect::ByApplication, "host key changed", "")

@@ -199,7 +199,7 @@ enum OobDrain {
 /// queue, given the leading `ESC` was already popped.  Consumes the `[` and the
 /// final byte and returns the ADM-3A key code on a plain arrow; otherwise
 /// leaves the queue untouched (the `ESC` is delivered raw).
-fn pending_csi_arrow(pending: &mut VecDeque<u8>) -> Option<u8> {
+pub(in crate::telnet) fn pending_csi_arrow(pending: &mut VecDeque<u8>) -> Option<u8> {
     if pending.front() != Some(&b'[') {
         return None;
     }
@@ -1578,6 +1578,236 @@ impl TelnetSession {
     }
 }
 
+/// Tests for the driver's *own* logic — the CCP-lite built-ins and the CSI
+/// arrow reassembly — as opposed to the bundled-artifact checks in
+/// `egt80_tests` below.
+///
+/// The built-ins are the cheap half of this module to cover: they are plain
+/// `async fn`s over a `CpmFs` and the session writer, so a scratch drive
+/// directory plus a duplex pipe exercises them with no Z80 in the loop.  What
+/// is still uncovered here is `cpmemu_run_program` (the BDOS/BIOS/HBIOS
+/// service loop) and `cpmemu_oob_drain`, both of which need a running guest.
+#[cfg(test)]
+mod repl_tests {
+    use super::*;
+    use crate::telnet::tests::make_test_session_with_peer;
+    use crate::telnet::TerminalType;
+    use tokio::io::AsyncReadExt;
+
+    /// A scratch `CPM/` container with drive A: created, plus a `CpmFs` on it.
+    fn scratch_fs(tag: &str) -> (std::path::PathBuf, CpmFs) {
+        let base = std::env::temp_dir()
+            .join(format!("cpmemu_repl_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let fs = CpmFs::new(base.clone());
+        (base, fs)
+    }
+
+    /// Collect everything the session has written to the peer.
+    ///
+    /// The handlers under test return once their output is in the pipe, so a
+    /// short real-time quiet period is enough to know the write side is done.
+    /// Outputs here are deliberately kept well under the 512-byte duplex
+    /// buffer so a handler can never block waiting for this drain.
+    async fn drain(peer: &mut tokio::io::DuplexStream) -> String {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        while let Ok(Ok(n)) = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            peer.read(&mut buf),
+        )
+        .await
+        {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_cpmemu_dir_reports_empty_drive_and_lists_files() {
+        let (base, fs) = scratch_fs("dir");
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+
+        // Empty drive → CP/M's "No file", not a blank screen.
+        sess.cpmemu_dir(&fs).await.unwrap();
+        let empty = drain(&mut peer).await;
+        assert!(
+            empty.contains("No file"),
+            "an empty drive must say 'No file'; got {:?}",
+            empty,
+        );
+
+        std::fs::write(base.join("A").join("ONE.COM"), b"x").unwrap();
+        std::fs::write(base.join("A").join("TWO.TXT"), b"y").unwrap();
+        sess.cpmemu_dir(&fs).await.unwrap();
+        let listing = drain(&mut peer).await;
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            listing.contains("ONE.COM") && listing.contains("TWO.TXT"),
+            "DIR must list both files; got {:?}",
+            listing,
+        );
+        // Names are padded into fixed 12-column cells so the listing tabulates.
+        assert!(
+            listing.contains("ONE.COM     "),
+            "DIR must pad each name to a 12-column cell; got {:?}",
+            listing,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cpmemu_era_deletes_and_reports_no_match() {
+        let (base, mut fs) = scratch_fs("era");
+        let victim = base.join("A").join("GONE.TXT");
+        std::fs::write(&victim, b"bye").unwrap();
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+
+        // No operand at all.
+        sess.cpmemu_era(&mut fs, "ERA").await.unwrap();
+        assert!(drain(&mut peer).await.contains("ERA what?"));
+
+        // Real erase is silent, as CP/M is.
+        sess.cpmemu_era(&mut fs, "ERA GONE.TXT").await.unwrap();
+        let quiet = drain(&mut peer).await;
+        assert!(!victim.exists(), "ERA must delete the file");
+        assert!(
+            quiet.trim().is_empty(),
+            "a successful ERA is silent; got {:?}",
+            quiet,
+        );
+
+        // Nothing matching → "No file".
+        sess.cpmemu_era(&mut fs, "ERA GONE.TXT").await.unwrap();
+        let missing = drain(&mut peer).await;
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            missing.contains("No file"),
+            "erasing nothing must say 'No file'; got {:?}",
+            missing,
+        );
+    }
+
+    /// `REN new=old` is the authentic CP/M form and `REN new old` the
+    /// convenience one; both must land, and neither may clobber silently.
+    #[tokio::test]
+    async fn test_cpmemu_ren_accepts_both_forms_and_refuses_to_clobber() {
+        let (base, mut fs) = scratch_fs("ren");
+        let a = base.join("A");
+        std::fs::write(a.join("OLD.TXT"), b"payload").unwrap();
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+
+        sess.cpmemu_ren(&mut fs, "REN NEW.TXT=OLD.TXT").await.unwrap();
+        assert!(drain(&mut peer).await.trim().is_empty(), "success is silent");
+        assert!(!a.join("OLD.TXT").exists() && a.join("NEW.TXT").exists());
+
+        // Space form.
+        sess.cpmemu_ren(&mut fs, "REN THIRD.TXT NEW.TXT").await.unwrap();
+        assert!(drain(&mut peer).await.trim().is_empty());
+        assert!(a.join("THIRD.TXT").exists(), "the space form must work too");
+
+        // Destination exists → refuse, don't clobber.
+        std::fs::write(a.join("TAKEN.TXT"), b"keep me").unwrap();
+        sess.cpmemu_ren(&mut fs, "REN TAKEN.TXT=THIRD.TXT").await.unwrap();
+        let refused = drain(&mut peer).await;
+        let kept = std::fs::read(a.join("TAKEN.TXT")).unwrap();
+
+        // Missing source → "No file".
+        sess.cpmemu_ren(&mut fs, "REN X.TXT=NOTHERE.TXT").await.unwrap();
+        let absent = drain(&mut peer).await;
+
+        // No operand → usage.
+        sess.cpmemu_ren(&mut fs, "REN").await.unwrap();
+        let usage = drain(&mut peer).await;
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(refused.contains("File exists"), "got {:?}", refused);
+        assert_eq!(kept, b"keep me", "a refused REN must not overwrite");
+        assert!(absent.contains("No file"), "got {:?}", absent);
+        assert!(usage.contains("REN new=old"), "got {:?}", usage);
+    }
+
+    #[tokio::test]
+    async fn test_cpmemu_type_streams_text_stops_at_ctrl_z_and_refuses_binary() {
+        let (base, mut fs) = scratch_fs("type");
+        let a = base.join("A");
+        // ^Z is CP/M's EOF filler: everything after it is padding, not text.
+        std::fs::write(a.join("NOTE.TXT"), b"hello there\r\nsecond line\r\n\x1Agarbage")
+            .unwrap();
+        std::fs::write(a.join("PROG.COM"), [0u8; 64]).unwrap();
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+
+        sess.cpmemu_type(&mut fs, "TYPE NOTE.TXT").await.unwrap();
+        let text = drain(&mut peer).await;
+
+        sess.cpmemu_type(&mut fs, "TYPE PROG.COM").await.unwrap();
+        let binary = drain(&mut peer).await;
+
+        sess.cpmemu_type(&mut fs, "TYPE").await.unwrap();
+        let usage = drain(&mut peer).await;
+
+        sess.cpmemu_type(&mut fs, "TYPE NOPE.TXT").await.unwrap();
+        let missing = drain(&mut peer).await;
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(text.contains("hello there") && text.contains("second line"),
+            "TYPE must stream the text; got {:?}", text);
+        assert!(
+            !text.contains("garbage"),
+            "TYPE must stop at ^Z; got {:?}",
+            text,
+        );
+        assert!(binary.contains("Cannot TYPE a binary file"), "got {:?}", binary);
+        assert!(usage.contains("TYPE what?"), "got {:?}", usage);
+        assert!(missing.contains("No file"), "got {:?}", missing);
+    }
+
+    /// `pending_csi_arrow` runs on buffered input, so it has to cope with a
+    /// sequence that is only partly present — the ESC has already been popped
+    /// by the caller and the rest may not have arrived yet.
+    #[test]
+    fn test_pending_csi_arrow_reassembles_only_complete_arrows() {
+        use crate::telnet::cpm_term;
+
+        for (final_byte, expected) in [
+            (b'A', cpm_term::csi_arrow_to_adm3a(b'A').unwrap()),
+            (b'B', cpm_term::csi_arrow_to_adm3a(b'B').unwrap()),
+            (b'C', cpm_term::csi_arrow_to_adm3a(b'C').unwrap()),
+            (b'D', cpm_term::csi_arrow_to_adm3a(b'D').unwrap()),
+        ] {
+            let mut q: VecDeque<u8> = [b'[', final_byte, b'z'].into_iter().collect();
+            assert_eq!(pending_csi_arrow(&mut q), Some(expected));
+            assert_eq!(
+                q.pop_front(),
+                Some(b'z'),
+                "only the '[' and the final byte may be consumed",
+            );
+        }
+
+        // Not a CSI at all: leave the queue completely alone.
+        let mut q: VecDeque<u8> = (*b"xy").into_iter().collect();
+        assert_eq!(pending_csi_arrow(&mut q), None);
+        assert_eq!(q.len(), 2, "a non-CSI must not be consumed");
+
+        // Split sequence — '[' arrived, the final byte has not.  Must report
+        // "no arrow" *without* eating the '[', or the byte that follows would
+        // be misread once it turns up.
+        let mut q: VecDeque<u8> = (*b"[").into_iter().collect();
+        assert_eq!(pending_csi_arrow(&mut q), None);
+        assert_eq!(q.len(), 1, "a truncated CSI must be left intact");
+
+        // A CSI that isn't an arrow (e.g. ESC [ H) is not our business here.
+        let mut q: VecDeque<u8> = (*b"[H").into_iter().collect();
+        assert_eq!(pending_csi_arrow(&mut q), None);
+        assert_eq!(q.len(), 2, "a non-arrow CSI must be left for the caller");
+    }
+}
+
 #[cfg(test)]
 mod egt80_tests {
     use super::{EGT80_COM, EGT80_NAME};
@@ -1621,6 +1851,38 @@ mod egt80_tests {
             &EGT80_COM[OFFSET..OFFSET + 8],
             b"EGT80CFG",
             "settings signature must sit at file offset 0x80 (record 1)"
+        );
+    }
+
+    /// The one check that closes the "code change without a version bump" gap
+    /// the sibling tests above cannot: an explicit hash of the committed
+    /// binary.
+    ///
+    /// `EGT80.COM` is compiled into every release with `include_bytes!` but no
+    /// CI runner can rebuild it — that needs a period Z80 assembler under zxcc
+    /// — so the checked-in artifact, not `EGT80.Z80`, is what users actually
+    /// run.  Pinning it here means the bytes cannot change without someone
+    /// updating this constant in the same commit, which puts the change in
+    /// front of a reviewer.  It does *not* prove the binary matches the
+    /// source; only `make` in `EGT80/` does that.
+    ///
+    /// **When you legitimately rebuild EGT80**, run `make` (which gates on
+    /// three independent assemblers), then update this hash from:
+    ///     sha256sum EGT80/EGT80.COM
+    #[test]
+    fn test_bundled_egt80_matches_pinned_hash() {
+        use sha2::{Digest, Sha256};
+
+        const PINNED: &str =
+            "b576eb3ee06eaa94833df35508724611c23800e8f6c8b6291809e83094efe367";
+
+        let actual = format!("{:x}", Sha256::digest(EGT80_COM));
+        assert_eq!(
+            actual, PINNED,
+            "\nEGT80.COM has changed but its pinned hash has not.\n\
+             If you rebuilt it on purpose, run `make` in EGT80/ and set\n\
+             PINNED in this test to:\n    {}\n",
+            actual
         );
     }
 
