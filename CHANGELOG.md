@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.1] - Unreleased
+## [0.8.1] - 2026-07-28
 
 ### Added
 - **Serial-port pickers now name the hardware behind a device path.** A bare
@@ -43,6 +43,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     desk will not reproduce on demand: manufacturer-only, product-only, neither,
     a maker that merely repeats the product, an unlabelled port, PCI and
     Bluetooth.
+- **A slave's Kermit-server-mode port is served by the master.** Previously such
+  a port ran a Kermit server on the slave, so a user at the attached machine saw
+  and wrote the *slave's* transfer directory — the one place files were never
+  supposed to land in master/slave mode, and there was no relay involvement at
+  all. The slave now pipes the wire to the master and the **master** runs its
+  Kermit server on that channel (new `serial-relay <port> kermit` verb,
+  `relay::run_master_relay_kermit`), so a user at the device is talking to the
+  master's server: `remote dir` lists the master's transfer directory, an upload
+  lands there, and a download is read from there. The slave serves nothing itself
+  and keeps no copy, which makes "files always land on the master" true by
+  construction rather than by synchronising two directories — no file protocol
+  over the relay was needed, because `kermit_server_with_outcome` is generic over
+  the stream and the directory belongs to whichever machine runs it.
+  - The channel opens as soon as the link allows, since a Kermit server is only
+    useful if it is already there when the device starts a transfer, and it
+    reconnects with the usual backoff. While the master is unreachable the port
+    serves **nothing**: a local fallback would let a transfer appear to succeed
+    with the file on the wrong machine, which is the surprise this removes.
+  - New master-side key **`allow_relay_kermit`**, off by default and wired into
+    all three config UIs. Kermit's server mode has no authentication of its own
+    — the same reason `allow_atdt_kermit` and `kermit_server_enabled` are opt-in
+    — so serving it to a remote wire is the operator's decision, even though this
+    path already requires a slave that authenticated over SSH with
+    `master_accept_relays` on.
+  - Tested end to end in-process: our Kermit client stands in for the device
+    against `run_master_relay_kermit`, proving an upload lands in the master's
+    directory and that `remote dir` and a download resolve there — against files
+    that exist *only* on the master, so nothing else could have supplied them.
+    Plus a grammar round-trip and a refusal test for the gate.
 
 ### Documentation
 - **New `web/cpmreference.html`** — a CP/M emulator reference so this material
@@ -125,37 +154,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cost (~1.1 s and ~60 ms for the respective call counts) rather than to
     jitter, so a timer creeping back onto either path fails loudly without the
     test being flaky.
-
-### Added
-- **A slave's Kermit-server-mode port is served by the master.** Previously such
-  a port ran a Kermit server on the slave, so a user at the attached machine saw
-  and wrote the *slave's* transfer directory — the one place files were never
-  supposed to land in master/slave mode, and there was no relay involvement at
-  all. The slave now pipes the wire to the master and the **master** runs its
-  Kermit server on that channel (new `serial-relay <port> kermit` verb,
-  `relay::run_master_relay_kermit`), so a user at the device is talking to the
-  master's server: `remote dir` lists the master's transfer directory, an upload
-  lands there, and a download is read from there. The slave serves nothing itself
-  and keeps no copy, which makes "files always land on the master" true by
-  construction rather than by synchronising two directories — no file protocol
-  over the relay was needed, because `kermit_server_with_outcome` is generic over
-  the stream and the directory belongs to whichever machine runs it.
-  - The channel opens as soon as the link allows, since a Kermit server is only
-    useful if it is already there when the device starts a transfer, and it
-    reconnects with the usual backoff. While the master is unreachable the port
-    serves **nothing**: a local fallback would let a transfer appear to succeed
-    with the file on the wrong machine, which is the surprise this removes.
-  - New master-side key **`allow_relay_kermit`**, off by default and wired into
-    all three config UIs. Kermit's server mode has no authentication of its own
-    — the same reason `allow_atdt_kermit` and `kermit_server_enabled` are opt-in
-    — so serving it to a remote wire is the operator's decision, even though this
-    path already requires a slave that authenticated over SSH with
-    `master_accept_relays` on.
-  - Tested end to end in-process: our Kermit client stands in for the device
-    against `run_master_relay_kermit`, proving an upload lands in the master's
-    directory and that `remote dir` and a download resolve there — against files
-    that exist *only* on the master, so nothing else could have supplied them.
-    Plus a grammar round-trip and a refusal test for the gate.
 
 ## [0.8.0] - 2026-07-26
 
@@ -2961,8 +2959,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.0...HEAD
-[0.8.1]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.1
 [0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
