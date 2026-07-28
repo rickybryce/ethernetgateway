@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     desk will not reproduce on demand: manufacturer-only, product-only, neither,
     a maker that merely repeats the product, an unlabelled port, PCI and
     Bluetooth.
+  - The GUI's *closed* selector names the hardware too, not just its open list —
+    matching the web UI's selected option, since the one state an operator looks
+    at most was the one saying the least. Falls back to the bare path for an
+    undescribed port, or a saved port that isn't currently plugged in.
 - **A slave's Kermit-server-mode port is served by the master.** Previously such
   a port ran a Kermit server on the slave, so a user at the attached machine saw
   and wrote the *slave's* transfer directory — the one place files were never
@@ -95,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now serialised by a dedicated test mutex. Test isolation only &mdash; production
   calls `reset()` / `expect()` synchronously from the single startup path before
   any listener task is spawned, so the race cannot occur there.
+- **The idle pacing missed a guest holding unread modem bytes.** Follow-up from a
+  second review pass over the fix below: it cleared its idle counter whenever the
+  receive ring was *non-empty*, rather than when bytes actually *arrived*. A guest
+  can sit polling for a keypress while peer bytes go unread &mdash; a "press any key"
+  prompt during an inbound burst &mdash; and that state would have reset the counter
+  on every pass and span the host exactly as before the fix. The reset now keys on
+  the ring depth increasing. Bytes being *consumed* needs no special case: the
+  trap that reads them is not a status poll, so it already clears the count.
+  Throughput re-measured unchanged (console output tens of thousands of char/s,
+  modem burst ~1.4&nbsp;KB/s).
 - **An idle CP/M session span the host CPU at over a core.** Caught reviewing the
   timer removal below, by measuring rather than reasoning: an idle EGT80 terminal
   sat at **161% CPU**. The two timers that fix had removed were, incidentally,

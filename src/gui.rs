@@ -1153,10 +1153,23 @@ impl App {
         let idx = id.index();
         ui.horizontal(|ui| {
             ui.label(format!("Port {}:", id.label()));
+            // The closed selector names the hardware too, matching the open list
+            // and the web UI's selected option — otherwise the one state an
+            // operator looks at most says the least.  Falls back to the bare path
+            // for an undescribed port, and for a saved port that isn't currently
+            // plugged in (nothing detected to describe it with).
             let selected = if self.cfg.port(id).port.is_empty() {
                 "(none)".to_string()
             } else {
-                self.cfg.port(id).port.clone()
+                let dev = &self.cfg.port(id).port;
+                match self
+                    .serial_ports
+                    .iter()
+                    .find(|p| &p.name == dev && !p.summary.is_empty())
+                {
+                    Some(p) => format!("{}  \u{2014} {}", p.name, p.summary),
+                    None => dev.clone(),
+                }
             };
             // Per-port salt so the two ComboBoxes don't share state.
             let tooltip = serial_ports_tooltip(&self.serial_ports);

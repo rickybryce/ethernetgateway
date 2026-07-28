@@ -877,6 +877,9 @@ impl TelnetSession {
         // "nothing available" — a comms program's idle loop.  Paces the loop
         // without touching throughput; see [`idle_nap`] for why and how much.
         let mut idle_polls: u32 = 0;
+        // Ring depth before this pass serviced the modem, so the pacing below can
+        // tell "bytes arrived" from "bytes are sitting unread".
+        let mut rx_before_service: usize = 0;
 
         loop {
             // Set by the status-poll arms below when they answer "nothing".
@@ -1145,6 +1148,7 @@ impl TelnetSession {
                 // Unread bytes already in the ring mean the guest is mid-burst,
                 // which makes the peer poll non-blocking (see poll_connection).
                 let guest_has_rx = cpm.modem_rx_len() > 0;
+                rx_before_service = cpm.modem_rx_len();
                 let rx = modem.service(tx, cpm.modem_rx_free(), guest_has_rx).await;
                 if !rx.is_empty() {
                     cpm.modem_queue_rx(&rx);
@@ -1178,7 +1182,17 @@ impl TelnetSession {
             // arriving is real work, so it clears the count as well as the
             // status arms do — the very next poll then runs at full speed and
             // sees the keystroke.
-            if pending_input.len() > pending_before || cpm.modem_rx_len() > 0 {
+            //
+            // "Arriving" is deliberately a *change* in the ring depth, not a
+            // non-empty ring.  A guest can sit polling for a keypress while
+            // peer bytes go unread — a "press any key" prompt during an inbound
+            // burst — and treating a merely non-empty ring as progress would
+            // reset this counter on every pass and spin the host exactly as
+            // before.  Bytes being *consumed* needs no special case: the trap
+            // that reads them is not a status poll, so it clears the count by
+            // leaving `idle_poll` false.
+            let rx_arrived = cpm.modem_rx_len() > rx_before_service;
+            if pending_input.len() > pending_before || rx_arrived {
                 idle_polls = 0;
             } else if idle_poll {
                 idle_polls = idle_polls.saturating_add(1);
