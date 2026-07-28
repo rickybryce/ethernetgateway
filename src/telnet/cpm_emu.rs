@@ -83,6 +83,43 @@ const CPM_RUN_BATCH: u64 = 200_000;
 /// The no-op waker means a `Pending` future's wakeup is discarded, which is
 /// correct here: the caller re-polls a fresh future on its next pass rather
 /// than waiting to be woken.
+/// Idle status polls tolerated at full speed before pacing starts.  Small, but
+/// not 1: a program may legitimately poll a couple of times around doing real
+/// work, and those passes should stay free.
+pub(in crate::telnet) const IDLE_POLLS_BEFORE_NAP: u32 = 8;
+/// First-tier nap: brief, because the program may be about to do something and
+/// this is still the "just went quiet" case.
+const IDLE_NAP: std::time::Duration = std::time::Duration::from_millis(1);
+/// Consecutive idle polls after which the session is clearly parked waiting for
+/// a human — roughly half a second at the first-tier rate.
+pub(in crate::telnet) const IDLE_POLLS_LONG: u32 = 500;
+/// Second-tier nap for a session idle a while.  Still far below the threshold
+/// of noticing a keypress, and it matters on the small ARM boards this runs on,
+/// where the first tier's ~1000 passes/sec is a real share of one slow core
+/// rather than a rounding error.
+const IDLE_NAP_LONG: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// How long to pause after `idle_polls` consecutive passes that were nothing but
+/// a status call answering "nothing available"; `None` to keep running at full
+/// speed.
+///
+/// A comms program's idle loop is exactly such a poll — `LD C,11 / CALL 5 / JR
+/// Z` around a keyboard check — and because a status call ends the CPU batch,
+/// each turn costs a full driver pass.  Once those passes became cheap (the
+/// point of removing the timers from them) nothing was left to slow the loop
+/// down, and an idle EGT80 terminal spun the host at **161% CPU**; with this it
+/// measures 1.4%.  Only the demonstrably idle case is paced, so throughput is
+/// untouched: any pass doing real work resets the count to zero.
+pub(in crate::telnet) fn idle_nap(idle_polls: u32) -> Option<std::time::Duration> {
+    if idle_polls > IDLE_POLLS_LONG {
+        Some(IDLE_NAP_LONG)
+    } else if idle_polls > IDLE_POLLS_BEFORE_NAP {
+        Some(IDLE_NAP)
+    } else {
+        None
+    }
+}
+
 pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
     let mut fut = std::pin::pin!(fut);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -836,7 +873,16 @@ impl TelnetSession {
         // timeout fire long after the operator's configured limit.
         let mut hbios_parked_since: Option<tokio::time::Instant> = None;
 
+        // Consecutive passes that were nothing but a status call answering
+        // "nothing available" — a comms program's idle loop.  Paces the loop
+        // without touching throughput; see [`idle_nap`] for why and how much.
+        let mut idle_polls: u32 = 0;
+
         loop {
+            // Set by the status-poll arms below when they answer "nothing".
+            // Defaults to "this pass did real work", so an unrecognised call is
+            // never throttled by mistake — only calls proven idle are.
+            let mut idle_poll = false;
             // Runaway guard, checked every batch regardless of why run()
             // returned.  A BDOS-frequent loop (e.g. polling console status,
             // `LD C,11 / CALL 5 / JR Z`) returns Stop::Bdos each batch and
@@ -904,6 +950,7 @@ impl TelnetSession {
                                 },
                                 // Status: 0xFF if a key is buffered, else 0.
                                 0xFE => {
+                                    idle_poll = pending_input.is_empty();
                                     cpm.bdos_return(if pending_input.is_empty() { 0x00 } else { 0xFF });
                                 }
                                 _ => {
@@ -944,7 +991,13 @@ impl TelnetSession {
                             // from the virtual modem, or ^Z (0x1A) if none.
                             // (CP/M 2.2 BDOS 3 has no status call; software
                             // that needs one uses the BIOS — best-effort here.)
-                            let b = cpm.modem_rx_pop().unwrap_or(0x1A);
+                            let b = cpm.modem_rx_pop().unwrap_or_else(|| {
+                                // CP/M 2.2 has no AUX status call, so ^Z is how
+                                // this device says "nothing" — and an AUX-profile
+                                // guest polls exactly here.
+                                idle_poll = true;
+                                0x1A
+                            });
                             cpm.bdos_return(b);
                         }
                         4 => {
@@ -958,6 +1011,7 @@ impl TelnetSession {
                             // by the out-of-band drain), else 0 — so the classic
                             // `LD C,11 / CALL 5 / OR A / JR Z` poll idiom sees a
                             // keypress instead of spinning to the budget ceiling.
+                            idle_poll = pending_input.is_empty();
                             cpm.bdos_return(if pending_input.is_empty() { 0x00 } else { 0xFF });
                         }
                         12 => cpm.bdos_return(0x22), // version: CP/M 2.2
@@ -1000,7 +1054,10 @@ impl TelnetSession {
                         }
                         // CONST: 0xFF if a key is buffered (out-of-band
                         // drain), else 0 — the non-blocking status poll.
-                        2 => cpm.bios_return(if pending_input.is_empty() { 0x00 } else { 0xFF }),
+                        2 => {
+                            idle_poll = pending_input.is_empty();
+                            cpm.bios_return(if pending_input.is_empty() { 0x00 } else { 0xFF })
+                        }
                         // CONIN: blocking keyboard read (no echo).
                         3 => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
                             ConIn::Byte(b) => cpm.bios_return(b),
@@ -1024,7 +1081,10 @@ impl TelnetSession {
                         }
                         // READER (AUX in): next modem byte, or ^Z if none.
                         7 => {
-                            let b = cpm.modem_rx_pop().unwrap_or(0x1A);
+                            let b = cpm.modem_rx_pop().unwrap_or_else(|| {
+                                idle_poll = true; // as BDOS 3: ^Z means "nothing"
+                                0x1A
+                            });
                             cpm.bios_return(b);
                         }
                         // LISTST: list device always ready.
@@ -1044,6 +1104,14 @@ impl TelnetSession {
                         == crate::cpm::hbios::HbiosOutcome::Waiting
                     {
                         hbios_waiting = true;
+                    } else if crate::cpm::hbios::is_idle_status_poll(cpm, func) {
+                        // A RomWBW program's wait loop polls input status rather
+                        // than blocking, so it never parks and the `hbios_waiting`
+                        // pacing above never sees it.  Count it as idle instead —
+                        // otherwise this loop spins the host at over a core, and
+                        // it alternates with the console-status poll below, so
+                        // marking only one of the two would never accumulate.
+                        idle_poll = true;
                     }
                 }
                 Stop::WarmBoot => {
@@ -1106,6 +1174,20 @@ impl TelnetSession {
             // sits on the trap and the loop would spin as fast as the executor
             // allows; a few milliseconds between polls is imperceptible at the
             // byte rates a CP/M comms program works at.
+            // Pace an established idle poll loop (see `idle_polls`).  A byte
+            // arriving is real work, so it clears the count as well as the
+            // status arms do — the very next poll then runs at full speed and
+            // sees the keystroke.
+            if pending_input.len() > pending_before || cpm.modem_rx_len() > 0 {
+                idle_polls = 0;
+            } else if idle_poll {
+                idle_polls = idle_polls.saturating_add(1);
+                if let Some(nap) = idle_nap(idle_polls) {
+                    tokio::time::sleep(nap).await;
+                }
+            } else {
+                idle_polls = 0;
+            }
             if pending_input.len() > pending_before {
                 hbios_parked_since = None; // the user is here: not idle
             }

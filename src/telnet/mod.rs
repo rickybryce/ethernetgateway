@@ -55,9 +55,9 @@ mod kernel;
 mod cpm_emu;
 mod cpm_modem;
 mod cpm_term;
-// The emulator's readiness probe, referenced only from tests.
+// The emulator's readiness probe and idle-pacing rule, referenced only from tests.
 #[cfg(test)]
-pub(in crate::telnet) use cpm_emu::poll_once;
+pub(in crate::telnet) use cpm_emu::{idle_nap, poll_once, IDLE_POLLS_BEFORE_NAP, IDLE_POLLS_LONG};
 // Weather free helpers/types are referenced only from tests; re-export under
 // cfg(test) so the non-test build doesn't see an unused re-export.
 #[cfg(test)]

@@ -5915,3 +5915,50 @@ fn test_cpmemu_trust_warning_fits_petscii() {
         );
     }
 }
+
+/// The emulator's idle-poll pacing. A status call answering "nothing available"
+/// ends the CPU batch, so a comms program's idle loop costs one driver pass per
+/// turn. Once those passes stopped waiting on a timer, nothing bounded the loop
+/// and an idle EGT80 terminal span the host at **161% CPU**; pacing brought it
+/// to 1.4%.
+///
+/// The rule has to hold two things at once, which is what this pins:
+/// throughput must be untouched (a working program never naps, because any real
+/// work resets the counter to zero), and a parked session must nap enough to
+/// stop spinning while still answering a keystroke imperceptibly fast.
+#[test]
+fn test_cpmemu_idle_nap_paces_only_an_established_idle_loop() {
+    // A working program: the counter never climbs, so it must never be slowed.
+    assert_eq!(idle_nap(0), None, "a busy pass must not nap");
+    assert_eq!(idle_nap(1), None);
+    assert_eq!(
+        idle_nap(IDLE_POLLS_BEFORE_NAP),
+        None,
+        "polling a few times around real work stays at full speed"
+    );
+
+    // Just gone quiet: pace, but only briefly.
+    let first = idle_nap(IDLE_POLLS_BEFORE_NAP + 1).expect("must pace once idle");
+    assert!(
+        first >= std::time::Duration::from_millis(1),
+        "a nap of zero would not stop the spin"
+    );
+
+    // Still first-tier right up to the long threshold.
+    assert_eq!(idle_nap(IDLE_POLLS_LONG), Some(first));
+
+    // Parked for a while: back off further, since ~1000 passes/sec is a real
+    // share of one slow ARM core.
+    let long = idle_nap(IDLE_POLLS_LONG + 1).expect("must still pace");
+    assert!(long > first, "the second tier must back off further than the first");
+
+    // Both tiers must stay imperceptible to someone typing. 20 ms is the bound
+    // we're willing to defend as unnoticeable; the measured worst case was 8 ms.
+    assert!(
+        long <= std::time::Duration::from_millis(20),
+        "nap {long:?} would make typing feel laggy"
+    );
+
+    // Saturating growth must not wrap into "no nap" for a long-idle session.
+    assert_eq!(idle_nap(u32::MAX), Some(long));
+}

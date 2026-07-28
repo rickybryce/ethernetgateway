@@ -56,6 +56,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   References grid on every sibling reference page.
 
 ### Fixed
+- **An idle CP/M session span the host CPU at over a core.** Caught reviewing the
+  timer removal below, by measuring rather than reasoning: an idle EGT80 terminal
+  sat at **161% CPU**. The two timers that fix had removed were, incidentally,
+  the only thing pacing a guest's idle loop — a comms program waits for activity
+  by polling a status call, and because every such call ends the CPU batch, each
+  turn of that loop costs a full driver pass. Making the passes cheap left
+  nothing to slow the loop down.
+  - Fixed by pacing *only* the demonstrably idle case, so throughput is
+    untouched: a pass that answers "nothing available" is counted, any pass doing
+    real work resets the count to zero, and once a loop is established as idle it
+    naps 1 ms, backing off to 8 ms after about half a second. Both tiers stay far
+    below the threshold of noticing a keypress — measured worst case 8 ms.
+  - Every way a guest can be told "nothing waiting" had to be recognised, which
+    is what the first attempt got wrong: marking only the console-status calls
+    fixed a port profile but left **HBIOS at 164%**, because a RomWBW program
+    alternates console-status with HBIOS input-status and the unmarked call reset
+    the counter every other pass. Now covered: BIOS CONST, BDOS 11, BDOS 6's
+    status form, HBIOS input status, and the `^Z`-means-nothing reads of BDOS 3 /
+    BIOS 7 that an `AUX:` profile polls.
+  - Verified across all three access families with EGT80 driven in the emulator:
+    idle CPU **2.2%** for a port profile, HBIOS and `AUX:` alike (from 161% and
+    164% respectively), with `AT` → `OK` still answered in 6&ndash;9 ms. Console
+    output stays at tens of thousands of char/s, the modem burst at ~1.5 KB/s,
+    and a double-`ESC` still breaks out of a compute-bound loop in 4 ms.
+  - The pacing rule is a pure function (`idle_nap`) so the thing worth pinning is
+    testable: that a working program never naps, that an idle one does, that the
+    second tier backs off further, and that neither tier could grow into a
+    perceptible delay.
 - **The CP/M emulator ran at roughly 150 baud, and none of it was the CPU.** Two
   tokio timers sat on the emulator's *per-character* path. The driver loop
   regains control at every BDOS/BIOS/HBIOS trap, so anything it does per pass is

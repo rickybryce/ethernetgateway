@@ -119,6 +119,26 @@ pub enum HbiosOutcome {
     Waiting,
 }
 
+/// Was this call an input-status poll that answered "nothing waiting"?
+///
+/// Used by the async driver to recognise a guest's idle loop and pace it.  A
+/// RomWBW comms program's wait-for-activity loop polls this function, and
+/// because every HBIOS call ends the CPU batch, each turn costs a full driver
+/// pass; with nothing slowing those passes down, an idle session spins the host
+/// at over a core (measured 164% before this was recognised).
+///
+/// Deliberately does *not* check that the unit is ours: a guest spinning on a
+/// call that gets refused is just as idle as one spinning on an empty ring, and
+/// pacing it is just as correct.
+///
+/// Kept as a predicate rather than a new [`HbiosOutcome`] variant so that
+/// "answered" keeps its single meaning at every existing call site — this asks
+/// a different question (was there anything to report?) from the one the
+/// outcome answers (did the guest get resumed?).
+pub fn is_idle_status_poll(cpm: &Cpm, func: u8) -> bool {
+    func == FN_IST && cpm.modem_rx_len() == 0
+}
+
 /// Service one [`Stop::Hbios`] call against the virtual modem.
 ///
 /// Synchronous by design — every supported function is a ring operation or a
