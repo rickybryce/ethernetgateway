@@ -304,8 +304,29 @@ mod tests {
         assert!(!text.contains("NONE"), "{text}");
     }
 
+    /// Serialises the tests that drive the process-wide registry.
+    ///
+    /// `reset()` / `expect()` / `bound()` / `failed()` all mutate one global
+    /// `State`, and cargo runs tests on parallel threads — so without this, one
+    /// test's `reset()` lands between another's `expect()` and its read, and the
+    /// read panics with "no entry found for key". That is precisely how CI failed
+    /// on **macOS** at `9f72b85` (1582 passed, 1 failed) while ubuntu and Windows
+    /// passed on scheduling luck, which is the trap the release checklist warns
+    /// about: a local run cannot see it.
+    ///
+    /// Production has no such race — `reset()` and `expect()` are called from the
+    /// single startup path, synchronously, before any listener task is spawned.
+    /// This is test isolation, not a fix to the registry's own locking.
+    fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_registry_records_and_resets() {
+        let _guard = registry_guard();
         reset();
         expect("telnet", 2323);
         expect("web", 8080);
@@ -333,6 +354,7 @@ mod tests {
 
     #[test]
     fn test_a_late_failure_supersedes_an_optimistic_bound() {
+        let _guard = registry_guard();
         reset();
         expect("SSH", 2222);
         bound("SSH");

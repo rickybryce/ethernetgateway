@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   References grid on every sibling reference page.
 
 ### Fixed
+- **A macOS-only CI failure: two `bindwatch` tests raced each other.** Caught by
+  checking CI before tagging rather than trusting the local suite &mdash; exactly the
+  case the release checklist warns about, since ubuntu and Windows passed on
+  scheduling luck. `test_a_late_failure_supersedes_an_optimistic_bound` panicked
+  `no entry found for key`: it and `test_registry_records_and_resets` both drive
+  the one process-wide registry, and cargo runs tests on parallel threads, so one
+  test's `reset()` landed between the other's `expect()` and its read. They are
+  now serialised by a dedicated test mutex. Test isolation only &mdash; production
+  calls `reset()` / `expect()` synchronously from the single startup path before
+  any listener task is spawned, so the race cannot occur there.
 - **An idle CP/M session span the host CPU at over a core.** Caught reviewing the
   timer removal below, by measuring rather than reasoning: an idle EGT80 terminal
   sat at **161% CPU**. The two timers that fix had removed were, incidentally,
