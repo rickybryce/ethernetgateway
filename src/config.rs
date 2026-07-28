@@ -2034,15 +2034,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push_str("\
 # CP/M emulator.  When enabled, the main menu offers a 'CP/M
 # System' item that runs a real CP/M 2.2 environment in an emulated Z80,
-# executing arbitrary user-supplied .COM software sandboxed to a CPM/
-# directory under transfer_dir.  Default-off (it runs arbitrary code); when
-# off the menu item is hidden and the key is rejected.
+# running .COM software the user launches, sandboxed to a CPM/
+# directory under transfer_dir.  On by default; set it off and the menu
+# item is hidden and the key is rejected.
 # cpm_emu_enabled: the CP/M emulator main-menu item (on by default).  It runs
-#   arbitrary guest Z80 software, jailed to the CPM/ directory under
-#   transfer_dir and bounded by cpm_emu_max_minstr; set false to hide the menu
-#   item and reject the key.  The guest reaches the network only through
-#   cpm_emu_uart, which now defaults to rc2014_1b (the port the bundled EGT80
-#   terminal expects); set it to off to leave the emulator with no modem.
+#   the Z80 software a user launches -- be sure you trust the CP/M files you
+#   run -- jailed to the CPM/ directory under transfer_dir and bounded by
+#   cpm_emu_max_minstr; set false to hide the menu item and reject the key.
+#   The guest reaches the network only through cpm_emu_uart, which now defaults
+#   to rc2014_1b (the port the bundled EGT80 terminal expects); set it to off
+#   to leave the emulator with no modem.
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.

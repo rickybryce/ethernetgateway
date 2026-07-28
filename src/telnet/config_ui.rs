@@ -509,11 +509,15 @@ impl TelnetSession {
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
+            // Two lines: the sentence plus the screen's indent is 43 columns and
+            // a PETSCII screen is 40.
             self.send_line(&format!(
                 "  {}",
-                self.amber("Runs arbitrary Z80 .COM software.")
+                self.amber("Be sure you trust the CP/M files")
             ))
             .await?;
+            self.send_line(&format!("  {}", self.amber("you run in the emulator.")))
+                .await?;
             self.send_line("").await?;
 
             let status = if cfg.cpm_emu_enabled {

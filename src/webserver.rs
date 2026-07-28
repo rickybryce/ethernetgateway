@@ -1655,7 +1655,7 @@ fn render_more_popups(cfg: &Config) -> String {
         u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
         cpm = checkbox(
             "cpm_emu_enabled",
-            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
+            "CP/M Emulator (main menu; be sure you trust the CP/M files you run)",
             cfg.cpm_emu_enabled,
         ),
         cpmmax = numfield(

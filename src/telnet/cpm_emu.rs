@@ -198,9 +198,17 @@ impl TelnetSession {
             .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
+        // Split across two lines because the whole sentence is 66 columns and a
+        // PETSCII screen is 40.  Both halves fit, so one wording serves every
+        // terminal rather than branching on width.
         self.send_line(&format!(
             "  {}",
-            self.amber("WARNING: runs arbitrary Z80 code.")
+            self.amber("WARNING: Be sure you trust the CP/M")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}",
+            self.amber("files you run in the emulator.")
         ))
         .await?;
         self.send_line(&format!(
@@ -211,7 +219,7 @@ impl TelnetSession {
         // Boot-banner memory report, as a real CP/M system prints on cold start.
         self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
             .await?;
-        // The two things a user needs before running arbitrary software: how to
+        // The two things a user needs before running a program: how to
         // leave the emulator, and how to stop a running program.
         self.send_line(&format!(
             "  {}",

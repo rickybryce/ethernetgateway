@@ -580,7 +580,8 @@
 
                 <div class="callout callout-warn">
                     <p>
-                        <strong>The emulator runs arbitrary code, so it is bounded on three axes.</strong>
+                        <strong>Be sure you trust the CP/M files you run &mdash; and the emulator is
+                        bounded on three axes regardless.</strong>
                         Every file call is jailed under <code>transfer_dir/CPM</code>; a runaway program is
                         stopped by <code>cpm_emu_max_minstr</code>; and a double-<code>ESC</code> always
                         returns you to the <code>A&gt;</code> prompt, even from a program that never reads

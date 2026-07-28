@@ -5883,3 +5883,35 @@ async fn test_poll_once_probes_without_arming_a_timer() {
          per-character emulator path (the zero-timeout bug cost ~1.1s here)"
     );
 }
+
+/// The CP/M trust warning appears on the emulator's banner and on its config
+/// screen, and both screens add a two-space indent.  A PETSCII terminal is 40
+/// columns, and the full sentence is 66 — so it is deliberately split, and each
+/// half has to keep fitting.
+///
+/// Pinned because the neighbouring drive-range help line silently went stale for
+/// weeks; nothing here is checked by the `*_help_lines` fit tests, since these
+/// lines are emitted inline rather than from an extracted function.
+#[test]
+fn test_cpmemu_trust_warning_fits_petscii() {
+    // Exactly the strings the two screens send, in order.
+    let banner = ["WARNING: Be sure you trust the CP/M", "files you run in the emulator."];
+    let config_screen = ["Be sure you trust the CP/M files", "you run in the emulator."];
+
+    for (screen, lines) in [("banner", &banner), ("config screen", &config_screen)] {
+        for line in lines.iter() {
+            assert!(
+                line.len() + 2 <= PETSCII_WIDTH,
+                "CP/M {screen} line '{line}' is {} cols with the indent, over {}",
+                line.len() + 2,
+                PETSCII_WIDTH
+            );
+        }
+        // Split text is only correct if it still reads as the whole sentence.
+        let joined = lines.join(" ");
+        assert!(
+            joined.contains("trust the CP/M files you run"),
+            "CP/M {screen} halves must rejoin into the warning, got '{joined}'"
+        );
+    }
+}

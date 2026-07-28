@@ -913,7 +913,7 @@ impl App {
         ui.separator();
         ui.checkbox(
             &mut self.cfg.cpm_emu_enabled,
-            "CP/M Emulator (main menu; runs arbitrary Z80 code)",
+            "CP/M Emulator (main menu; be sure you trust the CP/M files you run)",
         );
         ui.horizontal(|ui| {
             labeled_field(
