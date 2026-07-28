@@ -7875,8 +7875,7 @@ mod tests {
             &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
         ) -> T,
     {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let (server_side, client_side) = duplex(65536);
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
@@ -8129,7 +8128,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
 
         result.unwrap();
@@ -8185,7 +8183,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -8423,8 +8420,7 @@ mod tests {
     /// packet that arrived.  Returns the captured sequence.  Used to
     /// assert wire-level guarantees of the `text_response` parameter.
     async fn capture_send_packet_kinds(text_response: bool) -> Vec<u8> {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let (sx, rx) = duplex(65536);
         let (mut rx_r_for_send, mut sx_w_for_send) = split(sx);
         let (mut sx_r_for_recv, mut rx_w_for_recv) = split(rx);
@@ -8531,8 +8527,7 @@ mod tests {
     /// sender to give up — and we assert it emits 'E' on the way out.
     #[tokio::test]
     async fn test_sender_emits_error_packet_on_give_up() {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let (sx, rx) = duplex(65536);
         let (mut rx_r_for_send, mut sx_w_for_send) = split(sx);
         let (mut sx_r_for_recv, mut rx_w_for_recv) = split(rx);
@@ -8703,8 +8698,7 @@ mod tests {
         // through the shipped client functions a caller would actually
         // use.  Verifies the public API hasn't drifted from the test
         // helper's lower-level wire-driving.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let (server_side, client_side) = duplex(65536);
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
@@ -8779,7 +8773,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -8919,7 +8912,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -8962,7 +8954,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9000,7 +8991,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9041,7 +9031,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9087,7 +9076,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9126,7 +9114,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9156,7 +9143,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9181,8 +9167,7 @@ mod tests {
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let captured_for_cb = captured.clone();
 
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         config::update_config_value("transfer_dir", &dir_str);
 
         let (server_side, client_side) = duplex(65536);
@@ -9217,7 +9202,6 @@ mod tests {
 
         let server_result = server_task.await.unwrap();
         let snapshot = captured.lock().unwrap().clone();
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
 
         server_result.unwrap();
@@ -9276,7 +9260,6 @@ mod tests {
         .await;
 
         assert!(!path_check.exists(), "file should have been deleted");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9301,7 +9284,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9352,7 +9334,6 @@ mod tests {
         assert!(new_path.exists(), "new name should exist");
         assert_eq!(std::fs::read(&new_path).unwrap(), b"contents");
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9384,7 +9365,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9439,7 +9419,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9468,7 +9447,6 @@ mod tests {
         .await;
 
         assert!(new_subdir.is_dir(), "new directory should exist");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9494,7 +9472,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9522,7 +9499,6 @@ mod tests {
         .await;
 
         assert!(!target.exists(), "empty subdir should have been removed");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9552,7 +9528,6 @@ mod tests {
         .await;
 
         assert!(target.is_dir(), "directory must still exist after refused rmdir");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9600,8 +9575,7 @@ mod tests {
         // Ok and control returned to the file-transfer menu, so the
         // peer's next `remote ...` landed on a non-protocol menu and
         // surfaced as "too many retries" in the peer's UI.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         // Force a near-zero deadline so the test doesn't actually idle
         // for the production default.  1 second is short but well above
         // any timer-resolution jitter we'd expect locally.
@@ -9661,8 +9635,7 @@ mod tests {
         // and confirming no E-packet has shown up.  Then close cleanly
         // with G F to prove the dispatch loop is still alive and
         // returns Ok with `idle_timeout: false`.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         config::update_config_value("kermit_idle_timeout", "0");
 
         let (server_side, client_side) = duplex(65536);
@@ -9722,7 +9695,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9781,7 +9753,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
@@ -9885,8 +9856,7 @@ mod tests {
         // the subdir state.  Verify by following with a successful
         // CWD and a DIR — the listing should reflect only the
         // second CWD's effect.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_after_bad_cwd_{}", pid));
@@ -9942,7 +9912,6 @@ mod tests {
         close_server_session(&mut c_write, &mut c_read).await;
         let server_result = server_task.await.unwrap();
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         server_result.unwrap();
     }
@@ -9969,8 +9938,7 @@ mod tests {
         // G C with empty argument resets subdir to root.  Verify by
         // CWDing into a subdir, then CWD "" resets it, then DIR
         // returns root contents.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_cwd_reset_{}", pid));
@@ -10009,7 +9977,6 @@ mod tests {
         close_server_session(&mut c_write, &mut c_read).await;
         let server_result = server_task.await.unwrap();
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         server_result.unwrap();
     }
@@ -10023,8 +9990,7 @@ mod tests {
         // state-reset across S boundaries (pending_resume_offset,
         // declared_size, etc.).  (Uses the `kermit_server` test wrapper,
         // which retains file bytes; production frees them post-commit.)
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let payload_a: Vec<u8> = b"first upload".to_vec();
         let payload_b: Vec<u8> = b"second upload, distinct content".to_vec();
@@ -10080,8 +10046,7 @@ mod tests {
         // lose the completed files.  We synchronize via an mpsc
         // channel so the test deterministically observes the
         // callback firing without sleeping or polling.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let payload_a: Vec<u8> = b"first immediate".to_vec();
         let payload_b: Vec<u8> = b"second immediate".to_vec();
@@ -10236,8 +10201,7 @@ mod tests {
         // running in the same process.  Locks in the wire flow
         // R(filename) → S(caps) → ACK → F → A → D... → Z → B and
         // confirms the bytes round-trip.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_client_get_{}", pid));
@@ -10250,7 +10214,6 @@ mod tests {
         let (client_result, _server_result) =
             run_client_get_against_server("pulled.bin").await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = client_result.expect("GET should succeed");
@@ -10265,8 +10228,7 @@ mod tests {
         // server must resolve case-insensitively so the first GET succeeds
         // instead of failing "File not found" and burning a retry.  Here
         // the file is UPPER on disk and the client asks for lower.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_get_case_{}", pid));
@@ -10279,7 +10241,6 @@ mod tests {
         let (client_result, _server_result) =
             run_client_get_against_server("witness.com").await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = client_result.expect("case-insensitive GET should succeed");
@@ -10291,8 +10252,7 @@ mod tests {
     async fn test_client_get_missing_file_returns_error() {
         // Server has no such file → emits E-packet → client surfaces
         // the refusal as a structured error (not a hang or panic).
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_client_missing_{}", pid));
@@ -10302,7 +10262,6 @@ mod tests {
 
         let (client_result, _) = run_client_get_against_server("nonexistent.bin").await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let err = client_result.expect_err("GET must fail when file absent");
@@ -10320,8 +10279,7 @@ mod tests {
         // refuses with E-packet, client surfaces as Err.  Guards
         // against a future regression where the client might try
         // local validation and accidentally bypass the server check.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let (client_result, _) = run_client_get_against_server("../../etc/passwd").await;
         let err = client_result.expect_err("GET must fail for unsafe filename");
@@ -10347,8 +10305,7 @@ mod tests {
             &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
         ) -> T,
     {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let (server_side, client_side) = duplex(65536);
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
@@ -10471,7 +10428,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
 
         let body = client_result.unwrap();
@@ -10507,7 +10463,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
 
         let body = client_result.unwrap();
@@ -10546,7 +10501,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir_for_cleanup);
 
         let received = client_result.unwrap();
@@ -10589,7 +10543,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let existed = victim.exists();
         let _ = std::fs::remove_dir_all(&cleanup);
 
@@ -10613,7 +10566,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&cleanup);
         client_result.expect_err("DELETE of a missing file must be an error");
     }
@@ -10636,7 +10588,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let (old_gone, new_body) = (!old.exists(), std::fs::read(&new).ok());
         let _ = std::fs::remove_dir_all(&cleanup);
 
@@ -10684,7 +10635,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&cleanup);
 
         let body = client_result.expect("TYPE must succeed");
@@ -10714,7 +10664,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let still_there = made.exists();
         let _ = std::fs::remove_dir_all(&cleanup);
 
@@ -10743,7 +10692,6 @@ mod tests {
         })
         .await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let survived = kept.is_dir();
         let _ = std::fs::remove_dir_all(&cleanup);
 
@@ -10945,12 +10893,58 @@ mod tests {
     /// multi-threaded runtime).
     static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Holds [`CONFIG_LOCK`] **and** undoes the test's `transfer_dir` override
+    /// before the lock is released.
+    ///
+    /// Tests used to restore it with a bare
+    /// `update_config_value("transfer_dir", "transfer")` after the locked
+    /// helper had already returned, which is a race, not cleanup:
+    /// `update_config_value` does a full read-modify-write of the on-disk
+    /// config, so the restore takes milliseconds *outside* the lock. In that
+    /// window the next test can acquire the lock, point `transfer_dir` at its
+    /// own scratch directory and start its server — and then the previous
+    /// test's restore lands on top, pointing the running server back at
+    /// `transfer`. The victim fails with an empty or wrong listing and passes
+    /// on a re-run. `test_server_g_dir_returns_listing` was the known flaky
+    /// one; the mechanism was general to every test here that sets a
+    /// `transfer_dir`.
+    ///
+    /// Restoring from `Drop` puts the write back inside the critical section.
+    /// The saved value is whatever was actually there, not a hardcoded
+    /// `"transfer"`, so a test can no longer invent state for its successor.
+    ///
+    /// Note the field order: [`Drop::drop`] runs before any field is dropped,
+    /// so the lock is still held while `restore` executes.
+    struct ConfigTestGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        saved_transfer_dir: String,
+    }
+
+    impl ConfigTestGuard {
+        /// Take the lock, snapshot `transfer_dir`, and apply the shared test
+        /// config. Replaces the old `CONFIG_LOCK.lock()` + `init_test_config()`
+        /// pair, so acquiring the lock and arming the restore cannot drift
+        /// apart.
+        async fn acquire() -> ConfigTestGuard {
+            let _lock = CONFIG_LOCK.lock().await;
+            // In-memory read: no disk I/O, unlike the write in Drop.
+            let saved_transfer_dir = config::get_config().transfer_dir;
+            init_test_config();
+            ConfigTestGuard { _lock, saved_transfer_dir }
+        }
+    }
+
+    impl Drop for ConfigTestGuard {
+        fn drop(&mut self) {
+            config::update_config_value("transfer_dir", &self.saved_transfer_dir);
+        }
+    }
+
     async fn round_trip_with_overrides(
         overrides: &[(&str, &str)],
         files: Vec<(String, Vec<u8>)>,
     ) -> Result<Vec<KermitReceive>, String> {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         for (k, v) in overrides {
             config::update_config_value(k, v);
         }
@@ -10967,8 +10961,7 @@ mod tests {
         // file content.  If anything goes wrong end-to-end (sender
         // doesn't honor the ACK, receiver double-loads, slice math
         // is off) we'd see corrupted data length or mismatched bytes.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_resume_e2e_{}", pid));
@@ -10993,7 +10986,6 @@ mod tests {
         // (init_test_config doesn't reset these — they aren't part
         // of its baseline set.)
         config::update_config_value("kermit_resume_partial", "false");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = result.unwrap();
@@ -11026,8 +11018,7 @@ mod tests {
         // byte 0.  If the guard isn't in place we'd see merged data
         // that's longer than the sender's file, or the wrong bytes
         // at the start.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_resume_oversize_{}", pid));
@@ -11046,7 +11037,6 @@ mod tests {
         let result = round_trip(vec![("oversize.bin".into(), full.clone())]).await;
 
         config::update_config_value("kermit_resume_partial", "false");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = result.unwrap();
@@ -11066,8 +11056,7 @@ mod tests {
         // just being asked again).  Receiver advertises offset=N, sender
         // slices `f.data[N..]` = empty, sends 0 D-packets, then Z-packet.
         // Receiver returns its pre-loaded N bytes which == full content.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_resume_equal_{}", pid));
@@ -11085,7 +11074,6 @@ mod tests {
         let result = round_trip(vec![("complete.bin".into(), full.clone())]).await;
 
         config::update_config_value("kermit_resume_partial", "false");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = result.unwrap();
@@ -11099,8 +11087,7 @@ mod tests {
         // two don't.  All three must arrive byte-correct, proving the
         // per-file `pending_resume_offset` reset works (file 1 starts
         // fresh, file 2 resumes, file 3 starts fresh again).
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_resume_batch_{}", pid));
@@ -11127,7 +11114,6 @@ mod tests {
         .await;
 
         config::update_config_value("kermit_resume_partial", "false");
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = result.unwrap();
@@ -11147,8 +11133,7 @@ mod tests {
         // pre-load anything, and the transfer must complete with the
         // full file content as if no partial existed.  Guards against
         // an opt-out regression.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("xmodem_resume_disabled_{}", pid));
@@ -11166,7 +11151,6 @@ mod tests {
 
         let result = round_trip(vec![("noresume.bin".into(), full.clone())]).await;
 
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = result.unwrap();
@@ -11180,8 +11164,7 @@ mod tests {
         // shifts (qbin off, locking_shifts on); the resulting transfer
         // must round-trip 8-bit data correctly through the SO/SI mode
         // switching layer.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         config::update_config_value("kermit_locking_shifts", "true");
         config::update_config_value("kermit_8bit_quote", "on");
 
@@ -11251,8 +11234,7 @@ mod tests {
         // actually allocate 8 MB — fake the length by passing a
         // synthetic struct via Vec::from_raw_parts isn't safe; instead
         // allocate the cap + 1.  Test runs once, ~8 MB peak.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let big = vec![0u8; (MAX_FILE_SIZE + 1) as usize];
         // Use a sink writer + source reader; the size check fires
         // before any I/O happens.
@@ -11287,8 +11269,7 @@ mod tests {
         // server returns Err with a refusal reason, AND an E-packet
         // landed on the wire (so the sender's client logs a real
         // explanation rather than seeing a dead socket).
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let peer_caps = Capabilities {
             chkt: b'1',
@@ -11369,8 +11350,7 @@ mod tests {
         // Hand-build a wire stream: peer's Send-Init, then a D-packet
         // straight away with no F-packet in between.  Receiver should
         // emit an E-packet response and return an error.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let peer_caps = Capabilities {
             chkt: b'1',
@@ -11481,8 +11461,7 @@ mod tests {
         // file — keeping it (as we used to) commits a silently truncated
         // upload to disk.  The session must survive: a following file in
         // the same batch still arrives normally.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let mut wire = wire_with_send_init();
         wire.extend_from_slice(&build_packet(TYPE_FILE, 1, b"gone.com", b'1', 0, 0, CR));
@@ -11538,8 +11517,7 @@ mod tests {
         // early (the classic cause is a peer sending a binary file in text
         // mode, which stops at the first ^Z).  Without the length check we
         // wrote the truncated prefix out as a complete file.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             length: Some(4096),
@@ -11588,8 +11566,7 @@ mod tests {
         // declares TEXT mode but sends no length.  There is nothing to compare
         // against, so the content itself is the evidence — a "text" file full
         // of NULs is a binary that stopped at the first ^Z.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             file_type: Some(b'A'), // TEXT, and deliberately no length
@@ -11637,8 +11614,7 @@ mod tests {
         // text mode with no length must still be accepted.  ESC, TAB, CR/LF
         // and a trailing ^Z all appear in real CP/M text and must not read as
         // "binary" — ANSI art is nothing but ESC sequences.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             file_type: Some(b'A'),
@@ -11681,8 +11657,7 @@ mod tests {
         // The other false positive: binary content is perfectly fine when the
         // peer said it was sending binary.  Only the text-mode claim makes it
         // evidence of truncation.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             file_type: Some(b'B'),
@@ -11737,8 +11712,7 @@ mod tests {
         // Only SHORT is an error.  A text-mode sender legitimately declares
         // its on-disk size and then expands line ends on the wire, so more
         // bytes than declared must still be accepted.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             length: Some(4),
@@ -11777,8 +11751,7 @@ mod tests {
     async fn test_receive_accepts_text_declared_file_type() {
         // The text-mode file-type attribute is a warning, not a refusal —
         // a peer that really is sending text must still get its file.
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         let q = plain_peer_quoting();
         let attrs = Attributes {
             length: Some(5),
@@ -12080,8 +12053,7 @@ mod tests {
         drop_seq: u8,
     ) -> Result<Vec<KermitReceive>, String> {
         use tokio::io::{duplex, split};
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         // Force classic packets, CHKT=3 — the lossy bridge assumes
         // these.  Sliding windows on by default; callers can layer
         // streaming on via extra_overrides.
@@ -12979,8 +12951,7 @@ mod tests {
             return Err("kermit (ckermit) not found on PATH".into());
         }
 
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         for (k, v) in cfg_overrides {
             config::update_config_value(k, v);
         }
@@ -13061,8 +13032,7 @@ mod tests {
         use tokio::net::TcpListener;
         use tokio::process::Command;
 
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         config::update_config_value("kermit_sliding_windows", "true");
         config::update_config_value("kermit_window_size", "8");
         config::update_config_value("kermit_long_packets", "true");
@@ -13267,8 +13237,7 @@ mod tests {
             return;
         }
 
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         // Stage a file in transfer_dir for ckermit to GET.
         let pid = std::process::id();
@@ -13331,7 +13300,6 @@ mod tests {
         // saved.  If anything in the dispatch loop / R handler /
         // kermit_send_with_starting_seq path is wrong we'll either
         // fail to find local_save or its bytes will diverge.
-        config::update_config_value("transfer_dir", "transfer");
         let downloaded = std::fs::read(&local_save)
             .expect("ckermit should have saved the pulled file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -13386,8 +13354,7 @@ mod tests {
             return;
         }
 
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("kermit_send_interop_{}", pid));
@@ -13434,7 +13401,6 @@ mod tests {
         .expect("kermit_server timed out");
 
         let _ = child.wait().await;
-        config::update_config_value("transfer_dir", "transfer");
         let _ = std::fs::remove_dir_all(&dir);
 
         let received = server_result.expect("kermit_server returned an error");
@@ -13677,8 +13643,7 @@ mod tests {
     /// ensures a refactor of the timeout error message breaks CI.
     #[tokio::test]
     async fn test_send_and_await_ack_timeout_error_starts_with_known_prefix() {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
         // Tight timeout so the test finishes fast.
         config::update_config_value("kermit_negotiation_timeout", "1");
 
@@ -13728,8 +13693,7 @@ mod tests {
     /// move on; without this branch the transfer aborts mid-flight.
     #[tokio::test]
     async fn test_send_and_await_ack_discards_stale_ack() {
-        let _guard = CONFIG_LOCK.lock().await;
-        init_test_config();
+        let _guard = ConfigTestGuard::acquire().await;
 
         let (peer_to_gw, gw_in) = tokio::io::duplex(8192);
         let (gw_out, peer_from_gw) = tokio::io::duplex(8192);

@@ -2652,6 +2652,23 @@ pub struct DialupEntry {
 /// Load all dialup mappings from `dialup.conf`.
 /// If the file does not exist, creates it with a default starter entry.
 pub fn load_dialup_mappings() -> Vec<DialupEntry> {
+    try_load_dialup_mappings().unwrap_or_default()
+}
+
+/// Load the dialup mappings, surfacing a read failure instead of hiding it as
+/// an empty map.
+///
+/// The distinction matters to any caller that *writes the file back*.
+/// [`save_dialup_mappings`] rewrites it wholesale, so a read-modify-write
+/// built on a silently-empty list replaces every existing mapping with
+/// whatever the caller just added — the operator adds one number and loses the
+/// rest, with no error anywhere. Read-only callers (lookup, the listing
+/// screen) are content to degrade to "no mappings", and keep using
+/// [`load_dialup_mappings`]; mutating callers must use this and refuse.
+///
+/// A *missing* file is not a failure: that is first run, and it seeds the
+/// default mapping exactly as before.
+pub fn try_load_dialup_mappings() -> Result<Vec<DialupEntry>, std::io::Error> {
     if !Path::new(DIALUP_FILE).exists() {
         let defaults = vec![DialupEntry {
             number: "1234567".into(),
@@ -2660,13 +2677,24 @@ pub fn load_dialup_mappings() -> Vec<DialupEntry> {
         }];
         save_dialup_mappings(&defaults);
         glog!("Created default dialup mapping: {}", DIALUP_FILE);
-        return defaults;
+        return Ok(defaults);
     }
-    let content = match std::fs::read_to_string(DIALUP_FILE) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    parse_dialup_mappings(&content)
+    dialup_entries_from_read(std::fs::read_to_string(DIALUP_FILE))
+}
+
+/// Decision half of [`try_load_dialup_mappings`], split out so the failure
+/// branches are testable — `DIALUP_FILE` is a fixed process-relative path, so
+/// a test that made the real file unreadable would race every other test.
+fn dialup_entries_from_read(
+    read: Result<String, std::io::Error>,
+) -> Result<Vec<DialupEntry>, std::io::Error> {
+    match read {
+        Ok(content) => Ok(parse_dialup_mappings(&content)),
+        // Deleted between the exists() check and the open: genuinely no
+        // mappings, not a file we failed to read.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Parse dialup mappings from file content.
@@ -4367,6 +4395,45 @@ mod tests {
     }
 
     // ─── Dialup mapping tests ─────────────────────────────
+
+    /// A read failure must not look like "no mappings".
+    ///
+    /// `save_dialup_mappings` rewrites the file wholesale, so a
+    /// read-modify-write starting from a silently-empty list would replace
+    /// every existing mapping with just the one being added. The mutating
+    /// caller (the telnet "add mapping" screen) refuses on `Err`; only a
+    /// genuinely absent file may yield an empty list.
+    #[test]
+    fn test_dialup_entries_from_read_separates_unreadable_from_absent() {
+        // Readable: parsed as usual.
+        let ok = dialup_entries_from_read(Ok(
+            "5551234 = bbs.example.com:23\n".to_string()
+        ))
+        .expect("a readable file must not error");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].host, "bbs.example.com");
+
+        // Vanished between the exists() check and the open: really no entries.
+        let gone = dialup_entries_from_read(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "vanished",
+        )))
+        .expect("an absent file is not a failure");
+        assert!(gone.is_empty());
+
+        // Present but unreadable: must be an error, never an empty Vec.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let err = dialup_entries_from_read(Err(std::io::Error::new(kind, "boom")));
+            assert!(
+                err.is_err(),
+                "{:?} must surface as an error, or a later save wipes the file",
+                kind,
+            );
+        }
+    }
 
     #[test]
     fn test_parse_dialup_mappings_basic() {

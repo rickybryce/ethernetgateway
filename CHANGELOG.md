@@ -7,10 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Acting on an external quality review of the tree at `6c2ed36`. No user-facing
-behaviour changes except the two host-key refusals noted under Fixed.
+Acting on an external quality review of the tree at `6c2ed36`, then a
+follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The known flaky Kermit test had a general cause, and it is now structurally
+  impossible.** Tests that point `transfer_dir` at a scratch directory restored
+  it with a bare `update_config_value("transfer_dir", "transfer")` *after* the
+  locked helper had already returned — cleanup outside the critical section.
+  That is a race, and a wide one: `update_config_value` does a full
+  read-modify-write of the on-disk config, so the restore takes milliseconds
+  during which the next test can take the lock, point `transfer_dir` at its own
+  directory and start its server, only for the previous test's restore to land
+  on top and aim the running server back at `transfer`. The victim fails with a
+  wrong listing and passes on re-run. A new `ConfigTestGuard` takes the lock,
+  snapshots the real previous value, and restores it from `Drop` — before the
+  lock is released. All 40 acquisition sites and all 43 hand-written restores
+  are gone. `test_server_g_dir_returns_listing` was the one that had been
+  observed flaking; the mechanism applied to every test here that sets a
+  `transfer_dir`.
+- **An unreadable dialup-mapping file silently deleted every mapping.**
+  `load_dialup_mappings` returned an empty list for *any* read failure, and the
+  telnet "add mapping" screen does load → modify → `save_dialup_mappings`,
+  which rewrites the file wholesale. So with a present-but-unreadable file, an
+  operator adding one number replaced all the others with it, with no error
+  shown. This is the same defect class as the `save_known_host` one below,
+  found by sweeping for it. New `try_load_dialup_mappings` surfaces the failure;
+  read-only callers (dial lookup, the listing screen) still degrade quietly,
+  while the mutating path refuses and says why. A missing file is still first
+  run and still seeds the default mapping.
+- **Two new error messages were too wide for a 40-column PETSCII screen.**
+  `show_error` emits a single unwrapped line; the host-key and dialup refusals
+  added in this release were 99 and 123 characters. Both now use
+  `show_error_lines` with pre-split lines, matching the convention everywhere
+  else.
+- **`web/index.html` repeated the Kermit "client and server modes" claim** that
+  README was corrected for. Both now describe send/receive plus server mode.
 - **The test suite took nine minutes, and two tests were 96% of it.** Measured
   before and after: `kermit::tests::test_client_cwd_unsafe_path_returns_error`
   300.02s → 0.01s and

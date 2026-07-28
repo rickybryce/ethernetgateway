@@ -1027,10 +1027,16 @@ impl TelnetSession {
                         "SSH gateway: refusing {}:{} — known-hosts unreadable: {}",
                         host, port, e,
                     );
-                    self.show_error(
-                        "Cannot verify host key: the known-hosts file exists \
-                         but could not be read. Check its permissions.",
-                    )
+                    // show_error_lines, not show_error: the latter emits one
+                    // unwrapped line, and this doesn't fit 40-column PETSCII.
+                    self.show_error_lines(&[
+                        "Cannot verify this host's key:",
+                        "the known-hosts file exists but",
+                        "could not be read.",
+                        "",
+                        "Check the permissions on",
+                        "gateway_hosts.",
+                    ])
                     .await?;
                     return Ok(());
                 }

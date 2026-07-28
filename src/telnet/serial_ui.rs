@@ -150,7 +150,27 @@ impl TelnetSession {
             None => return Ok(()),
         };
 
-        let mut entries = config::load_dialup_mappings();
+        // Checked load: this path writes the whole file back, so a read
+        // failure must abort rather than degrade to an empty list — saving
+        // from that would delete every other mapping to add this one.
+        let mut entries = match config::try_load_dialup_mappings() {
+            Ok(e) => e,
+            Err(e) => {
+                glog!("Dialup: refusing to save — could not read mappings: {}", e);
+                // show_error_lines, not show_error: the latter emits one
+                // unwrapped line, and this doesn't fit 40-column PETSCII.
+                self.show_error_lines(&[
+                    "Could not read the dialup mapping",
+                    "file, so it cannot be updated",
+                    "without losing the entries it",
+                    "already holds.",
+                    "",
+                    "Check its permissions.",
+                ])
+                .await?;
+                return Ok(());
+            }
+        };
 
         // Remove any existing entry with the same normalized number
         let new_norm = config::normalize_phone_number(&number);
