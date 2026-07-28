@@ -5,7 +5,7 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.1] - Unreleased
 
 ### Added
 - **Serial-port pickers now name the hardware behind a device path.** A bare
@@ -2924,6 +2924,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - S-register persistence via `AT&W`.
 
 [Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.0...HEAD
+[0.8.1]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.0...HEAD
 [0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
 [0.6.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.6.4
