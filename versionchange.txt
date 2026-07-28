@@ -34,6 +34,7 @@ web/atcommandreference.html  # also the ATI / ATI3 example rows
 web/telnetreference.html
 web/punterreference.html     # <title>, .hdr-version, footer
 web/sshreference.html        # <title>, .hdr-version, footer
+web/cpmreference.html        # <title>, .hdr-version, footer
 #
 # ── On release (separate step) ──────────────────────────────────
 CHANGELOG.md            # Pre-release, the next version's notes accumulate under a
