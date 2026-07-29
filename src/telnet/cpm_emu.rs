@@ -120,6 +120,24 @@ pub(in crate::telnet) fn idle_nap(idle_polls: u32) -> Option<std::time::Duration
     }
 }
 
+/// Poll `fut` exactly once and drop it, returning `Some` only if it was already
+/// ready.  The "is there anything waiting right now?" primitive of the emulator
+/// driver loop.
+///
+/// This replaced `tokio::time::timeout(Duration::ZERO, …)`, which looks
+/// equivalent and is not: tokio rounds a deadline up to the next timer tick, so
+/// a zero-duration timeout cost ~1.1 ms against ~6 ns for a single poll — paid
+/// per emulated character, because the driver regains control at every
+/// BDOS/BIOS/HBIOS trap.
+///
+/// The waker is a no-op, which is sound *only* because nothing waits for a
+/// wake-up: the driver loop polls a fresh future on its next pass, paced by
+/// [`idle_nap`].  It follows that **every future passed here must be
+/// cancel-safe**, since a `Pending` one is dropped mid-flight. The two callers
+/// are: `AsyncReadExt::read` (documented cancel-safe — no data is consumed
+/// unless it completes) and [`TelnetSession::session_read_byte`], which carries
+/// a `mid_iac_cmd` resume point precisely so a cancel between an IAC and its
+/// command byte cannot desynchronise telnet parsing.
 pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
     let mut fut = std::pin::pin!(fut);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());

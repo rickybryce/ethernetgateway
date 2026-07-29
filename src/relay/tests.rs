@@ -27,11 +27,19 @@ use super::{
 };
 
 /// Serializes the onward-dial tests, which flip the global `allow_peer_dial`
-/// flag and restore it.  Holding this for a test's duration keeps two of them
-/// from interleaving their set/restore.  (Concurrency with *non-relay* tests
-/// that write config is handled by persisting to disk — see
-/// [`enable_peer_dial`] — not by this lock.)
-static PEER_DIAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// flag and restore it.
+///
+/// This is the **crate-wide** config lock, not a relay-local one. A local lock
+/// only excluded other *relay* tests, on the reasoning that persisting to disk
+/// handled the rest. Persisting does make each individual write atomic
+/// (`update_config_values` holds the global `CONFIG` mutex across its
+/// read-modify-write), but the unsafe part is the *pairing*, not the write: two
+/// guards under different locks interleave their snapshot/restore, so one
+/// guard's `Drop` restores a value it captured before the other test's change
+/// and silently repoints the key while that test is still running. That is the
+/// same mechanism as the `test_server_g_dir_returns_listing` flake. One lock per
+/// piece of global state.
+use crate::config::CONFIG_TEST_LOCK as PEER_DIAL_TEST_LOCK;
 
 /// RAII guard that enables the `allow_peer_dial` gate which
 /// `run_master_relay_dial` (onward dial, M-7) and `run_master_relay_peer`
@@ -385,7 +393,11 @@ fn test_parse_relay_command_rejects_garbage() {
 }
 
 /// Serializes the tests that flip `allow_relay_kermit` + `transfer_dir`.
-static RELAY_KERMIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+///
+/// The crate-wide config lock — `transfer_dir` is the very key `kermit`'s tests
+/// repoint, so a relay-local lock left the two modules racing (see
+/// [`PEER_DIAL_TEST_LOCK`]).
+use crate::config::CONFIG_TEST_LOCK as RELAY_KERMIT_TEST_LOCK;
 
 /// Sets `allow_relay_kermit` and points `transfer_dir` at a temp directory for
 /// the guard's lifetime, restoring both on drop.  Written to the config FILE

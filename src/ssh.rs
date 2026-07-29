@@ -356,6 +356,22 @@ fn try_claim_slot(count: &AtomicUsize, max: usize) -> bool {
     true
 }
 
+/// Releases a claimed session slot when dropped.
+///
+/// Exists because a manual release at the end of a function is one `return`
+/// away from leaking, and that is not hypothetical: the relay task released its
+/// slot on the last line, and adding the Kermit-server branch — which returns
+/// early — silently leaked one slot per relay Kermit transfer, permanently
+/// shrinking the master's capacity until a restart. A guard cannot be bypassed
+/// by a branch added later.
+struct SlotGuard(Arc<AtomicUsize>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 // ─── Server (connection factory) ───────────────────────────
 
 struct SshServer {
@@ -956,6 +972,10 @@ impl russh::server::Handler for SshHandler {
         let session_count = self.session_count.clone();
         let port_label_for_kermit = port_label.clone();
         tokio::spawn(async move {
+            // Release the slot however this task ends — including the Kermit
+            // branch's early return, which used to skip the manual release at
+            // the bottom and leak a slot per transfer.
+            let _slot = SlotGuard(session_count);
             if kermit_target {
                 // The slave's port is in Kermit-server mode: serve OUR Kermit
                 // server on this channel, so its device's file operations
@@ -994,8 +1014,7 @@ impl russh::server::Handler for SshHandler {
                     .await;
                 }
             }
-            // Release the slot when the relay session ends.
-            session_count.fetch_sub(1, Ordering::SeqCst);
+            // No manual release here: `_slot` does it on drop.
         });
 
         // Forward relay-session output back to the SSH channel (shared
@@ -1441,6 +1460,61 @@ mod tests {
         assert!(
             granted.load(Ordering::SeqCst) > 0,
             "the contention test granted nothing, so it proved nothing"
+        );
+    }
+
+    /// A claimed slot must be released however the holder finishes.
+    ///
+    /// Regression test with a real bug behind it: the relay task released its
+    /// slot as its **last statement**, and adding the Kermit-server branch —
+    /// which returns early — skipped it, leaking one slot per relay Kermit
+    /// transfer. Nothing else releases a relay channel's slot, so the master's
+    /// capacity (default 50) shrank permanently until a restart, eventually
+    /// refusing every new telnet, SSH and relay session. A guard cannot be
+    /// bypassed by a branch someone adds later; a trailing `fetch_sub` can.
+    #[test]
+    fn test_slot_guard_releases_on_every_exit_path() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        /// Stands in for the relay task: an early-returning branch (the Kermit
+        /// server) and a fall-through one (the menu / dial paths).
+        fn relay_task(count: Arc<AtomicUsize>, kermit: bool) -> &'static str {
+            let _slot = SlotGuard(count);
+            if kermit {
+                return "kermit";
+            }
+            "menu"
+        }
+
+        assert!(try_claim_slot(&count, 4));
+        assert_eq!(relay_task(count.clone(), true), "kermit");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the early-return branch must release its slot"
+        );
+
+        assert!(try_claim_slot(&count, 4));
+        assert_eq!(relay_task(count.clone(), false), "menu");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the fall-through branch must release its slot"
+        );
+
+        // A panicking relay session must not leak either — Drop runs while
+        // unwinding, and relay paths have panicked before now.
+        assert!(try_claim_slot(&count, 4));
+        let c = count.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = SlotGuard(c);
+            panic!("relay session blew up");
+        }));
+        assert!(res.is_err(), "the closure was supposed to panic");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a panicking holder must still release its slot"
         );
     }
 

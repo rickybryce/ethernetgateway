@@ -110,6 +110,21 @@ follow-up quality/stability pass of our own.
   accepted M-11 over-count (a relay channel claims a slot on top of its
   connection's auth slot) is pinned by a test that states the tradeoff, so a
   later "fix" cannot silently flip it.
+- **Every relay Kermit transfer permanently leaked a master session slot.**
+  A relay channel claims a slot against `max_sessions`, and the relay task
+  released it as its *last statement* — but the Kermit-server branch returns
+  early, so it never got there, and nothing else releases a relay channel's slot.
+  With the default cap of 50, fifty such transfers left the master refusing
+  **every** new telnet, SSH and relay session until it was restarted. The slot is
+  now released by an RAII `SlotGuard`, which a branch added later cannot bypass
+  and which also survives a panic mid-session.
+- **Three separate test mutexes guarded the one global `Config`.** `kermit`,
+  `relay`'s onward-dial tests and `relay`'s Kermit tests each had their own lock;
+  the last two also repoint `transfer_dir`, the very key the first one changes.
+  Individual writes are atomic, but the snapshot/restore *pairing* is not: two
+  guards under different locks interleave, and one guard's `Drop` restores a
+  value captured before the other test's change, repointing the key while that
+  test is still running. All three now share `config::CONFIG_TEST_LOCK`.
 - **A read-only CP/M file was writable when the gateway runs as root.**
   `delete`, `rename` and `make` checked the attribute explicitly, but
   `write_record` left it to the host — and root bypasses file permissions
