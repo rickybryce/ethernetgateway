@@ -110,6 +110,19 @@ follow-up quality/stability pass of our own.
   accepted M-11 over-count (a relay channel claims a slot on top of its
   connection's auth slot) is pinned by a test that states the tradeoff, so a
   later "fix" cannot silently flip it.
+- **A read-only CP/M file was writable when the gateway runs as root.**
+  `delete`, `rename` and `make` checked the attribute explicitly, but
+  `write_record` left it to the host — and root bypasses file permissions
+  (`CAP_DAC_OVERRIDE`), which is exactly how this gateway runs under systemd.
+  A guest could overwrite a file it was not allowed to erase or rename. All four
+  mutating paths now enforce the attribute the same way.
+- **The config test lock is now crate-wide** (`config::CONFIG_TEST_LOCK`). It
+  lived in `kermit`'s test submodule, but the state it guards is global: the
+  kermit tests repoint `transfer_dir`, so a test in *any* module that reads it —
+  directly, or through a function calling `get_config()` internally — raced them.
+  A per-module lock would have reintroduced the
+  `test_server_g_dir_returns_listing` flake across module boundaries instead of
+  fixing it.
 - **`DIR` in the Gateway Shell resolved its operand twice.** Written as a match
   guard, which cannot bind what it resolves, so `DIR SUB` ran two
   `canonicalize` calls plus a case-insensitive component walk, then threw the

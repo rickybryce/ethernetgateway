@@ -1200,10 +1200,6 @@ impl TelnetSession {
             // can't pin the tokio worker.  Interactive handlers already
             // await; this makes the non-awaiting ones cooperative too.
             tokio::task::yield_now().await;
-            // Pace a parked HBIOS blocking call.  Without this the guest's PC
-            // sits on the trap and the loop would spin as fast as the executor
-            // allows; a few milliseconds between polls is imperceptible at the
-            // byte rates a CP/M comms program works at.
             // Pace an established idle poll loop (see `idle_polls`).  A byte
             // arriving is real work, so it clears the count as well as the
             // status arms do — the very next poll then runs at full speed and
@@ -1231,6 +1227,10 @@ impl TelnetSession {
             if pending_input.len() > pending_before {
                 hbios_parked_since = None; // the user is here: not idle
             }
+            // Pace a parked HBIOS blocking call.  Without this the guest's PC
+            // sits on the trap and the loop would spin as fast as the executor
+            // allows; a few milliseconds between polls is imperceptible at the
+            // byte rates a CP/M comms program works at.
             if hbios_waiting {
                 hbios_waiting = false;
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;

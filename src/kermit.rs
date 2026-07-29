@@ -10891,7 +10891,11 @@ mod tests {
     /// CHKT or 8-bit-quote mid-transfer.  `tokio::sync::Mutex` lets the
     /// guard cross await points (std::sync::Mutex can't on a
     /// multi-threaded runtime).
-    static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// The crate-wide test config lock (see [`crate::config::CONFIG_TEST_LOCK`]).
+    /// Shared rather than module-local: tests in other modules read
+    /// `transfer_dir` too, and a second lock would let them race the overrides
+    /// here — the same failure this guard exists to prevent.
+    use crate::config::CONFIG_TEST_LOCK as CONFIG_LOCK;
 
     /// Holds [`CONFIG_LOCK`] **and** undoes the test's `transfer_dir` override
     /// before the lock is released.

@@ -45,6 +45,23 @@ fn config_file_path() -> String {
         .clone()
 }
 
+/// Test-only lock serialising every test that depends on the process-wide
+/// `Config`, whichever module the test lives in.
+///
+/// It lives here rather than in one module's test submodule because the state
+/// it guards is global: `kermit`'s tests repoint `transfer_dir`, and any test
+/// elsewhere that *reads* it — directly or through a function that calls
+/// `get_config()` internally — races them and fails intermittently. That is
+/// exactly the mechanism behind the `test_server_g_dir_returns_listing` flake,
+/// so a second copy of the lock per module would just reintroduce it across
+/// module boundaries.
+///
+/// `tokio::sync::Mutex` so the guard can cross await points on a
+/// multi-threaded runtime, which `std::sync::Mutex` cannot.
+#[cfg(test)]
+pub(crate) static CONFIG_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 // ─── Defaults ──────────────────────────────────────────────
 const DEFAULT_TELNET_ENABLED: bool = true;
 const DEFAULT_TELNET_PORT: u16 = 2323;

@@ -503,6 +503,32 @@ impl CpmFs {
         blocks
     }
 
+    /// Every host file on the FCB's drive whose 8.3 name matches it.
+    ///
+    /// Shared by [`CpmFs::delete`] and [`CpmFs::count_ro_matches`] on purpose:
+    /// they must agree on exactly this set, or the `File R/O` message would
+    /// describe different files than the erase actually skipped.
+    fn matching_files(&self, fcb: &Fcb) -> Vec<PathBuf> {
+        let Some(drive0) = self.drive_index_for(fcb.drive) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.drive_dir(drive0)) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if let Some((n, x)) = split_8_3(&fname) {
+                    if fcb.matches(&n, &x) {
+                        out.push(e.path());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// BDOS "delete file" (19): remove every host file on the FCB's drive
     /// matching the (possibly wildcarded) FCB.  Returns the count deleted.
     /// A read-only file is skipped, not deleted — CP/M refuses to erase an
@@ -514,26 +540,10 @@ impl CpmFs {
         if self.fcb_drive_is_ro(fcb) {
             return 0;
         }
-        let drive0 = match self.drive_index_for(fcb.drive) {
-            Some(d) => d,
-            None => return 0,
-        };
-        let dir = self.drive_dir(drive0);
         let mut count = 0;
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    continue;
-                }
-                let fname = e.file_name().to_string_lossy().to_string();
-                if let Some((n, x)) = split_8_3(&fname) {
-                    if fcb.matches(&n, &x)
-                        && !Self::host_is_ro(&e.path())
-                        && std::fs::remove_file(e.path()).is_ok()
-                    {
-                        count += 1;
-                    }
-                }
+        for path in self.matching_files(fcb) {
+            if !Self::host_is_ro(&path) && std::fs::remove_file(&path).is_ok() {
+                count += 1;
             }
         }
         count
@@ -543,25 +553,10 @@ impl CpmFs {
     /// because they are read-only.  Lets a caller tell "nothing matched" from
     /// "matched but protected" so it can report the difference.
     pub fn count_ro_matches(&self, fcb: &Fcb) -> usize {
-        let drive0 = match self.drive_index_for(fcb.drive) {
-            Some(d) => d,
-            None => return 0,
-        };
-        let mut count = 0;
-        if let Ok(rd) = std::fs::read_dir(self.drive_dir(drive0)) {
-            for e in rd.flatten() {
-                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    continue;
-                }
-                let fname = e.file_name().to_string_lossy().to_string();
-                if let Some((n, x)) = split_8_3(&fname) {
-                    if fcb.matches(&n, &x) && Self::host_is_ro(&e.path()) {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        count
+        self.matching_files(fcb)
+            .iter()
+            .filter(|p| Self::host_is_ro(p))
+            .count()
     }
 
     /// Build the directory-entry list for every file matching `fcb`, sorted
@@ -615,9 +610,7 @@ impl CpmFs {
     /// end zero-fills the gap, matching CP/M's record model.
     pub fn write_record(&self, fcb: &Fcb, record: u32, data: &[u8; 128]) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
-        // A software write-protected drive (BDOS 28) refuses every write.  A
-        // read-only *file* needs no check here: opening it for write fails on
-        // the host, which surfaces as the same error.
+        // A software write-protected drive (BDOS 28) refuses every write.
         if self.fcb_drive_is_ro(fcb) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -642,6 +635,20 @@ impl CpmFs {
                 ))
             }
         };
+        // A read-only *file* is refused here rather than left to the host.
+        // Opening for write does fail for an ordinary user, but **root bypasses
+        // file permissions** (`CAP_DAC_OVERRIDE`) — and this gateway commonly
+        // runs from systemd — so relying on the OS would let a guest write to a
+        // file it is not allowed to erase or rename.  Checking here also keeps
+        // all four mutating paths enforcing the attribute the same way.
+        // (A file that isn't there reads as not-read-only and falls through to
+        // the open below, which reports the missing file.)
+        if Self::host_is_ro(&path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is read-only (CP/M t1')",
+            ));
+        }
         let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(data)?;
@@ -1159,6 +1166,34 @@ mod tests {
 
         // A file that isn't there is a failure (BDOS 30 returns 0xFF).
         assert!(fs.set_file_ro(&fcb_named(1, "GONE", "TXT"), true).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A read-only file must refuse writes from the emulator itself, not merely
+    /// from the host: **root bypasses file permissions**, so a gateway running
+    /// from systemd as root would otherwise let a guest overwrite a file it is
+    /// not allowed to erase or rename.
+    #[test]
+    fn test_readonly_file_refuses_write_record() {
+        let base = temp_base("ro_write");
+        let fs = CpmFs::new(base.clone());
+        let path = base.join("A").join("LOCK.DAT");
+        std::fs::write(&path, vec![b'o'; 128]).unwrap();
+        set_ro(&path, true);
+
+        let fcb = fcb_named(1, "LOCK", "DAT");
+        let err = fs.write_record(&fcb, 0, &[b'x'; 128]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            vec![b'o'; 128],
+            "the file's contents must be untouched"
+        );
+        // Reads are unaffected — R/O is a write attribute.
+        assert!(fs.read_record(&fcb, 0).unwrap().is_some());
+
+        set_ro(&path, false);
+        assert!(fs.write_record(&fcb, 0, &[b'x'; 128]).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 

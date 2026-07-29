@@ -3390,15 +3390,18 @@ fn test_match_terminal_name_unrecognized() {
 ///   `DIR` (cwd), `DIR SUB` (an existing directory's contents),
 ///   `DIR *.TXT` (a glob in the cwd), and `DIR NOSUCH` (an error).
 ///
-/// Deliberately mutates **no** config: `cpm_dir_abs` resolves against the
-/// configured `transfer_dir`, so the test creates a uniquely-named subtree
-/// inside whatever that already is.  Touching `transfer_dir` would need the
-/// config lock, and an unsynchronised write to it is exactly what made a
-/// kermit test flaky.
+/// Mutates **no** config — it creates a uniquely-named subtree inside whatever
+/// `transfer_dir` already is — but it must still hold `CONFIG_TEST_LOCK`.
+/// `cpm_dir_abs` calls `get_config()` *itself*, on every one of the five runs
+/// below, so a kermit test repointing `transfer_dir` mid-test would move the
+/// jail out from under a subtree created against the old value. Reading global
+/// config unsynchronised is the same race that made a kermit test flaky, just
+/// from the other side.
 #[tokio::test]
 async fn test_cpm_dir_operand_selects_directory_or_pattern() {
     use tokio::io::AsyncReadExt;
 
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
     let cfg = config::get_config();
     let base = std::path::PathBuf::from(&cfg.transfer_dir);
     if std::fs::create_dir_all(&base).is_err() {
