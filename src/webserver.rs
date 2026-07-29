@@ -2017,8 +2017,17 @@ h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; 
   padding: 8px 12px; border: 1px solid var(--amber);
   border-radius: 4px; margin: 10px 0;
 }
+/* 500px is not arbitrary: it is what the Server frame's widest row needs.  Its
+   seven grid columns measure ~411px (the Kermit Server label alone is the
+   widest single cell at ~118px) plus 60px of column gaps, 24px of frame padding
+   and 2px of border — ~497px.  The old 420px floor let the frame get narrower
+   than its own content, which is what pushed the More button out of view.
+   Measured with the wide Linux fallback font; Segoe UI on Windows is narrower,
+   so this floor holds there too.  On a viewport too small for 500px the page
+   scrolls horizontally, which is a predictable degradation; a button that has
+   left its frame is not. */
 .grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
   gap: 10px; margin-top: 10px;
 }
 .frame {
@@ -2095,32 +2104,62 @@ button.refresh {
 /* Dir field stretches to fill the row inside the File Transfer
    frame, mirroring the GUI's expanding text edit. */
 .transfer-dir { flex: 1 1 auto; min-width: 0; }
+/* Numeric entry boxes get an explicit width.  They used to be sized only by
+   the HTML size=5 attribute, which browsers map to different pixel widths —
+   and the width also depends on which font in the stack actually resolved
+   (Segoe UI on Windows is much narrower than the DejaVu/Verdana fallbacks).
+   That variance is what pushed the File Transfer frame's More button out of
+   the frame on some browsers at some widths.  One ch is the width of a zero
+   in the resolved font, so five digits always fit whichever font that is (the
+   widest value we expose is kermit_max_packet_length, 4 digits); the 14px is
+   the horizontal padding (6px each side) plus the 1px borders, which width
+   has to include because box-sizing is border-box. */
+.num-tight { width: calc(5ch + 14px); }
 /* Server frame's listener block uses CSS Grid so the two Port:
-   colons in each column align between rows (and the 6-char port
-   inputs line up too).  Column 7 is the More button slot — it
+   colons in each column align between rows (and the port inputs
+   line up too).  Column 7 is the More button slot — it
    sits on row 1 and an empty cell on row 2 keeps the grid square. */
 .server-grid {
   display: grid;
+  /* The six content columns stay max-content: nothing here can be squeezed
+     without either clipping a port number or colliding a label with the next
+     column, both of which were tried and looked broken.  Instead the frame is
+     never allowed to get narrower than this row needs — see the 500px floor on
+     .grid, which is derived from these columns plus the frame padding.
+     Column 7 is minmax(max-content, 1fr): never narrower than the button
+     itself, so it can no longer collapse to zero and push the button outside
+     the frame (the old 1fr did exactly that), but it still absorbs the slack
+     that right-justifies the button when there is room. */
   grid-template-columns:
     max-content max-content max-content
     max-content max-content max-content
-    1fr;
+    minmax(max-content, 1fr);
   column-gap: 10px;
   row-gap: 6px;
   align-items: center;
   margin: 4px 0;
 }
 .server-grid .port-label { color: var(--text); }
-.server-grid .port-num { width: 6ch; }
+/* 5ch of digits, which is exactly a full port number (65535), plus the 14px of
+   padding and borders that width must include under border-box.  The old plain
+   6ch was BOTH too wide for the row to fit and too narrow to show five digits,
+   because the padding ate into it. */
+.server-grid .port-num { width: calc(5ch + 14px); }
 .server-grid button.more { justify-self: end; margin-left: 0; }
 /* Tight row: keeps the contents on a single line.  Used by the
    File Transfer XMODEM tunables row so the right-floated More
    button stays after the last numeric field instead of wrapping
    onto its own line. */
-.tight-row { flex-wrap: nowrap; align-items: center; }
-.tight-row input,
+.tight-row { flex-wrap: nowrap; align-items: center; min-width: 0; }
+/* Labels and the button keep their full size... */
 .tight-row .label,
 .tight-row button { flex-shrink: 0; white-space: nowrap; }
+/* ...but the numeric inputs may shrink, which is what guarantees the
+   right-justified More button stays inside the frame.  With nowrap and
+   nothing allowed to shrink, a row wider than the frame simply overflowed to
+   the right and the button went out of view — narrower digits are a much
+   better failure mode than an unreachable button. */
+.tight-row input { flex-shrink: 1; min-width: 3ch; }
 /* Serial-frame header carries two title+checkbox pairs plus the Save
    button.  Allow wrap (unlike the row above) since on narrow viewports
    it makes more sense for the second title to drop to its own line
@@ -3193,6 +3232,50 @@ mod tests {
         assert!(
             html.contains(r#"class="row tight-row""#),
             "File-transfer tunables row missing tight-row class"
+        );
+    }
+
+    /// The four CSS rules that between them keep every More button inside its
+    /// frame.  Verified empirically with headless Chrome across viewports from
+    /// 1600px down to 400px (all five More buttons flush against the frame's
+    /// content edge, zero overflow); these assertions guard the rules that
+    /// result was measured against.
+    ///
+    /// The bug: the numeric inputs were sized only by the HTML `size` attribute,
+    /// which browsers map to different pixel widths, so the File Transfer
+    /// tunables row overflowed and carried its right-floated More button out of
+    /// the frame — and the Server grid's `1fr` button column collapsed to zero
+    /// whenever its `max-content` columns overflowed a narrow frame, doing the
+    /// same thing there.
+    #[test]
+    fn test_more_buttons_cannot_leave_their_frame() {
+        let html = render_main_page(&Config::default(), None);
+
+        // 1. Numeric inputs have a real width, not a browser-dependent `size`.
+        assert!(
+            html.contains(".num-tight { width: calc(5ch + 14px); }"),
+            "numeric inputs must carry an explicit width; `size=5` alone is \
+             mapped differently by each browser, which is what pushed the File \
+             Transfer More button out of frame"
+        );
+        // 2. Those inputs may shrink so the button is never pushed out.
+        assert!(
+            html.contains(".tight-row input { flex-shrink: 1; min-width: 3ch; }"),
+            "tight-row inputs must be allowed to shrink, or a row wider than the \
+             frame overflows and takes the More button with it"
+        );
+        // 3. The Server grid's button column cannot collapse to zero.
+        assert!(
+            html.contains("minmax(max-content, 1fr)"),
+            "the Server grid's More column must be minmax(max-content, 1fr); a \
+             bare 1fr collapses to zero width when the content columns overflow"
+        );
+        // 4. Frames are never narrower than the Server row needs.
+        assert!(
+            html.contains("repeat(auto-fit, minmax(500px, 1fr))"),
+            "the frame grid's minimum must stay >= the Server row's intrinsic \
+             width (~497px measured), or the frame gets narrower than its own \
+             content and the More button ends up outside it"
         );
     }
 

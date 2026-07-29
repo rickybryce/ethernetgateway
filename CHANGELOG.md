@@ -118,6 +118,24 @@ follow-up quality/stability pass of our own.
   **every** new telnet, SSH and relay session until it was restarted. The slot is
   now released by an RAII `SlotGuard`, which a branch added later cannot bypass
   and which also survives a panic mid-session.
+- **The web UI's "More…" buttons could sit outside their frame.** Two
+  independent causes, both width- and browser-dependent, which is why it only
+  showed up sometimes. The numeric inputs were sized purely by the HTML `size`
+  attribute, which every browser maps to a different pixel width (and which also
+  depends on which font in the stack resolved), so the File Transfer tunables row
+  could overflow and carry its right-floated button out of the frame. Separately,
+  the Server frame's grid put the button in a `1fr` column behind six
+  `max-content` columns — grid doesn't shrink-to-fit like flexbox, so on a narrow
+  frame the columns held their width, the grid overflowed, and the `1fr` column
+  collapsed to zero. The numeric boxes now carry explicit widths, the button
+  column is `minmax(max-content, 1fr)` so it can't collapse, and the frame grid's
+  floor is raised to the Server row's measured intrinsic width. Verified in
+  headless Chrome from 1600px down to 400px: all five buttons flush inside their
+  frame, zero overflow.
+- **BDOS 34 / 40 (Write Random) were undocumented.** `web/cpmreference.html`
+  listed Read Random but never its write counterpart, though both have been
+  implemented for some time. The BDOS tables now cover every function the
+  emulator services.
 - **The web UI could not enable "serve Kermit to slave ports", and saving as a
   non-master cleared it.** Its checkbox renders `disabled` outside the Master
   role, but it was never added to the `updateRelayFields()` JS that re-enables
