@@ -132,6 +132,11 @@ follow-up quality/stability pass of our own.
   floor is raised to the Server row's measured intrinsic width. Verified in
   headless Chrome from 1600px down to 400px: all five buttons flush inside their
   frame, zero overflow.
+- **The CP/M emulator config submenu's invalid-key hint omitted `D`.** The menu
+  displays `D` and the code handles it, but the hint a user sees after a wrong
+  keypress listed only "E, C, U, or Q" — found by cross-checking every telnet
+  menu's accepted keys against the keys its hint names, the same drift class as
+  the file-transfer hint fixed earlier today.
 - **BDOS 34 / 40 (Write Random) were undocumented.** `web/cpmreference.html`
   listed Read Random but never its write counterpart, though both have been
   implemented for some time. The BDOS tables now cover every function the

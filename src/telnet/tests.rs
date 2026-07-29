@@ -1247,7 +1247,7 @@ fn test_all_error_messages_fit_petscii() {
         // Other settings (uses the generic hint — too many keys to list)
         "Press a letter from the menu.",
         // CP/M emulator submenu
-        "Press E, C, U, or Q.",
+        "Press E, C, D, U, or Q.",
         // Security
         // Post unified-credentials merge: S (Set SSH user) and
         // W (Set SSH pass) menu keys went away.

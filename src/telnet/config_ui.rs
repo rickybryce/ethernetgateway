@@ -626,7 +626,10 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press E, C, U, or Q.").await?;
+                    // D is a displayed menu item and is handled above, so it
+                    // belongs in the hint — it was the one key this list had
+                    // drifted away from.
+                    self.show_error("Press E, C, D, U, or Q.").await?;
                 }
             }
         }
