@@ -726,6 +726,12 @@ pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
         // sixteen bits are set.  Without this the call returned 0 (no
         // drives), which confused drive-enumeration utilities.
         24 => Some(0xFFFF),
+        // Get R/O Vector: HL = bitmap of software write-protected drives
+        // (bit 0 = A:), as set by BDOS 28 and cleared by BDOS 13 / 37.  This
+        // returned a hardcoded 0 for as long as nothing could *become* R/O;
+        // now that BDOS 28 works, reporting the real bitmap is what keeps
+        // 28 and 29 consistent with each other.
+        29 => Some(fs.ro_vector()),
         31 => {
             cpm.write_block(DPB_ADDR, &build_dpb());
             Some(DPB_ADDR)
@@ -785,9 +791,12 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             Some(0)
         }
         13 => {
-            // Reset disk system: default drive A:, DMA 0x0080.
+            // Reset disk system: default drive A:, DMA 0x0080, and every
+            // software write-protect released (BDOS 28's flag lives only until
+            // the next disk reset).
             fs.select(0);
             fs.set_dma(fs::DEFAULT_DMA);
+            fs.clear_all_drive_ro();
             cpm.set_current_disk(fs.current_drive(), fs.current_user());
             Some(0)
         }
@@ -899,6 +908,52 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
         26 => {
             let de = cpm.reg16(Reg16::DE);
             fs.set_dma(de);
+            Some(0)
+        }
+        28 => {
+            // Write Protect Disk: software write-protect the current drive
+            // until the next disk reset.  Enforced in the filesystem's four
+            // mutating paths (write / make / delete / rename) and reported by
+            // BDOS 29.
+            fs.set_drive_ro();
+            Some(0)
+        }
+        30 => {
+            // Set File Attributes.  The attribute bits ride the *high* bits of
+            // the FCB's name and extension bytes, which `Fcb::from_bytes`
+            // strips, so read them from the raw FCB the way BDOS 23 reads its
+            // second-half name.
+            //
+            // Only t1' (R/O, high bit of the first extension byte) is honoured;
+            // it maps onto the host file's read-only permission.  t2' (System)
+            // and t3' (Archive) are accepted and ignored — a plain host
+            // directory has nowhere to keep them, and inventing a sidecar file
+            // would litter the folders users drop their own files into.
+            // Returns 0xFF when the file doesn't exist, as CP/M does.
+            let de = cpm.reg16(Reg16::DE);
+            let raw = cpm.read_block(de, FCB_SIZE);
+            let ro = raw[9] & 0x80 != 0;
+            let fcb = Fcb::from_bytes(&raw);
+            if fs.fcb_drive_is_ro(&fcb) {
+                return Some(0xFF);
+            }
+            Some(match fs.set_file_ro(&fcb, ro) {
+                Some(()) => 0x00,
+                None => 0xFF,
+            })
+        }
+        37 => {
+            // Reset Drive: release the software write-protect on the drives
+            // selected by the DE bitmap (bit 0 = A:).
+            //
+            // In real CP/M this also marks those drives "not logged in" so the
+            // next access re-reads the directory.  Here that half is a genuine
+            // no-op rather than a stub: drives are host folders that are always
+            // present, and the CP/M directory is synthesized live from them on
+            // every search, so there is no cached state to invalidate and no
+            // media change to detect.
+            let de = cpm.reg16(Reg16::DE);
+            fs.clear_drive_ro(de);
             Some(0)
         }
         32 => {
@@ -1274,6 +1329,130 @@ mod tests {
         // Get reads the same value back, and it physically lives at 0x0003.
         assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 7), Some(0x95));
         assert_eq!(cpm.read_block(IOBYTE_ADDR, 1)[0], 0x95);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 28 (Write Protect Disk) ↔ 29 (Get R/O Vector) ↔ 13/37 (release).
+    /// 28 and 29 must agree: 29 reported a hardcoded 0 for as long as nothing
+    /// could become R/O, so wiring 28 without 29 would have left a program
+    /// unable to see the protection it had just asked for.
+    #[test]
+    fn test_bdos_write_protect_and_ro_vector() {
+        let base = std::env::temp_dir().join("xmodem_cpm_wp");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]);
+
+        // Nothing protected initially.
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 29), Some(0x0000));
+
+        // Protect A: (the current drive).
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 28), Some(0));
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 29), Some(0x0001));
+
+        // Select B: and protect that too — the vector carries both bits.
+        cpm.set_reg8(Reg8::E, 1);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 14), Some(0));
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 28), Some(0));
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 29), Some(0x0003));
+
+        // BDOS 37 (Reset Drive) with only A:'s bit releases A: alone.
+        cpm.set_reg16(Reg16::DE, 0x0001);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 37), Some(0));
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 29), Some(0x0002));
+
+        // BDOS 13 (Reset Disk System) releases everything.
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 13), Some(0));
+        assert_eq!(disk_info_bdos(&mut cpm, &fs, 29), Some(0x0000));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 30 (Set File Attributes): the R/O bit rides the *high* bit of the
+    /// first extension byte, which `Fcb::from_bytes` strips — so reading it
+    /// from the raw FCB (as BDOS 23 does for its second-half name) is the whole
+    /// trick.  System/Archive are accepted and ignored, not faked.
+    #[test]
+    fn test_bdos_set_file_attributes_ro_bit() {
+        let base = std::env::temp_dir().join("xmodem_cpm_attr");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let path = base.join("A").join("NOTE.TXT");
+        std::fs::write(&path, b"body").unwrap();
+
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]);
+
+        // Build an FCB at 0x0100 naming NOTE.TXT with t1' set on the ext.
+        let fcb_at = 0x0100u16;
+        let mut raw = [b' '; FCB_SIZE];
+        raw[0] = 1; // A:
+        raw[1..5].copy_from_slice(b"NOTE");
+        raw[9..12].copy_from_slice(b"TXT");
+        raw[12..].fill(0);
+        raw[9] |= 0x80; // t1' = R/O
+        cpm.write_block(fcb_at, &raw);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 30), Some(0x00));
+        assert!(CpmFs::host_is_ro(&path), "BDOS 30 must set the host R/O bit");
+
+        // …and it is genuinely enforced, not merely recorded.
+        let fcb = Fcb::from_bytes(&raw);
+        assert_eq!(fs.delete(&fcb), 0, "the now-R/O file must resist erase");
+        assert!(path.is_file());
+
+        // Clearing t1' makes it writable again.
+        raw[9] &= 0x7F;
+        cpm.write_block(fcb_at, &raw);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 30), Some(0x00));
+        assert!(!CpmFs::host_is_ro(&path));
+
+        // A missing file is 0xFF, as CP/M reports.
+        let mut gone = raw;
+        gone[1..5].copy_from_slice(b"GONE");
+        cpm.write_block(fcb_at, &gone);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 30), Some(0xFF));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A write-protected drive must refuse the write path with an error code
+    /// the guest can act on, not the fake success an unhandled function gets.
+    #[test]
+    fn test_bdos_write_to_protected_drive_reports_error() {
+        let base = std::env::temp_dir().join("xmodem_cpm_wpwrite");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::write(base.join("A").join("OUT.DAT"), vec![0u8; 128]).unwrap();
+
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]);
+
+        let fcb_at = 0x0100u16;
+        let mut raw = [b' '; FCB_SIZE];
+        raw[0] = 1;
+        raw[1..4].copy_from_slice(b"OUT");
+        raw[9..12].copy_from_slice(b"DAT");
+        raw[12..].fill(0);
+        cpm.write_block(fcb_at, &raw);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 28), Some(0));
+        // 21 = write sequential → 0x01 (generic write error).
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 21), Some(0x01));
+        // 34 = write random → 0x05 (write / directory-overflow error).
+        cpm.write_block(fcb_at, &raw);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 34), Some(0x05));
+        // 22 = make → 0xFF; the drive is protected, so no new file appears.
+        let mut newf = raw;
+        newf[1..4].copy_from_slice(b"NEW");
+        cpm.write_block(fcb_at, &newf);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 22), Some(0xFF));
+        assert!(!base.join("A").join("NEW.DAT").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

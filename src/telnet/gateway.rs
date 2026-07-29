@@ -1243,12 +1243,23 @@ impl TelnetSession {
             if cfg.ssh_gateway_auth == "password" {
                 self.show_error("Authentication failed.").await?;
             } else {
-                self.show_error(
-                    "Key authentication failed. Copy the gateway's public \
-                     key (shown in the GUI Server > More popup) into the \
-                     remote's ~/.ssh/authorized_keys, or switch to Password \
-                     mode from Configuration > Gateway Configuration.",
-                )
+                // `show_error` emits ONE unwrapped line, so the backslash-
+                // continued single string this used to be arrived on the wire
+                // as 207 unbroken characters — hard-wrapped on a 40-col
+                // PETSCII screen and wrapped even at 80.  Same content, now
+                // pre-wrapped to fit the narrowest terminal.
+                self.show_error_lines(&[
+                    "Key authentication failed.",
+                    "",
+                    "Copy the gateway public key into the",
+                    "remote's ~/.ssh/authorized_keys.",
+                    "The key is shown in the GUI under",
+                    "Server > More...",
+                    "",
+                    "Or switch to Password mode under",
+                    "Configuration > Gateway",
+                    "Configuration.",
+                ])
                 .await?;
             }
             return Ok(());

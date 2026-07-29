@@ -150,8 +150,16 @@ impl TelnetSession {
             }
             "r" => {} // Refresh — just re-render
             _ => {
-                self.show_error("Press U, D, X, C, M, K, S, I, R, Q, or H.")
-                    .await?;
+                // Split across two lines rather than shortened to the generic
+                // "Press a letter from the menu." hint: this menu grew to
+                // eleven keys, and at 43 cols with its indent the single-line
+                // form wrapped on a 40-col PETSCII screen.  Splitting keeps
+                // every key visible on a C64 *and* on an 80-col terminal.
+                self.show_error_lines(&[
+                    "Press U, D, X, C, M, K, S, I, R, Q,",
+                    "or H for help.",
+                ])
+                .await?;
             }
         }
         Ok(true)
@@ -1646,8 +1654,14 @@ impl TelnetSession {
         self.ensure_transfer_dir().await?;
 
         if Self::is_disk_full() {
-            self.show_error("Disk space is low. Server mode disabled.")
-                .await?;
+            // Two lines: `show_error` emits one *unwrapped* line, and the
+            // single-line form was 42 cols with its indent — it wrapped on a
+            // 40-col PETSCII screen.
+            self.show_error_lines(&[
+                "Disk space is low.",
+                "Server mode disabled.",
+            ])
+            .await?;
             return Ok(());
         }
 

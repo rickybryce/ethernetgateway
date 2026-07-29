@@ -333,6 +333,29 @@ pub(crate) fn client_public_key_openssh() -> Result<String, String> {
     }
 }
 
+/// Claim one session slot if the cap allows; `true` when the slot is ours.
+///
+/// Atomic `fetch_add` + rollback, the same pattern as the telnet accept loop:
+/// two connections racing can both increment, but only those whose prior value
+/// was under the cap keep their slot, so the count never settles above `max`.
+/// The cap binds at exactly `max` — slots `0..max` are admitted, the next is
+/// refused.
+///
+/// Single-sourced deliberately.  This was written out three times (password
+/// auth, relay `exec`, console register) and each copy has its own release
+/// paths; a divergence between the *claims* is one of the ways the accounting
+/// could flip from over-counting (safe) to under-counting (fails open), which
+/// is precisely the risk that kept M-11 deferred.  One implementation, one
+/// test.
+fn try_claim_slot(count: &AtomicUsize, max: usize) -> bool {
+    let prev = count.fetch_add(1, Ordering::SeqCst);
+    if prev >= max {
+        count.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
 // ─── Server (connection factory) ───────────────────────────
 
 struct SshServer {
@@ -491,9 +514,7 @@ impl SshHandler {
         // A registered idle port consumes a session slot for its lifetime.
         // Like the relay path (see exec_request), this is on TOP of the auth
         // slot — an accepted over-count (M-11, fails safe); see that note.
-        let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
-        if prev >= self.max_sessions {
-            self.session_count.fetch_sub(1, Ordering::SeqCst);
+        if !try_claim_slot(&self.session_count, self.max_sessions) {
             glog!(
                 "SSH: serial-register from {} rejected (server at capacity {})",
                 slave_ip,
@@ -666,9 +687,7 @@ impl russh::server::Handler for SshHandler {
             // exactly here, where a connection becomes a real authenticated
             // session — accepting sessions 0..max_sessions-1 and rejecting
             // the rest.
-            let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
-            if prev >= self.max_sessions {
-                self.session_count.fetch_sub(1, Ordering::SeqCst);
+            if !try_claim_slot(&self.session_count, self.max_sessions) {
                 if let Some(ip) = self.peer_addr {
                     glog!(
                         "SSH: {} authenticated but server at capacity ({}); rejecting",
@@ -857,9 +876,12 @@ impl russh::server::Handler for SshHandler {
         // trusted-LAN master/slave threat model rather than converting the
         // auth slot per-channel, which risks a fails-open under-count in
         // this concurrency-critical path (three release sites).
-        let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
-        if prev >= self.max_sessions {
-            self.session_count.fetch_sub(1, Ordering::SeqCst);
+        //
+        // The arithmetic is pinned by
+        // `test_relay_channel_slot_is_on_top_of_auth_slot`, so a later change
+        // to it has to go through a test that states the tradeoff.  The claim
+        // itself is `try_claim_slot` — one implementation for all three sites.
+        if !try_claim_slot(&self.session_count, self.max_sessions) {
             glog!(
                 "SSH: relay from {:?} rejected (server at capacity {})",
                 self.peer_addr,
@@ -1349,6 +1371,110 @@ mod tests {
             0,
             "no empty-credential path may claim a session slot"
         );
+    }
+
+    /// The session-slot claim, single-sourced in `try_claim_slot`: the cap
+    /// binds at exactly `max_sessions`, a refusal leaves the count untouched
+    /// (no leak), and a lost slot becomes available again.
+    #[test]
+    fn test_try_claim_slot_enforces_cap_exactly() {
+        let count = AtomicUsize::new(0);
+        assert!(try_claim_slot(&count, 3));
+        assert!(try_claim_slot(&count, 3));
+        assert!(try_claim_slot(&count, 3));
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+
+        // The fourth is refused, and the rollback leaves the count at the cap
+        // rather than one above it — a refusal that leaked would permanently
+        // shrink capacity.
+        assert!(!try_claim_slot(&count, 3));
+        assert_eq!(count.load(Ordering::SeqCst), 3, "a refusal must not leak");
+
+        // Release one; the next claim succeeds.
+        count.fetch_sub(1, Ordering::SeqCst);
+        assert!(try_claim_slot(&count, 3));
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+
+        // A zero cap admits nothing.
+        let zero = AtomicUsize::new(0);
+        assert!(!try_claim_slot(&zero, 0));
+        assert_eq!(zero.load(Ordering::SeqCst), 0);
+    }
+
+    /// Concurrent claimers must never settle the count above the cap — the
+    /// property the `fetch_add` + rollback shape exists for.  Without the
+    /// rollback, or with a load-then-add, the count would drift over `max`.
+    #[test]
+    fn test_try_claim_slot_never_exceeds_cap_under_contention() {
+        const MAX: usize = 8;
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 200;
+        let count = Arc::new(AtomicUsize::new(0));
+        let granted = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let count = count.clone();
+            let granted = granted.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..PER_THREAD {
+                    if try_claim_slot(&count, MAX) {
+                        granted.fetch_add(1, Ordering::SeqCst);
+                        // Hold it briefly, then release, as a session would.
+                        count.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    // The observed count must never exceed the cap.
+                    assert!(
+                        count.load(Ordering::SeqCst) <= MAX,
+                        "count rose above the cap under contention"
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "every granted slot must have been released"
+        );
+        assert!(
+            granted.load(Ordering::SeqCst) > 0,
+            "the contention test granted nothing, so it proved nothing"
+        );
+    }
+
+    /// Pins the **accepted** M-11 accounting so it can't drift unnoticed: a
+    /// relay/register channel claims its own slot *on top of* the slot its
+    /// connection claimed at auth, so a single-channel relay occupies two where
+    /// an interactive user occupies one.
+    ///
+    /// This over-counts, which fails safe (a master hosts fewer relay sessions
+    /// than `max_sessions`, never more) and is what bounds a slave from opening
+    /// unbounded relay channels on one connection.  It is documented in
+    /// `exec_request`; asserting it here means a future "fix" has to change a
+    /// test that explains the tradeoff rather than silently flipping the
+    /// accounting to fails-open.
+    ///
+    /// Scope: `exec_request` itself needs a live `russh::server::Session`,
+    /// which a unit test can't build, so this pins the *arithmetic* both sites
+    /// share — not the wiring that calls it.
+    #[test]
+    fn test_relay_channel_slot_is_on_top_of_auth_slot() {
+        let count = AtomicUsize::new(0);
+        let max = 2;
+        // The connection authenticates: one slot (auth_password).
+        assert!(try_claim_slot(&count, max), "auth claims a slot");
+        // Its first relay channel claims a second (exec_request).
+        assert!(try_claim_slot(&count, max), "the relay channel claims another");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        // So with max_sessions = 2, a second relay channel is refused even
+        // though only ONE relay session is actually being served.
+        assert!(
+            !try_claim_slot(&count, max),
+            "the over-count is the accepted behaviour: 2 slots for 1 relay"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 
     /// A locked-out IP is rejected even with correct credentials, and the

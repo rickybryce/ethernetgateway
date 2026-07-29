@@ -1185,7 +1185,13 @@ fn test_all_error_messages_fit_petscii() {
         "Press A-C, F, R, S, T, W, X, or H.",
         // Non-serial prompt includes E but is only shown to
         // ANSI/SSH users (80 cols), so it is not tested here.
-        "Press U, D, X, C, I, R, Q, or H.",
+        //
+        // The file-transfer menu's invalid-key hint used to sit here as
+        // "Press U, D, X, C, I, R, Q, or H." — a string the code stopped
+        // using once the menu grew to eleven keys.  This list is hand-copied,
+        // so it kept passing against the dead string while the live one was
+        // 43 cols and wrapped.  It is now two lines and is covered
+        // automatically by `test_show_error_literals_fit_petscii` below.
         "Disk space is low. Uploads disabled.",
         "File already exists.",
         "No files available.",
@@ -1271,6 +1277,159 @@ fn test_all_error_messages_fit_petscii() {
             PETSCII_WIDTH,
         );
     }
+}
+
+/// Drift-proof companion to `test_all_error_messages_fit_petscii`: instead of
+/// asserting against a hand-copied list, this reads the telnet module's own
+/// source at compile time (`include_str!`) and checks **every** literal passed
+/// to `show_error` / `show_error_lines`.
+///
+/// The hand-copied list cannot catch a message that is edited in place — it
+/// happily kept asserting about a string the code no longer used, while the
+/// live 43-col replacement wrapped on a C64 for months.  A scan of the call
+/// sites has no such blind spot: a new or lengthened literal is covered the
+/// moment it is written, with no second place to remember to update.
+///
+/// Both helpers indent by two spaces and emit each line **unwrapped**, so the
+/// budget is identical: `2 + literal <= PETSCII_WIDTH`.
+///
+/// Calls whose argument contains `format!` are skipped — their width depends on
+/// runtime values (a filename, an `io::Error`) and cannot be checked
+/// statically.  Those are the ones to keep short by hand.
+#[test]
+fn test_show_error_literals_fit_petscii() {
+    // Every submodule that calls either helper.  A file missing from this list
+    // is the one hole left, so it is asserted non-empty below.
+    const SOURCES: &[(&str, &str)] = &[
+        ("mod.rs",        include_str!("mod.rs")),
+        ("io.rs",         include_str!("io.rs")),
+        ("session.rs",    include_str!("session.rs")),
+        ("transfer.rs",   include_str!("transfer.rs")),
+        ("gateway.rs",    include_str!("gateway.rs")),
+        ("serial_ui.rs",  include_str!("serial_ui.rs")),
+        ("config_ui.rs",  include_str!("config_ui.rs")),
+        ("web.rs",        include_str!("web.rs")),
+        ("weather.rs",    include_str!("weather.rs")),
+        ("aichat_ui.rs",  include_str!("aichat_ui.rs")),
+        ("kernel.rs",     include_str!("kernel.rs")),
+        ("cpm_emu.rs",    include_str!("cpm_emu.rs")),
+    ];
+
+    /// Extract the balanced-parenthesis argument text starting at `open`
+    /// (the index of the `(`).  Parens inside string literals don't count,
+    /// so a message containing "(" can't truncate the scan.
+    fn balanced_arg(src: &str, open: usize) -> &str {
+        let b = src.as_bytes();
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut esc = false;
+        let mut i = open;
+        while i < b.len() {
+            let c = b[i];
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if c == b'\\' {
+                    esc = true;
+                } else if c == b'"' {
+                    in_str = false;
+                }
+            } else {
+                match c {
+                    b'"' => in_str = true,
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &src[open..=i];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        &src[open..]
+    }
+
+    /// Every `"..."` literal body in `text`, honouring backslash escapes.
+    fn string_literals(text: &str) -> Vec<String> {
+        let b = text.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'"' {
+                let start = i + 1;
+                let mut j = start;
+                let mut esc = false;
+                while j < b.len() {
+                    if esc {
+                        esc = false;
+                    } else if b[j] == b'\\' {
+                        esc = true;
+                    } else if b[j] == b'"' {
+                        break;
+                    }
+                    j += 1;
+                }
+                out.push(text[start..j.min(text.len())].to_string());
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    let mut checked = 0usize;
+    for (file, src) in SOURCES {
+        // Match the call, not the definition, and don't let `show_error(`
+        // also match inside `show_error_lines(` (the char after the name is
+        // `_`, not `(`, so searching for the paren-terminated name is enough).
+        for pat in ["show_error(", "show_error_lines("] {
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(pat) {
+                let at = from + rel;
+                from = at + pat.len();
+                // Skip the `fn show_error…(` definitions in io.rs.
+                let before = src[..at].trim_end();
+                if before.ends_with("async fn") || before.ends_with("fn") {
+                    continue;
+                }
+                let arg = balanced_arg(src, at + pat.len() - 1);
+                // Runtime-formatted width; not statically checkable.
+                if arg.contains("format!") {
+                    continue;
+                }
+                for lit in string_literals(arg) {
+                    // Escape sequences are counted as written (`\"` as two
+                    // chars), which over-counts.  That errs toward failing a
+                    // borderline message rather than passing a too-wide one.
+                    let displayed = 2 + lit.chars().count();
+                    assert!(
+                        displayed <= PETSCII_WIDTH,
+                        "{}: show_error literal {:?} is {} chars with its \
+                         2-space indent, exceeding PETSCII's {} columns — \
+                         split it across lines with `show_error_lines`",
+                        file,
+                        lit,
+                        displayed,
+                        PETSCII_WIDTH,
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+
+    // Guards the scanner itself: a refactor that renames the helpers, or an
+    // `include_str!` path that goes stale, would otherwise leave this test
+    // passing while checking nothing at all.
+    assert!(
+        checked > 50,
+        "expected to check >50 show_error literals, found {checked} — \
+         the scanner has stopped matching the real call sites"
+    );
 }
 
 /// All menu items must fit in PETSCII width (40 cols).
@@ -3224,6 +3383,93 @@ fn test_match_terminal_name_unrecognized() {
     assert_eq!(match_terminal_name("MY-WEIRD-TERM"), None);
     assert_eq!(match_terminal_name(""), None);
     assert_eq!(match_terminal_name("   "), None);
+}
+
+/// End-to-end cover for the Gateway Shell's `DIR` operand handling — the
+/// four distinct paths through its dir/pattern selection:
+///   `DIR` (cwd), `DIR SUB` (an existing directory's contents),
+///   `DIR *.TXT` (a glob in the cwd), and `DIR NOSUCH` (an error).
+///
+/// Deliberately mutates **no** config: `cpm_dir_abs` resolves against the
+/// configured `transfer_dir`, so the test creates a uniquely-named subtree
+/// inside whatever that already is.  Touching `transfer_dir` would need the
+/// config lock, and an unsynchronised write to it is exactly what made a
+/// kermit test flaky.
+#[tokio::test]
+async fn test_cpm_dir_operand_selects_directory_or_pattern() {
+    use tokio::io::AsyncReadExt;
+
+    let cfg = config::get_config();
+    let base = std::path::PathBuf::from(&cfg.transfer_dir);
+    if std::fs::create_dir_all(&base).is_err() {
+        return; // no transfer dir available; nothing to assert against
+    }
+    // Unique per run so this can't collide with a parallel test.
+    let root = base.join(format!("dirtest_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("SUB")).unwrap();
+    std::fs::write(root.join("TOP.TXT"), b"top").unwrap();
+    std::fs::write(root.join("OTHER.DAT"), b"other").unwrap();
+    std::fs::write(root.join("SUB").join("INNER.TXT"), b"inner").unwrap();
+    let rootname = root.file_name().unwrap().to_string_lossy().to_string();
+
+    async fn run(subdir: &str, pattern: Option<&str>) -> String {
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        session.transfer_subdir = subdir.to_string();
+        session.cpm_dir(pattern).await.unwrap();
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    // 1. No operand: list the cwd.  Both files, plus SUB as a <DIR>.
+    let cwd = run(&rootname, None).await;
+    // 2. A wildcard-free operand naming a directory lists *its* contents —
+    //    the path whose resolved value the old match guard had to throw away.
+    let sub = run(&rootname, Some("SUB")).await;
+    // 3. A glob is matched within the cwd.
+    let glob = run(&rootname, Some("*.TXT")).await;
+    // 4. A wildcard-free operand that is neither a directory nor an existing
+    //    file is a *name pattern* in the cwd that matches nothing — "No file",
+    //    the DOS/CP/M behaviour, not a directory error.
+    let bad = run(&rootname, Some("NOSUCH")).await;
+    // 5. A path-qualified operand whose parent doesn't exist is the real error
+    //    case, and the error must come from resolving that parent.
+    let badpath = run(&rootname, Some("NOSUCH/ANY")).await;
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        cwd.contains("TOP.TXT") && cwd.contains("OTHER.DAT") && cwd.contains("SUB"),
+        "bare DIR must list the cwd; got {:?}",
+        cwd,
+    );
+    assert!(
+        sub.contains("INNER.TXT"),
+        "DIR SUB must list SUB's contents; got {:?}",
+        sub,
+    );
+    assert!(
+        !sub.contains("TOP.TXT"),
+        "DIR SUB must not list the parent's files; got {:?}",
+        sub,
+    );
+    assert!(
+        glob.contains("TOP.TXT") && !glob.contains("OTHER.DAT"),
+        "DIR *.TXT must match only .TXT in the cwd; got {:?}",
+        glob,
+    );
+    assert!(
+        bad.contains("No file"),
+        "DIR NOSUCH is an unmatched name pattern, so 'No file'; got {:?}",
+        bad,
+    );
+    assert!(
+        badpath.contains("No such directory"),
+        "DIR NOSUCH/ANY must report the unresolvable parent; got {:?}",
+        badpath,
+    );
 }
 
 #[tokio::test]

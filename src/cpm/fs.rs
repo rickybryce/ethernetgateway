@@ -50,6 +50,16 @@ pub struct CpmFs {
     /// by user (all files share one flat namespace), a documented
     /// simplification of this host-directory-backed filesystem.
     user: u8,
+    /// Software write-protect bitmap, one bit per drive (bit 0 = A:).  Set by
+    /// BDOS 28 (Write Protect Disk) for the current drive, reported by BDOS 29
+    /// (Get R/O Vector), cleared by BDOS 13 (Reset Disk System) and BDOS 37
+    /// (Reset Drive).
+    ///
+    /// Deliberately in-memory and volatile: on real CP/M this is a BDOS flag
+    /// that lives until the next disk reset, *not* a property of the media, so
+    /// persisting it to the host would be wrong (and would need the sidecar
+    /// metadata we specifically avoid — see `set_file_ro`).
+    ro_drives: u16,
 }
 
 impl CpmFs {
@@ -63,7 +73,91 @@ impl CpmFs {
             search: Vec::new(),
             search_pos: 0,
             user: 0,
+            ro_drives: 0,
         }
+    }
+
+    /// BDOS 28: software write-protect the current drive until the next disk
+    /// reset.
+    pub fn set_drive_ro(&mut self) {
+        self.ro_drives |= 1u16 << self.drive;
+    }
+
+    /// BDOS 29: the R/O bitmap (bit 0 = A:) for all sixteen drives.
+    pub fn ro_vector(&self) -> u16 {
+        self.ro_drives
+    }
+
+    /// BDOS 13: clear every software write-protect (Reset Disk System).
+    pub fn clear_all_drive_ro(&mut self) {
+        self.ro_drives = 0;
+    }
+
+    /// BDOS 37: clear the write-protect on just the drives set in `mask`
+    /// (bit 0 = A:).
+    pub fn clear_drive_ro(&mut self, mask: u16) {
+        self.ro_drives &= !mask;
+    }
+
+    /// Whether the drive an FCB addresses is software write-protected.  The
+    /// FCB drive byte is 0 for "current drive", so this resolves it the same
+    /// way every other path does.
+    pub fn fcb_drive_is_ro(&self, fcb: &Fcb) -> bool {
+        match self.drive_index_for(fcb.drive) {
+            Some(d) => self.ro_drives & (1u16 << d) != 0,
+            None => false,
+        }
+    }
+
+    /// Whether a host file is read-only, which is how this filesystem stores
+    /// CP/M's per-file R/O (t1') attribute — no sidecar metadata, so the
+    /// attribute means the same thing to the host user as to the guest.
+    ///
+    /// `Permissions::readonly` is the portable spelling: on Unix it is "no
+    /// write bit set for anyone", on Windows the read-only attribute itself.
+    pub fn host_is_ro(path: &Path) -> bool {
+        std::fs::metadata(path)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false)
+    }
+
+    /// BDOS 30 (Set File Attributes), R/O half: mark the file the FCB names
+    /// read-only (or writable) on the host.  `None` if the file doesn't
+    /// resolve or the permission change failed.
+    ///
+    /// Only t1' (R/O) is honoured.  t2' (System) and t3' (Archive) have
+    /// nowhere to live in a plain host directory and are accepted-and-ignored
+    /// rather than faked — storing them would mean dropping sidecar files into
+    /// the very folders users drop their own files into.
+    pub fn set_file_ro(&self, fcb: &Fcb, ro: bool) -> Option<()> {
+        let path = self.resolve(fcb)?;
+        if !path.is_file() {
+            return None;
+        }
+        Self::set_host_ro(&path, ro).ok()
+    }
+
+    /// Set or clear a host file's read-only state.
+    ///
+    /// Deliberately **not** `Permissions::set_readonly(false)`: on Unix that
+    /// sets *every* write bit, so clearing CP/M's R/O attribute would leave the
+    /// file world-writable (0o666) — a guest turning an attribute off must not
+    /// widen host permissions.  Clearing grants owner-write only and leaves the
+    /// group/other bits as they were; setting clears all three, which is what
+    /// "read-only" has to mean for [`CpmFs::host_is_ro`] to agree.
+    pub fn set_host_ro(path: &Path, ro: bool) -> std::io::Result<()> {
+        let mut perms = std::fs::metadata(path)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = perms.mode();
+            perms.set_mode(if ro { mode & !0o222 } else { mode | 0o200 });
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(ro);
+        }
+        std::fs::set_permissions(path, perms)
     }
 
     /// Current CP/M user number (0–15).
@@ -253,7 +347,18 @@ impl CpmFs {
     /// file the FCB names, so subsequent writes land in it.  Returns the
     /// path on success.
     pub fn make(&self, fcb: &Fcb) -> Option<PathBuf> {
+        if self.fcb_drive_is_ro(fcb) {
+            return None;
+        }
         let path = self.resolve(fcb)?;
+        // `File::create` truncates, so an existing R/O file must be refused
+        // here.  (The host would refuse it too — unlike unlink, opening for
+        // write does check the file's own permission — but failing on our own
+        // check keeps the reason explicit and the behaviour identical on
+        // Windows.)
+        if path.is_file() && Self::host_is_ro(&path) {
+            return None;
+        }
         match std::fs::File::create(&path) {
             Ok(_) => Some(path),
             Err(_) => None,
@@ -263,7 +368,13 @@ impl CpmFs {
     /// BDOS "rename file" (23): rename the file `old` names to the new 8.3
     /// name on the same drive.  Refuses if the source is missing or the
     /// destination already exists (no silent clobber).  Returns success.
+    /// Refuses on a write-protected drive, and refuses to rename a read-only
+    /// file — like `unlink`, a Unix `rename` is governed by the directory's
+    /// write bit, so the host permission does not enforce this for us.
     pub fn rename(&self, old: &Fcb, new_name: &[u8; 8], new_ext: &[u8; 3]) -> bool {
+        if self.fcb_drive_is_ro(old) {
+            return false;
+        }
         let drive0 = match self.drive_index_for(old.drive) {
             Some(d) => d,
             None => return false,
@@ -276,7 +387,7 @@ impl CpmFs {
             Some(p) => p,
             None => return false,
         };
-        if !old_path.is_file() || new_path.exists() {
+        if !old_path.is_file() || new_path.exists() || Self::host_is_ro(&old_path) {
             return false;
         }
         std::fs::rename(old_path, new_path).is_ok()
@@ -394,7 +505,15 @@ impl CpmFs {
 
     /// BDOS "delete file" (19): remove every host file on the FCB's drive
     /// matching the (possibly wildcarded) FCB.  Returns the count deleted.
+    /// A read-only file is skipped, not deleted — CP/M refuses to erase an
+    /// R/O file, and the host permission alone does **not** stop this: on Unix
+    /// `unlink` is governed by the *directory's* write bit, not the file's, so
+    /// without this check a `chmod -w` file was erasable from the guest.
+    /// A software write-protected drive (BDOS 28) refuses outright.
     pub fn delete(&self, fcb: &Fcb) -> usize {
+        if self.fcb_drive_is_ro(fcb) {
+            return 0;
+        }
         let drive0 = match self.drive_index_for(fcb.drive) {
             Some(d) => d,
             None => return 0,
@@ -408,7 +527,35 @@ impl CpmFs {
                 }
                 let fname = e.file_name().to_string_lossy().to_string();
                 if let Some((n, x)) = split_8_3(&fname) {
-                    if fcb.matches(&n, &x) && std::fs::remove_file(e.path()).is_ok() {
+                    if fcb.matches(&n, &x)
+                        && !Self::host_is_ro(&e.path())
+                        && std::fs::remove_file(e.path()).is_ok()
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// How many files matching `fcb` were left in place by [`CpmFs::delete`]
+    /// because they are read-only.  Lets a caller tell "nothing matched" from
+    /// "matched but protected" so it can report the difference.
+    pub fn count_ro_matches(&self, fcb: &Fcb) -> usize {
+        let drive0 = match self.drive_index_for(fcb.drive) {
+            Some(d) => d,
+            None => return 0,
+        };
+        let mut count = 0;
+        if let Ok(rd) = std::fs::read_dir(self.drive_dir(drive0)) {
+            for e in rd.flatten() {
+                if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fname = e.file_name().to_string_lossy().to_string();
+                if let Some((n, x)) = split_8_3(&fname) {
+                    if fcb.matches(&n, &x) && Self::host_is_ro(&e.path()) {
                         count += 1;
                     }
                 }
@@ -427,7 +574,16 @@ impl CpmFs {
             None => return out,
         };
         let dir = self.drive_dir(drive0);
-        let mut files: Vec<([u8; 8], [u8; 3], u64, String)> = Vec::new();
+        /// One matching host file, ready to be turned into directory entries.
+        /// `host_name` is kept only to sort the listing by the on-disk name.
+        struct Match {
+            name: [u8; 8],
+            ext: [u8; 3],
+            size: u64,
+            ro: bool,
+            host_name: String,
+        }
+        let mut files: Vec<Match> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -436,15 +592,20 @@ impl CpmFs {
                 let fname = e.file_name().to_string_lossy().to_string();
                 if let Some((n, x)) = split_8_3(&fname) {
                     if fcb.matches(&n, &x) {
-                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                        files.push((n, x, size, fname));
+                        let md = e.metadata();
+                        let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let ro = md
+                            .as_ref()
+                            .map(|m| m.permissions().readonly())
+                            .unwrap_or(false);
+                        files.push(Match { name: n, ext: x, size, ro, host_name: fname });
                     }
                 }
             }
         }
-        files.sort_by(|a, b| a.3.cmp(&b.3));
-        for (n, x, size, _) in files {
-            out.extend(dir_entries_for_file(&n, &x, size));
+        files.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        for f in files {
+            out.extend(dir_entries_for_file(&f.name, &f.ext, f.size, f.ro));
         }
         out
     }
@@ -454,6 +615,15 @@ impl CpmFs {
     /// end zero-fills the gap, matching CP/M's record model.
     pub fn write_record(&self, fcb: &Fcb, record: u32, data: &[u8; 128]) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
+        // A software write-protected drive (BDOS 28) refuses every write.  A
+        // read-only *file* needs no check here: opening it for write fails on
+        // the host, which surfaces as the same error.
+        if self.fcb_drive_is_ro(fcb) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "drive is write-protected (BDOS 28)",
+            ));
+        }
         let offset = record as u64 * 128;
         // Bound the file size so a guest can't seek to a huge random record
         // (up to ~2 GB) and exhaust the host disk.
@@ -484,7 +654,11 @@ impl CpmFs {
 /// (EX/S2), and the record count (RC).  The allocation map is filled with
 /// distinct non-zero block numbers so a directory scanner treats the space
 /// as used.  An empty file still gets one entry (RC = 0).
-fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64) -> Vec<DirEntry> {
+///
+/// `ro` sets the t1' attribute — the high bit of the first extension byte —
+/// which is how CP/M marks a file read-only, so a host-side `chmod -w` shows
+/// up as `R/O` in `STAT` and is refused by erase/rename in the guest.
+fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> Vec<DirEntry> {
     let records = size.div_ceil(128) as u32; // 128-byte records
     let extents = if records == 0 {
         1
@@ -498,6 +672,9 @@ fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64) -> Vec<DirEntr
         e[0] = 0; // user number 0
         e[1..9].copy_from_slice(name);
         e[9..12].copy_from_slice(ext);
+        if ro {
+            e[9] |= 0x80; // t1' = R/O
+        }
         e[12] = (k & 0x1F) as u8; // EX
         e[14] = ((k >> 5) & 0x3F) as u8; // S2
         let recs_this = if records == 0 {
@@ -870,6 +1047,209 @@ mod tests {
         assert_eq!(&rec[..3], b"abc");
         assert_eq!(rec[3], 0x1A); // padded with ^Z
         assert_eq!(rec[127], 0x1A);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ─── R/O attribute + write protect (BDOS 28/29/30/37) ────────────
+
+    /// Mark a host file read-only, the way a host user or BDOS 30 would —
+    /// through the same routine production uses, so the tests can't drift from
+    /// it (and so clearing doesn't go world-writable).
+    fn set_ro(path: &Path, ro: bool) {
+        CpmFs::set_host_ro(path, ro).unwrap();
+    }
+
+    /// The bug this whole feature exists for: a Unix `unlink` is governed by
+    /// the *directory's* write bit, not the file's, so a `chmod -w` file was
+    /// happily erasable from the guest.  `delete` must skip it.
+    #[test]
+    fn test_readonly_file_survives_delete() {
+        let base = temp_base("ro_del");
+        let fs = CpmFs::new(base.clone());
+        let path = base.join("A").join("KEEP.TXT");
+        std::fs::write(&path, b"precious").unwrap();
+        set_ro(&path, true);
+
+        let fcb = fcb_named(1, "KEEP", "TXT");
+        assert_eq!(fs.delete(&fcb), 0, "a read-only file must not be deleted");
+        assert!(path.is_file(), "file was erased despite being R/O");
+        assert_eq!(fs.count_ro_matches(&fcb), 1, "should report it as protected");
+
+        // Clearing the attribute makes it deletable again.
+        set_ro(&path, false);
+        assert_eq!(fs.delete(&fcb), 1);
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Same blind spot for rename — also directory-governed on Unix.
+    #[test]
+    fn test_readonly_file_cannot_be_renamed() {
+        let base = temp_base("ro_ren");
+        let fs = CpmFs::new(base.clone());
+        let path = base.join("A").join("LOCKED.TXT");
+        std::fs::write(&path, b"x").unwrap();
+        set_ro(&path, true);
+
+        let old = fcb_named(1, "LOCKED", "TXT");
+        let mut nn = [b' '; 8];
+        nn[..3].copy_from_slice(b"NEW");
+        assert!(!fs.rename(&old, &nn, b"TXT"), "R/O file must not be renamed");
+        assert!(path.is_file());
+        assert!(!base.join("A").join("NEW.TXT").exists());
+
+        set_ro(&path, false);
+        assert!(fs.rename(&old, &nn, b"TXT"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A wildcard erase deletes what it may and leaves the protected file.
+    #[test]
+    fn test_wildcard_delete_spares_only_readonly() {
+        let base = temp_base("ro_wild");
+        let fs = CpmFs::new(base.clone());
+        for n in ["ONE.TXT", "TWO.TXT", "THREE.TXT"] {
+            std::fs::write(base.join("A").join(n), b"d").unwrap();
+        }
+        set_ro(&base.join("A").join("TWO.TXT"), true);
+
+        let fcb = fcb_named(1, "????????", "TXT");
+        assert_eq!(fs.delete(&fcb), 2, "the two writable files go");
+        assert!(base.join("A").join("TWO.TXT").is_file(), "R/O one stays");
+        assert_eq!(fs.count_ro_matches(&fcb), 1);
+        set_ro(&base.join("A").join("TWO.TXT"), false);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A host read-only file must surface as CP/M's t1' attribute so `STAT`
+    /// and `DIR` show `R/O` rather than claiming it is writable.
+    #[test]
+    fn test_readonly_shows_as_t1_prime_in_dir_entry() {
+        let base = temp_base("ro_attr");
+        let mut fs = CpmFs::new(base.clone());
+        let path = base.join("A").join("PROT.TXT");
+        std::fs::write(&path, b"z").unwrap();
+
+        let fcb = fcb_named(1, "PROT", "TXT");
+        let e = fs.search_first(&fcb).expect("entry");
+        assert_eq!(e[9] & 0x80, 0, "writable file must not carry t1'");
+
+        set_ro(&path, true);
+        let e = fs.search_first(&fcb).expect("entry");
+        assert_eq!(e[9] & 0x80, 0x80, "R/O file must carry t1'");
+        // The name itself must be unharmed — the flag rides the high bit only.
+        assert_eq!(e[9] & 0x7F, b'T');
+        set_ro(&path, false);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 30's R/O half, through the filesystem seam.
+    #[test]
+    fn test_set_file_ro_round_trip() {
+        let base = temp_base("ro_set");
+        let fs = CpmFs::new(base.clone());
+        let path = base.join("A").join("ATTR.TXT");
+        std::fs::write(&path, b"q").unwrap();
+        let fcb = fcb_named(1, "ATTR", "TXT");
+
+        assert!(fs.set_file_ro(&fcb, true).is_some());
+        assert!(CpmFs::host_is_ro(&path));
+        assert!(fs.set_file_ro(&fcb, false).is_some());
+        assert!(!CpmFs::host_is_ro(&path));
+
+        // A file that isn't there is a failure (BDOS 30 returns 0xFF).
+        assert!(fs.set_file_ro(&fcb_named(1, "GONE", "TXT"), true).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Clearing the R/O attribute must not widen host permissions.
+    /// `Permissions::set_readonly(false)` sets *every* write bit on Unix, so
+    /// the obvious spelling would turn a private 0o600 file into a
+    /// world-writable 0o666 one just because a guest cleared t1'.
+    #[cfg(unix)]
+    #[test]
+    fn test_clearing_ro_does_not_go_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = temp_base("ro_perms");
+        let path = base.join("A").join("PRIV.TXT");
+        std::fs::write(&path, b"secret").unwrap();
+        // A deliberately private file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        CpmFs::set_host_ro(&path, true).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400, "setting R/O clears every write bit");
+        assert!(CpmFs::host_is_ro(&path));
+
+        CpmFs::set_host_ro(&path, false).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "clearing R/O must restore owner-write only, not 0o666"
+        );
+        assert_eq!(mode & 0o022, 0, "group/other must never gain write");
+        assert!(!CpmFs::host_is_ro(&path));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 28 write-protects the whole drive: all four mutating paths refuse,
+    /// reads still work, and BDOS 13/37 release it.
+    #[test]
+    fn test_drive_write_protect_blocks_mutations() {
+        let base = temp_base("ro_drive");
+        let mut fs = CpmFs::new(base.clone());
+        std::fs::write(base.join("A").join("DATA.TXT"), b"hello").unwrap();
+        let fcb = fcb_named(1, "DATA", "TXT");
+
+        assert!(!fs.fcb_drive_is_ro(&fcb));
+        assert_eq!(fs.ro_vector(), 0);
+        fs.set_drive_ro();
+        assert!(fs.fcb_drive_is_ro(&fcb));
+        assert_eq!(fs.ro_vector(), 0b1, "A: is bit 0");
+
+        // Every mutating path refuses.
+        assert!(fs.write_record(&fcb, 0, &[b'x'; 128]).is_err());
+        assert!(fs.make(&fcb_named(1, "NEW", "TXT")).is_none());
+        assert_eq!(fs.delete(&fcb), 0);
+        let mut nn = [b' '; 8];
+        nn[..2].copy_from_slice(b"NX");
+        assert!(!fs.rename(&fcb, &nn, b"TXT"));
+        // …and nothing on disk changed.
+        assert_eq!(
+            std::fs::read(base.join("A").join("DATA.TXT")).unwrap(),
+            b"hello"
+        );
+        assert!(!base.join("A").join("NEW.TXT").exists());
+        // Reading is unaffected — it's a *write* protect.
+        assert!(fs.read_record(&fcb, 0).unwrap().is_some());
+
+        // BDOS 37 with A:'s bit clears just that drive.
+        fs.clear_drive_ro(0b1);
+        assert!(!fs.fcb_drive_is_ro(&fcb));
+        assert_eq!(fs.delete(&fcb), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The write-protect is per drive, and BDOS 13 clears all of them.
+    #[test]
+    fn test_write_protect_is_per_drive() {
+        let base = temp_base("ro_perdrive");
+        std::fs::create_dir_all(base.join("C")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        assert!(fs.select(2)); // C:
+        fs.set_drive_ro();
+        assert_eq!(fs.ro_vector(), 0b100, "C: is bit 2");
+
+        // An FCB naming A: explicitly (drive byte 1) is unaffected.
+        assert!(!fs.fcb_drive_is_ro(&fcb_named(1, "X", "TXT")));
+        // An FCB naming C: explicitly (drive byte 3) is protected.
+        assert!(fs.fcb_drive_is_ro(&fcb_named(3, "X", "TXT")));
+        // Bit 37 for a *different* drive leaves C: protected.
+        fs.clear_drive_ro(0b10);
+        assert_eq!(fs.ro_vector(), 0b100);
+        // Reset Disk System clears everything.
+        fs.clear_all_drive_ro();
+        assert_eq!(fs.ro_vector(), 0);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

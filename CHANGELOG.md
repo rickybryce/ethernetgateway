@@ -82,6 +82,40 @@ follow-up quality/stability pass of our own.
   server modes"; the client G-command state machine is real and tested but
   reachable from no telnet, web or GUI surface. The bullet now describes what a
   user can actually use — send/receive plus server mode.
+- **Clearing a CP/M file's R/O attribute no longer widens host permissions.**
+  `Permissions::set_readonly(false)` sets *every* write bit on Unix, so the
+  obvious spelling would have turned a private `0o600` file into a
+  world-writable `0o666` one merely because a guest cleared `t1'`. Clearing now
+  grants owner-write only and leaves the group/other bits untouched.
+- **Two `show_error` strings wrapped on a 40-column PETSCII screen, and a third
+  was far worse.** `show_error` emits one *unwrapped* line. The file-transfer
+  menu's invalid-key hint had grown to eleven keys (43 columns with its indent)
+  and the Kermit-server disk-space refusal was 42; both are now two lines. The
+  third was found by the new guard rather than by eye: the SSH gateway's
+  key-authentication failure was a backslash-continued string that reached the
+  wire as 207 unbroken characters, wrapping even at 80 columns.
+- **The PETSCII width guard could not see message drift.** The fit test
+  hand-copied its list of messages, so it kept happily asserting about
+  `"Press U, D, X, C, I, R, Q, or H."` — a string the code had stopped using —
+  while the live 43-column replacement wrapped unnoticed.
+  `test_show_error_literals_fit_petscii` reads the telnet module's own source
+  with `include_str!` and checks every literal passed to `show_error` /
+  `show_error_lines`, so a new or lengthened message is covered the moment it is
+  written, with no second place to remember to update.
+- **The SSH session-slot claim had three copies.** Password auth, relay `exec`
+  and console register each wrote out the same `fetch_add` + rollback, and each
+  owns its own release paths; a divergence between them is how the accounting
+  would flip from over-counting (safe) to under-counting (fails open). Now one
+  `try_claim_slot`, tested — including under thread contention — and the
+  accepted M-11 over-count (a relay channel claims a slot on top of its
+  connection's auth slot) is pinned by a test that states the tradeoff, so a
+  later "fix" cannot silently flip it.
+- **`DIR` in the Gateway Shell resolved its operand twice.** Written as a match
+  guard, which cannot bind what it resolves, so `DIR SUB` ran two
+  `canonicalize` calls plus a case-insensitive component walk, then threw the
+  result away and did it again. Behaviour is unchanged — the same new test
+  passes against the old code — and `DIR` now has end-to-end coverage of all
+  five operand paths, which it had none of.
 
 ### Changed
 - **Release builds now keep integer overflow checks on**
@@ -129,6 +163,34 @@ follow-up quality/stability pass of our own.
   buffered input where the rest of an arrow may not have arrived yet.
   `cpmemu_run_program` and `cpmemu_oob_drain` remain uncovered; both need a
   running guest.
+- **The CP/M emulator honours read-only files, and BDOS 28 / 29 / 30 / 37.**
+  Previously the three functions fell through to the unknown-function arm and
+  returned a fake success, and a read-only file was not protected at all: a Unix
+  `unlink` is governed by the *directory's* write bit rather than the file's, so
+  `ERA` deleted a `chmod -w` file the host user had deliberately locked. Now a
+  host read-only file reports CP/M's `t1'` attribute (so `STAT` shows `R/O`) and
+  is refused by erase, rename and truncating open. `28` (Write Protect Disk)
+  software-write-protects the current drive until the next disk reset, enforced
+  in all four mutating paths; `29` (Get R/O Vector) reports the real bitmap
+  rather than a hardcoded zero, so a program can see the protection it just
+  requested; `30` (Set File Attributes) maps `t1'` onto the host permission, and
+  accepts-and-ignores System and Archive rather than faking them, because a host
+  directory has nowhere to keep them and a sidecar file would litter the folders
+  users drop their own files into; `37` (Reset Drive) releases the write-protect
+  for the drives in its `DE` bitmap — its "log the drive out" half is a genuine
+  no-op, not a stub, since the directory is synthesised live on every search.
+  `ERA` and `REN` now report `File R/O` and `Bdos Err On d: R/O` instead of a
+  misleading `No file`.
+- **An advisory CI job runs the 25 `#[ignore]`d interop tests.** They spawn real
+  lrzsz and C-Kermit peers, and are the only send-path cover for XMODEM/YMODEM
+  and the only check that our wire format satisfies somebody else's reader — the
+  checked-in replay fixtures lock the receive path, but a fixture can only
+  confirm what we recorded, so a send-side regression was invisible to CI.
+  Advisory on purpose: the peers come from the Ubuntu archive and can be
+  upgraded under us, so a distro bump surfaces as a red X to triage rather than
+  a blocked merge. The job records the peer versions, because "did we regress or
+  did the peer change?" is unanswerable after the fact without them, and splits
+  the two peers into separate steps so one failing still reports the other.
 
 ## [0.8.1] - 2026-07-28
 

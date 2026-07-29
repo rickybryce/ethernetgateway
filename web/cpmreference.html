@@ -993,7 +993,7 @@
                 <table class="data-table">
                     <thead><tr><th>Fn (C)</th><th>Name</th><th>Notes</th></tr></thead>
                     <tbody>
-                        <tr><td><code>13</code></td><td>Reset Disk System</td><td>Back to drive A:, DMA <code>0x0080</code>.</td></tr>
+                        <tr><td><code>13</code></td><td>Reset Disk System</td><td>Back to drive A:, DMA <code>0x0080</code>, and every software write-protect released.</td></tr>
                         <tr><td><code>14</code></td><td>Select Disk</td><td>Also maintains the page-zero CDISK byte, which some transients read directly to find their login drive.</td></tr>
                         <tr><td><code>15</code> / <code>16</code></td><td>Open / Close File</td><td>Writes are write-through, so close has nothing to flush.</td></tr>
                         <tr><td><code>17</code> / <code>18</code></td><td>Search First / Next</td><td>Wildcard directory search.</td></tr>
@@ -1005,11 +1005,15 @@
                         <tr><td><code>25</code></td><td>Return Current Disk</td><td></td></tr>
                         <tr><td><code>26</code></td><td>Set DMA Address</td><td></td></tr>
                         <tr><td><code>27</code></td><td>Get Allocation Vector</td><td>A real bitmap &mdash; reserved directory blocks plus the blocks this drive's files occupy &mdash; so STAT's free count reflects actual usage.</td></tr>
+                        <tr><td><code>28</code></td><td>Write Protect Disk</td><td>Software write-protects the current drive until the next disk reset. Enforced in all four mutating paths &mdash; write, make, erase and rename all refuse.</td></tr>
+                        <tr><td><code>29</code></td><td>Get R/O Vector</td><td>The real bitmap of write-protected drives, so a program can see the protection it just asked <code>28</code> for.</td></tr>
+                        <tr><td><code>30</code></td><td>Set File Attributes</td><td>The R/O attribute (<code>t1'</code>) maps onto the host file's read-only permission, so it means the same thing to a host user as to the guest. System (<code>t2'</code>) and Archive (<code>t3'</code>) are accepted and ignored &mdash; see the note below.</td></tr>
                         <tr><td><code>31</code></td><td>Get Disk Parameters</td><td>Returns a synthesised DPB.</td></tr>
                         <tr><td><code>33</code></td><td>Read Random</td><td></td></tr>
                         <tr><td><code>35</code></td><td>Compute File Size</td><td>Sets <code>R0</code>&ndash;<code>R2</code> to the record count.</td></tr>
                         <tr><td><code>36</code></td><td>Set Random Record</td><td>From the current sequential position.</td></tr>
-                        <tr><td colspan="3" class="dim-text">Not implemented, by decision: <code>28</code> (write-protect disk), <code>30</code> (set file attributes) and <code>37</code> (reset drive). The attribute bits would need sidecar metadata a directory-backed drive has nowhere to keep.</td></tr>
+                        <tr><td><code>37</code></td><td>Reset Drive</td><td>Releases the write-protect on the drives named in the <code>DE</code> bitmap. The "log the drive out" half is a genuine no-op rather than a stub: drives are host folders that are always present, and the directory is synthesised live on every search, so there is no cached state to invalidate.</td></tr>
+                        <tr><td colspan="3" class="dim-text">Accepted and ignored: the System (<code>t2'</code>) and Archive (<code>t3'</code>) file attributes. A host directory has nowhere to keep them, and inventing a sidecar file would litter the very folders you drop your own files into &mdash; so they are honestly dropped rather than faked.</td></tr>
                     </tbody>
                 </table>
 
@@ -1037,6 +1041,18 @@
                         <strong>Every file call is jailed.</strong> Drives A:&ndash;P: are folders under
                         <code>transfer_dir/CPM</code>, and no FCB can name a path outside it. There is no BDOS
                         function that reaches a host command.
+                    </p>
+                </div>
+
+                <div class="callout">
+                    <p>
+                        <strong>Making a file read-only on the host protects it from the guest.</strong>
+                        A <code>chmod -w</code> file (or one the guest itself marked R/O via BDOS 30) shows as
+                        <code>R/O</code> in <code>STAT</code>, and <code>ERA</code> and <code>REN</code> refuse
+                        it with CP/M's <code>File R/O</code> rather than deleting it. This needs enforcing in
+                        the emulator, not just on the host: a Unix <code>unlink</code> is governed by the
+                        <em>directory's</em> write bit, not the file's, so the host permission alone would not
+                        have stopped an erase.
                     </p>
                 </div>
             </div>

@@ -576,30 +576,43 @@ impl TelnetSession {
     }
 
     /// `DIR [pattern]` — list the cwd (or a path-qualified / wildcard set).
-    async fn cpm_dir(&mut self, pattern: Option<&str>) -> Result<(), std::io::Error> {
+    /// Module-visible so `tests.rs` can drive the operand handling directly.
+    pub(in crate::telnet) async fn cpm_dir(
+        &mut self,
+        pattern: Option<&str>,
+    ) -> Result<(), std::io::Error> {
         // Resolve the directory to list + the name pattern to match.
-        let (dir_operand, name_pat) = match pattern {
-            None => (String::new(), "*".to_string()),
-            // A wildcard-free operand that names an existing directory lists
-            // that directory's contents, so `DIR SUB` behaves like `DIR SUB/`
-            // (the DOS/Unix expectation).  Otherwise the last path component
-            // is treated as a name/glob pattern to match within its parent.
-            // The guard's `cpm_dir_abs(p)` is resolved again in the body below
-            // (`dir_operand == p`); the extra resolve is intentional — DIR is
-            // not a hot path and a match guard can't bind the resolved value.
-            Some(p) if !Self::cpm_has_wildcard(p) && self.cpm_dir_abs(p).is_ok() => {
-                (p.to_string(), "*".to_string())
-            }
-            Some(p) => {
-                let (dir_part, leaf) = Self::cpm_split_leaf(p);
-                let leaf = if leaf.is_empty() { "*" } else { leaf };
-                (dir_part.to_string(), leaf.to_string())
-            }
+        //
+        // A wildcard-free operand that names an existing directory lists that
+        // directory's contents, so `DIR SUB` behaves like `DIR SUB/` (the
+        // DOS/Unix expectation).  Otherwise the last path component is treated
+        // as a name/glob pattern to match within its parent.
+        //
+        // Resolution is not free — `cpm_dir_abs` makes two `canonicalize` calls
+        // and walks the components case-insensitively — and this was written as
+        // a match guard, which cannot bind what it resolves, so `DIR SUB` ran
+        // the whole resolution twice.  Try it as a directory and *keep* the
+        // result instead.
+        let as_dir = match pattern {
+            Some(p) if !Self::cpm_has_wildcard(p) => self.cpm_dir_abs(p).ok(),
+            _ => None,
         };
-
-        let dir = match self.cpm_dir_abs(&dir_operand) {
-            Ok(d) => d,
-            Err(e) => return self.cpm_err(e).await,
+        let (dir, name_pat) = match (as_dir, pattern) {
+            (Some(d), _) => (d, "*".to_string()),
+            (None, operand) => {
+                // Either no operand (list the cwd) or one whose last component
+                // is a name/glob; in both cases the *parent* is what we resolve,
+                // and its error is the one worth reporting.
+                let (dir_part, leaf) = match operand {
+                    Some(p) => Self::cpm_split_leaf(p),
+                    None => ("", "*"),
+                };
+                let leaf = if leaf.is_empty() { "*" } else { leaf };
+                match self.cpm_dir_abs(dir_part) {
+                    Ok(d) => (d, leaf.to_string()),
+                    Err(e) => return self.cpm_err(e).await,
+                }
+            }
         };
 
         let entries = Self::list_transfer_entries_in(&dir).await?;

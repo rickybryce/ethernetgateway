@@ -560,7 +560,21 @@ impl TelnetSession {
         raw[1..9].copy_from_slice(&name);
         raw[9..12].copy_from_slice(&ext);
         let fcb = Fcb::from_bytes(&raw);
-        if fs.delete(&fcb) == 0 {
+        if fs.fcb_drive_is_ro(&fcb) {
+            self.send_line(&format!(
+                "  Bdos Err On {}: R/O",
+                fs.current_drive_letter()
+            ))
+            .await?;
+            return Ok(());
+        }
+        let deleted = fs.delete(&fcb);
+        // `delete` skips read-only files, so anything still matching afterwards
+        // was protected.  Reporting that matters: "No file" about a file the
+        // user can see in `DIR` reads as a bug in the emulator.
+        if fs.count_ro_matches(&fcb) > 0 {
+            self.send_line("  File R/O").await?;
+        } else if deleted == 0 {
             self.send_line("  No file").await?;
         }
         Ok(())
@@ -602,8 +616,20 @@ impl TelnetSession {
         if fs.rename(&old, &nn, &ne) {
             return Ok(()); // success is silent, as in CP/M
         }
-        // Distinguish the two refusal cases for a helpful message.
-        if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)).is_some() {
+        // Distinguish the refusal cases for a helpful message.
+        if fs.fcb_drive_is_ro(&old) {
+            self.send_line(&format!(
+                "  Bdos Err On {}: R/O",
+                fs.current_drive_letter()
+            ))
+            .await?;
+        } else if fs
+            .resolve(&old)
+            .map(|p| CpmFs::host_is_ro(&p))
+            .unwrap_or(false)
+        {
+            self.send_line("  File R/O").await?;
+        } else if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)).is_some() {
             self.send_line("  File exists").await?;
         } else {
             self.send_line("  No file").await?;
@@ -1690,6 +1716,57 @@ mod repl_tests {
             missing.contains("No file"),
             "erasing nothing must say 'No file'; got {:?}",
             missing,
+        );
+    }
+
+    /// A read-only file must survive `ERA` and be *reported* as protected.
+    /// Saying "No file" about a file the user can plainly see in `DIR` reads
+    /// as an emulator bug, so the two refusals have to be distinguishable.
+    #[tokio::test]
+    async fn test_cpmemu_era_refuses_readonly_file() {
+        let (base, mut fs) = scratch_fs("era_ro");
+        let keep = base.join("A").join("KEEP.TXT");
+        std::fs::write(&keep, b"precious").unwrap();
+        CpmFs::set_host_ro(&keep, true).unwrap();
+
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+        sess.cpmemu_era(&mut fs, "ERA KEEP.TXT").await.unwrap();
+        let out = drain(&mut peer).await;
+
+        let survived = keep.is_file();
+        // Restore write permission before cleanup so the temp dir can go.
+        let _ = CpmFs::set_host_ro(&keep, false);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(survived, "ERA must not delete a read-only file");
+        assert!(
+            out.contains("File R/O"),
+            "ERA of an R/O file must say 'File R/O', not 'No file'; got {:?}",
+            out,
+        );
+    }
+
+    /// `ERA` on a drive write-protected by BDOS 28 reports CP/M's R/O error
+    /// rather than pretending nothing matched.
+    #[tokio::test]
+    async fn test_cpmemu_era_reports_write_protected_drive() {
+        let (base, mut fs) = scratch_fs("era_wp");
+        let f = base.join("A").join("DATA.TXT");
+        std::fs::write(&f, b"kept").unwrap();
+        fs.set_drive_ro();
+
+        let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+        sess.cpmemu_era(&mut fs, "ERA DATA.TXT").await.unwrap();
+        let out = drain(&mut peer).await;
+
+        let survived = f.is_file();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(survived, "a write-protected drive must not lose files");
+        assert!(
+            out.contains("Bdos Err On A: R/O"),
+            "expected CP/M's R/O error; got {:?}",
+            out,
         );
     }
 
