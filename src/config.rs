@@ -2465,6 +2465,23 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "verbose" => cfg.verbose = value.eq_ignore_ascii_case("true"),
+        "log_to_file" => cfg.log_to_file = value.eq_ignore_ascii_case("true"),
+        // Trimmed to match `logger::file_policy_from`, which trims before using
+        // the path; an empty value is a valid "switch file logging off".
+        "log_file" => cfg.log_file = value.trim().to_string(),
+        // No `>= 1` floor on either limit — unlike most numeric keys here, `0`
+        // is meaningful for both: no size rotation, and keep no rotated
+        // generations.  See `logger::should_rotate` / `logger::rotate`.
+        "log_max_size_kb" => {
+            if let Ok(v) = value.parse::<u64>() {
+                cfg.log_max_size_kb = v;
+            }
+        }
+        "log_max_files" => {
+            if let Ok(v) = value.parse::<u32>() {
+                cfg.log_max_files = v;
+            }
+        }
         "xmodem_negotiation_timeout" => {
             if let Ok(v) = value.parse::<u64>() && v >= 1 {
                 cfg.xmodem_negotiation_timeout = v;
@@ -3020,6 +3037,144 @@ mod tests {
         assert!(cfg.allow_peer_dial);
         apply_config_key(&mut cfg, "allow_peer_dial", "false");
         assert!(!cfg.allow_peer_dial);
+    }
+
+    /// The four on-disk-log keys must be settable through `apply_config_key`,
+    /// the path BOTH the telnet and web UIs write by (`update_config_value` /
+    /// `update_config_values`).  The GUI is different — it persists the whole
+    /// `Config` struct — which is exactly why this needed its own test: a key
+    /// with a parser, a writer and a struct field but no `apply_config_key` arm
+    /// looks completely wired, works in the GUI, and is silently dropped by the
+    /// other two UIs.  That is how these four shipped in `3c9ff89`.
+    #[test]
+    fn test_log_keys_apply() {
+        let mut cfg = Config::default();
+
+        apply_config_key(&mut cfg, "log_to_file", "false");
+        assert!(!cfg.log_to_file);
+        apply_config_key(&mut cfg, "log_to_file", "TRUE");
+        assert!(cfg.log_to_file, "the bool arm is case-insensitive like its peers");
+
+        apply_config_key(&mut cfg, "log_file", "  /var/log/eg.log  ");
+        assert_eq!(cfg.log_file, "/var/log/eg.log", "trimmed, as file_policy_from expects");
+        apply_config_key(&mut cfg, "log_file", "");
+        assert_eq!(cfg.log_file, "", "empty is a valid off-switch, not a rejection");
+
+        apply_config_key(&mut cfg, "log_max_size_kb", "2048");
+        assert_eq!(cfg.log_max_size_kb, 2048);
+        apply_config_key(&mut cfg, "log_max_files", "3");
+        assert_eq!(cfg.log_max_files, 3);
+
+        // Zero must survive on both: it is the documented "no size rotation" /
+        // "keep no history" sentinel, so neither may be floored to 1.
+        apply_config_key(&mut cfg, "log_max_size_kb", "0");
+        assert_eq!(cfg.log_max_size_kb, 0);
+        apply_config_key(&mut cfg, "log_max_files", "0");
+        assert_eq!(cfg.log_max_files, 0);
+
+        // Junk leaves the previous value alone rather than resetting it.
+        apply_config_key(&mut cfg, "log_max_size_kb", "lots");
+        assert_eq!(cfg.log_max_size_kb, 0);
+        apply_config_key(&mut cfg, "log_max_files", "-1");
+        assert_eq!(cfg.log_max_files, 0);
+    }
+
+    /// Drift-proof version of the test above, for every key rather than four:
+    /// each key the config *writer* emits must also have an `apply_config_key`
+    /// arm, or the telnet and web UIs cannot set it.  Scans this file's own
+    /// source (the technique that found the third over-wide `show_error`
+    /// literal) because a `match` cannot be introspected at runtime and the
+    /// `_ => {}` fallthrough makes an unhandled key indistinguishable from a
+    /// handled one.
+    ///
+    /// Per-port `serial_a_*` / `serial_b_*` keys are emitted by
+    /// `write_serial_port_section` and applied by `apply_port_key`, so they
+    /// appear in neither literal set and are covered by their own tests.
+    #[test]
+    fn test_every_written_key_can_be_applied() {
+        // Scan only the production half.  The marker strings below appear
+        // verbatim in this test's own source, so scanning the whole file makes
+        // the scanner match itself and report a phantom key called "key".
+        let whole = include_str!("config.rs");
+        let src = {
+            // Anchor on the test MODULE, not the first `#[cfg(test)]` item:
+            // CONFIG_TEST_LOCK and friends are test-only items near the top of
+            // the file, so cutting at the first attribute discarded the writer
+            // and the scan silently found nothing.
+            let cut = whole
+                .find("#[cfg(test)]\nmod tests")
+                .expect("test module marker moved — this scan needs updating");
+            &whole[..cut]
+        };
+
+        // Keys the writer persists: write_kv(&mut content, "key", ...) and the
+        // _str variant.
+        let mut written: Vec<&str> = Vec::new();
+        for marker in ["write_kv(&mut content, \"", "write_kv_str(&mut content, \""] {
+            let mut rest = src;
+            while let Some(i) = rest.find(marker) {
+                rest = &rest[i + marker.len()..];
+                if let Some(end) = rest.find('"') {
+                    written.push(&rest[..end]);
+                }
+            }
+        }
+        assert!(
+            written.len() > 80,
+            "expected >80 written keys, found {} — the writer scan has stopped \
+             matching (did write_kv's call shape change?)",
+            written.len()
+        );
+
+        // Keys apply_config_key handles: string literals in match-arm position
+        // inside its body, including `"a" | "b" =>` alternates.
+        let body = {
+            let start = src
+                .find("fn apply_config_key")
+                .expect("apply_config_key not found — this scan needs renaming");
+            let after = &src[start..];
+            // Ends at the next top-level `fn ` definition.
+            let end = after[1..].find("\nfn ").map(|e| e + 1).unwrap_or(after.len());
+            &after[..end]
+        };
+        let mut applied: Vec<&str> = Vec::new();
+        for line in body.lines() {
+            let t = line.trim();
+            // Match-arm lines look like: "key" => ...  or  "a" | "b" => ...
+            let Some(arrow) = t.find("=>") else { continue };
+            let head = &t[..arrow];
+            if !head.trim_start().starts_with('"') {
+                continue;
+            }
+            let mut rest = head;
+            while let Some(i) = rest.find('"') {
+                rest = &rest[i + 1..];
+                if let Some(end) = rest.find('"') {
+                    applied.push(&rest[..end]);
+                    rest = &rest[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+        assert!(
+            applied.len() > 80,
+            "expected >80 applied keys, found {} — the arm scan has stopped \
+             matching apply_config_key's real arms",
+            applied.len()
+        );
+
+        let missing: Vec<&&str> = written
+            .iter()
+            .filter(|k| !applied.contains(k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these keys are written to egateway.conf but have no \
+             apply_config_key arm, so the telnet and web UIs silently drop \
+             them (the GUI would still work, which is what hides it): {:?}",
+            missing
+        );
     }
 
     #[test]

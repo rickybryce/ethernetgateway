@@ -1477,6 +1477,14 @@ fn test_all_menu_items_fit_petscii() {
         "  V  Toggle verbose transfer logging",
         "  G  Toggle GUI on startup",
         "  E  CP/M settings",
+        // L shares a row with R — Other Settings is at its 22-row budget, so
+        // this is the two-column form and both keys must fit together.
+        "  L  Log file         R  Restart server",
+        // Log file submenu (Other Settings -> L)
+        "  E  Toggle logging to file",
+        "  F  Set log file name",
+        "  S  Set rotate size (KB, 0 = never)",
+        "  K  Set old logs to keep (0 = none)",
         // CP/M emulator submenu (Other Settings -> E)
         "  E  Toggle emulator on/off",
         "  C  Set runaway ceiling (M-instr)",
@@ -1951,13 +1959,24 @@ fn test_security_help_screen_row_count() {
 }
 
 /// Other settings menu row count:
-/// header(3) + blank + 5 values + blank + 9 items + blank + Q/H + prompt = 22
+/// header(3) + blank + 5 values + blank + 9 item rows + blank + Q/H + prompt = 22
 /// (Verbose+GUI and Gateway-debug+CP/M each share a value row, folding 7
-/// statuses into 5 lines; the `E` "CP/M settings" submenu entry is the 9th item.)
+/// statuses into 5 lines; the `E` "CP/M settings" submenu entry is the 8th item
+/// row, and the 9th carries BOTH `L` Log file and `R` Restart server — the menu
+/// is at its budget, so a new entry has to pair with an existing one.)
 #[test]
 fn test_other_settings_menu_row_count() {
     let rows = 3 + 1 + 5 + 1 + 9 + 1 + 1 + 1; // 22
     assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
+}
+
+/// Log-file submenu (Other Settings -> L) must fit the 22-row PETSCII screen.
+/// header(3) + blank + 5 values (state/file/rotate/keep/max-disk) + blank
+/// + 4 items (E/F/S/K) + blank + Q + prompt = 17, well inside the budget.
+#[test]
+fn test_log_settings_menu_row_count() {
+    let rows = 3 + 1 + 5 + 1 + 4 + 1 + 1 + 1; // 17
+    assert!(rows <= 22, "log settings menu is {} rows, exceeds 22", rows);
 }
 
 /// Other settings help lines (PETSCII) must fit 40 cols.
@@ -1999,12 +2018,31 @@ fn test_punter_settings_menu_row_count() {
     assert!(rows <= 22, "punter settings menu is {} rows, exceeds 22", rows);
 }
 
-/// Other settings help screen (PETSCII): header(3) + blank + 15 content +
-/// blank + "Press any key" = 21 rows (the CP/M `E` entry adds 2 lines).
+/// Other settings help must stay a SINGLE page in both widths.  Derived from
+/// the real help lines and the real page limit rather than a hand-copied row
+/// count: the list sits exactly at the limit, so an added entry silently spills
+/// one lonely line onto a second page (that is why the `U` weather-units entry
+/// is folded onto one line — it paid for the `L` log-file entry).
+///
+/// A second page is not a bug in itself, so this is a deliberate tidiness
+/// guard: if a future entry genuinely needs the room, fold another two-line
+/// entry into one rather than just bumping this assertion.
 #[test]
-fn test_other_help_screen_row_count() {
-    let rows = 3 + 1 + 15 + 1 + 1; // 21
-    assert!(rows <= 22, "other help screen is {} rows, exceeds 22", rows);
+fn test_other_help_fits_one_page() {
+    for petscii in [true, false] {
+        let lines = TelnetSession::other_help_lines(petscii);
+        let pages = TelnetSession::paginate_help(lines, HELP_MAX_CONTENT_LINES);
+        assert_eq!(
+            pages.len(),
+            1,
+            "other help ({}) needs {} pages for {} lines, limit {} — fold a \
+             two-line entry into one instead of spilling",
+            if petscii { "petscii" } else { "wide" },
+            pages.len(),
+            lines.len(),
+            HELP_MAX_CONTENT_LINES,
+        );
+    }
 }
 
 /// File Transfer settings submenu row count:

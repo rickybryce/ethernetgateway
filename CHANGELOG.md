@@ -11,6 +11,24 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The four new log keys could not be set from the telnet or web UI at all.**
+  They had a parser, a writer, a struct field and a default — everything that
+  makes a key look wired — but no arm in `apply_config_key`, which is the path
+  `update_config_value` / `update_config_values` take. So both of those UIs
+  collected the value, wrote it into the update batch, and had it silently
+  dropped by the `_ => {}` fallthrough. The GUI was unaffected, because it
+  persists the whole `Config` struct instead — which is precisely what hid the
+  bug: the setting demonstrably worked in one surface. Caught by driving a real
+  save through a headless browser against a scratch gateway and then reading
+  `egateway.conf`, not by a unit test; the form-collection test passed
+  throughout, because the drop happened one layer below it.
+  `test_every_written_key_can_be_applied` now closes the whole class rather than
+  these four keys: it scans this file's own source for the keys the writer emits
+  and the keys `apply_config_key` matches, and fails with the offending names if
+  any key is persisted but unsettable. (A `match` can't be introspected at
+  runtime, and the fallthrough makes an unhandled key indistinguishable from a
+  handled one, so source-scanning is the only guard that works here — the same
+  technique that found the third over-wide `show_error` literal.)
 - **The known flaky Kermit test had a general cause, and it is now structurally
   impossible.** Tests that point `transfer_dir` at a scratch directory restored
   it with a bare `update_config_value("transfer_dir", "transfer")` *after* the
@@ -208,6 +226,39 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **A size-bounded log file that deletes its old generations.** The gateway
+  wrote no log file at all: `logger::log` did `eprintln!` plus two capped
+  in-memory rings, so nothing survived a restart and there were no log-related
+  config keys. Four new keys, **on by default**: `log_to_file` (`true`),
+  `log_file` (`ethernetgateway.log`), `log_max_size_kb` (`1024`) and
+  `log_max_files` (`5`). The active file rotates once a write would take it past
+  the size cap, `.1` becomes `.2`, and anything past `log_max_files` is
+  **deleted** — so worst-case disk use is `log_max_size_kb × (log_max_files + 1)`,
+  6 MB with the defaults. `logger::max_disk_kb` states that bound in one place,
+  which the three config UIs and the startup line all read rather than each
+  multiplying it out. Setting either limit to `0` has a documented meaning (no
+  size rotation / keep no history), so neither field is floored to 1 the way the
+  other numeric fields are. The file is owner-only (0600 on Unix) because log
+  lines name hosts, ports and usernames, and is reopened in *append* mode so a
+  restart extends the log instead of discarding the previous run.
+
+  **Deliberately not rate-limited.** A limiter was built and then removed:
+  `verbose` logs per protocol block, which legitimately exceeds any sane
+  lines-per-second ceiling during a fast transfer, so it would have discarded
+  exactly the lines an operator turned verbose on to see. Bounding growth by
+  rotation loses *old* data instead of current data. The reasoning is recorded in
+  `logger.rs` so it isn't re-litigated. Note this duplicates journald's own
+  rotation under systemd; set `log_to_file = false` to rely on the journal alone.
+
+  All four keys are in **all three config surfaces**, per the standing rule:
+  telnet Other Settings → `L` (a submenu, because that screen is at its 22-row
+  PETSCII budget — the `U` weather-units help entry was folded onto one line to
+  pay for the new `L` entry without spilling the help onto a second page), and
+  the Server **More…** panel in both the GUI and the web UI. Each shows the
+  computed worst-case disk figure rather than leaving the operator to multiply
+  it out, and says so plainly when `log_max_size_kb = 0` makes the file
+  unbounded. Documented in `usermanual.html` (both key tables) and
+  `web/index.html`.
 - **`EGT80.COM` is pinned by hash.** It is compiled into every release with
   `include_bytes!` but no CI runner can rebuild it, so the committed binary —
   not `EGT80.Z80` — is what users actually run. The existing tests check the

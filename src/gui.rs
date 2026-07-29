@@ -505,6 +505,10 @@ struct App {
     punter_max_bad_rounds_buf: String,
     punter_negotiation_retry_interval_buf: String,
     cpm_emu_max_minstr_buf: String,
+    /// On-disk log limits, edited as text like every other numeric field so a
+    /// half-typed number never becomes a config value.
+    log_max_size_kb_buf: String,
+    log_max_files_buf: String,
     /// Numeric text buffers for the CP/M modem profile, same pattern as every
     /// other numeric field here: edited as text, parsed back on sync so a
     /// half-typed value never becomes a config value.
@@ -607,6 +611,8 @@ impl App {
         let punter_negotiation_retry_interval_buf =
             cfg.punter_negotiation_retry_interval.to_string();
         let cpm_emu_max_minstr_buf = cfg.cpm_emu_max_minstr.to_string();
+        let log_max_size_kb_buf = cfg.log_max_size_kb.to_string();
+        let log_max_files_buf = cfg.log_max_files.to_string();
         let cpm_emu_x_code_buf = cfg.cpm_emu_modem.x_code.to_string();
         let cpm_emu_dcd_mode_buf = cfg.cpm_emu_modem.dcd_mode.to_string();
         let serial_baud_buf = [
@@ -656,6 +662,8 @@ impl App {
             punter_max_bad_rounds_buf,
             punter_negotiation_retry_interval_buf,
             cpm_emu_max_minstr_buf,
+            log_max_size_kb_buf,
+            log_max_files_buf,
             cpm_emu_x_code_buf,
             cpm_emu_dcd_mode_buf,
             serial_baud_buf,
@@ -707,6 +715,11 @@ impl App {
         if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
         if let Ok(v) = self.cpm_emu_max_minstr_buf.parse::<u32>() && v >= 1 { self.cfg.cpm_emu_max_minstr = v; }
+        // No `>= 1` floor on either log limit: `0` is meaningful for both —
+        // no size rotation, and keep no rotated generations — matching the
+        // config-file loader and `logger::should_rotate`/`rotate`.
+        if let Ok(v) = self.log_max_size_kb_buf.parse::<u64>() { self.cfg.log_max_size_kb = v; }
+        if let Ok(v) = self.log_max_files_buf.parse::<u32>() { self.cfg.log_max_files = v; }
         // Clamped to the ranges the AT layer itself produces (ATX0-4, AT&C0/1),
         // so a typo here cannot leave the modem in a state no command could set.
         if let Ok(v) = self.cpm_emu_x_code_buf.parse::<u8>() && v <= 4 { self.cfg.cpm_emu_modem.x_code = v; }
@@ -867,6 +880,47 @@ impl App {
                     }
                 });
         });
+    }
+
+    /// Render the on-disk log controls — shown only in the Server "More…"
+    /// popup, next to the other server-wide settings.  The log is written in
+    /// addition to stderr and the console buffer above; it is size-bounded and
+    /// deletes its oldest generation, so the worst-case disk figure shown here
+    /// comes from [`logger::max_disk_kb`] rather than being multiplied out again
+    /// here (one source for that arithmetic — the telnet and web UIs and the
+    /// startup banner all call it).
+    fn draw_server_logging(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Log File").strong().color(AMBER));
+        ui.checkbox(&mut self.cfg.log_to_file, "Write the log to a file");
+        ui.add_enabled_ui(self.cfg.log_to_file, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("File:");
+                singleline_with_menu(ui, &mut self.cfg.log_file, false, None);
+            });
+            ui.horizontal(|ui| {
+                labeled_field(ui, "Rotate at (KB):", &mut self.log_max_size_kb_buf, 60.0);
+                ui.add_space(8.0);
+                labeled_field(ui, "Keep old:", &mut self.log_max_files_buf, 40.0);
+            });
+        });
+        // Parse the buffers for the hint rather than reading cfg: the fields
+        // sync on the next frame, so cfg still holds the pre-edit numbers while
+        // the operator is typing and the figure would lag a keystroke behind.
+        let size_kb = self.log_max_size_kb_buf.parse::<u64>().unwrap_or(self.cfg.log_max_size_kb);
+        let files = self.log_max_files_buf.parse::<u32>().unwrap_or(self.cfg.log_max_files);
+        let hint = if !self.cfg.log_to_file {
+            "Logging to stderr and the console above only.".to_string()
+        } else if size_kb == 0 {
+            "No size limit — this file can grow without bound.".to_string()
+        } else {
+            format!(
+                "At most {} KB on disk ({} plus {} rotated; the oldest is deleted).",
+                logger::max_disk_kb(size_kb, files),
+                self.cfg.log_file.trim(),
+                files,
+            )
+        };
+        ui.label(egui::RichText::new(hint).italics().small());
     }
 
     /// Contents of the "AI, Browser & Weather — More" popup: every option in
@@ -2060,6 +2114,8 @@ impl App {
         self.punter_negotiation_retry_interval_buf =
             self.cfg.punter_negotiation_retry_interval.to_string();
         self.cpm_emu_max_minstr_buf = self.cfg.cpm_emu_max_minstr.to_string();
+        self.log_max_size_kb_buf = self.cfg.log_max_size_kb.to_string();
+        self.log_max_files_buf = self.cfg.log_max_files.to_string();
         self.cpm_emu_x_code_buf = self.cfg.cpm_emu_modem.x_code.to_string();
         self.cpm_emu_dcd_mode_buf = self.cfg.cpm_emu_modem.dcd_mode.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
@@ -2748,6 +2804,10 @@ impl eframe::App for App {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
+                self.draw_server_logging(ui);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
                 self.draw_server_advanced(ui);
                 ui.add_space(6.0);
                 ui.separator();
@@ -3234,6 +3294,8 @@ impl eframe::App for App {
                 || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
                 || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
                 || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
+                || self.log_max_size_kb_buf != self.last_synced_cfg.log_max_size_kb.to_string()
+                || self.log_max_files_buf != self.last_synced_cfg.log_max_files.to_string()
                 || self.cpm_emu_x_code_buf != self.last_synced_cfg.cpm_emu_modem.x_code.to_string()
                 || self.cpm_emu_dcd_mode_buf != self.last_synced_cfg.cpm_emu_modem.dcd_mode.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
@@ -3338,6 +3400,62 @@ mod tests {
         );
         assert_eq!(app.serial_baud_buf[0], app.cfg.serial_a.baud.to_string());
         assert_eq!(app.serial_baud_buf[1], app.cfg.serial_b.baud.to_string());
+    }
+
+    /// The two on-disk-log limits round-trip through their text buffers, and —
+    /// unlike most numeric fields here — `0` must survive rather than being
+    /// floored to 1: it is the documented "no size rotation" / "keep no
+    /// history" sentinel that `logger::rotate` acts on.  A `>= 1` guard copied
+    /// from the neighbouring lines would silently make both settings
+    /// unreachable from the GUI.
+    #[test]
+    fn test_sync_log_limits_accepts_zero() {
+        let mut app = test_app();
+        app.log_max_size_kb_buf = "512".into();
+        app.log_max_files_buf = "2".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.log_max_size_kb, 512);
+        assert_eq!(app.cfg.log_max_files, 2);
+
+        app.log_max_size_kb_buf = "0".into();
+        app.log_max_files_buf = "0".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.log_max_size_kb, 0, "0 KB means never rotate on size");
+        assert_eq!(app.cfg.log_max_files, 0, "0 files means keep no history");
+
+        // A half-typed or junk value must leave the last good number alone.
+        app.log_max_size_kb_buf = "".into();
+        app.log_max_files_buf = "x".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.log_max_size_kb, 0);
+        assert_eq!(app.cfg.log_max_files, 0);
+    }
+
+    /// `refresh_from_global` must rebuild the log buffers too — a buffer left
+    /// holding a stale number is what makes the popup show one value and the
+    /// config hold another.
+    #[test]
+    fn test_refresh_rebuilds_log_buffers() {
+        let mut app = test_app();
+        // refresh_from_global bails out when the global already matches the
+        // snapshot, so perturb the SNAPSHOT rather than the global config —
+        // mutating the process-wide config here would need CONFIG_TEST_LOCK and
+        // would rewrite the on-disk egateway.conf that other tests read.
+        app.last_synced_cfg.log_max_size_kb = app.cfg.log_max_size_kb.wrapping_add(1);
+        app.dirty = false;
+        app.log_max_size_kb_buf = "999999".into();
+        app.log_max_files_buf = "77".into();
+        app.refresh_from_global();
+        assert_eq!(app.log_max_size_kb_buf, app.cfg.log_max_size_kb.to_string());
+        assert_eq!(app.log_max_files_buf, app.cfg.log_max_files.to_string());
+    }
+
+    /// `App::new` seeds the log buffers, same as every other numeric field.
+    #[test]
+    fn test_app_new_seeds_log_buffers() {
+        let app = test_app();
+        assert_eq!(app.log_max_size_kb_buf, app.cfg.log_max_size_kb.to_string());
+        assert_eq!(app.log_max_files_buf, app.cfg.log_max_files.to_string());
     }
 
     #[test]

@@ -879,6 +879,7 @@ fn collect_form_updates(
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
+        "log_file", "log_max_size_kb", "log_max_files",
         "groq_api_key", "browser_homepage", "weather_location", "weather_units",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
         "xmodem_max_retries", "xmodem_negotiation_retry_interval",
@@ -919,7 +920,7 @@ fn collect_form_updates(
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
         "security_enabled", "disable_ip_safety", "disable_gateway_connections",
-        "enable_console", "verbose",
+        "enable_console", "verbose", "log_to_file",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "cpm_emu_enabled",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
@@ -1577,6 +1578,24 @@ fn render_warning_popups() -> String {
     out
 }
 
+/// One-line description of what the current log settings will do on disk.
+/// Rendered under the log controls in the Server "More" popup and mirrored by
+/// the GUI's own hint.  Pure, so a test can pin the three cases.
+fn log_hint(cfg: &Config) -> String {
+    if !cfg.log_to_file {
+        "Logging to stderr and the console only.".to_string()
+    } else if cfg.log_max_size_kb == 0 {
+        "No size limit \u{2014} this file can grow without bound.".to_string()
+    } else {
+        format!(
+            "At most {} KB on disk ({} plus {} rotated; the oldest is deleted).",
+            crate::logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),
+            cfg.log_file.trim(),
+            cfg.log_max_files,
+        )
+    }
+}
+
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
     // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
@@ -1600,6 +1619,10 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"1.5\" {z150}>150%</option>\
          <option value=\"2.0\" {z200}>200%</option>\
          </select></div>\
+         <div class=\"row\">{logfile}</div>\
+         <div class=\"row\">{logpath}</div>\
+         <div class=\"row\">{logsize} {logkeep}</div>\
+         <div class=\"row\"><span class=\"hint\">{loghint}</span></div>\
          <div class=\"row\">{tneg} {traw}</div>\
          <div class=\"row\"><span class=\"label\">SSH Gateway Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
@@ -1617,6 +1640,14 @@ fn render_more_popups(cfg: &Config) -> String {
         z125 = zsel(1.25),
         z150 = zsel(1.5),
         z200 = zsel(2.0),
+        // On-disk log.  The worst-case disk figure comes from
+        // logger::max_disk_kb so this page doesn't re-derive the bound (the GUI,
+        // telnet and the startup banner all read it from the same place).
+        logfile = checkbox("log_to_file", "Write the log to a file", cfg.log_to_file),
+        logpath = textfield("log_file", "Log file", &cfg.log_file, false, 28),
+        logsize = numfield("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb),
+        logkeep = numfield("log_max_files", "Keep old", cfg.log_max_files),
+        loghint = html_escape(&log_hint(cfg)),
         tneg = checkbox("telnet_gateway_negotiate", "Telnet Gateway: negotiate TTYPE/NAWS", cfg.telnet_gateway_negotiate),
         traw = checkbox("telnet_gateway_raw", "Telnet Gateway: raw TCP mode", cfg.telnet_gateway_raw),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
@@ -2923,6 +2954,85 @@ mod tests {
         assert_eq!(lookup("telnet_port"), Some("2323"));
         assert_eq!(lookup("groq_api_key"), Some("gsk_test"));
         assert_eq!(lookup("transfer_dir"), Some("/var/files"));
+    }
+
+    /// The four on-disk-log keys must be rendered AND saved.  Rendering a field
+    /// the save path doesn't collect is the bug class that hit
+    /// `allow_relay_kermit`: the box appears, the operator ticks it, and the
+    /// save silently drops it.  So this asserts both halves together — the
+    /// input exists in the Server "More" popup, and a submitted value comes back
+    /// out of `collect_form_updates`.
+    #[test]
+    fn test_log_keys_are_rendered_and_saved() {
+        let cfg = Config::default();
+        let html = render_more_popups(&cfg);
+        let popup = {
+            let start = html.find("id=\"more-server\"").expect("server popup");
+            let end = html[start..].find("id=\"more-ai\"").map(|e| start + e).unwrap_or(html.len());
+            &html[start..end]
+        };
+        for name in ["log_to_file", "log_file", "log_max_size_kb", "log_max_files"] {
+            assert!(
+                popup.contains(&format!("name=\"{}\"", name)),
+                "{} has no input in the Server More popup",
+                name
+            );
+        }
+
+        // Now the save half.  log_to_file is a checkbox, so it is submitted as
+        // "true" and its absence means false; the other three are plain fields.
+        let mut form = empty_form();
+        form.insert("log_to_file".into(), "true".into());
+        form.insert("log_file".into(), "/var/log/eg.log".into());
+        form.insert("log_max_size_kb".into(), "2048".into());
+        form.insert("log_max_files".into(), "3".into());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+        let lookup = |k: &str| {
+            updates.iter().find(|(uk, _)| uk == k).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(lookup("log_to_file"), Some("true"));
+        assert_eq!(lookup("log_file"), Some("/var/log/eg.log"));
+        assert_eq!(lookup("log_max_size_kb"), Some("2048"));
+        assert_eq!(lookup("log_max_files"), Some("3"));
+
+        // Unticking the box must reach the config as an explicit false, not be
+        // dropped (an absent checkbox is the canonical "false" signal).
+        let mut off = empty_form();
+        off.insert("log_file".into(), "eg.log".into());
+        let (updates, _) = collect_form_updates(&off, &cfg);
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "log_to_file").map(|(_, v)| v.as_str()),
+            Some("false"),
+            "an unticked log_to_file must be saved as false"
+        );
+    }
+
+    /// The hint under the log controls describes what the settings actually do.
+    /// Its three branches are the ones an operator can reach: off, no size
+    /// limit, and bounded — and the bounded figure must come from
+    /// `logger::max_disk_kb` rather than being re-derived here.
+    #[test]
+    fn test_log_hint_covers_each_state() {
+        let mut cfg = Config { log_to_file: false, ..Config::default() };
+        assert!(log_hint(&cfg).contains("stderr"), "off state: {}", log_hint(&cfg));
+
+        cfg.log_to_file = true;
+        cfg.log_max_size_kb = 0;
+        let h = log_hint(&cfg);
+        assert!(h.contains("without bound"), "unbounded state: {}", h);
+
+        cfg.log_max_size_kb = 1024;
+        cfg.log_max_files = 5;
+        cfg.log_file = "eg.log".into();
+        let h = log_hint(&cfg);
+        let expected = crate::logger::max_disk_kb(1024, 5);
+        assert!(
+            h.contains(&format!("{} KB", expected)),
+            "bounded hint should state the {} KB bound: {}",
+            expected,
+            h
+        );
+        assert!(h.contains("eg.log"), "bounded hint should name the file: {}", h);
     }
 
     #[test]

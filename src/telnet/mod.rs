@@ -152,6 +152,13 @@ const MAX_INPUT_LENGTH: usize = 1024;
 /// pushed the PETSCII menu past the 22-row C64 budget; capping it keeps
 /// the screen bounded (see `test_server_config_menu_row_count`).
 const SERVER_ADDR_DISPLAY_CAP: usize = 3;
+/// Content rows a single help page holds (see `show_help_page`).  Chrome is 6
+/// rows: sep(1) + title(1) + sep(1) + blank(1) + blank(1) + footer(1).  PETSCII
+/// renders 22 usable rows on a 25-line Commodore 64, so 22 - 6 = 16 content
+/// rows; we use 15 to leave breathing room for terminals that occasionally push
+/// an extra line at the bottom.  Named rather than inlined so the per-screen
+/// help tests can assert against the real limit instead of a copy of it.
+const HELP_MAX_CONTENT_LINES: usize = 15;
 const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// Per-IP ban window after `MAX_AUTH_ATTEMPTS` failures.  `pub(crate)` so the
 /// slave reconnect loop's auth-backoff (serial.rs §9 #14) can be tested to

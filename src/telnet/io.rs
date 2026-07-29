@@ -1120,14 +1120,7 @@ impl TelnetSession {
         title: &str,
         lines: &[&str],
     ) -> Result<(), std::io::Error> {
-        // Chrome is 6 rows: sep(1) + title(1) + sep(1) + blank(1) +
-        // blank(1) + footer(1).  PETSCII renders 22 usable rows on a
-        // 25-line Commodore 64, so 22 - 6 = 16 content rows.  We use 15
-        // to leave a little breathing room for terminals that occasionally
-        // push an extra line at the bottom.
-        const MAX_CONTENT_LINES: usize = 15;
-
-        let pages = Self::paginate_help(lines, MAX_CONTENT_LINES);
+        let pages = Self::paginate_help(lines, HELP_MAX_CONTENT_LINES);
         // Empty content is rare but possible; treat it as one blank page
         // so the caller still gets the usual "Press any key" affordance.
         let pages: Vec<Vec<&str>> = if pages.is_empty() {

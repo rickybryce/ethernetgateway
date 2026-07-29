@@ -274,8 +274,12 @@ impl TelnetSession {
                 self.cyan("E")
             ))
             .await?;
+            // L shares this row with R: the menu is already at exactly 22 rows
+            // (see test_other_settings_menu_row_count), so the log-file entry
+            // has to pair with an existing item rather than add a line.
             self.send_line(&format!(
-                "  {}  Restart server",
+                "  {}  Log file         {}  Restart server",
+                self.cyan("L"),
                 self.cyan("R")
             ))
             .await?;
@@ -373,6 +377,9 @@ impl TelnetSession {
                     // 22-row PETSCII budget.
                     self.cpm_settings().await?;
                 }
+                "l" => {
+                    self.log_settings().await?;
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -462,14 +469,17 @@ impl TelnetSession {
                 "     the built-in web browser",
                 "  W  Weather location (city or",
                 "     postal code, worldwide)",
-                "  U  Cycle weather units",
-                "     (auto / us / metric)",
+                // Folded onto one line to free a row for L below: this list is
+                // at show_help_page's 15-line page limit, and a 16th line would
+                // spill a single entry onto a second page.
+                "  U  Cycle units: auto/us/metric",
                 "  V  Toggle verbose transfer log",
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
                 "  D  Toggle gateway debug trace",
                 "  E  CP/M emulator settings",
                 "     (enable + runaway ceiling)",
+                "  L  Log file (size, how many kept)",
                 "  R  Restart the server",
             ]
         } else {
@@ -486,6 +496,8 @@ impl TelnetSession {
                 "  D  Toggle gateway debug trace",
                 "  E  CP/M emulator settings (enable +",
                 "     runaway instruction ceiling)",
+                "  L  Log file (name, size limit, how",
+                "     many old logs are kept)",
                 "  R  Restart the server",
             ]
         }
@@ -630,6 +642,147 @@ impl TelnetSession {
                     // belongs in the hint — it was the one key this list had
                     // drifted away from.
                     self.show_error("Press E, C, D, U, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    /// Log-file submenu, reached from Other Settings → `L`.  Holds the four
+    /// on-disk log keys.  Its own screen because Other Settings is already at
+    /// exactly 22 rows, the same reason `E` opens the CP/M submenu.
+    ///
+    /// Every change here needs a server restart: the log is armed by
+    /// `configure_file_logging` from the startup path when the config is
+    /// re-read, so the running sink keeps its old policy until then.
+    pub(in crate::telnet) async fn log_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("LOG FILE")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let status = if cfg.log_to_file {
+                self.green("ON")
+            } else {
+                self.dim("off")
+            };
+            self.send_line(&format!("  Log file:  {}", status)).await?;
+            // Truncated to the screen: a path can be far longer than a C64 line,
+            // and this menu is rendered inside a fixed row budget.
+            let path_w = if self.terminal_type == TerminalType::Petscii { 26 } else { 62 };
+            self.send_line(&format!(
+                "  File:      {}",
+                self.amber(&truncate_to_width(&cfg.log_file, path_w))
+            ))
+            .await?;
+            let size_shown = if cfg.log_max_size_kb == 0 {
+                "0 (no rotation)".to_string()
+            } else {
+                format!("{} KB", cfg.log_max_size_kb)
+            };
+            self.send_line(&format!("  Rotate at: {}", self.amber(&size_shown)))
+                .await?;
+            self.send_line(&format!(
+                "  Keep old:  {}",
+                self.amber(&cfg.log_max_files.to_string())
+            ))
+            .await?;
+            // The bound comes from logger::max_disk_kb, never multiplied out
+            // here — one place owns that arithmetic (the web/GUI and the startup
+            // banner read the same fn).
+            let disk_shown = if cfg.log_max_size_kb == 0 {
+                self.red("unbounded")
+            } else {
+                self.amber(&format!(
+                    "{} KB",
+                    crate::logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files)
+                ))
+            };
+            self.send_line(&format!("  Max disk:  {}", disk_shown)).await?;
+            self.send_line("").await?;
+
+            self.send_line(&format!(
+                "  {}  Toggle logging to file",
+                self.cyan("E")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set log file name",
+                self.cyan("F")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set rotate size (KB, 0 = never)",
+                self.cyan("S")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set old logs to keep (0 = none)",
+                self.cyan("K")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.action_prompt("Q", "Back")
+            ))
+            .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/log"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            match input.as_str() {
+                "e" => {
+                    let v = (!cfg.log_to_file).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("log_to_file", &v);
+                    })
+                    .await
+                    .ok();
+                    self.config_restart_notice().await?;
+                }
+                "f" => {
+                    if self
+                        .other_set_field("Log file", "log_file", &cfg.log_file, false)
+                        .await?
+                    {
+                        self.config_restart_notice().await?;
+                    }
+                }
+                "s" => {
+                    self.config_set_count(
+                        "rotate size (KB)",
+                        "log_max_size_kb",
+                        cfg.log_max_size_kb,
+                        0,
+                        "Rotate at how many KB (0 = never)",
+                    )
+                    .await?;
+                }
+                "k" => {
+                    self.config_set_count(
+                        "old logs kept",
+                        "log_max_files",
+                        cfg.log_max_files as u64,
+                        0,
+                        "How many old logs to keep (0 = none)",
+                    )
+                    .await?;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press E, F, S, K, or Q.").await?;
                 }
             }
         }
