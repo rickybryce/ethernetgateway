@@ -11,6 +11,40 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **Two of the new logger tests raced each other through the process-global log
+  sink.** `configure_file_logging` replaces one process-wide sink, and nothing
+  serialised the two tests that arm it, so one test's writes landed in the
+  other's file while its rotation sequence stopped advancing — reproduced as
+  `left: ["t.log", "t.log.2"]`, the `.1` generation missing, on the first
+  iteration of stressing `logger::tests` with four threads. It had already been
+  seen once as a 1-in-19 failure of the full suite. Serialising the sink-arming
+  tests turned out to be necessary but *not* sufficient: nothing serialises the
+  ~1650 tests that merely call `log()`, and each of those appends to whichever
+  sink is armed, which against a 200-byte cap rotated the newest line out of the
+  file the test was asserting on. So `write_to_file` is now a thin wrapper over
+  `write_line_to(&mut FileSink, line)`, and the rotation test drives a
+  **locally-owned** sink — removing the shared state instead of racing it. The
+  remaining test that genuinely exercises the global path takes a
+  `FileLogTestGuard` that both serialises and, importantly, disarms the sink from
+  `Drop`: a failed assertion returns early, and a sink left armed at a
+  since-deleted temp directory would make every later `log()` in the suite fail.
+  Same lesson as `ConfigTestGuard` — cleanup belongs inside the critical section.
+  Verified with 40 consecutive stress runs where it previously failed on the
+  first.
+- **The startup banner could claim "Logging to " with no filename.** A blank
+  `log_file` disables file logging exactly as `log_to_file = false` does, but the
+  banner consulted only the flag — so a blank path printed a line promising a
+  file, a rotation size and a disk bound while nothing was being written. The
+  same rule had been open-coded in three places (banner, web hint, GUI hint),
+  which is precisely how they came to disagree; there is now one predicate,
+  `logger::file_logging_enabled`, and all four surfaces (including the telnet
+  screen, which now shows `(not set)` and `n/a`) ask it. Pinned by a test that
+  asserts the predicate and the policy agree on every combination.
+- **The log file did not record which build wrote it.** The version banner is
+  emitted before the config exists — necessarily, since the log path comes from
+  the config — so the file began mid-story, and because it is *appended* across
+  restarts a reader could not tell which build produced a given stretch. The
+  arming line now carries the version, and it is the first line in the file.
 - **The four new log keys could not be set from the telnet or web UI at all.**
   They had a parser, a writer, a struct field and a default — everything that
   makes a key look wired — but no arm in `apply_config_key`, which is the path

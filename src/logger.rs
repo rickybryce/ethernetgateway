@@ -65,6 +65,17 @@ pub fn file_policy_from(cfg: &crate::config::Config) -> Option<FilePolicy> {
     })
 }
 
+/// Whether `cfg` actually results in a log file being written.
+///
+/// The single answer to that question, because `log_to_file` alone is **not**
+/// the whole rule: a blank `log_file` is an off-switch too (see
+/// [`file_policy_from`]).  Every surface that reports the state — the startup
+/// banner, the web hint, the GUI hint — asks this rather than re-deriving it, so
+/// none of them can claim a file is being written when none is.
+pub fn file_logging_enabled(cfg: &crate::config::Config) -> bool {
+    file_policy_from(cfg).is_some()
+}
+
 /// Path of rotated generation `n` (1 = most recent).  `foo.log` → `foo.log.1`.
 fn rotated_path(base: &Path, n: u32) -> PathBuf {
     let mut s = base.as_os_str().to_os_string();
@@ -176,34 +187,49 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
     }
 }
 
-/// Append one line to the on-disk log, rotating first if it would overflow.
-fn write_to_file(line: &str) {
-    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(sink) = slot.as_mut() else { return };
+/// Append one line to `sink`, rotating first if it would overflow.
+///
+/// Takes the sink by reference rather than reaching for the global so the
+/// rotation behaviour can be tested against a locally-owned sink.  That is not
+/// cosmetic: the global is shared with every other test in the binary, and any
+/// one of them calling [`log()`] lands a line in whichever file is armed — which
+/// with a small size cap rotates the test's own newest line out from under it.
+/// An owned sink has no such coupling.
+///
+/// Returns `Err` if the line could not be written, in which case the caller is
+/// expected to disarm — a sink that cannot be written to is not usable.
+fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
     let bytes = line.len() as u64 + 1; // + newline
     if should_rotate(sink.written, bytes, sink.policy.max_bytes) {
-        match rotate(&sink.policy) {
-            Ok(f) => {
-                sink.file = f;
-                sink.written = 0;
-            }
-            Err(e) => {
-                eprintln!("Log rotation failed: {} — file logging disabled.", e);
-                *slot = None;
-                return;
-            }
-        }
+        // Errors go to stderr, never through log(): the caller holds the sink
+        // mutex, so logging here would deadlock.
+        let f = rotate(&sink.policy).inspect_err(|e| {
+            eprintln!("Log rotation failed: {} — file logging disabled.", e);
+        })?;
+        sink.file = f;
+        sink.written = 0;
     }
     // No fsync: one write syscall per line is cheap, but flushing to the SD
     // card on a Pi for every verbose protocol line would not be.  The
     // in-memory rings and stderr/journald cover a hard crash.
     use std::io::Write;
-    if let Err(e) = sink.file.write_all(line.as_bytes()).and_then(|()| sink.file.write_all(b"\n")) {
-        eprintln!("Log write failed: {} — file logging disabled.", e);
-        *slot = None;
-        return;
-    }
+    sink.file
+        .write_all(line.as_bytes())
+        .and_then(|()| sink.file.write_all(b"\n"))
+        .inspect_err(|e| {
+            eprintln!("Log write failed: {} — file logging disabled.", e);
+        })?;
     sink.written = sink.written.saturating_add(bytes);
+    Ok(())
+}
+
+/// Append one line to the process-wide on-disk log, if one is armed.
+fn write_to_file(line: &str) {
+    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(sink) = slot.as_mut() else { return };
+    if write_line_to(sink, line).is_err() {
+        *slot = None;
+    }
 }
 
 // Deliberately NO rate limiting.  It was considered and rejected: verbose mode
@@ -278,6 +304,54 @@ pub(crate) use glog;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises the tests that arm the process-global [`FILE_SINK`], and
+    /// disarms it from `Drop`.
+    ///
+    /// Required by any test that calls `configure_file_logging`, because that
+    /// replaces one process-wide sink: two such tests each pointing it at their
+    /// own temp file corrupt each other, one test's writes landing in the
+    /// other's file while its rotation sequence stops advancing. That was
+    /// observed, not theorised — `left: ["t.log", "t.log.2"]`, the `.1`
+    /// generation missing, within a minute of stressing `logger::tests` with 4
+    /// threads.
+    ///
+    /// **`Drop` is the important half.** A failed assertion returns early, so a
+    /// trailing `configure_file_logging(None)` is skipped exactly when it
+    /// matters most: the sink would stay armed at a temp directory the test then
+    /// deletes, and every later `log()` in the suite would hit a write error.
+    /// Same reasoning as `ConfigTestGuard` — cleanup belongs inside the critical
+    /// section, not after it.
+    ///
+    /// Note the lock alone is **not** sufficient protection for a test that
+    /// asserts on file *contents* under a size cap: nothing serialises the
+    /// ~1650 tests that merely call `log()`, and each of those writes into
+    /// whichever sink is armed. Such a test should own its sink and drive
+    /// [`write_line_to`] directly, as
+    /// `test_rotation_bounds_disk_and_deletes_oldest` does.
+    struct FileLogTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl FileLogTestGuard {
+        fn new() -> Self {
+            static FILE_LOG_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            let lock = FILE_LOG_TEST_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // Start from a known state: a previous panic cannot leak its sink
+            // into this test even though Drop normally clears it.
+            configure_file_logging(None);
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for FileLogTestGuard {
+        fn drop(&mut self) {
+            configure_file_logging(None);
+        }
+    }
 
     /// Log a couple of unique sentinel strings, then verify
     /// `snapshot()` finds them.  The buffer is a global singleton
@@ -365,6 +439,14 @@ mod tests {
 
     /// End to end: the active file rotates, generations shift, and the oldest
     /// is **deleted** so the log cannot grow without bound.
+    ///
+    /// Drives a **locally-owned** sink rather than arming the global one. That
+    /// is deliberate and was arrived at the hard way: with the global sink, every
+    /// other test in the binary that calls `log()` writes into this test's file,
+    /// and against a 200-byte cap those foreign lines rotate `line 059` out of
+    /// the active file. Serialising the sink-arming tests was not enough —
+    /// nothing serialises the ~1650 tests that merely log. An owned sink removes
+    /// the shared state instead of racing it.
     #[test]
     fn test_rotation_bounds_disk_and_deletes_oldest() {
         let dir = std::env::temp_dir().join(format!("eg_log_rot_{}", std::process::id()));
@@ -374,11 +456,15 @@ mod tests {
 
         // 200-byte cap, keep 2 generations => at most 3 files on disk.
         let policy = FilePolicy { path: base.clone(), max_bytes: 200, max_files: 2 };
-        configure_file_logging(Some(policy));
+        let mut sink = FileSink {
+            file: open_log(&policy.path, false).unwrap(),
+            written: 0,
+            policy,
+        };
 
         // Each line is ~40 bytes, so this rotates several times over.
         for i in 0..60 {
-            write_to_file(&format!("line {i:03} ------------------------------"));
+            write_line_to(&mut sink, &format!("line {i:03} ------------------------------")).unwrap();
         }
 
         let mut present: Vec<String> = std::fs::read_dir(&dir)
@@ -410,7 +496,7 @@ mod tests {
         let active = std::fs::read_to_string(&base).unwrap();
         assert!(active.contains("line 059"), "active log missing newest line");
 
-        configure_file_logging(None);
+        drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -418,6 +504,7 @@ mod tests {
     /// *append* rather than discard what a previous run recorded.
     #[test]
     fn test_configure_off_then_on_appends() {
+        let _guard = FileLogTestGuard::new();
         let dir = std::env::temp_dir().join(format!("eg_log_cfg_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -459,6 +546,39 @@ mod tests {
         cfg.log_to_file = true;
         cfg.log_file = "   ".into();
         assert!(file_policy_from(&cfg).is_none(), "blank path must yield no policy");
+    }
+
+    /// `file_logging_enabled` must agree with `file_policy_from` on every state.
+    /// Four surfaces report the on/off state from it — the startup banner and the
+    /// telnet / web / GUI screens — and they each used to re-derive the rule,
+    /// which is how the banner came to print "Logging to " for a blank path while
+    /// nothing was being written.
+    #[test]
+    fn test_file_logging_enabled_matches_the_policy() {
+        let base = crate::config::Config::default();
+        for (to_file, path, want) in [
+            (true, "eg.log", true),
+            (false, "eg.log", false),
+            (true, "", false),   // blank path is an off-switch of its own
+            (true, "   ", false), // ...including whitespace-only
+            (false, "", false),
+        ] {
+            let cfg = crate::config::Config {
+                log_to_file: to_file,
+                log_file: path.into(),
+                ..base.clone()
+            };
+            assert_eq!(
+                file_logging_enabled(&cfg),
+                want,
+                "log_to_file={to_file}, log_file={path:?}"
+            );
+            assert_eq!(
+                file_logging_enabled(&cfg),
+                file_policy_from(&cfg).is_some(),
+                "the predicate and the policy must never disagree"
+            );
+        }
     }
 
     /// `drain()` and `snapshot()` are independent — the GUI's

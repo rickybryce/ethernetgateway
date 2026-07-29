@@ -68,10 +68,16 @@ fn main() {
         // cycle because the config is re-read here; `configure_file_logging` is
         // idempotent and keeps the file open when the policy is unchanged.
         logger::configure_file_logging(logger::file_policy_from(&cfg));
-        if cfg.log_to_file {
+        // Asks the policy, not `cfg.log_to_file`: a blank `log_file` disables
+        // file logging too, and this line claimed "Logging to " with an empty
+        // path when it consulted only the flag.  It also names the version,
+        // because the file is appended to across restarts and the build that
+        // wrote a given stretch of it is the first thing a reader needs.
+        if logger::file_logging_enabled(&cfg) {
             glog!(
-                "Logging to {} (rotate at {} KB, keep {} old, max {} KB on disk)",
-                cfg.log_file,
+                "Logging to {} — v{} (rotate at {} KB, keep {} old, max {} KB on disk)",
+                cfg.log_file.trim(),
+                env!("CARGO_PKG_VERSION"),
                 cfg.log_max_size_kb,
                 cfg.log_max_files,
                 logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),

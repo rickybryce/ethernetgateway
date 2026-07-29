@@ -1582,10 +1582,10 @@ fn render_warning_popups() -> String {
 /// Rendered under the log controls in the Server "More" popup and mirrored by
 /// the GUI's own hint.  Pure, so a test can pin the three cases.
 fn log_hint(cfg: &Config) -> String {
-    // An empty path is an off-switch too — logger::file_policy_from returns None
-    // for it — so it must read as "off" here rather than quoting a disk bound for
-    // a file that will never be opened.
-    if !cfg.log_to_file || cfg.log_file.trim().is_empty() {
+    // Asks logger for the state rather than re-deriving it: an empty path is an
+    // off-switch too, and that rule belongs in one place (it was duplicated here
+    // and in the GUI, which is how the startup banner came to disagree).
+    if !crate::logger::file_logging_enabled(cfg) {
         "Logging to stderr and the console only.".to_string()
     } else if cfg.log_max_size_kb == 0 {
         "No size limit \u{2014} this file can grow without bound.".to_string()

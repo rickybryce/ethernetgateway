@@ -908,9 +908,9 @@ impl App {
         // the operator is typing and the figure would lag a keystroke behind.
         let size_kb = self.log_max_size_kb_buf.parse::<u64>().unwrap_or(self.cfg.log_max_size_kb);
         let files = self.log_max_files_buf.parse::<u32>().unwrap_or(self.cfg.log_max_files);
-        // An empty path disables file logging just as the checkbox does (see
-        // logger::file_policy_from), so it must not read as "bounded".
-        let hint = if !self.cfg.log_to_file || self.cfg.log_file.trim().is_empty() {
+        // Asks logger for the state rather than re-deriving it — an empty path
+        // disables file logging just as the checkbox does.
+        let hint = if !logger::file_logging_enabled(&self.cfg) {
             "Logging to stderr and the console above only.".to_string()
         } else if size_kb == 0 {
             "No size limit — this file can grow without bound.".to_string()

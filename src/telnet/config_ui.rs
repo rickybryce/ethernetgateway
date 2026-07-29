@@ -668,7 +668,7 @@ impl TelnetSession {
 
             // A blank path disables file logging just as the toggle does (see
             // logger::file_policy_from), so it must not read as ON here.
-            let armed = cfg.log_to_file && !cfg.log_file.trim().is_empty();
+            let armed = crate::logger::file_logging_enabled(&cfg);
             let status = if armed {
                 self.green("ON")
             } else {
