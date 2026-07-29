@@ -121,6 +121,17 @@ const DEFAULT_GUI_ZOOM: &str = "auto";
 const GUI_ZOOM_MIN: f32 = 0.5;
 const GUI_ZOOM_MAX: f32 = 3.0;
 const DEFAULT_MAX_SESSIONS: usize = 50;
+/// Write the log to a file as well as stderr.  On by default: a gateway is
+/// usually left running unattended, and the in-memory rings only hold the last
+/// 2000 lines.
+const DEFAULT_LOG_TO_FILE: bool = true;
+/// Active log file, in the binary's working directory alongside `egateway.conf`.
+const DEFAULT_LOG_FILE: &str = "ethernetgateway.log";
+/// Rotate once the active log reaches this size, in KB.
+const DEFAULT_LOG_MAX_SIZE_KB: u64 = 1024;
+/// Rotated generations to keep; older ones are deleted.  With the defaults the
+/// log can never occupy more than 1024 KB x (5 + 1) = 6 MB total.
+const DEFAULT_LOG_MAX_FILES: u32 = 5;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900; // 15 minutes
 const DEFAULT_GROQ_API_KEY: &str = "";
 const DEFAULT_BROWSER_HOMEPAGE: &str = "http://telnetbible.com";
@@ -642,6 +653,17 @@ pub struct Config {
     /// Weather display units: "auto" (infer from country), "us"
     /// (Fahrenheit/mph), or "metric" (Celsius/km/h).
     pub weather_units: String,
+    /// Mirror the log to [`Config::log_file`] as well as stderr.
+    pub log_to_file: bool,
+    /// Active log file path.
+    pub log_file: String,
+    /// Rotate the active log once it reaches this many KB.  Zero disables
+    /// size-based rotation (the file then grows unbounded).
+    pub log_max_size_kb: u64,
+    /// How many rotated generations to keep (`.1` ...).  Older ones are
+    /// deleted, so worst-case disk use is `log_max_size_kb * (log_max_files
+    /// + 1)`.  Zero keeps none: the active file is truncated on rotation.
+    pub log_max_files: u32,
     /// Enable verbose XMODEM protocol logging to stderr.
     pub verbose: bool,
     /// XMODEM negotiation timeout in seconds.  Shared with XMODEM-1K
@@ -856,6 +878,10 @@ impl Default for Config {
             browser_homepage: DEFAULT_BROWSER_HOMEPAGE.into(),
             weather_location: DEFAULT_WEATHER_LOCATION.into(),
             weather_units: DEFAULT_WEATHER_UNITS.into(),
+            log_to_file: DEFAULT_LOG_TO_FILE,
+            log_file: DEFAULT_LOG_FILE.into(),
+            log_max_size_kb: DEFAULT_LOG_MAX_SIZE_KB,
+            log_max_files: DEFAULT_LOG_MAX_FILES,
             verbose: DEFAULT_VERBOSE,
             xmodem_negotiation_timeout: DEFAULT_XMODEM_NEGOTIATION_TIMEOUT,
             xmodem_block_timeout: DEFAULT_XMODEM_BLOCK_TIMEOUT,
@@ -1208,6 +1234,22 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "auto" | "us" | "metric"))
             .unwrap_or_else(|| DEFAULT_WEATHER_UNITS.into()),
+        log_to_file: map
+            .get("log_to_file")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_LOG_TO_FILE),
+        log_file: map
+            .get("log_file")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_LOG_FILE.into()),
+        log_max_size_kb: map
+            .get("log_max_size_kb")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_LOG_MAX_SIZE_KB),
+        log_max_files: map
+            .get("log_max_files")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_LOG_MAX_FILES),
         verbose: map
             .get("verbose")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1864,6 +1906,20 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("# Weather units: auto (infer from country), us (F/mph), or metric (C/km/h)\n");
     write_kv_str(&mut content, "weather_units", &cfg.weather_units);
+    content.push('\n');
+
+    content.push_str("# Log file: mirror the console log to disk as well as stderr.\n");
+    content.push_str("# The log is size-bounded and old generations are DELETED, so it cannot\n");
+    content.push_str("# grow without limit: the active file is rotated to .1 once it reaches\n");
+    content.push_str("# log_max_size_kb, .1 becomes .2 and so on, and anything past\n");
+    content.push_str("# log_max_files is removed.  Worst-case disk use is therefore\n");
+    content.push_str("# log_max_size_kb x (log_max_files + 1) -- 6 MB with the defaults below.\n");
+    content.push_str("# Set log_max_size_kb = 0 to disable size-based rotation (unbounded growth),\n");
+    content.push_str("# or log_max_files = 0 to keep no history at all.\n");
+    write_kv(&mut content, "log_to_file", cfg.log_to_file);
+    write_kv_str(&mut content, "log_file", &cfg.log_file);
+    write_kv(&mut content, "log_max_size_kb", cfg.log_max_size_kb);
+    write_kv(&mut content, "log_max_files", cfg.log_max_files);
     content.push('\n');
 
     content.push_str("# Verbose logging: set to true for detailed XMODEM protocol diagnostics\n");
@@ -3168,6 +3224,10 @@ mod tests {
             browser_homepage: "https://example.com".into(),
             weather_location: "90210".into(),
             weather_units: "metric".into(),
+            log_to_file: false,
+            log_file: "custom.log".into(),
+            log_max_size_kb: 77,
+            log_max_files: 9,
             verbose: true,
             xmodem_negotiation_timeout: 120,
             xmodem_block_timeout: 30,

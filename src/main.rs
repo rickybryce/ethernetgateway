@@ -63,6 +63,20 @@ fn main() {
     loop {
         // Load or create config (re-read from disk on each restart)
         let cfg = config::load_or_create_config();
+        // File logging can only be armed once the config exists, so the three
+        // banner lines above reach stderr only.  Re-applied on every restart
+        // cycle because the config is re-read here; `configure_file_logging` is
+        // idempotent and keeps the file open when the policy is unchanged.
+        logger::configure_file_logging(logger::file_policy_from(&cfg));
+        if cfg.log_to_file {
+            glog!(
+                "Logging to {} (rotate at {} KB, keep {} old, max {} KB on disk)",
+                cfg.log_file,
+                cfg.log_max_size_kb,
+                cfg.log_max_files,
+                logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),
+            );
+        }
         glog!("Config: telnet={}, port={}, security={}, transfer_dir={}",
             cfg.telnet_enabled, cfg.telnet_port, cfg.security_enabled, cfg.transfer_dir);
         if !cfg.telnet_enabled && !cfg.ssh_enabled {

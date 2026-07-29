@@ -7,12 +7,211 @@
 //! without disturbing the GUI's view).
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_LINES: usize = 2000;
 
 static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 static HISTORY_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+
+// ─── On-disk log: size-bounded, with old generations deleted ──────────
+
+/// What the on-disk log is allowed to do.  Held separately from the open
+/// file so the policy can be compared cheaply when the config is re-read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilePolicy {
+    /// Active log file.
+    pub path: PathBuf,
+    /// Rotate once the active file would exceed this many bytes.
+    pub max_bytes: u64,
+    /// How many rotated generations to keep (`.1` … `.max_files`).  Anything
+    /// older is **deleted**, which is what bounds disk use.  Zero keeps no
+    /// generations at all: the active file is simply truncated.
+    pub max_files: u32,
+}
+
+/// The open log plus the byte count that decides when to rotate.
+struct FileSink {
+    policy: FilePolicy,
+    file: std::fs::File,
+    written: u64,
+}
+
+static FILE_SINK: OnceLock<Mutex<Option<FileSink>>> = OnceLock::new();
+
+fn file_sink() -> &'static Mutex<Option<FileSink>> {
+    FILE_SINK.get_or_init(|| Mutex::new(None))
+}
+
+/// The hard ceiling on how much disk the log can ever occupy, in KB: the active
+/// file plus every kept generation.  Stated in KB because that is the unit the
+/// config uses, and exposed so the UIs can show the real total instead of
+/// leaving the operator to multiply it out.
+pub fn max_disk_kb(max_size_kb: u64, max_files: u32) -> u64 {
+    max_size_kb.saturating_mul(max_files as u64 + 1)
+}
+
+/// Build the policy a [`crate::config::Config`] describes, or `None` when file
+/// logging is switched off.
+pub fn file_policy_from(cfg: &crate::config::Config) -> Option<FilePolicy> {
+    if !cfg.log_to_file || cfg.log_file.trim().is_empty() {
+        return None;
+    }
+    Some(FilePolicy {
+        path: PathBuf::from(cfg.log_file.trim()),
+        max_bytes: cfg.log_max_size_kb.saturating_mul(1024),
+        max_files: cfg.log_max_files,
+    })
+}
+
+/// Path of rotated generation `n` (1 = most recent).  `foo.log` → `foo.log.1`.
+fn rotated_path(base: &Path, n: u32) -> PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(format!(".{}", n));
+    PathBuf::from(s)
+}
+
+/// Would writing `next_len` more bytes push the active file past its limit?
+/// A zero limit means "never rotate on size".  The first line of a fresh file
+/// is always written even if it alone exceeds the limit, since rotating an
+/// empty file would loop forever.
+fn should_rotate(written: u64, next_len: u64, max_bytes: u64) -> bool {
+    max_bytes > 0 && written > 0 && written.saturating_add(next_len) > max_bytes
+}
+
+/// Shift the generations down and delete the oldest, then reopen `path` empty.
+///
+/// Errors go to stderr directly, **never** through [`log()`] — this runs while
+/// the sink mutex is held, so logging here would deadlock.
+fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
+    if policy.max_files == 0 {
+        // Keep no history: truncate in place.
+        return open_log(&policy.path, true);
+    }
+    // The oldest generation is dropped entirely — this is what stops the log
+    // growing without bound.
+    let oldest = rotated_path(&policy.path, policy.max_files);
+    if oldest.exists() {
+        if let Err(e) = std::fs::remove_file(&oldest) {
+            eprintln!("Log rotation: could not delete {}: {}", oldest.display(), e);
+        }
+    }
+    for n in (1..policy.max_files).rev() {
+        let from = rotated_path(&policy.path, n);
+        if from.exists() {
+            let to = rotated_path(&policy.path, n + 1);
+            if let Err(e) = std::fs::rename(&from, &to) {
+                eprintln!("Log rotation: could not rename {}: {}", from.display(), e);
+            }
+        }
+    }
+    if policy.path.exists() {
+        let to = rotated_path(&policy.path, 1);
+        if let Err(e) = std::fs::rename(&policy.path, &to) {
+            eprintln!(
+                "Log rotation: could not rename {}: {}",
+                policy.path.display(),
+                e
+            );
+        }
+    }
+    open_log(&policy.path, true)
+}
+
+/// Open (or create) the log.  Owner-only on Unix: log lines name hosts, ports
+/// and usernames, the same privacy reasoning as the config and dialup files.
+fn open_log(path: &Path, truncate: bool) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if truncate {
+        opts.truncate(true);
+    } else {
+        opts.append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+/// Point file logging at `policy`, or turn it off with `None`.
+///
+/// Idempotent and safe to call on every config load — the server re-reads its
+/// config on each restart cycle.  An unchanged policy keeps the file open
+/// (reopening on every restart would be pointless churn); a changed path or
+/// limit reopens.
+pub fn configure_file_logging(policy: Option<FilePolicy>) {
+    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+    match policy {
+        None => {
+            *slot = None;
+        }
+        Some(p) => {
+            if let Some(existing) = slot.as_ref() {
+                if existing.policy == p {
+                    return; // already logging exactly this way
+                }
+            }
+            // Append rather than truncate: a restart should extend the log, not
+            // discard what the previous run recorded.
+            match open_log(&p.path, false) {
+                Ok(file) => {
+                    let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    *slot = Some(FileSink { policy: p, file, written });
+                }
+                Err(e) => {
+                    // stderr, not log(): we hold the sink mutex.
+                    eprintln!(
+                        "Warning: could not open log file {}: {} — file logging disabled.",
+                        p.path.display(),
+                        e
+                    );
+                    *slot = None;
+                }
+            }
+        }
+    }
+}
+
+/// Append one line to the on-disk log, rotating first if it would overflow.
+fn write_to_file(line: &str) {
+    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(sink) = slot.as_mut() else { return };
+    let bytes = line.len() as u64 + 1; // + newline
+    if should_rotate(sink.written, bytes, sink.policy.max_bytes) {
+        match rotate(&sink.policy) {
+            Ok(f) => {
+                sink.file = f;
+                sink.written = 0;
+            }
+            Err(e) => {
+                eprintln!("Log rotation failed: {} — file logging disabled.", e);
+                *slot = None;
+                return;
+            }
+        }
+    }
+    // No fsync: one write syscall per line is cheap, but flushing to the SD
+    // card on a Pi for every verbose protocol line would not be.  The
+    // in-memory rings and stderr/journald cover a hard crash.
+    use std::io::Write;
+    if let Err(e) = sink.file.write_all(line.as_bytes()).and_then(|()| sink.file.write_all(b"\n")) {
+        eprintln!("Log write failed: {} — file logging disabled.", e);
+        *slot = None;
+        return;
+    }
+    sink.written = sink.written.saturating_add(bytes);
+}
+
+// Deliberately NO rate limiting.  It was considered and rejected: verbose mode
+// logs per protocol block, which can legitimately exceed any sane
+// lines-per-second ceiling during a fast transfer, so a limiter would discard
+// exactly the lines an operator turned verbose on to see.  Growth is bounded by
+// rotation and generation deletion instead, which loses old data rather than
+// current data.
 
 /// Initialise the global log buffers.  Safe to call more than once.
 pub fn init() {
@@ -26,6 +225,8 @@ pub fn init() {
 /// console poll for recent lines without competing with the GUI.
 pub fn log(msg: String) {
     eprintln!("{}", msg);
+    // Before the rings, so a line is on disk even if a ring lock is contended.
+    write_to_file(&msg);
     // Recover from a poisoned lock rather than dropping the line: if a
     // thread panicked while holding the log mutex, logging is exactly when
     // we most want it to keep working.  Matches config.rs / gui.rs.
@@ -122,6 +323,142 @@ mod tests {
         }
         let snap = snapshot(8);
         assert!(snap.len() <= 8, "snapshot returned {} > cap of 8", snap.len());
+    }
+
+    // ─── On-disk log: size bound + generation deletion ───────────────
+
+    #[test]
+    fn test_rotated_path_appends_generation() {
+        assert_eq!(
+            rotated_path(Path::new("ethernetgateway.log"), 1),
+            PathBuf::from("ethernetgateway.log.1")
+        );
+        assert_eq!(
+            rotated_path(Path::new("/var/log/eg.log"), 5),
+            PathBuf::from("/var/log/eg.log.5")
+        );
+    }
+
+    /// The disk bound Ricky asked for, stated once: active file + generations.
+    #[test]
+    fn test_max_disk_kb_counts_the_active_file_too() {
+        assert_eq!(max_disk_kb(1024, 5), 6144); // the shipped default: 6 MB
+        assert_eq!(max_disk_kb(1024, 0), 1024); // no generations kept
+        // Saturating, so a nonsense config can't wrap to a small number and
+        // silently promise a bound it doesn't enforce.
+        assert_eq!(max_disk_kb(u64::MAX, 4), u64::MAX);
+    }
+
+    #[test]
+    fn test_should_rotate_boundaries() {
+        // Under the limit: keep writing.
+        assert!(!should_rotate(100, 10, 1000));
+        // Exactly at the limit is still fine; past it rotates.
+        assert!(!should_rotate(990, 10, 1000));
+        assert!(should_rotate(991, 10, 1000));
+        // A zero limit disables size-based rotation.
+        assert!(!should_rotate(u64::MAX / 2, 10, 0));
+        // An empty file never rotates, even for an oversized line — otherwise a
+        // line bigger than the limit would rotate forever and never be written.
+        assert!(!should_rotate(0, 99_999, 10));
+    }
+
+    /// End to end: the active file rotates, generations shift, and the oldest
+    /// is **deleted** so the log cannot grow without bound.
+    #[test]
+    fn test_rotation_bounds_disk_and_deletes_oldest() {
+        let dir = std::env::temp_dir().join(format!("eg_log_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("t.log");
+
+        // 200-byte cap, keep 2 generations => at most 3 files on disk.
+        let policy = FilePolicy { path: base.clone(), max_bytes: 200, max_files: 2 };
+        configure_file_logging(Some(policy));
+
+        // Each line is ~40 bytes, so this rotates several times over.
+        for i in 0..60 {
+            write_to_file(&format!("line {i:03} ------------------------------"));
+        }
+
+        let mut present: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        present.sort();
+        // Active + .1 + .2 and nothing older: .3 must have been deleted.
+        assert_eq!(
+            present,
+            vec!["t.log".to_string(), "t.log.1".into(), "t.log.2".into()],
+            "expected exactly the active file plus 2 generations"
+        );
+
+        let total: u64 = present
+            .iter()
+            .map(|n| std::fs::metadata(dir.join(n)).unwrap().len())
+            .sum();
+        // The bound is per-file, so the total is under (max_files + 1) * cap
+        // plus one final line's slack on the active file.
+        assert!(
+            total <= 200 * 3 + 64,
+            "total on-disk log grew to {total} bytes, past the bound"
+        );
+
+        // The newest data must be in the ACTIVE file — rotation must not leave
+        // the current line stranded in a generation.
+        let active = std::fs::read_to_string(&base).unwrap();
+        assert!(active.contains("line 059"), "active log missing newest line");
+
+        configure_file_logging(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Disabling file logging must actually stop writing, and re-enabling must
+    /// *append* rather than discard what a previous run recorded.
+    #[test]
+    fn test_configure_off_then_on_appends() {
+        let dir = std::env::temp_dir().join(format!("eg_log_cfg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("a.log");
+        let policy = || FilePolicy { path: base.clone(), max_bytes: 0, max_files: 3 };
+
+        configure_file_logging(Some(policy()));
+        write_to_file("first");
+        configure_file_logging(None);
+        write_to_file("must not appear");
+        configure_file_logging(Some(policy()));
+        write_to_file("second");
+        configure_file_logging(None);
+
+        let body = std::fs::read_to_string(&base).unwrap();
+        assert!(body.contains("first") && body.contains("second"), "got {body:?}");
+        assert!(
+            !body.contains("must not appear"),
+            "wrote while file logging was off: {body:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `file_policy_from` is the one place config turns into policy, so the
+    /// off-switch and the KB->bytes conversion are pinned here.
+    #[test]
+    fn test_file_policy_from_config() {
+        let mut cfg = crate::config::Config::default();
+        // Shipped default is ON, so an untouched config logs to a file.
+        assert!(cfg.log_to_file, "file logging should ship enabled");
+        let p = file_policy_from(&cfg).expect("default config must yield a policy");
+        assert_eq!(p.max_bytes, cfg.log_max_size_kb * 1024, "KB must become bytes");
+        assert_eq!(p.max_files, cfg.log_max_files);
+
+        cfg.log_to_file = false;
+        assert!(file_policy_from(&cfg).is_none(), "disabled must yield no policy");
+
+        // A blank path is treated as off rather than creating a file named "".
+        cfg.log_to_file = true;
+        cfg.log_file = "   ".into();
+        assert!(file_policy_from(&cfg).is_none(), "blank path must yield no policy");
     }
 
     /// `drain()` and `snapshot()` are independent — the GUI's
