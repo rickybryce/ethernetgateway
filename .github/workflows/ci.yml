@@ -75,6 +75,89 @@ jobs:
           PROPTEST_CASES: "4096"
         run: cargo test proptest --verbose
 
+  # ─── Interop against real protocol peers (advisory) ───────────────────
+  #
+  # Runs the 25 `#[ignore]`d tests, which are excluded from `cargo test`
+  # because they spawn real third-party peer binaries.  They are the only
+  # SEND-path cover for XMODEM/YMODEM and the only ground truth that our
+  # wire format matches somebody else's reader — the checked-in replay
+  # fixtures lock the RECEIVE path, but a fixture can only ever confirm
+  # what we recorded, so a send-side regression is invisible to it.
+  #
+  # ADVISORY (`continue-on-error`), deliberately: the peers arrive from the
+  # Ubuntu archive and can be upgraded under us, so a distro bump must
+  # surface as a red X to triage, never as a blocked merge.  The gating
+  # jobs stay `test` / `licenses`.
+  #
+  # Unix-only by construction — every one of these tests is `#[cfg(unix)]`
+  # (lrzsz and C-Kermit are Unix programs), so there is no Windows variant
+  # to add here.
+  interop:
+    name: interop (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies and protocol peers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev \
+            lrzsz \
+            ckermit
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Record which peer we actually tested against.  These tests assert
+      # against another implementation's behaviour, so when this job goes
+      # red the first question is always "did we regress, or did the peer
+      # change?" — and that is unanswerable after the fact without this.
+      # Validated locally against lrzsz 0.12.21rc and C-Kermit 10.0.416
+      # Beta.12; Ubuntu noble ships C-Kermit 10.0 Beta.11.
+      - name: Record peer versions
+        run: |
+          echo "--- lrzsz ---"
+          for b in sx sb sz rx rb rz; do
+            printf '%-4s ' "$b"; "$b" --version 2>&1 | head -1
+          done
+          echo "--- C-Kermit ---"
+          kermit -V 2>&1 | head -3 || true
+
+      # `--test-threads=1` because these tests spawn subprocesses, bind
+      # sockets and mutate the shared on-disk `egateway.conf`; serial is
+      # both deterministic and, at ~35 s for all 25, not worth
+      # parallelising.  The debug profile is used on purpose — measured
+      # identical to `--release` (34.9 s vs 34.1 s locally), so there is no
+      # reason to pay for a second compile of the whole tree.
+      #
+      # Split by peer so one family failing still reports the other's
+      # result; a single step would stop at the first failure and hide it.
+      #
+      # The three fixture *recorders* are `#[ignore]`d too and so run here,
+      # but each self-skips unless its own env var is set (e.g.
+      # ZMODEM_RECORD_FIXTURES) — that second gate exists precisely so a
+      # bulk `--ignored` run like this one cannot silently rewrite the
+      # committed fixtures.
+      - name: lrzsz interop (XMODEM / XMODEM-1K / YMODEM / ZMODEM)
+        continue-on-error: true
+        run: cargo test --verbose -- --ignored --test-threads=1 --skip ckermit
+
+      - name: C-Kermit interop (send, sliding-window, streaming, server)
+        continue-on-error: true
+        run: cargo test --verbose ckermit -- --ignored --test-threads=1
+
   rustfmt:
     name: rustfmt check
     runs-on: ubuntu-latest
