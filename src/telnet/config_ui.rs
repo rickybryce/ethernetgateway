@@ -666,7 +666,10 @@ impl TelnetSession {
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
-            let status = if cfg.log_to_file {
+            // A blank path disables file logging just as the toggle does (see
+            // logger::file_policy_from), so it must not read as ON here.
+            let armed = cfg.log_to_file && !cfg.log_file.trim().is_empty();
+            let status = if armed {
                 self.green("ON")
             } else {
                 self.dim("off")
@@ -675,11 +678,12 @@ impl TelnetSession {
             // Truncated to the screen: a path can be far longer than a C64 line,
             // and this menu is rendered inside a fixed row budget.
             let path_w = if self.terminal_type == TerminalType::Petscii { 26 } else { 62 };
-            self.send_line(&format!(
-                "  File:      {}",
+            let path_shown = if cfg.log_file.trim().is_empty() {
+                self.dim("(not set)")
+            } else {
                 self.amber(&truncate_to_width(&cfg.log_file, path_w))
-            ))
-            .await?;
+            };
+            self.send_line(&format!("  File:      {}", path_shown)).await?;
             let size_shown = if cfg.log_max_size_kb == 0 {
                 "0 (no rotation)".to_string()
             } else {
@@ -695,7 +699,9 @@ impl TelnetSession {
             // The bound comes from logger::max_disk_kb, never multiplied out
             // here — one place owns that arithmetic (the web/GUI and the startup
             // banner read the same fn).
-            let disk_shown = if cfg.log_max_size_kb == 0 {
+            let disk_shown = if !armed {
+                self.dim("n/a")
+            } else if cfg.log_max_size_kb == 0 {
                 self.red("unbounded")
             } else {
                 self.amber(&format!(

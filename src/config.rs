@@ -3101,8 +3101,12 @@ mod tests {
             // CONFIG_TEST_LOCK and friends are test-only items near the top of
             // the file, so cutting at the first attribute discarded the writer
             // and the scan silently found nothing.
+            //
+            // Must not span a line break: a Windows checkout has CRLF endings,
+            // so an anchor containing a literal `\n` matches nothing there and
+            // this test failed on windows-latest only.
             let cut = whole
-                .find("#[cfg(test)]\nmod tests")
+                .find("\nmod tests {")
                 .expect("test module marker moved — this scan needs updating");
             &whole[..cut]
         };

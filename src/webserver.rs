@@ -1582,7 +1582,10 @@ fn render_warning_popups() -> String {
 /// Rendered under the log controls in the Server "More" popup and mirrored by
 /// the GUI's own hint.  Pure, so a test can pin the three cases.
 fn log_hint(cfg: &Config) -> String {
-    if !cfg.log_to_file {
+    // An empty path is an off-switch too — logger::file_policy_from returns None
+    // for it — so it must read as "off" here rather than quoting a disk bound for
+    // a file that will never be opened.
+    if !cfg.log_to_file || cfg.log_file.trim().is_empty() {
         "Logging to stderr and the console only.".to_string()
     } else if cfg.log_max_size_kb == 0 {
         "No size limit \u{2014} this file can grow without bound.".to_string()
@@ -3020,6 +3023,23 @@ mod tests {
         cfg.log_max_size_kb = 0;
         let h = log_hint(&cfg);
         assert!(h.contains("without bound"), "unbounded state: {}", h);
+
+        // An empty (or whitespace) path is an off-switch of its own — the policy
+        // builder returns None for it — so the hint must not quote a bound for a
+        // file that will never be opened.
+        for blank in ["", "   "] {
+            let blanked = Config { log_file: blank.into(), ..cfg.clone() };
+            let h = log_hint(&blanked);
+            assert!(
+                h.contains("stderr"),
+                "an empty log_file must read as off, got: {}",
+                h
+            );
+            assert!(
+                crate::logger::file_policy_from(&blanked).is_none(),
+                "hint and policy must agree that a blank path means off"
+            );
+        }
 
         cfg.log_max_size_kb = 1024;
         cfg.log_max_files = 5;
