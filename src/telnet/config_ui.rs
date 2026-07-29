@@ -1192,6 +1192,14 @@ impl TelnetSession {
                     self.dim("Accept relays: (master only)")
                 ))
                 .await?;
+                // The `K` item is offered in every role (it answers with
+                // "Master role only."), so say so here too rather than leaving
+                // one of the two master-only toggles unexplained.
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Kermit to slaves: (master only)")
+                ))
+                .await?;
             }
 
             // Master host/user/pass point this gateway at its master, so they

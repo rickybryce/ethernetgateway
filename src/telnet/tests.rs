@@ -1842,21 +1842,57 @@ fn test_config_menu_row_count() {
     assert!(static_rows <= 22, "server config menu is {} rows, exceeds 22", static_rows);
 }
 
-/// Master/Slave sub-screen: header(3) + blank + 5 status (role,
-/// accept-relays, master host:port, user, pass) + blank + 3 item rows
-/// (R/A, M/P, U/W) + Q/H + prompt = 15.  (Transport is not exposed
-/// until the raw transport is implemented; SSH is the only mode.)
-/// Plus the §9 #10 live-status block. A master shows a "Registered
-/// remote ports:" header, up to 3 entries (RELAY_STATUS_CAP), an
-/// optional "+N more", and a trailing blank — 6 rows worst case. A slave
-/// shows up to 2 link lines and a blank — 3 rows. The master case
-/// dominates, so the guard is base plus 6.
+/// Master/Slave sub-screen row budget.  The status rows differ by role, so both
+/// shapes are counted and the master must remain the worst case.
+///
+/// MASTER: header(3) + blank + 4 status (role, accept-relays,
+/// Kermit-to-slaves, the "Master/User/Pass: (slave only)" note) + blank +
+/// 4 item rows (R/A, K, M/P, U/W) + Q/H + prompt = 15, plus the §9 #10
+/// live-status block — "Registered remote ports:" header, up to 3 entries
+/// (RELAY_STATUS_CAP), an optional "+N more", and a trailing blank = 6 — so 21.
+///
+/// SLAVE: header(3) + blank + 6 status (role, the two "(master only)" notes,
+/// master host:port, user, pass) + blank + 4 item rows + Q/H + prompt = 17, plus
+/// up to 2 link lines and a blank = 3 — so 20.
+///
+/// (Transport is not exposed until the raw transport is implemented; SSH is the
+/// only mode.)
+///
+/// These counts are hand-maintained, and that has already drifted: `9f72b85`
+/// added *both* the Kermit-to-slaves status row and its `K` item row without
+/// touching this test, which went on asserting the old "5 status + 3 item"
+/// shape — a shape that was also wrong about which role shows five status rows.
+/// It happened to still total 21 for the master, so nothing overflowed, but the
+/// guard demonstrably cannot notice a new row.
+///
+/// **Headroom is one row.** At 21 of 22, adding a second row to this screen
+/// means lowering `RELAY_STATUS_CAP` or splitting the screen.
 #[test]
 fn test_master_slave_menu_row_count() {
-    let base = 3 + 1 + 5 + 1 + 3 + 1 + 1; // 15
+    let master_base = 3 + 1 + 4 + 1 + 4 + 1 + 1; // 15
     let master_status_worst = 1 + 3 + 1 + 1; // header + cap + "+N more" + blank
-    let rows = base + master_status_worst; // 21
-    assert!(rows <= 22, "master/slave menu is {} rows, exceeds 22", rows);
+    let master_rows = master_base + master_status_worst; // 21
+    assert!(
+        master_rows <= 22,
+        "master/slave menu (master) is {} rows, exceeds 22",
+        master_rows,
+    );
+
+    let slave_base = 3 + 1 + 6 + 1 + 4 + 1 + 1; // 17
+    let slave_status_worst = 2 + 1; // up to 2 link lines + blank
+    let slave_rows = slave_base + slave_status_worst; // 20
+    assert!(
+        slave_rows <= 22,
+        "master/slave menu (slave) is {} rows, exceeds 22",
+        slave_rows,
+    );
+    assert!(
+        slave_rows <= master_rows,
+        "the master shape must stay the worst case ({} vs {}) — otherwise the \
+         budget above is guarding the wrong screen",
+        slave_rows,
+        master_rows,
+    );
 }
 
 /// Configuration help screen (ANSI): header(3) + blank + 15 content lines +

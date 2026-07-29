@@ -832,6 +832,17 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
 /// `apply_form_post` so tests can exercise the form-to-update mapping
 /// (including the connection-breaking warning logic) without touching
 /// the global CONFIG singleton or rewriting the on-disk config file.
+/// Boolean keys the save must **not** write when the submitted role isn't
+/// master.  Their checkboxes render `disabled` outside master, and a disabled
+/// input isn't submitted — which the "absent means false" rule would otherwise
+/// read as the operator turning the setting off.
+///
+/// Three places must agree about these: the renderer that disables them, the
+/// `updateRelayFields()` JS that re-enables them when the role changes, and this
+/// skip. `test_role_gated_checkboxes_are_kept_in_sync_by_js` enforces that.
+const BOOL_KEYS_SKIPPED_OUTSIDE_MASTER: &[&str] =
+    &["master_accept_relays", "allow_relay_kermit"];
+
 fn collect_form_updates(
     fields: &HashMap<String, String>,
     old_cfg: &Config,
@@ -933,7 +944,7 @@ fn collect_form_updates(
         // it there instead of clobbering the stored value to false.  This
         // matches the GUI/telnet, which preserve it (it is inert outside master
         // anyway, and is re-defaulted on when the role is switched to master).
-        if matches!(*key, "master_accept_relays" | "allow_relay_kermit")
+        if BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(key)
             && fields.get("gateway_role").map(String::as_str) != Some("master")
         {
             continue;
@@ -1266,14 +1277,18 @@ fn master_slave_rows(cfg: &Config) -> String {
     let is_master = cfg.gateway_role == "master";
     let is_slave = cfg.gateway_role == "slave";
     // Grey out the fields that don't apply to the current role: `accept relays`
-    // is Master-only, the master host/port/user/pass are Slave-only.  The
-    // server renders the initial disabled state (correct even without JS), and
+    // and `serve Kermit to slave ports` are Master-only, the master
+    // host/port/user/pass are Slave-only.  The server renders the initial
+    // disabled state (correct even without JS), and
     // `updateRelayFields()`/`onRoleChange()` keep it in sync as the role
-    // changes.  Disabled inputs aren't submitted, and the save preserves a
-    // greyed field's stored value: the slave_* text fields because plain keys
-    // are only written when present, and `master_accept_relays` because the
-    // save skips it unless the submitted role is master (see
-    // collect_form_updates).
+    // changes.  **Every field using `dis_accept` must also be listed in
+    // `updateRelayFields`** — `allow_relay_kermit` was not, so switching the
+    // role to Master left its box greyed out and unsubmittable, and saving then
+    // stored false over a previously-enabled setting.  Disabled inputs aren't
+    // submitted, and the save preserves a greyed field's stored value: the
+    // slave_* text fields because plain keys are only written when present, and
+    // the two Master-only checkboxes because the save skips them unless the
+    // submitted role is master (see collect_form_updates).
     let dis_accept = if is_master { "" } else { "disabled" };
     let dis_slave = if is_slave { "" } else { "disabled" };
     format!(
@@ -2229,8 +2244,14 @@ function updateRelayFields() {
   if (!roleEl) return;
   var role = roleEl.value;
   var isMaster = role === 'master', isSlave = role === 'slave';
-  var accept = document.querySelector('[name=master_accept_relays]');
-  if (accept) accept.disabled = !isMaster;
+  // Both Master-only checkboxes, and both gated on the *role* alone — not on
+  // master_accept_relays. The save only skips these two when the submitted role
+  // isn't master, so disabling either on any other condition would make a
+  // greyed box submit nothing and silently store false.
+  ['master_accept_relays', 'allow_relay_kermit'].forEach(function(n) {
+    var el = document.querySelector('[name=' + n + ']');
+    if (el) el.disabled = !isMaster;
+  });
   ['slave_master_host', 'slave_master_port', 'slave_master_username', 'slave_master_password'].forEach(function(n) {
     var el = document.querySelector('[name=' + n + ']');
     if (el) el.disabled = !isSlave;
@@ -2359,6 +2380,74 @@ mod tests {
         assert_eq!(find_double_crlf(b"GET / HTTP/1.1\r\n\r\n"), Some(14));
         assert_eq!(find_double_crlf(b"no separator here"), None);
         assert_eq!(find_double_crlf(b"\r\n\r\n"), Some(0));
+    }
+
+    /// Every role-gated checkbox rendered `disabled` must also be listed in the
+    /// `updateRelayFields()` JS, and must be skipped by the save when the role
+    /// isn't master.  Those three places have to agree or the control breaks in
+    /// a way no compiler catches.
+    ///
+    /// `allow_relay_kermit` was added to the first and third but not the second:
+    /// switching the role to Master left its box greyed out — so it submitted
+    /// nothing, and since the submitted role *was* master the save no longer
+    /// skipped it, storing `false` over a previously-enabled setting. Derived
+    /// from the rendered HTML rather than hand-listed so a fourth such field
+    /// can't repeat it.
+    #[test]
+    fn test_role_gated_checkboxes_are_kept_in_sync_by_js() {
+        // Render in a NON-master role, which is when they are disabled.
+        let cfg = Config {
+            gateway_role: "slave".into(),
+            ..Config::default()
+        };
+        let html = render_main_page(&cfg, None);
+
+        // Collect the `name=` of every checkbox rendered disabled.
+        let mut disabled: Vec<String> = Vec::new();
+        for tag in html.split('<') {
+            if !tag.starts_with("input") || !tag.contains("type=\"checkbox\"") {
+                continue;
+            }
+            if !tag.contains("disabled") {
+                continue;
+            }
+            if let Some(rest) = tag.split("name=\"").nth(1) {
+                if let Some(name) = rest.split('"').next() {
+                    disabled.push(name.to_string());
+                }
+            }
+        }
+        assert!(
+            disabled.iter().any(|n| n == "master_accept_relays"),
+            "expected the Master-only relay checkboxes to render disabled for a \
+             slave; found {:?} — if the markup changed, this scan needs updating \
+             rather than deleting",
+            disabled,
+        );
+
+        // The JS list that re-enables them when the role changes to master.
+        let js = html
+            .split("function updateRelayFields()")
+            .nth(1)
+            .expect("updateRelayFields must exist");
+        let js_body = js.split("\nfunction ").next().unwrap_or(js);
+
+        for name in &disabled {
+            assert!(
+                js_body.contains(name),
+                "checkbox {name:?} renders disabled but updateRelayFields() never \
+                 re-enables it — switching the role to Master would leave it \
+                 greyed out, submitting nothing, and the save would store false",
+            );
+            // …and the save must skip it outside master, or a greyed box would
+            // clobber the stored value even before the role is switched.
+            assert!(
+                BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(&name.as_str()),
+                "checkbox {name:?} renders disabled but collect_form_updates \
+                 does not skip it outside master, so saving as a slave stores \
+                 false over the operator's setting",
+            );
+        }
     }
 
     #[test]

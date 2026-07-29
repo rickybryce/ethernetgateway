@@ -118,6 +118,25 @@ follow-up quality/stability pass of our own.
   **every** new telnet, SSH and relay session until it was restarted. The slot is
   now released by an RAII `SlotGuard`, which a branch added later cannot bypass
   and which also survives a panic mid-session.
+- **The web UI could not enable "serve Kermit to slave ports", and saving as a
+  non-master cleared it.** Its checkbox renders `disabled` outside the Master
+  role, but it was never added to the `updateRelayFields()` JS that re-enables
+  the other Master-only field when the role dropdown changes — so switching to
+  Master left the box greyed out, a disabled input submits nothing, and because
+  the *submitted* role was now master the save no longer skipped the key and
+  wrote `false` over a previously-enabled setting. The renderer, the JS and the
+  save-skip list must all agree; a new test derives the set from the rendered
+  HTML and checks the other two, so a fourth such field can't repeat it.
+- **The Master/Slave screen's row-count guard had gone stale.** It still
+  asserted the pre-`9f72b85` shape ("5 status + 3 item rows"), missing both the
+  Kermit-to-slaves status row and its `K` item row — and its "5 status" was the
+  slave shape, not the master one. The total coincidentally still came to 21, so
+  nothing overflowed a 22-row PETSCII screen, but the guard could not have
+  noticed. It now counts both role shapes, asserts the master remains the worst
+  case, and records that headroom is exactly one row.
+- **`K` (Kermit to slaves) is offered in every role but only `A` said "(master
+  only)".** The non-master view now labels both, so neither master-only toggle
+  is left unexplained.
 - **Three separate test mutexes guarded the one global `Config`.** `kermit`,
   `relay`'s onward-dial tests and `relay`'s Kermit tests each had their own lock;
   the last two also repoint `transfer_dir`, the very key the first one changes.
