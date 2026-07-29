@@ -260,6 +260,38 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **The log file now begins at the beginning.** The log path comes from the
+  config, so nothing could be written to disk until the config had been read —
+  which meant the version banner and every `load_or_create_config` diagnostic
+  (including the FATAL "exists but could not be read" refusal, and "Created
+  default configuration") were emitted to stderr only. The file always began
+  mid-story, missing exactly the startup diagnostics an operator reading a log
+  after the fact wants most. Those lines are now held in a bounded pre-arm
+  backlog and written into the file, in order, as soon as one is armed.
+  Collection stops at the first `configure_file_logging` call — that is what
+  "pre-arm" means, and it is also when we learn whether a file was wanted at all,
+  so a process running with file logging off does not accumulate lines nothing
+  will read. The window closes for good, so a restart cycle cannot replay the
+  startup block; verified with three consecutive `SIGHUP` reloads, after which
+  the banner appears exactly once and each cycle's arming line re-anchors the
+  version. The drain and the bound are both tested against owned state rather
+  than the process globals, so neither test depends on suite ordering.
+- **A master that cannot accept relays now says so wherever it is configured.**
+  The SSH relay listens on the SSH server's port, so `master_accept_relays` is
+  inert while `ssh_enabled` is false. That was warned about at startup and by a
+  popup at the moment the role was switched to Master — but neither covers the
+  case that actually stranded people: a master set up earlier whose SSH server
+  was turned off since, which fires no role-change event and whose startup
+  warning has long scrolled away. All three config surfaces now show it
+  persistently: telnet renders `Accept relays: ENABLED (SSH off!)` (the qualifier
+  rides the existing status row because that screen is at 21 of its 22 PETSCII
+  rows, and its help now names both requirements without adding a line), and the
+  GUI and web show a warning beside the checkbox. As with the popup, nothing
+  switches SSH on for you. The four-part condition is one method,
+  `Config::relays_blocked_by_ssh_off`, rather than a copy per surface — the
+  lesson from the log keys, where three copies of an "is it on?" rule did drift
+  apart. It includes the `relay_transport` check the startup warning already had,
+  which the UI copies would have omitted.
 - **A size-bounded log file that deletes its old generations.** The gateway
   wrote no log file at all: `logger::log` did `eprintln!` plus two capped
   in-memory rings, so nothing survived a restart and there were no log-related

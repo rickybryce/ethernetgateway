@@ -107,11 +107,7 @@ fn main() {
 
         // Master/Slave relay sanity checks — surface "silently armed but
         // inert" misconfigurations instead of failing quietly.
-        if cfg.gateway_role == "master"
-            && cfg.master_accept_relays
-            && cfg.relay_transport == "ssh"
-            && !cfg.ssh_enabled
-        {
+        if cfg.relays_blocked_by_ssh_off() {
             glog!("WARNING: gateway_role=master and master_accept_relays=true, but ssh_enabled=false.");
             glog!("         Relays ride the SSH server, so NO slave can connect until SSH is enabled.");
         }

@@ -1300,9 +1300,23 @@ fn master_slave_rows(cfg: &Config) -> String {
          <option value=\"master\" {ma_sel}>Master</option>\
          <option value=\"slave\" {sl_sel}>Slave</option>\
          </select> {accept_chk}</div>\
+         {ssh_warn}\
          <div class=\"row\">{host} {port}</div>\
          <div class=\"row\">{relay_kermit_chk}</div>\
          <div class=\"row\">{user} {pass}</div>",
+        // The relay listens on the SSH port, so accept-relays is inert while the
+        // SSH server is off.  The `showWarn` in onRoleChange only fires on the
+        // *switch* into Master, which misses the case that actually stops a relay
+        // working: a master set up earlier whose SSH server was turned off since.
+        // Rendered server-side so it is correct on load and without JS, and (like
+        // the popup) it never changes SSH on its own.
+        ssh_warn = if cfg.relays_blocked_by_ssh_off() {
+            "<div class=\"row\"><span class=\"warn-inline\">SSH server is off \
+             \u{2014} the relay listens on the SSH port, so no slave can \
+             connect.</span></div>"
+        } else {
+            ""
+        },
         st_sel = role_sel("standalone"),
         ma_sel = role_sel("master"),
         sl_sel = role_sel("slave"),
@@ -2046,6 +2060,10 @@ header { display: flex; align-items: baseline; justify-content: space-between; }
 h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; }
 .server-ip { color: var(--amber); font-family: monospace; font-size: 14px; }
 .hint { color: var(--amber-dim); font-style: italic; margin-top: 4px; }
+/* Inline (non-modal) warning that a setting is inert as configured.  Reuses the
+   warning-modal red so the two read as the same class of message.  Wraps rather
+   than overflowing its frame — the text is a full sentence. */
+.warn-inline { color: var(--warn-border); font-style: italic; }
 .notice {
   background: #1c3a50; color: var(--amber-bright);
   padding: 8px 12px; border: 1px solid var(--amber);
@@ -3007,6 +3025,55 @@ mod tests {
             updates.iter().find(|(k, _)| k == "log_to_file").map(|(_, v)| v.as_str()),
             Some("false"),
             "an unticked log_to_file must be saved as false"
+        );
+    }
+
+    /// A master that accepts relays while the SSH server is off cannot actually
+    /// accept anything — the relay listens on the SSH port.  The web must say so
+    /// **persistently**, not only in the `onRoleChange` popup: the case that
+    /// strands an operator is a master configured earlier whose SSH was turned
+    /// off since, which never fires a role-change event.
+    ///
+    /// Also asserts the CSS class it uses actually has a rule. `.num-tight` was
+    /// a class with no rule at all, and that was a real rendering bug.
+    #[test]
+    fn test_web_warns_persistently_when_master_relays_need_ssh() {
+        let warned = Config {
+            gateway_role: "master".into(),
+            master_accept_relays: true,
+            ssh_enabled: false,
+            ..Config::default()
+        };
+        let html = master_slave_rows(&warned);
+        assert!(
+            html.contains("warn-inline") && html.contains("SSH server is off"),
+            "no persistent SSH warning for a master with relays on and SSH off: {html}"
+        );
+
+        // And not shown when it does not apply.
+        for (role, accept, ssh) in [
+            ("master", true, true),    // SSH on — nothing wrong
+            ("master", false, false),  // not accepting relays anyway
+            ("standalone", true, false),
+            ("slave", true, false),
+        ] {
+            let cfg = Config {
+                gateway_role: role.into(),
+                master_accept_relays: accept,
+                ssh_enabled: ssh,
+                ..Config::default()
+            };
+            assert!(
+                !master_slave_rows(&cfg).contains("warn-inline"),
+                "spurious SSH warning for role={role} accept={accept} ssh={ssh}"
+            );
+        }
+
+        // The class must be styled, or the warning renders as ordinary text.
+        let page_css = render_main_page(&Config::default(), None);
+        assert!(
+            page_css.contains(".warn-inline {"),
+            ".warn-inline has no CSS rule — the warning would not look like one"
         );
     }
 

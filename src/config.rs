@@ -960,6 +960,24 @@ impl Config {
         }
     }
 
+    /// Is this a master that wants relays but cannot possibly accept one?
+    ///
+    /// The SSH relay listens on the SSH server's port, so `master_accept_relays`
+    /// is inert while `ssh_enabled` is false — a slave has nothing to connect to.
+    /// The `relay_transport` check matters because the (unimplemented) raw
+    /// transport would not ride SSH, so warning about SSH would then be wrong.
+    ///
+    /// One method rather than the condition open-coded per surface: the startup
+    /// warning and the telnet / web / GUI screens all ask this, so they cannot
+    /// disagree about when to complain.  (Learned from the log-file keys, where
+    /// three copies of an "is it on?" rule did drift apart.)
+    pub fn relays_blocked_by_ssh_off(&self) -> bool {
+        self.gateway_role == "master"
+            && self.master_accept_relays
+            && self.relay_transport == "ssh"
+            && !self.ssh_enabled
+    }
+
     /// Resolve `gui_zoom` to an absolute pixels-per-point override for the
     /// desktop GUI.  `None` means "auto" (empty or the literal `auto`) — let
     /// egui follow the monitor's own scale factor.  A parsed number is clamped
@@ -3001,6 +3019,43 @@ mod tests {
         assert_eq!(cfg.slave_master_username, "");
         assert_eq!(cfg.slave_master_password, "");
         assert_eq!(cfg.relay_transport, "ssh");
+    }
+
+    /// `relays_blocked_by_ssh_off` is the one predicate behind the startup
+    /// warning and the telnet / web / GUI notices, so pin every arm of it.
+    #[test]
+    fn test_relays_blocked_by_ssh_off() {
+        let master_ready = Config {
+            gateway_role: "master".into(),
+            master_accept_relays: true,
+            relay_transport: "ssh".into(),
+            ssh_enabled: false,
+            ..Config::default()
+        };
+        assert!(
+            master_ready.relays_blocked_by_ssh_off(),
+            "a master accepting SSH relays with SSH off is exactly the blocked case"
+        );
+
+        // Each condition on its own must clear the warning.
+        let cases = [
+            ("ssh on", Config { ssh_enabled: true, ..master_ready.clone() }),
+            ("not accepting relays", Config { master_accept_relays: false, ..master_ready.clone() }),
+            ("standalone", Config { gateway_role: "standalone".into(), ..master_ready.clone() }),
+            ("slave", Config { gateway_role: "slave".into(), ..master_ready.clone() }),
+            // The raw transport would not ride SSH, so complaining about SSH
+            // being off would be wrong — this is why the predicate checks it.
+            ("raw transport", Config { relay_transport: "raw".into(), ..master_ready.clone() }),
+        ];
+        for (why, cfg) in cases {
+            assert!(
+                !cfg.relays_blocked_by_ssh_off(),
+                "spurious blocked-relay warning for: {why}"
+            );
+        }
+
+        // A default config must never warn — a fresh install is standalone.
+        assert!(!Config::default().relays_blocked_by_ssh_off());
     }
 
     /// Invalid enum-valued relay keys fall back to their defaults rather

@@ -1182,6 +1182,22 @@ impl App {
                 "Master: serve Kermit to a slave's Kermit-mode port",
             );
         });
+        // The relay listens on the SSH port, so accept-relays is inert while the
+        // SSH server is off.  The popup above only fires on the *switch* into
+        // Master, which misses the case that actually strands an operator: a
+        // master configured earlier whose SSH server was turned off since.  This
+        // line is always shown while the combination holds, and (like the popup)
+        // never changes SSH on its own.
+        if self.cfg.relays_blocked_by_ssh_off() {
+            ui.label(
+                egui::RichText::new(
+                    "SSH server is off — the relay listens on the SSH port, so no slave can connect.",
+                )
+                .italics()
+                .small()
+                .color(WARN_BORDER),
+            );
+        }
         ui.add_enabled_ui(is_slave, |ui| {
             ui.horizontal(|ui| {
                 labeled_field(ui, "Master host:", &mut self.cfg.slave_master_host, 150.0);

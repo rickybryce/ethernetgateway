@@ -1970,6 +1970,31 @@ fn test_other_settings_menu_row_count() {
     assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
 }
 
+/// The Master/Slave screen's accept-relays row carries an inline "(SSH off!)"
+/// qualifier when the relay cannot possibly work, and it must still fit 40 cols.
+///
+/// The qualifier rides on the existing status row **on purpose**: that screen is
+/// at 21 of its 22 rows (see `test_master_slave_menu_row_count`), so a separate
+/// warning line would spend the last of the headroom. This pins the widest form
+/// so a reworded qualifier can't silently wrap on a C64.
+#[test]
+fn test_accept_relays_ssh_qualifier_fits_petscii() {
+    // The rendered row with colour stripped — what a PETSCII screen measures.
+    let widest = "  Accept relays: ENABLED (SSH off!)";
+    assert!(
+        widest.len() <= PETSCII_WIDTH,
+        "accept-relays row with the SSH qualifier is {} chars, exceeds {}",
+        widest.len(),
+        PETSCII_WIDTH,
+    );
+    // And the help says what a master actually needs, both parts of it.
+    let help = TelnetSession::master_slave_help_lines(true);
+    assert!(
+        help.iter().any(|l| l.contains("SSH")),
+        "master/slave help never mentions that the relay needs SSH: {help:?}"
+    );
+}
+
 /// Log-file submenu (Other Settings -> L) must fit the 22-row PETSCII screen.
 /// header(3) + blank + 5 values (state/file/rotate/keep/max-disk) + blank
 /// + 4 items (E/F/S/K) + blank + Q + prompt = 17, well inside the budget.

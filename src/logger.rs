@@ -44,6 +44,33 @@ fn file_sink() -> &'static Mutex<Option<FileSink>> {
     FILE_SINK.get_or_init(|| Mutex::new(None))
 }
 
+/// Lines logged before the config was read, held so they can still reach the
+/// file once one is armed.
+///
+/// The log path lives in the config, so nothing can be written to disk until the
+/// config has been loaded — but the version banner and every
+/// `load_or_create_config` diagnostic (including the FATAL "exists but could not
+/// be read" refusal) happen *before* that. Without this the file always began
+/// mid-story, missing exactly the startup diagnostics an operator reading a log
+/// after the fact wants most.
+///
+/// Collection stops at the first [`configure_file_logging`] call — that is what
+/// "pre-arm" means, and it is also when we learn whether a file was wanted at
+/// all. If one was, the backlog is written into it in order; either way the
+/// buffer is then dropped, so an operator who runs with file logging off does not
+/// accumulate lines nothing will ever read.
+static PREARM_BACKLOG: OnceLock<Mutex<Option<VecDeque<String>>>> = OnceLock::new();
+
+/// Cap on the pre-arm backlog.  Startup is a few dozen lines; this is generous
+/// enough to cover a pathological config-migration run while still bounding the
+/// memory a never-armed process holds.  Oldest lines are dropped first — the
+/// newest are the ones nearest the failure being diagnosed.
+const MAX_PREARM_LINES: usize = 500;
+
+fn prearm_backlog() -> &'static Mutex<Option<VecDeque<String>>> {
+    PREARM_BACKLOG.get_or_init(|| Mutex::new(Some(VecDeque::new())))
+}
+
 /// The hard ceiling on how much disk the log can ever occupy, in KB: the active
 /// file plus every kept generation.  Stated in KB because that is the unit the
 /// config uses, and exposed so the UIs can show the real total instead of
@@ -163,7 +190,12 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
         Some(p) => {
             if let Some(existing) = slot.as_ref() {
                 if existing.policy == p {
-                    return; // already logging exactly this way
+                    // Already logging exactly this way.  Retire the backlog
+                    // anyway: this is still a configure call, so the pre-arm
+                    // window is over and anything held has already been written
+                    // by the call that opened this sink.
+                    retire_prearm_backlog(slot.as_mut());
+                    return;
                 }
             }
             // Append rather than truncate: a restart should extend the log, not
@@ -184,6 +216,50 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
                 }
             }
         }
+    }
+    // Whatever was decided, the pre-arm window closes here: flush the backlog
+    // into the file if we have one, then drop it.
+    retire_prearm_backlog(slot.as_mut());
+}
+
+/// Write any pre-arm backlog into `sink` (if there is one) and stop collecting.
+///
+/// Called with the sink lock held, so the lock order is FILE_SINK → BACKLOG.
+/// [`log()`] never holds both at once — it finishes with the sink before touching
+/// the backlog — so there is no cycle and no deadlock.
+fn retire_prearm_backlog(sink: Option<&mut FileSink>) {
+    let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+    // `None` means the window already closed; a second configure call is a no-op.
+    let Some(lines) = held.take() else { return };
+    if let Some(sink) = sink {
+        drain_backlog_into(lines, sink);
+    }
+}
+
+/// Write `lines` into `sink`, oldest first.
+///
+/// Split out from [`retire_prearm_backlog`] so it can be tested against an owned
+/// sink and an owned deque — no process-global state, so no ordering dependence
+/// on the rest of the suite (the same reasoning as [`write_line_to`]).
+fn drain_backlog_into(lines: VecDeque<String>, sink: &mut FileSink) {
+    for line in lines {
+        // A write failure has already reported itself; stop rather than repeat
+        // the message once per backlogged line.  The next ordinary log() call
+        // disarms the sink.
+        if write_line_to(sink, &line).is_err() {
+            break;
+        }
+    }
+}
+
+/// Push `line` onto `lines`, dropping the oldest beyond `cap`.
+///
+/// The newest lines are kept because they are the ones nearest whatever failure
+/// is being diagnosed.  Free of globals so the bound is directly testable.
+fn push_bounded(lines: &mut VecDeque<String>, line: &str, cap: usize) {
+    lines.push_back(line.to_string());
+    while lines.len() > cap {
+        lines.pop_front();
     }
 }
 
@@ -224,12 +300,30 @@ fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
 }
 
 /// Append one line to the process-wide on-disk log, if one is armed.
-fn write_to_file(line: &str) {
+///
+/// Returns `false` when the line did not reach a file, so [`log()`] can hold it
+/// in the pre-arm backlog instead.  The sink lock is released before returning,
+/// which is what keeps `log()` from ever holding the sink and backlog locks at
+/// the same time (see [`retire_prearm_backlog`]).
+fn write_to_file(line: &str) -> bool {
     let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(sink) = slot.as_mut() else { return };
+    let Some(sink) = slot.as_mut() else { return false };
     if write_line_to(sink, line).is_err() {
         *slot = None;
+        return false;
     }
+    true
+}
+
+/// Hold a line that could not be written yet, while the pre-arm window is open.
+///
+/// A no-op once [`configure_file_logging`] has run: after that, a line that
+/// didn't reach a file is one the operator chose not to keep (or one that failed
+/// to write and reported itself), not one waiting for a file to exist.
+fn buffer_prearm_line(line: &str) {
+    let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(lines) = held.as_mut() else { return };
+    push_bounded(lines, line, MAX_PREARM_LINES);
 }
 
 // Deliberately NO rate limiting.  It was considered and rejected: verbose mode
@@ -252,7 +346,12 @@ pub fn init() {
 pub fn log(msg: String) {
     eprintln!("{}", msg);
     // Before the rings, so a line is on disk even if a ring lock is contended.
-    write_to_file(&msg);
+    // A line that predates the config (the version banner, the config-load
+    // diagnostics) has no file to go to yet, so it waits in the backlog and is
+    // written when one is armed.
+    if !write_to_file(&msg) {
+        buffer_prearm_line(&msg);
+    }
     // Recover from a poisoned lock rather than dropping the line: if a
     // thread panicked while holding the log mutex, logging is exactly when
     // we most want it to keep working.  Matches config.rs / gui.rs.
@@ -498,6 +597,90 @@ mod tests {
 
         drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pre-arm backlog reaches the file, in order, once one is armed.
+    ///
+    /// This is what puts the version banner and the `load_or_create_config`
+    /// diagnostics into the log: the log path comes from the config, so those
+    /// lines are all emitted before any file can be open. Uses an owned sink and
+    /// an owned deque — the real backlog is a process global whose window closes
+    /// on the first `configure_file_logging` call anywhere in the binary, so a
+    /// test driving it would depend on suite ordering.
+    #[test]
+    fn test_prearm_backlog_reaches_the_file_in_order() {
+        let dir = std::env::temp_dir().join(format!("eg_log_pre_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("p.log");
+
+        let policy = FilePolicy { path: base.clone(), max_bytes: 0, max_files: 0 };
+        let mut sink = FileSink {
+            file: open_log(&policy.path, false).unwrap(),
+            written: 0,
+            policy,
+        };
+
+        let backlog: VecDeque<String> = ["Ethernet Gateway v9.9.9", "Author: Ricky Bryce", "Created default configuration: egateway.conf"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        drain_backlog_into(backlog, &mut sink);
+        // A line logged after arming must follow the backlog, not precede it.
+        write_line_to(&mut sink, "Logging to p.log").unwrap();
+
+        let body = std::fs::read_to_string(&base).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Ethernet Gateway v9.9.9",
+                "Author: Ricky Bryce",
+                "Created default configuration: egateway.conf",
+                "Logging to p.log",
+            ],
+            "backlog must land in order, ahead of post-arm lines"
+        );
+
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The backlog is bounded, and keeps the NEWEST lines — those are the ones
+    /// nearest whatever failure is being diagnosed.  Unbounded would mean a
+    /// process that never arms a log file grows a buffer nothing will ever read.
+    #[test]
+    fn test_prearm_backlog_is_bounded_keeping_newest() {
+        let mut lines = VecDeque::new();
+        for i in 0..10 {
+            push_bounded(&mut lines, &format!("line {i}"), 4);
+        }
+        assert_eq!(lines.len(), 4, "cap not enforced");
+        assert_eq!(
+            lines.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["line 6", "line 7", "line 8", "line 9"],
+            "the oldest lines must be the ones dropped"
+        );
+        // The shipped cap is generous enough for a startup, and bounded.
+        assert!(
+            (100..=2000).contains(&MAX_PREARM_LINES),
+            "MAX_PREARM_LINES = {MAX_PREARM_LINES} is outside the sane range"
+        );
+    }
+
+    /// Retiring the backlog is idempotent and closes the window for good: a
+    /// second arm must not replay lines that were already written, which would
+    /// duplicate the whole startup block on every restart cycle.
+    #[test]
+    fn test_prearm_backlog_retires_once() {
+        let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+        // Whatever state the rest of the suite left this in, `take()` is what
+        // retire does; assert the second take yields nothing.
+        let _first = held.take();
+        assert!(
+            held.take().is_none(),
+            "the window must stay closed once retired, or a restart replays the backlog"
+        );
     }
 
     /// Disabling file logging must actually stop writing, and re-enabling must

@@ -1331,10 +1331,18 @@ impl TelnetSession {
             // Accept-relays applies to a MASTER only; grey it out in the other
             // roles so the operator isn't led to toggle a field that is inert.
             if is_master {
-                let accept_disp = if cfg.master_accept_relays {
-                    self.green("ENABLED")
-                } else {
+                // The relay listens on the SSH port, so accept-relays is inert
+                // while the SSH server is off — no slave can reach it.  The
+                // qualifier rides on this same row rather than taking one of its
+                // own: this screen sits at 21 of its 22 PETSCII rows (see
+                // test_master_slave_menu_row_count), and attaching the caveat to
+                // the field it applies to reads better than a separate line.
+                let accept_disp = if !cfg.master_accept_relays {
                     self.red("Disabled")
+                } else if cfg.relays_blocked_by_ssh_off() {
+                    format!("{} {}", self.green("ENABLED"), self.red("(SSH off!)"))
+                } else {
+                    self.green("ENABLED")
                 };
                 self.send_line(&format!("  Accept relays: {}", accept_disp))
                     .await?;
@@ -1651,7 +1659,10 @@ impl TelnetSession {
             "",
             "  Standalone: normal gateway.",
             "  Master: accepts slave relays",
-            "    (also enable Accept relays).",
+            // Both requirements on the one line: this list is already at
+            // show_help_page's 15-line page limit, and the relay listening on
+            // the SSH port is exactly the thing operators miss.
+            "    (needs Accept relays + SSH).",
             "  Slave: bridges its serial ports",
             "    to the master over SSH.",
             "",
