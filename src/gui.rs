@@ -532,6 +532,10 @@ struct App {
     serial_popup_open: [bool; 2],
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
+    /// Whether the "General — More..." popup is open.  Holds the on-disk log
+    /// settings; the frame's own three toggles are re-shown there so the popup
+    /// reads as the whole General group rather than a fragment of it.
+    general_popup_open: bool,
     /// Whether the "AI, Browser & Weather — More..." popup is open.  Holds the
     /// weather location + units (and re-shows the API key / homepage) so the
     /// main frame stays at three rows.
@@ -672,6 +676,7 @@ impl App {
             server_popup_open: false,
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
+            general_popup_open: false,
             ai_browser_popup_open: false,
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
@@ -882,14 +887,31 @@ impl App {
         });
     }
 
-    /// Render the on-disk log controls — shown only in the Server "More…"
-    /// popup, next to the other server-wide settings.  The log is written in
-    /// addition to stderr and the console buffer above; it is size-bounded and
-    /// deletes its oldest generation, so the worst-case disk figure shown here
-    /// comes from [`logger::max_disk_kb`] rather than being multiplied out again
-    /// here (one source for that arithmetic — the telnet and web UIs and the
-    /// startup banner all call it).
-    fn draw_server_logging(&mut self, ui: &mut egui::Ui) {
+    /// Contents of the "General — More" popup: the whole General group.
+    ///
+    /// Re-shows the frame's own three toggles so the popup reads as the complete
+    /// group rather than a fragment (the same thing the AI/Browser popup does
+    /// with the API key and homepage).  The web cannot do this — its page is a
+    /// single form, so a duplicated field name would submit twice — which is why
+    /// the web's General popup carries only the log settings.
+    fn draw_general_more(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+        ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
+        ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        self.draw_general_logging(ui);
+    }
+
+    /// Render the on-disk log controls, shown in the General "More…" popup.
+    ///
+    /// The log is written in addition to stderr and the console pane; it is
+    /// size-bounded and deletes its oldest generation, so the worst-case disk
+    /// figure shown here comes from [`logger::max_disk_kb`] rather than being
+    /// multiplied out again (one source for that arithmetic — the telnet and web
+    /// UIs and the startup banner all call it).
+    fn draw_general_logging(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Log File").strong().color(AMBER));
         ui.checkbox(&mut self.cfg.log_to_file, "Write the log to a file");
         ui.add_enabled_ui(self.cfg.log_to_file, |ui| {
@@ -2689,6 +2711,18 @@ impl eframe::App for App {
                                     ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
                                     ui.add_space(40.0);
                                     ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+                                    // More rides THIS row (the frame's third
+                                    // line, counting the heading) rather than
+                                    // taking a fourth: a fourth line makes this
+                                    // frame taller than the AI/Browser frame
+                                    // beside it and the two stop lining up.
+                                    // Same right_to_left layout as every other
+                                    // More button, which lays out within the
+                                    // available width — so it cannot land
+                                    // outside the frame on a resize.
+                                    if right_aligned_small_button(ui, "More...") {
+                                        self.general_popup_open = true;
+                                    }
                                 });
                                 // The CP/M emulator toggle + runaway ceiling live
                                 // in the "AI, Browser & Weather — More" popup
@@ -2819,10 +2853,6 @@ impl eframe::App for App {
                 ui.separator();
                 ui.add_space(4.0);
                 self.draw_server_more_only(ui);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                self.draw_server_logging(ui);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -2980,6 +3010,41 @@ impl eframe::App for App {
             }
         });
         self.file_transfer_popup_open = ft_open;
+
+        // General — More popup: the on-disk log, plus the frame's own three
+        // toggles re-shown so the popup covers the whole group.  Save-and-Restart
+        // rather than Save, because file logging is armed from the startup path:
+        // a changed log path or limit takes effect on the next restart.
+        let mut general_open = self.general_popup_open;
+        egui::Window::new(
+            egui::RichText::new("General — More")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut general_open)
+        .resizable(true)
+        .collapsible(false)
+        .default_width(520.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            self.draw_general_more(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Save and Restart")
+                        .strong()
+                        .size(16.0)
+                        .color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                self.save_and_restart_all();
+            }
+        });
+        self.general_popup_open = general_open;
 
         // ATDT KERMIT enable-confirmation popup.  Shown when the
         // operator first ticks the checkbox in the Serial — More popup;
@@ -3466,6 +3531,20 @@ mod tests {
         app.refresh_from_global();
         assert_eq!(app.log_max_size_kb_buf, app.cfg.log_max_size_kb.to_string());
         assert_eq!(app.log_max_files_buf, app.cfg.log_max_files.to_string());
+    }
+
+    /// Every More popup starts closed, including the new General one.  A popup
+    /// defaulting to open would cover the main screen on launch — which is
+    /// exactly what the temporary flip used to screenshot it does, so the default
+    /// is worth pinning.
+    #[test]
+    fn test_all_more_popups_start_closed() {
+        let app = test_app();
+        assert!(!app.server_popup_open, "Server");
+        assert!(!app.general_popup_open, "General");
+        assert!(!app.file_transfer_popup_open, "File Transfer");
+        assert!(!app.ai_browser_popup_open, "AI/Browser");
+        assert!(!app.serial_popup_open[0] && !app.serial_popup_open[1], "Serial A/B");
     }
 
     /// `App::new` seeds the log buffers, same as every other numeric field.

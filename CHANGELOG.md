@@ -320,11 +320,23 @@ follow-up quality/stability pass of our own.
   telnet Other Settings → `L` (a submenu, because that screen is at its 22-row
   PETSCII budget — the `U` weather-units help entry was folded onto one line to
   pay for the new `L` entry without spilling the help onto a second page), and
-  the Server **More…** panel in both the GUI and the web UI. Each shows the
+  a new **General → More…** panel in both the GUI and the web UI. Each shows the
   computed worst-case disk figure rather than leaving the operator to multiply
   it out, and says so plainly when `log_max_size_kb = 0` makes the file
   unbounded. Documented in `usermanual.html` (both key tables) and
   `web/index.html`.
+
+  The General frame had no More button before this; its button is right-justified
+  on the frame's **third line**, sharing the row with the Gateway-debug and
+  Show-GUI toggles rather than taking a fourth line — a fourth line makes the
+  frame taller than the one beside it and the two stop lining up (measured: the
+  General and Serial Port A frames are both 109 px again). It is positioned by an
+  auto margin in a wrapping flex row (web) and egui's `right_to_left` layout
+  (GUI), neither of which can push the button past its container — deliberately
+  *not* the CSS-Grid mechanism whose `1fr` column collapsed to zero and put the
+  Server frame's button outside its frame. Re-measured in headless Chrome: all
+  six More buttons stay inside their frames across 15 viewport widths from
+  1600 px down to 400 px (90 checks, 0 problems).
 - **`EGT80.COM` is pinned by hash.** It is compiled into every release with
   `include_bytes!` but no CI runner can rebuild it, so the committed binary —
   not `EGT80.Z80` — is what users actually run. The existing tests check the

@@ -1496,7 +1496,9 @@ fn frame_general(cfg: &Config) -> String {
          <span class=\"title\">General</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{v}</div>\
-         <div class=\"row\">{d}<span class=\"hspace\"></span>{g}</div>\
+         <div class=\"row\">{d}<span class=\"hspace\"></span>{g}\
+         <button type=\"button\" class=\"more row-right\" \
+         data-target=\"more-general\">More\u{2026}</button></div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         v = checkbox("verbose", "Verbose Transfer Logging", cfg.verbose),
@@ -1636,10 +1638,6 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"1.5\" {z150}>150%</option>\
          <option value=\"2.0\" {z200}>200%</option>\
          </select></div>\
-         <div class=\"row\">{logfile}</div>\
-         <div class=\"row\">{logpath}</div>\
-         <div class=\"row\">{logsize} {logkeep}</div>\
-         <div class=\"row\"><span class=\"hint\">{loghint}</span></div>\
          <div class=\"row\">{tneg} {traw}</div>\
          <div class=\"row\"><span class=\"label\">SSH Gateway Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
@@ -1657,14 +1655,6 @@ fn render_more_popups(cfg: &Config) -> String {
         z125 = zsel(1.25),
         z150 = zsel(1.5),
         z200 = zsel(2.0),
-        // On-disk log.  The worst-case disk figure comes from
-        // logger::max_disk_kb so this page doesn't re-derive the bound (the GUI,
-        // telnet and the startup banner all read it from the same place).
-        logfile = checkbox("log_to_file", "Write the log to a file", cfg.log_to_file),
-        logpath = textfield("log_file", "Log file", &cfg.log_file, false, 28),
-        logsize = numfield("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb),
-        logkeep = numfield("log_max_files", "Keep old", cfg.log_max_files),
-        loghint = html_escape(&log_hint(cfg)),
         tneg = checkbox("telnet_gateway_negotiate", "Telnet Gateway: negotiate TTYPE/NAWS", cfg.telnet_gateway_negotiate),
         traw = checkbox("telnet_gateway_raw", "Telnet Gateway: raw TCP mode", cfg.telnet_gateway_raw),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
@@ -1672,6 +1662,40 @@ fn render_more_popups(cfg: &Config) -> String {
         // Master/Slave lives under Server → More (mirrors the GUI); the modal's
         // own Save-and-Restart covers the restart a role change needs.
         master_slave = master_slave_rows(cfg),
+        save = save_button("save_and_restart", "Save and Restart", "primary"),
+    ));
+
+    // General More — the on-disk log.  Ricky moved these off the Server popup:
+    // they belong with the other General settings, not with the listeners.
+    //
+    // The three General checkboxes on the main frame (verbose, gateway debug,
+    // show GUI) are deliberately NOT repeated here.  The whole page is ONE form,
+    // so a second input with the same `name=` would submit twice and the last
+    // value would win — the defect class that let a save clobber
+    // `allow_relay_kermit`.  The GUI has no such constraint and does re-show
+    // them.  Same reasoning as the AI/Browser popup, which leaves the API key
+    // and homepage on its main frame.
+    //
+    // Save-and-Restart, not Save: file logging is armed from the startup path,
+    // so a changed path or limit takes effect on the next restart.
+    out.push_str(&format!(
+        "<div class=\"modal\" id=\"more-general\"><div class=\"modal-body\">\
+         <div class=\"modal-head\"><span class=\"title\">General \u{2014} More</span>\
+         <button type=\"button\" class=\"close\" data-close=\"more-general\">\u{00d7}</button></div>\
+         <div class=\"row\">{logfile}</div>\
+         <div class=\"row\">{logpath}</div>\
+         <div class=\"row\">{logsize} {logkeep}</div>\
+         <div class=\"row\"><span class=\"hint\">{loghint}</span></div>\
+         <div class=\"modal-foot\">{save}</div>\
+         </div></div>",
+        // The worst-case disk figure comes from logger::max_disk_kb so this page
+        // doesn't re-derive the bound (the GUI, telnet and the startup banner all
+        // read it from the same place).
+        logfile = checkbox("log_to_file", "Write the log to a file", cfg.log_to_file),
+        logpath = textfield("log_file", "Log file", &cfg.log_file, false, 28),
+        logsize = numfield("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb),
+        logkeep = numfield("log_max_files", "Keep old", cfg.log_max_files),
+        loghint = html_escape(&log_hint(cfg)),
         save = save_button("save_and_restart", "Save and Restart", "primary"),
     ));
 
@@ -2060,6 +2084,12 @@ header { display: flex; align-items: baseline; justify-content: space-between; }
 h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; }
 .server-ip { color: var(--amber); font-family: monospace; font-size: 14px; }
 .hint { color: var(--amber-dim); font-style: italic; margin-top: 4px; }
+/* Right-justify an item on its own `.row` (the General frame's More button).
+   `.row` is flex with wrap, so auto-margin pushes the button to the frame's
+   right edge and it stays inside on every width — unlike the Server frame's
+   CSS Grid, where a `1fr` button column collapsed to zero and put the button
+   outside the frame.  Guarded by test_more_buttons_cannot_leave_their_frame. */
+.row-right { margin-left: auto; }
 /* Inline (non-modal) warning that a setting is inert as configured.  Reuses the
    warning-modal red so the two read as the same class of message.  Wraps rather
    than overflowing its frame — the text is a full sentence. */
@@ -2987,17 +3017,32 @@ mod tests {
     fn test_log_keys_are_rendered_and_saved() {
         let cfg = Config::default();
         let html = render_more_popups(&cfg);
+        // The log settings live under General → More (Ricky moved them off the
+        // Server popup: they belong with the other General settings, not with
+        // the listeners).  Slice out that popup so the assertion can't pass
+        // because the field happens to exist in some other popup.
         let popup = {
-            let start = html.find("id=\"more-server\"").expect("server popup");
-            let end = html[start..].find("id=\"more-ai\"").map(|e| start + e).unwrap_or(html.len());
+            let start = html.find("id=\"more-general\"").expect("general popup");
+            let end = html[start + 1..]
+                .find("class=\"modal\"")
+                .map(|e| start + 1 + e)
+                .unwrap_or(html.len());
             &html[start..end]
         };
         for name in ["log_to_file", "log_file", "log_max_size_kb", "log_max_files"] {
             assert!(
                 popup.contains(&format!("name=\"{}\"", name)),
-                "{} has no input in the Server More popup",
+                "{} has no input in the General More popup",
                 name
             );
+        }
+        // The whole page is one form, so a field must appear exactly once —
+        // twice and the save submits both and the last value wins (the defect
+        // that let a save clobber allow_relay_kermit).
+        let page = render_main_page(&cfg, None);
+        for name in ["log_to_file", "log_file", "log_max_size_kb", "log_max_files"] {
+            let n = page.matches(&format!("name=\"{}\"", name)).count();
+            assert_eq!(n, 1, "{name} appears {n} times in the form; it must appear once");
         }
 
         // Now the save half.  log_to_file is a checkbox, so it is submitted as
@@ -3467,7 +3512,21 @@ mod tests {
             "the Server grid's More column must be minmax(max-content, 1fr); a \
              bare 1fr collapses to zero width when the content columns overflow"
         );
-        // 4. Frames are never narrower than the Server row needs.
+        // 4. The General frame's More button is right-justified by an auto
+        //    margin inside a wrapping flex `.row` — not by a grid column, which
+        //    is what collapsed to zero and put the Server button outside its
+        //    frame.  An auto margin cannot push a flex item past its container.
+        assert!(
+            html.contains(".row-right { margin-left: auto; }"),
+            ".row-right must have a real CSS rule — a class with no rule is how \
+             .num-tight silently took its width from the browser's `size=` default"
+        );
+        assert!(
+            html.contains(r#"class="more row-right" data-target="more-general""#),
+            "the General More button must use .row-right (auto-margin in a \
+             wrapping flex row), not a grid column that can collapse"
+        );
+        // 5. Frames are never narrower than the Server row needs.
         assert!(
             html.contains("repeat(auto-fit, minmax(500px, 1fr))"),
             "the frame grid's minimum must stay >= the Server row's intrinsic \
@@ -3655,16 +3714,53 @@ mod tests {
         // in a More popup silently dropped on save.  Lock it down by
         // checking that a popup id appears between <form ...> and
         // </form> in the rendered HTML.
+        // Enumerated from the rendered HTML rather than hand-listed, so a popup
+        // added later is covered automatically — this test previously checked
+        // only `more-server` and would not have noticed a new one.
         let cfg = Config::default();
         let html = render_main_page(&cfg, None);
         let form_start = html.find("<form").expect("form open tag");
         let form_end = html.find("</form>").expect("form close tag");
-        let popup_pos = html.find("id=\"more-server\"").expect("server popup id");
+
+        let mut checked = 0;
+        let mut rest = html.as_str();
+        let mut offset = 0usize;
+        while let Some(i) = rest.find("id=\"more-") {
+            let abs = offset + i;
+            let id_end = rest[i + 4..].find('"').map(|e| i + 4 + e).unwrap_or(rest.len());
+            let id = &rest[i + 4..id_end];
+            assert!(
+                abs > form_start && abs < form_end,
+                "popup {id} is outside the form (pos {abs} vs form {form_start}..{form_end}) \
+                 — its fields would silently drop on save",
+            );
+            checked += 1;
+            offset = abs + 1;
+            rest = &html[offset..];
+        }
+        // Guards the scan: a renamed id prefix would otherwise check nothing.
         assert!(
-            popup_pos > form_start && popup_pos < form_end,
-            "more-server popup is outside the form (pos {} vs form {}..{})",
-            popup_pos, form_start, form_end,
+            checked >= 5,
+            "expected at least 5 More popups (server, general, ai, xfer, 2 serial), \
+             found {checked} — has the id scheme changed?"
         );
+
+        // Every More *button* must point at a popup that exists, or clicking it
+        // throws in openModal and nothing opens.
+        let mut rest = html.as_str();
+        let mut buttons = 0;
+        while let Some(i) = rest.find("data-target=\"") {
+            let start = i + "data-target=\"".len();
+            let end = rest[start..].find('"').map(|e| start + e).unwrap();
+            let target = &rest[start..end];
+            assert!(
+                html.contains(&format!("id=\"{target}\"")),
+                "More button targets {target}, which no popup defines"
+            );
+            buttons += 1;
+            rest = &rest[end..];
+        }
+        assert!(buttons >= 5, "expected at least 5 More buttons, found {buttons}");
     }
 
     #[test]
