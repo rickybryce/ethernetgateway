@@ -11,6 +11,35 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The web left the log path/size/keep fields editable while file logging was
+  off**, where the GUI greys its equivalents. They now grey to match, and the
+  earlier decision not to do this was over-cautious: it treated the
+  `allow_relay_kermit` bug as a general hazard of greying, when in fact that bug
+  turned on `allow_relay_kermit` being a **checkbox**. An absent checkbox is the
+  canonical `false`, so a greyed box *clobbered* the stored value — whereas
+  `collect_form_updates` writes a **plain key** only when the form contains it, so
+  an unsubmitted text or numeric field leaves what is stored alone. These three
+  are plain keys and need no entry in the save's skip-list. Proven end-to-end
+  rather than argued: saving the whole form with the fields greyed leaves
+  `log_file`, `log_max_size_kb` and `log_max_files` byte-for-byte unchanged in
+  `egateway.conf`, and ticking the box then editing them writes the new values.
+  The other half of the relay bug — rendered `disabled`, never re-enabled by JS —
+  is covered by `updateLogFields()`, verified in a real browser: the fields
+  un-grey the instant the box is ticked and re-grey when it is unticked, with no
+  reload. Gated on `log_to_file` alone rather than on
+  `logger::file_logging_enabled`, because a blank path also means "off" and
+  greying the path field *because* it is blank would make it impossible to fill in
+  — the GUI gates on the same flag.
+
+  The guard that should have caught this only scanned **checkboxes**, so text
+  inputs gaining a `disabled` attribute were invisible to it. The new
+  `test_disabled_inputs_are_re_enabled_by_js` scans every disabled input, requires
+  JS that can re-enable each one, and asserts the checkbox/plain-key asymmetry in
+  both directions so the reasoning is pinned rather than remembered. Rendered in
+  the `standalone` role deliberately — a *slave* leaves the four `slave_*` fields
+  enabled, so that role would cover fewer inputs; standalone greys all nine the
+  page can ever grey. Mutation-tested: dropping a field from the JS list, and
+  inverting the gate, each fail with the right diagnosis.
 - **A new test looked like coverage and proved nothing.** The guard for "arming a
   log file must not replay the pre-arm backlog on a later restart" asserted only
   that two `Option::take` calls in a row yield `None` — which passes no matter

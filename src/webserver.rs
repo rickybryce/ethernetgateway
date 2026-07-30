@@ -1655,18 +1655,27 @@ fn render_more_popups(cfg: &Config) -> String {
     // them.  Same reasoning as the AI/Browser popup, which leaves the API key
     // and homepage on its main frame.
     //
-    // The path/size/keep fields are NOT greyed out when `log_to_file` is off,
-    // even though the GUI greys its equivalents.  That asymmetry is deliberate:
-    // a disabled input here needs the renderer, `updateRelayFields`-style JS and
-    // the save's skip-list to agree, and getting that wrong is precisely how
-    // `allow_relay_kermit` became unsettable *and* silently cleared on save.
-    // egui has no such coupling — it re-renders from live state every frame — so
-    // the GUI can grey them for free.  Leaving them enabled costs nothing: the
-    // values are stored either way and the hint below already says the log is
-    // off.  Do not "fix" this by adding `disabled` without wiring all three.
+    // The path/size/keep fields grey out when `log_to_file` is off, matching the
+    // GUI.  Two things make that safe here, and the distinction is the whole
+    // reason `allow_relay_kermit` was a data-loss bug while this is not:
+    //
+    //  * These are **plain keys**.  `collect_form_updates` writes a plain key
+    //    only when the form actually contains it (`if let Some(v) = ...`), so a
+    //    disabled — and therefore unsubmitted — field leaves the stored value
+    //    alone.  A **checkbox** is the opposite: absence is the canonical
+    //    "false", which is how a greyed box silently cleared a saved setting.
+    //    So these need no entry in `BOOL_KEYS_SKIPPED_OUTSIDE_MASTER`.
+    //  * `updateLogFields()` re-enables them the moment the box is ticked, so the
+    //    operator is never left unable to type a path.  That was the other half
+    //    of the relay bug: rendered disabled, never re-enabled by JS.
+    //
+    // Gated on `log_to_file` alone, NOT on `logger::file_logging_enabled` — a
+    // blank path also means "off", but greying the path field because it is blank
+    // would make it impossible to fill in.  The GUI gates on the same flag.
     //
     // Save-and-Restart, not Save: file logging is armed from the startup path,
     // so a changed path or limit takes effect on the next restart.
+    let dis_log = if cfg.log_to_file { "" } else { "disabled" };
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-general\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">General \u{2014} More</span>\
@@ -1681,9 +1690,9 @@ fn render_more_popups(cfg: &Config) -> String {
         // doesn't re-derive the bound (the GUI, telnet and the startup banner all
         // read it from the same place).
         logfile = checkbox("log_to_file", "Write the log to a file", cfg.log_to_file),
-        logpath = textfield("log_file", "Log file", &cfg.log_file, false, 28),
-        logsize = numfield("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb),
-        logkeep = numfield("log_max_files", "Keep old", cfg.log_max_files),
+        logpath = textfield_attr("log_file", "Log file", &cfg.log_file, false, 28, dis_log),
+        logsize = numfield_attr("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb, dis_log),
+        logkeep = numfield_attr("log_max_files", "Keep old", cfg.log_max_files, dis_log),
         loghint = html_escape(&crate::logger::log_state_hint(
             cfg,
             cfg.log_max_size_kb,
@@ -2386,6 +2395,27 @@ function onRoleChange(sel) {
   updateRelayFields();
 }
 updateRelayFields();
+// Grey the log path/size/keep fields while 'write the log to a file' is off,
+// matching the GUI.  The server renders the initial state (correct even without
+// JS); this keeps it in sync as the box is toggled.  Every field named here must
+// also be rendered with the same gate in render_more_popups, and vice versa --
+// a field rendered disabled with nothing to re-enable it is un-editable until a
+// save-and-reload, which is half of what made allow_relay_kermit a bug.
+// Enforced by test_disabled_inputs_are_re_enabled_by_js.
+var LOG_GATED = ['log_file', 'log_max_size_kb', 'log_max_files'];
+function updateLogFields() {
+  var box = document.querySelector('[name=log_to_file]');
+  if (!box) return;
+  LOG_GATED.forEach(function(n) {
+    var e = document.querySelector('[name=' + n + ']');
+    if (e) e.disabled = !box.checked;
+  });
+}
+(function() {
+  var box = document.querySelector('[name=log_to_file]');
+  if (box) box.addEventListener('change', updateLogFields);
+})();
+updateLogFields();
 function refreshLogs() {
   fetch('/logs').then(function(r) { return r.text(); }).then(function(t) {
     var el = document.getElementById('console');
@@ -2496,6 +2526,138 @@ mod tests {
         assert_eq!(find_double_crlf(b"\r\n\r\n"), Some(0));
     }
 
+    /// EVERY input rendered `disabled` must have JS that can re-enable it.
+    ///
+    /// Generalises the checkbox-only scan below, which would not have covered the
+    /// log path/size/keep fields when they gained a `disabled` gate — they are
+    /// text inputs. A field rendered disabled with nothing to re-enable it is
+    /// un-editable until a save-and-reload, which was half of what made
+    /// `allow_relay_kermit` a bug.
+    ///
+    /// The *other* half — a greyed field clobbering its stored value on save —
+    /// applies only to checkboxes, and that asymmetry is asserted here so the
+    /// reasoning is pinned rather than remembered: `collect_form_updates` writes a
+    /// plain key only when the form contains it, so an unsubmitted plain field
+    /// preserves what is stored; an absent checkbox means `false`.
+    #[test]
+    fn test_disabled_inputs_are_re_enabled_by_js() {
+        // Standalone greys the most at once: the two Master-only checkboxes AND
+        // the four slave_* fields (a *slave* leaves those four enabled, which is
+        // why this test does not use that role — it would cover fewer inputs).
+        // Plus file logging off, which greys the three log fields.
+        let cfg = Config {
+            gateway_role: "standalone".into(),
+            log_to_file: false,
+            ..Config::default()
+        };
+        let html = render_main_page(&cfg, None);
+        let script = html
+            .split("<script>")
+            .nth(1)
+            .and_then(|s| s.split("</script>").next())
+            .expect("page must have a <script> block");
+
+        let mut checked = 0;
+        for tag in html.split('<') {
+            if !tag.starts_with("input") || !tag.contains("disabled") {
+                continue;
+            }
+            let Some(name) = tag
+                .split("name=\"")
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+            else {
+                continue;
+            };
+            let is_checkbox = tag.contains("type=\"checkbox\"");
+            assert!(
+                script.contains(name),
+                "input {name:?} renders disabled but no JS mentions it, so nothing \
+                 can re-enable it — the operator is stuck until a save-and-reload"
+            );
+            if is_checkbox {
+                assert!(
+                    BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(&name),
+                    "checkbox {name:?} renders disabled but the save does not skip \
+                     it; an absent checkbox means false, so saving would clobber \
+                     the stored value"
+                );
+            } else {
+                // Stated as an assertion so the reasoning can't quietly rot: a
+                // plain key is only written when present, so it needs no skip.
+                assert!(
+                    !BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(&name),
+                    "{name:?} is not a checkbox, so it does not belong in the \
+                     bool skip-list; plain keys are preserved by absence"
+                );
+            }
+            checked += 1;
+        }
+        // Guards the scan itself: 2 relay checkboxes + 4 slave_* fields + 3 log
+        // fields are expected in this state.
+        assert!(
+            checked >= 8,
+            "expected at least 8 disabled inputs in this state, found {checked} — \
+             the scan has stopped matching the real markup"
+        );
+
+        // The log fields must be greyed here, and enabled when the box is ticked.
+        for n in ["log_file", "log_max_size_kb", "log_max_files"] {
+            assert!(
+                html.contains(&format!("name=\"{n}\" value=")) ,
+                "{n} not rendered at all"
+            );
+        }
+        let on = render_main_page(&Config { log_to_file: true, ..cfg.clone() }, None);
+        for n in ["log_file", "log_max_size_kb", "log_max_files"] {
+            let disabled_when_on = on
+                .split('<')
+                .filter(|t| t.starts_with("input") && t.contains(&format!("name=\"{n}\"")))
+                .any(|t| t.contains("disabled"));
+            assert!(
+                !disabled_when_on,
+                "{n} still renders disabled with log_to_file = true"
+            );
+        }
+    }
+
+    /// Saving while the log fields are greyed must PRESERVE them, not clear them.
+    ///
+    /// This is the property that makes greying them safe, and it is the one the
+    /// `allow_relay_kermit` bug violated — so assert it directly rather than
+    /// trusting the reasoning. A disabled input is not submitted, and a plain key
+    /// absent from the form is skipped, so the stored value survives. The
+    /// contrast is asserted too: an absent *checkbox* is a real `false`.
+    #[test]
+    fn test_saving_with_log_fields_greyed_preserves_them() {
+        let stored = Config {
+            log_to_file: true,
+            log_file: "/var/log/keepme.log".into(),
+            log_max_size_kb: 4096,
+            log_max_files: 9,
+            ..Config::default()
+        };
+        // What the browser submits with logging unticked: the checkbox is absent
+        // (that is the "false" signal) and so are the three disabled fields.
+        let form = empty_form();
+        let (updates, _) = collect_form_updates(&form, &stored);
+        let lookup = |k: &str| updates.iter().find(|(uk, _)| uk == k).map(|(_, v)| v.as_str());
+
+        assert_eq!(
+            lookup("log_to_file"),
+            Some("false"),
+            "the checkbox's absence must still turn file logging off"
+        );
+        for k in ["log_file", "log_max_size_kb", "log_max_files"] {
+            assert_eq!(
+                lookup(k),
+                None,
+                "{k} was written despite being absent from the form — a greyed \
+                 field would clobber the operator's stored value"
+            );
+        }
+    }
+
     /// Every role-gated checkbox rendered `disabled` must also be listed in the
     /// `updateRelayFields()` JS, and must be skipped by the save when the role
     /// isn't master.  Those three places have to agree or the control breaks in
@@ -2507,6 +2669,9 @@ mod tests {
     /// skipped it, storing `false` over a previously-enabled setting. Derived
     /// from the rendered HTML rather than hand-listed so a fourth such field
     /// can't repeat it.
+    ///
+    /// (See also `test_disabled_inputs_are_re_enabled_by_js`, which generalises
+    /// the scan to every disabled input, not just checkboxes.)
     #[test]
     fn test_role_gated_checkboxes_are_kept_in_sync_by_js() {
         // Render in a NON-master role, which is when they are disabled.
