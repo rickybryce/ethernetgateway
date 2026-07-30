@@ -428,6 +428,16 @@
             margin-bottom: 12px;
         }
 
+        /* Two-column variant of .compat-grid.  This was an inline
+           `style="grid-template-columns: 1fr 1fr"`, which beat the
+           max-width:900px rule below no matter what — inline styles win over
+           stylesheet rules, media query or not — so that one grid stayed at two
+           columns on a phone and pushed the page 190px wider than the screen.
+           As a class it participates in the cascade and collapses like the rest. */
+        .compat-grid-2 {
+            grid-template-columns: 1fr 1fr;
+        }
+
         .compat-card {
             border: 1px solid var(--border);
             padding: 18px 20px;
@@ -525,8 +535,29 @@
             .compat-grid { grid-template-columns: 1fr; }
             .section-title { font-size: 1em; letter-spacing: 2px; }
             .feature-table .desc-col { display: none; }
-            .logo-photo { height: 120px; }
-            .sysop-photo { height: 120px; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
             .author-block { flex-direction: column; text-align: center; }
         }
     </style>
@@ -2181,7 +2212,7 @@ relay_transport = ssh</span></code></pre>
                 <div class="section-title">References</div>
                 <p class="intro">Companion documents that go deeper than this manual.</p>
 
-                <div class="compat-grid" style="grid-template-columns: 1fr 1fr;">
+                <div class="compat-grid compat-grid-2">
                     <div class="compat-card">
                         <h3><a href="xmodemreference.html">XMODEM Protocol Reference</a></h3>
                         <p>
