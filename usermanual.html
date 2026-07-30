@@ -98,7 +98,16 @@ pre {
     border-left: 3px solid #888;
     padding: 8px 10px;
     margin: 0.5em 0 0.9em 0;
+    /* `overflow-x: auto` gives a browser a scrollbar, but print has nowhere to
+       scroll: an over-long line just ran off the page and was CLIPPED, losing the
+       end of it with nothing to show it was cut (the all-listeners-failed warning
+       sample lost its port list).  WeasyPrint says so on every build —
+       "Ignored `overflow-x: auto`, unknown property" — which is worth reading
+       rather than filtering out, as it was reporting exactly this.  Kept for the
+       HTML, where it is what you want; `pre-wrap` is what makes the PDF honest. */
     overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     page-break-inside: avoid;
     font-size: 9pt;
     line-height: 1.35;
@@ -129,7 +138,22 @@ th {
 }
 tbody tr:nth-child(odd)  { background: #ffffff; }
 tbody tr:nth-child(even) { background: #f4f4f4; }
-td code, th code { background: none; padding: 0; }
+/* Long config-key tokens must be allowed to split.  An unbreakable
+   `telnet_gateway_negotiate` sets the minimum width of the Key column; across
+   five columns that pushed the config-key appendix wider than the text block, and
+   WeasyPrint does not shrink or clip a table to fit — it overflows the page, so
+   the whole Description column ran off the right edge and rows ended mid-sentence
+   ("Outbound telnet gateway:") with nothing to show they were cut.
+   Scoped to `code` **inside cells**, and that scope is load-bearing in both
+   directions — each alternative was rendered and inspected:
+     * on every *cell* (not just `code`): the narrow Type / Default / Range
+       columns collapse to one character per line ("T y p e", "b o o l");
+     * on `td:first-child code` only: the table overflows and clips again,
+       because `password` / `transfer` / `key or password` in the Default and
+       Range columns are unbreakable too and still push it over.
+   The cost of this scope is that `password` wraps as "passwor d" in the Default
+   column, which is a fair trade for a Description column that is fully legible. */
+td code, th code { background: none; padding: 0; overflow-wrap: anywhere; }
 
 aside.note, aside.warn, aside.tip {
     border-left: 4px solid #888;
@@ -698,7 +722,7 @@ phone-number slots are covered in chapter 9.
     <tbody>
         <tr><td><code>telnet_enabled</code></td><td>bool</td><td><code>true</code></td><td>Run the telnet server. Set <code>false</code> for SSH-only mode.</td></tr>
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>Telnet listen port. Must be &ge; 1.</td></tr>
-        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>.</td></tr>
+        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>. Ignored when <code>telnet_gateway_raw</code> is set &mdash; raw TCP has no IAC layer to negotiate over &mdash; so every config surface greys this control in raw mode and leaves its stored value alone.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>Byte-level trace of SSH/Telnet gateway sessions. Toggle from the GUI/web General frame or the telnet Other / Serial Configuration menus; takes effect next session. <code>EGATEWAY_GATEWAY_DEBUG</code> env var forces it on. See §16.10.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
@@ -4505,7 +4529,7 @@ numeric values fall back to the default.
         <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td><code>key</code> or <code>password</code></td><td>Auth mode for the outbound SSH Gateway. See §10.1.</td></tr>
         <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>&ge; 1</td><td>SSH listen port.</td></tr>
         <tr><td><code>telnet_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Run the telnet server.</td></tr>
-        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: send proactive TTYPE / NAWS / DO ECHO offers.</td></tr>
+        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: send proactive TTYPE / NAWS / DO ECHO offers. Inert while <code>telnet_gateway_raw</code> is set (raw TCP carries no IAC layer); the control is greyed in that mode in every config surface, and saving then preserves rather than clears it.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: raw-TCP escape hatch, no IAC layer.</td></tr>
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>&ge; 1</td><td>Telnet listen port.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>

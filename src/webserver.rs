@@ -843,6 +843,35 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
 const BOOL_KEYS_SKIPPED_OUTSIDE_MASTER: &[&str] =
     &["master_accept_relays", "allow_relay_kermit"];
 
+/// Is this boolean key's checkbox greyed out by the state the form was submitted
+/// in — so its absence means "the browser could not submit it", not "the operator
+/// turned it off"?
+///
+/// **Only checkboxes need this.** A plain key is written only when the form
+/// contains it, so an unsubmitted text/number field preserves what is stored; an
+/// absent checkbox is an affirmative `false` and would clobber it.
+///
+/// The condition is read from the **submitted** form rather than the stored
+/// config, because the operator may have changed the gating control in the same
+/// save (switching to Master, or ticking raw-TCP mode) and it is the submitted
+/// state that decides what the browser was able to send.
+fn bool_checkbox_gated_off(key: &str, fields: &HashMap<String, String>) -> bool {
+    let submitted = |k: &str| fields.get(k).map(|v| is_truthy(v)).unwrap_or(false);
+    match key {
+        // Master-only relay gates.
+        k if BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(&k) => {
+            fields.get("gateway_role").map(String::as_str) != Some("master")
+        }
+        // Raw TCP has no IAC layer, so TTYPE/NAWS negotiation is meaningless and
+        // the checkbox is greyed — matching the GUI's `add_enabled_ui(!raw)`.
+        // Without this skip, saving in raw mode would store `false` over the
+        // operator's setting, and turning raw mode back off would silently leave
+        // negotiation disabled.
+        "telnet_gateway_negotiate" => submitted("telnet_gateway_raw"),
+        _ => false,
+    }
+}
+
 fn collect_form_updates(
     fields: &HashMap<String, String>,
     old_cfg: &Config,
@@ -940,14 +969,12 @@ fn collect_form_updates(
         "serial_a_drive_carrier", "serial_b_drive_carrier",
     ];
     for key in bool_keys {
-        // `master_accept_relays` applies only to a master.  In the other roles
-        // the web renders its checkbox disabled, so it isn't submitted — skip
-        // it there instead of clobbering the stored value to false.  This
-        // matches the GUI/telnet, which preserve it (it is inert outside master
-        // anyway, and is re-defaulted on when the role is switched to master).
-        if BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(key)
-            && fields.get("gateway_role").map(String::as_str) != Some("master")
-        {
+        // A checkbox rendered `disabled` isn't submitted, and "absent means
+        // false" would read that as the operator turning the setting off —
+        // clobbering it.  Skip those instead, preserving the stored value the way
+        // the GUI and telnet do (they leave an inert setting alone).  See
+        // `bool_checkbox_gated_off` for which keys and why.
+        if bool_checkbox_gated_off(key, fields) {
             continue;
         }
         let truthy = fields.get(*key).map(|s| is_truthy(s)).unwrap_or(false);
@@ -1634,8 +1661,24 @@ fn render_more_popups(cfg: &Config) -> String {
         z125 = zsel(1.25),
         z150 = zsel(1.5),
         z200 = zsel(2.0),
-        tneg = checkbox("telnet_gateway_negotiate", "Telnet Gateway: negotiate TTYPE/NAWS", cfg.telnet_gateway_negotiate),
-        traw = checkbox("telnet_gateway_raw", "Telnet Gateway: raw TCP mode", cfg.telnet_gateway_raw),
+        // Raw TCP has no IAC layer, so TTYPE/NAWS negotiation is meaningless
+        // there — greyed, matching the GUI's `add_enabled_ui(!raw)`.  Being a
+        // checkbox, this also needs the save to skip it (see
+        // `bool_checkbox_gated_off`) or the greyed box would store `false` over
+        // the operator's setting, and `updateGatewayFields()` to re-enable it when
+        // raw mode is unticked.
+        tneg = checkbox_with_attr(
+            "telnet_gateway_negotiate",
+            "Telnet Gateway: negotiate TTYPE/NAWS",
+            cfg.telnet_gateway_negotiate,
+            if cfg.telnet_gateway_raw { "disabled" } else { "" },
+        ),
+        traw = checkbox_with_attr(
+            "telnet_gateway_raw",
+            "Telnet Gateway: raw TCP mode",
+            cfg.telnet_gateway_raw,
+            "onchange=\"updateGatewayFields()\"",
+        ),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
         pwd_sel = if cfg.ssh_gateway_auth == "password" { "selected" } else { "" },
         // Master/Slave lives under Server → More (mirrors the GUI); the modal's
@@ -2402,6 +2445,15 @@ updateRelayFields();
 // a field rendered disabled with nothing to re-enable it is un-editable until a
 // save-and-reload, which is half of what made allow_relay_kermit a bug.
 // Enforced by test_disabled_inputs_are_re_enabled_by_js.
+// Raw TCP mode has no IAC layer, so TTYPE/NAWS negotiation is meaningless: grey
+// that box while raw is ticked, matching the GUI.  The save skips the key while
+// it is greyed (bool_checkbox_gated_off), so the operator's setting survives.
+function updateGatewayFields() {
+  var raw = document.querySelector('[name=telnet_gateway_raw]');
+  var neg = document.querySelector('[name=telnet_gateway_negotiate]');
+  if (raw && neg) neg.disabled = raw.checked;
+}
+updateGatewayFields();
 var LOG_GATED = ['log_file', 'log_max_size_kb', 'log_max_files'];
 function updateLogFields() {
   var box = document.querySelector('[name=log_to_file]');
@@ -2541,15 +2593,25 @@ mod tests {
     /// preserves what is stored; an absent checkbox means `false`.
     #[test]
     fn test_disabled_inputs_are_re_enabled_by_js() {
-        // Standalone greys the most at once: the two Master-only checkboxes AND
-        // the four slave_* fields (a *slave* leaves those four enabled, which is
-        // why this test does not use that role — it would cover fewer inputs).
-        // Plus file logging off, which greys the three log fields.
+        // A state that greys everything the page can ever grey at once:
+        //  * standalone — greys the two Master-only checkboxes AND the four
+        //    slave_* fields (a *slave* leaves those four enabled, so that role
+        //    would cover fewer inputs),
+        //  * file logging off — greys the three log fields,
+        //  * raw TCP on — greys the TTYPE/NAWS negotiate box.
         let cfg = Config {
             gateway_role: "standalone".into(),
             log_to_file: false,
+            telnet_gateway_raw: true,
             ..Config::default()
         };
+        // The form a browser submits from that page: the gating controls carry
+        // their state and every disabled input is simply absent.  Used to ask the
+        // save whether it would skip each greyed checkbox.
+        let mut submitted = empty_form();
+        submitted.insert("gateway_role".into(), "standalone".into());
+        submitted.insert("telnet_gateway_raw".into(), "true".into());
+
         let html = render_main_page(&cfg, None);
         let script = html
             .split("<script>")
@@ -2576,11 +2638,16 @@ mod tests {
                  can re-enable it — the operator is stuck until a save-and-reload"
             );
             if is_checkbox {
+                // Asks the save's own predicate rather than a hard-coded list, so
+                // a new gate is covered automatically.  An earlier version checked
+                // `BOOL_KEYS_SKIPPED_OUTSIDE_MASTER` directly and would have
+                // rejected `telnet_gateway_negotiate`, whose gate is raw-TCP mode
+                // rather than the role.
                 assert!(
-                    BOOL_KEYS_SKIPPED_OUTSIDE_MASTER.contains(&name),
+                    bool_checkbox_gated_off(name, &submitted),
                     "checkbox {name:?} renders disabled but the save does not skip \
-                     it; an absent checkbox means false, so saving would clobber \
-                     the stored value"
+                     it in that state; an absent checkbox means false, so saving \
+                     would clobber the stored value"
                 );
             } else {
                 // Stated as an assertion so the reasoning can't quietly rot: a
@@ -2619,6 +2686,43 @@ mod tests {
                 "{n} still renders disabled with log_to_file = true"
             );
         }
+    }
+
+    /// Raw-TCP mode greys the TTYPE/NAWS negotiate box, so saving in raw mode must
+    /// PRESERVE that setting rather than store `false` over it.
+    ///
+    /// This is the dangerous shape — a **checkbox**, where absence is an
+    /// affirmative `false`. Without the skip, an operator who turned raw mode on
+    /// would silently lose their negotiate setting, and turning raw mode back off
+    /// would leave negotiation unexpectedly disabled.
+    #[test]
+    fn test_saving_in_raw_mode_preserves_the_negotiate_setting() {
+        let stored = Config {
+            telnet_gateway_negotiate: true,
+            telnet_gateway_raw: true,
+            ..Config::default()
+        };
+        // Raw mode on: the negotiate box is greyed, so the browser omits it.
+        let mut form = empty_form();
+        form.insert("telnet_gateway_raw".into(), "true".into());
+        let (updates, _) = collect_form_updates(&form, &stored);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "telnet_gateway_negotiate"),
+            "the greyed negotiate box was written anyway — saving in raw mode \
+             would clobber the operator's setting"
+        );
+
+        // Raw mode off: the box is live, so absence really does mean "unticked".
+        let form_off = empty_form();
+        let (updates, _) = collect_form_updates(&form_off, &stored);
+        assert_eq!(
+            updates
+                .iter()
+                .find(|(k, _)| k == "telnet_gateway_negotiate")
+                .map(|(_, v)| v.as_str()),
+            Some("false"),
+            "outside raw mode an absent checkbox must still turn the setting off"
+        );
     }
 
     /// Saving while the log fields are greyed must PRESERVE them, not clear them.

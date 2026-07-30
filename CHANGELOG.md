@@ -11,6 +11,53 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The PDF manual was silently clipping content, and had been for some time.**
+  Adding one sentence to a config-key row exposed it: the five-column key appendix
+  is wider than the printable text block, and WeasyPrint neither shrinks nor clips
+  a table to fit — it overflows the page, so the **entire Description column ran
+  off the right edge**. Rows ended mid-sentence ("Outbound telnet gateway:") with
+  nothing to indicate anything was missing, across roughly a hundred rows. The
+  cause was long unbreakable `<code>` keys setting the column's minimum width;
+  `overflow-wrap: anywhere` on cell code lets them split so the table fits. That
+  scope is load-bearing in both directions and each alternative was rendered and
+  inspected: applied to every *cell*, the narrow Type / Default / Range columns
+  collapse to one character per line; applied only to the first cell, the table
+  overflows again because `password` / `key or password` are unbreakable too.
+- **Two `<pre>` blocks in the PDF were clipped the same way**, including the
+  all-listeners-failed sample, which lost its port list after "telnet 2323, we".
+  `pre` carried `overflow-x: auto` — a scrollbar in a browser, but print has
+  nowhere to scroll. WeasyPrint had been reporting this on every single build
+  ("Ignored `overflow-x: auto`, unknown property") and the warning was being
+  filtered out of the build output; it was describing exactly this defect.
+  `white-space: pre-wrap` now wraps those lines instead of losing them.
+
+  Both fixes verified by measurement rather than inspection: every page is
+  rendered to a bitmap and the right-most inked pixel compared against the text
+  block's edge. **106 pages, 0 overflowing** — from 2 pages plus the appendix
+  table before.
+- **The web let you tick TTYPE/NAWS negotiation while raw-TCP mode was on**, where
+  the GUI greys it — raw TCP has no IAC layer, so the setting is meaningless
+  there. Found by comparing every `add_enabled_ui` gate in the GUI against the
+  web's rendering, which left exactly this one gap once the log fields were
+  matched. This is the *dangerous* shape rather than the safe one: being a
+  **checkbox**, greying it means the browser omits it, and "absent means false"
+  would store `false` over the operator's setting — so turning raw mode on and
+  saving would silently lose it, and turning raw mode back off would leave
+  negotiation unexpectedly disabled. All three places are wired: the renderer
+  greys it, `updateGatewayFields()` re-enables it the moment raw is unticked, and
+  the save skips it while it is greyed.
+
+  The skip was a role-specific list (`BOOL_KEYS_SKIPPED_OUTSIDE_MASTER`) that
+  could not express "greyed by raw mode", so it is now a predicate,
+  `bool_checkbox_gated_off(key, submitted_form)`. It reads the condition from the
+  **submitted** form rather than the stored config, because the operator may have
+  changed the gating control in the same save and it is the submitted state that
+  decides what the browser was able to send. The general guard now asks that
+  predicate instead of the old constant — an earlier version checked the constant
+  directly and would have rejected this key, whose gate is raw mode rather than the
+  role. Verified live: greyed on load with raw on, un-greys on untick, re-greys on
+  re-tick, and a save in raw mode left `telnet_gateway_negotiate = true`
+  untouched. Mutation-tested — removing the skip fails two independent tests.
 - **The web left the log path/size/keep fields editable while file logging was
   off**, where the GUI greys its equivalents. They now grey to match, and the
   earlier decision not to do this was over-cautious: it treated the
