@@ -11,6 +11,28 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **A new test looked like coverage and proved nothing.** The guard for "arming a
+  log file must not replay the pre-arm backlog on a later restart" asserted only
+  that two `Option::take` calls in a row yield `None` — which passes no matter
+  what the production code does, and by the time it ran another test had usually
+  already closed the window, so both takes returned `None` and the assertion was
+  trivially true. Demonstrated by mutation: replacing the retire's `take()` with
+  `clone()`, so the backlog *would* be replayed into every subsequent log file,
+  left the test passing. It now drives the real thing — seed the backlog, arm one
+  file and assert the line lands, arm a second and assert it does not — and fails
+  on that mutation with a message naming the consequence.
+- **The web page still told operators the log settings were under Server.** The
+  panel moved to General in the same commit that updated `usermanual.html`, but
+  `web/index.html` was missed, so the two docs disagreed about where to find a
+  setting.
+- **The log-state hint existed twice and had already drifted.** The web and the
+  GUI each carried their own copy of the same three-branch message, and they had
+  diverged: the GUI's read "the console **above** only", which is wrong in a popup
+  — the console pane is behind it, not above it. Both now call
+  `logger::log_state_hint`, which also owns the "a blank path is off too" rule, so
+  the wording and the on/off decision cannot disagree between surfaces. The
+  numbers are arguments rather than read from the config, which is what lets the
+  GUI's figure track a half-typed field instead of lagging a keystroke behind.
 - **Two of the new logger tests raced each other through the process-global log
   sink.** `configure_file_logging` replaces one process-wide sink, and nothing
   serialised the two tests that arm it, so one test's writes landed in the

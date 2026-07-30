@@ -1594,27 +1594,6 @@ fn render_warning_popups() -> String {
     out
 }
 
-/// One-line description of what the current log settings will do on disk.
-/// Rendered under the log controls in the Server "More" popup and mirrored by
-/// the GUI's own hint.  Pure, so a test can pin the three cases.
-fn log_hint(cfg: &Config) -> String {
-    // Asks logger for the state rather than re-deriving it: an empty path is an
-    // off-switch too, and that rule belongs in one place (it was duplicated here
-    // and in the GUI, which is how the startup banner came to disagree).
-    if !crate::logger::file_logging_enabled(cfg) {
-        "Logging to stderr and the console only.".to_string()
-    } else if cfg.log_max_size_kb == 0 {
-        "No size limit \u{2014} this file can grow without bound.".to_string()
-    } else {
-        format!(
-            "At most {} KB on disk ({} plus {} rotated; the oldest is deleted).",
-            crate::logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),
-            cfg.log_file.trim(),
-            cfg.log_max_files,
-        )
-    }
-}
-
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
     // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
@@ -1676,6 +1655,16 @@ fn render_more_popups(cfg: &Config) -> String {
     // them.  Same reasoning as the AI/Browser popup, which leaves the API key
     // and homepage on its main frame.
     //
+    // The path/size/keep fields are NOT greyed out when `log_to_file` is off,
+    // even though the GUI greys its equivalents.  That asymmetry is deliberate:
+    // a disabled input here needs the renderer, `updateRelayFields`-style JS and
+    // the save's skip-list to agree, and getting that wrong is precisely how
+    // `allow_relay_kermit` became unsettable *and* silently cleared on save.
+    // egui has no such coupling — it re-renders from live state every frame — so
+    // the GUI can grey them for free.  Leaving them enabled costs nothing: the
+    // values are stored either way and the hint below already says the log is
+    // off.  Do not "fix" this by adding `disabled` without wiring all three.
+    //
     // Save-and-Restart, not Save: file logging is armed from the startup path,
     // so a changed path or limit takes effect on the next restart.
     out.push_str(&format!(
@@ -1695,7 +1684,11 @@ fn render_more_popups(cfg: &Config) -> String {
         logpath = textfield("log_file", "Log file", &cfg.log_file, false, 28),
         logsize = numfield("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb),
         logkeep = numfield("log_max_files", "Keep old", cfg.log_max_files),
-        loghint = html_escape(&log_hint(cfg)),
+        loghint = html_escape(&crate::logger::log_state_hint(
+            cfg,
+            cfg.log_max_size_kb,
+            cfg.log_max_files,
+        )),
         save = save_button("save_and_restart", "Save and Restart", "primary"),
     ));
 
@@ -3120,51 +3113,6 @@ mod tests {
             page_css.contains(".warn-inline {"),
             ".warn-inline has no CSS rule — the warning would not look like one"
         );
-    }
-
-    /// The hint under the log controls describes what the settings actually do.
-    /// Its three branches are the ones an operator can reach: off, no size
-    /// limit, and bounded — and the bounded figure must come from
-    /// `logger::max_disk_kb` rather than being re-derived here.
-    #[test]
-    fn test_log_hint_covers_each_state() {
-        let mut cfg = Config { log_to_file: false, ..Config::default() };
-        assert!(log_hint(&cfg).contains("stderr"), "off state: {}", log_hint(&cfg));
-
-        cfg.log_to_file = true;
-        cfg.log_max_size_kb = 0;
-        let h = log_hint(&cfg);
-        assert!(h.contains("without bound"), "unbounded state: {}", h);
-
-        // An empty (or whitespace) path is an off-switch of its own — the policy
-        // builder returns None for it — so the hint must not quote a bound for a
-        // file that will never be opened.
-        for blank in ["", "   "] {
-            let blanked = Config { log_file: blank.into(), ..cfg.clone() };
-            let h = log_hint(&blanked);
-            assert!(
-                h.contains("stderr"),
-                "an empty log_file must read as off, got: {}",
-                h
-            );
-            assert!(
-                crate::logger::file_policy_from(&blanked).is_none(),
-                "hint and policy must agree that a blank path means off"
-            );
-        }
-
-        cfg.log_max_size_kb = 1024;
-        cfg.log_max_files = 5;
-        cfg.log_file = "eg.log".into();
-        let h = log_hint(&cfg);
-        let expected = crate::logger::max_disk_kb(1024, 5);
-        assert!(
-            h.contains(&format!("{} KB", expected)),
-            "bounded hint should state the {} KB bound: {}",
-            expected,
-            h
-        );
-        assert!(h.contains("eg.log"), "bounded hint should name the file: {}", h);
     }
 
     #[test]

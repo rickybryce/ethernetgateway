@@ -103,6 +103,32 @@ pub fn file_logging_enabled(cfg: &crate::config::Config) -> bool {
     file_policy_from(cfg).is_some()
 }
 
+/// One-line description of what the current log settings will do on disk.
+///
+/// Shown under the log controls in the web and GUI config panels.  Shared rather
+/// than written once per surface: the two copies this replaced had already
+/// drifted ("the console above only" vs "the console only"), and "above" was
+/// wrong in a popup anyway — the console pane is behind it, not above it.
+///
+/// `size_kb`/`files` are passed in rather than read from `cfg` because the GUI
+/// edits them as text: its fields sync on the following frame, so reading `cfg`
+/// there would show a figure one keystroke stale.  The on/off decision still
+/// comes from [`file_logging_enabled`], so it cannot disagree with the rest.
+pub fn log_state_hint(cfg: &crate::config::Config, size_kb: u64, files: u32) -> String {
+    if !file_logging_enabled(cfg) {
+        "Logging to stderr and the console only.".to_string()
+    } else if size_kb == 0 {
+        "No size limit \u{2014} this file can grow without bound.".to_string()
+    } else {
+        format!(
+            "At most {} KB on disk ({} plus {} rotated; the oldest is deleted).",
+            max_disk_kb(size_kb, files),
+            cfg.log_file.trim(),
+            files,
+        )
+    }
+}
+
 /// Path of rotated generation `n` (1 = most recent).  `foo.log` → `foo.log.1`.
 fn rotated_path(base: &Path, n: u32) -> PathBuf {
     let mut s = base.as_os_str().to_os_string();
@@ -668,19 +694,58 @@ mod tests {
         );
     }
 
-    /// Retiring the backlog is idempotent and closes the window for good: a
-    /// second arm must not replay lines that were already written, which would
-    /// duplicate the whole startup block on every restart cycle.
+    /// Arming a file flushes the backlog into it — and arming a *second* file
+    /// must NOT replay those lines, or every restart cycle duplicates the whole
+    /// startup block into the log.
+    ///
+    /// This drives the real globals (that is the property under test), so it
+    /// takes the guard.  An earlier version of this test asserted only that two
+    /// `Option::take`s in a row yield `None`, which passes no matter what the
+    /// production code does — by the time it ran, another test had usually
+    /// already closed the window, so both takes returned `None` and the
+    /// assertion was trivially true.  Mutation-tested: replacing retire's
+    /// `take()` with `clone()` fails this version and passed the old one.
     #[test]
-    fn test_prearm_backlog_retires_once() {
-        let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
-        // Whatever state the rest of the suite left this in, `take()` is what
-        // retire does; assert the second take yields nothing.
-        let _first = held.take();
+    fn test_prearm_backlog_is_flushed_once_then_never_replayed() {
+        let _guard = FileLogTestGuard::new();
+        let dir = std::env::temp_dir().join(format!("eg_log_once_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("one.log");
+        let second = dir.join("two.log");
+
+        // The guard's own configure(None) closed the window, so re-open it and
+        // seed a line the way a pre-config log() call would have.
+        {
+            let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+            let mut q = VecDeque::new();
+            q.push_back("PREARM_SENTINEL banner line".to_string());
+            *held = Some(q);
+        }
+
+        let policy = |p: &std::path::Path| FilePolicy {
+            path: p.to_path_buf(),
+            max_bytes: 0,
+            max_files: 0,
+        };
+
+        configure_file_logging(Some(policy(&first)));
+        let body = std::fs::read_to_string(&first).unwrap();
         assert!(
-            held.take().is_none(),
-            "the window must stay closed once retired, or a restart replays the backlog"
+            body.contains("PREARM_SENTINEL"),
+            "arming a file must flush the pre-arm backlog into it; got {body:?}"
         );
+
+        // A later arm (a restart cycle, or a changed log path) must start clean.
+        configure_file_logging(Some(policy(&second)));
+        let body2 = std::fs::read_to_string(&second).unwrap();
+        assert!(
+            !body2.contains("PREARM_SENTINEL"),
+            "the backlog was replayed into a second file — every restart would \
+             duplicate the startup block; got {body2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Disabling file logging must actually stop writing, and re-enabling must
@@ -729,6 +794,67 @@ mod tests {
         cfg.log_to_file = true;
         cfg.log_file = "   ".into();
         assert!(file_policy_from(&cfg).is_none(), "blank path must yield no policy");
+    }
+
+    /// The hint shown under the log controls in the web and GUI panels.  Its
+    /// three branches are the ones an operator can reach — off, no size limit,
+    /// bounded — and the bounded figure must come from `max_disk_kb` rather than
+    /// being multiplied out again.  Lives here because both surfaces share it;
+    /// two copies had already drifted in wording before this was consolidated.
+    #[test]
+    fn test_log_state_hint_covers_each_state() {
+        let cfg = crate::config::Config::default();
+
+        // Off, by the flag.
+        let off = crate::config::Config { log_to_file: false, ..cfg.clone() };
+        assert!(
+            log_state_hint(&off, 1024, 5).contains("stderr"),
+            "off state: {}",
+            log_state_hint(&off, 1024, 5)
+        );
+
+        // Off, by a blank (or whitespace-only) path — an off-switch of its own.
+        for blank in ["", "   "] {
+            let blanked = crate::config::Config {
+                log_to_file: true,
+                log_file: blank.into(),
+                ..cfg.clone()
+            };
+            let h = log_state_hint(&blanked, 1024, 5);
+            assert!(h.contains("stderr"), "a blank log_file must read as off: {h}");
+            assert!(
+                file_policy_from(&blanked).is_none(),
+                "hint and policy must agree that a blank path means off"
+            );
+        }
+
+        let on = crate::config::Config {
+            log_to_file: true,
+            log_file: "eg.log".into(),
+            ..cfg.clone()
+        };
+
+        // No size limit.
+        let h = log_state_hint(&on, 0, 5);
+        assert!(h.contains("without bound"), "unbounded state: {h}");
+
+        // Bounded — states the real total and names the file.
+        let h = log_state_hint(&on, 1024, 5);
+        let expected = max_disk_kb(1024, 5);
+        assert!(
+            h.contains(&format!("{expected} KB")),
+            "bounded hint should state the {expected} KB bound: {h}"
+        );
+        assert!(h.contains("eg.log"), "bounded hint should name the file: {h}");
+
+        // The numbers come from the ARGUMENTS, not from cfg — that is what lets
+        // the GUI show a figure that tracks a half-typed field instead of
+        // lagging a keystroke behind.
+        let h = log_state_hint(&on, 512, 3);
+        assert!(
+            h.contains(&format!("{} KB", max_disk_kb(512, 3))),
+            "hint must use the passed-in numbers, not cfg's: {h}"
+        );
     }
 
     /// `file_logging_enabled` must agree with `file_policy_from` on every state.
