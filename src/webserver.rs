@@ -2042,18 +2042,14 @@ fn checkbox_with_attr(name: &str, label: &str, checked: bool, attr: &str) -> Str
     )
 }
 
+/// Narrowest a numeric box is allowed to get, in characters.
+///
+/// Five digits covers nearly every setting we expose, and keeping the boxes
+/// tight is deliberate — frames shouldn't waste width on empty input padding.
+const NUM_FIELD_MIN_CH: usize = 5;
+
 fn numfield<T: std::fmt::Display>(name: &str, label: &str, value: T) -> String {
-    // size=5 fits every numeric setting we currently expose (max
-    // observed is kermit_max_packet_length 4096, 4 digits) and
-    // tightens the visual footprint so frames don't waste width on
-    // empty input padding — matches the user's directive that text
-    // entry boxes shouldn't reserve more characters than needed.
-    format!(
-        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"5\" class=\"num-tight\">",
-        name = name,
-        label = html_escape(label),
-        value = value,
-    )
+    numfield_attr(name, label, value, "")
 }
 
 fn textfield(name: &str, label: &str, value: &str, password: bool, size: usize) -> String {
@@ -2083,12 +2079,33 @@ fn textfield_attr(
 }
 
 /// Like [`numfield`] but with an extra attribute string (e.g. `"disabled"`).
+///
+/// The box grows to fit values longer than [`NUM_FIELD_MIN_CH`] digits.  The
+/// fixed five-digit width clipped `log_max_size_kb`, which is a `u64` an
+/// operator can legitimately set to a 6- or 7-digit KB figure: the value was
+/// intact and the input scrolled, but the field showed a truncated number,
+/// which reads as data loss.  Sizing from the value itself rather than adding a
+/// second CSS class for one key keeps it a single rule — nothing to keep in
+/// sync, and any other setting that grows past five digits is covered too.
 fn numfield_attr<T: std::fmt::Display>(name: &str, label: &str, value: T, attr: &str) -> String {
+    let value = value.to_string();
+    let ch = value.chars().count().max(NUM_FIELD_MIN_CH);
+    // `.num-tight` already sizes the common case; only a wider box needs an
+    // override, so the markup stays clean for the ~60 fields that don't.
+    // The `+ 14px` matches the class: 6px padding each side plus the 1px
+    // borders, which the width must include under border-box.
+    let style = if ch > NUM_FIELD_MIN_CH {
+        format!(" style=\"width: calc({ch}ch + 14px)\"")
+    } else {
+        String::new()
+    };
     format!(
-        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"5\" class=\"num-tight\" {attr}>",
+        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"{ch}\" class=\"num-tight\"{style} {attr}>",
         name = name,
         label = html_escape(label),
         value = value,
+        ch = ch,
+        style = style,
         attr = attr,
     )
 }
@@ -2253,7 +2270,10 @@ button.refresh {
    in the resolved font, so five digits always fit whichever font that is (the
    widest value we expose is kermit_max_packet_length, 4 digits); the 14px is
    the horizontal padding (6px each side) plus the 1px borders, which width
-   has to include because box-sizing is border-box. */
+   has to include because box-sizing is border-box.
+   A value too long for five digits (log_max_size_kb is a u64 in KB) gets an
+   inline width from numfield_attr, computed the same way, rather than a second
+   class here that would have to be assigned key by key. */
 .num-tight { width: calc(5ch + 14px); }
 /* Server frame's listener block uses CSS Grid so the two Port:
    colons in each column align between rows (and the port inputs
@@ -4000,6 +4020,48 @@ mod tests {
         assert!(
             html.contains("notice="),
             "URL-strip guard should still mention notice= in the check"
+        );
+    }
+
+    /// A numeric box must be wide enough for the value it is showing.
+    ///
+    /// The fixed five-digit width clipped `log_max_size_kb` — a `u64` in KB, so
+    /// a 1 GB cap is seven digits.  The value was never lost (the input
+    /// scrolls), but a config screen that displays `104857` where the setting
+    /// says `1048576` reads as data loss.  Checked here rather than by eye
+    /// because the visible width comes from the CSS `calc`, not from `size`.
+    #[test]
+    fn test_numeric_fields_grow_to_fit_long_values() {
+        // The common case is unchanged: tight box, no inline override.
+        let small = numfield("idle_timeout_secs", "Idle (s)", 300u64);
+        assert!(small.contains("size=\"5\""), "short values keep the 5-digit box: {small}");
+        assert!(
+            !small.contains("style="),
+            "a value that fits must not carry an inline width: {small}"
+        );
+
+        // Seven digits: both `size` and the rendered width must follow.
+        let big = numfield("log_max_size_kb", "Rotate at (KB)", 1_048_576u64);
+        assert!(big.contains("size=\"7\""), "{big}");
+        assert!(
+            big.contains("width: calc(7ch + 14px)"),
+            "the visible width comes from the calc, so `size` alone is not enough: {big}"
+        );
+
+        // The `_attr` form is the same rule — the log fields go through it,
+        // greyed, and are exactly the ones that overflow.
+        let greyed = numfield_attr("log_max_size_kb", "Rotate at (KB)", 1_048_576u64, "disabled");
+        assert!(
+            greyed.contains("width: calc(7ch + 14px)") && greyed.contains("disabled"),
+            "greying a field must not cost it its width: {greyed}"
+        );
+
+        // And it reaches the real page, not just the helper.
+        let cfg = Config { log_max_size_kb: 1_048_576, ..Config::default() };
+        let page = render_main_page(&cfg, None);
+        assert!(
+            page.contains("name=\"log_max_size_kb\" value=\"1048576\" size=\"7\""),
+            "the rendered config page still clips the log size field"
         );
     }
 
