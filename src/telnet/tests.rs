@@ -2362,7 +2362,15 @@ fn test_numeric_confirmation_lines_splits_without_losing_anything() {
 /// print), so the assertion tracks a caller that raises its ceiling too.
 #[test]
 fn test_numeric_confirmations_fit_every_screen() {
-    let src = include_str!("config_ui.rs");
+    // Normalised to LF first.  A Windows checkout has CRLF endings, and the
+    // `)\n` anchor below is a *trailing* newline match, so it finds nothing
+    // there: the "call" then ran to the end of the file, the cap it parsed came
+    // from an unrelated setting, and this test failed on windows-latest only —
+    // reporting `kermit_idle_timeout` with a u64::MAX ceiling it never has.
+    // (config.rs's scan is safe with a bare `\n` anchor because a *leading*
+    // newline still matches inside `\r\n`; only a trailing one breaks.)
+    let src = include_str!("config_ui.rs").replace("\r\n", "\n");
+    let src = src.as_str();
     // .xmodem_set_numeric( "Label", "key", <current>, <min>, <max>, "unit", )
     let mut checked = 0;
     for (idx, _) in src.match_indices("self.xmodem_set_numeric(") {
