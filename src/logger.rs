@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const MAX_LINES: usize = 2000;
 
@@ -38,10 +39,66 @@ struct FileSink {
     written: u64,
 }
 
-static FILE_SINK: OnceLock<Mutex<Option<FileSink>>> = OnceLock::new();
+/// What the on-disk log is doing right now.
+///
+/// The `Paused` state is the whole point of this enum.  A write error used to
+/// throw the sink away, which meant one full disk, one unplugged USB stick or one
+/// momentary NFS hiccup silently stopped file logging **for the life of the
+/// process** — the operator only found out later, from a log that stops
+/// mid-sentence.  Keeping the policy lets logging re-arm itself once the
+/// underlying problem clears.
+enum Sink {
+    /// No log file wanted (or none could ever be opened).
+    Off,
+    /// Writing normally.
+    Armed(FileSink),
+    /// A write (or the initial open) failed.  The file is closed, but the policy
+    /// is remembered so it can be reopened at `retry_at`.  `dropped` counts the
+    /// lines that did not reach disk, and is reported in the file itself when it
+    /// comes back, so the gap is visible to whoever reads the log later.
+    Paused {
+        policy: FilePolicy,
+        retry_at: Instant,
+        backoff: Duration,
+        dropped: u64,
+    },
+}
 
-fn file_sink() -> &'static Mutex<Option<FileSink>> {
-    FILE_SINK.get_or_init(|| Mutex::new(None))
+impl Sink {
+    /// The policy currently in force, whether armed or paused.  Used by
+    /// [`configure_file_logging`] so a re-configure with unchanged settings does
+    /// not reset a pause's backoff.
+    fn policy(&self) -> Option<&FilePolicy> {
+        match self {
+            Sink::Off => None,
+            Sink::Armed(s) => Some(&s.policy),
+            Sink::Paused { policy, .. } => Some(policy),
+        }
+    }
+}
+
+/// How long to wait before the first attempt to reopen a failed log, and the
+/// ceiling the delay doubles up to.
+///
+/// Deliberately not a per-line retry: on a full disk that would mean a failed
+/// `write` syscall (and a stderr line) for every message the gateway emits, which
+/// is the reason retrying was rejected the first time round.  A doubling backoff
+/// costs at most one reopen attempt every 30 s at first and every 5 min once a
+/// failure looks permanent, while still recovering within half a minute from the
+/// transient case that actually happens.
+const RETRY_BACKOFF_START: Duration = Duration::from_secs(30);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// The next delay in the backoff sequence: double, capped.  Pure, so the
+/// sequence is testable without waiting on a clock.
+fn next_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(RETRY_BACKOFF_MAX)
+}
+
+static FILE_SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
+
+fn file_sink() -> &'static Mutex<Sink> {
+    FILE_SINK.get_or_init(|| Mutex::new(Sink::Off))
 }
 
 /// Lines logged before the config was read, held so they can still reach the
@@ -146,6 +203,13 @@ fn should_rotate(written: u64, next_len: u64, max_bytes: u64) -> bool {
 
 /// Shift the generations down and delete the oldest, then reopen `path` empty.
 ///
+/// **A failed rename aborts the rotation** rather than carrying on to truncate.
+/// Truncating after a rename failure destroyed the very content the rename was
+/// supposed to preserve — a read-only directory, a cross-device `.1`, or a
+/// generation held open by another process turned "rotate the log" into "delete
+/// the log".  Returning the error instead pauses file logging (see [`Sink`]),
+/// which loses new lines for a while but never loses lines already on disk.
+///
 /// Errors go to stderr directly, **never** through [`log()`] — this runs while
 /// the sink mutex is held, so logging here would deadlock.
 fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
@@ -166,7 +230,15 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
         if from.exists() {
             let to = rotated_path(&policy.path, n + 1);
             if let Err(e) = std::fs::rename(&from, &to) {
-                eprintln!("Log rotation: could not rename {}: {}", from.display(), e);
+                // Abort: the next rename in the sequence would overwrite the
+                // generation this one failed to move out of the way.
+                eprintln!(
+                    "Log rotation: could not rename {}: {} — rotation abandoned, the \
+                     current log is left intact.",
+                    from.display(),
+                    e
+                );
+                return Err(e);
             }
         }
     }
@@ -174,10 +246,12 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
         let to = rotated_path(&policy.path, 1);
         if let Err(e) = std::fs::rename(&policy.path, &to) {
             eprintln!(
-                "Log rotation: could not rename {}: {}",
+                "Log rotation: could not rename {}: {} — keeping the current log rather \
+                 than truncating it.",
                 policy.path.display(),
                 e
             );
+            return Err(e);
         }
     }
     open_log(&policy.path, true)
@@ -211,41 +285,51 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
     let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
     match policy {
         None => {
-            *slot = None;
+            *slot = Sink::Off;
         }
         Some(p) => {
-            if let Some(existing) = slot.as_ref() {
-                if existing.policy == p {
-                    // Already logging exactly this way.  Retire the backlog
-                    // anyway: this is still a configure call, so the pre-arm
-                    // window is over and anything held has already been written
-                    // by the call that opened this sink.
-                    retire_prearm_backlog(slot.as_mut());
-                    return;
-                }
+            if slot.policy() == Some(&p) {
+                // Already logging exactly this way (or already retrying exactly
+                // this way — a re-configure must not reset a pause's backoff, or
+                // a config-saving operator would drive a full disk's retries
+                // back down to every 30 s).  Retire the backlog anyway: this is
+                // still a configure call, so the pre-arm window is over and
+                // anything held has already been written by the call that opened
+                // this sink.
+                retire_prearm_backlog(&mut slot);
+                return;
             }
             // Append rather than truncate: a restart should extend the log, not
             // discard what the previous run recorded.
             match open_log(&p.path, false) {
                 Ok(file) => {
                     let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-                    *slot = Some(FileSink { policy: p, file, written });
+                    *slot = Sink::Armed(FileSink { policy: p, file, written });
                 }
                 Err(e) => {
-                    // stderr, not log(): we hold the sink mutex.
+                    // stderr, not log(): we hold the sink mutex.  Paused rather
+                    // than off — a log directory that does not exist yet, or a
+                    // volume that has not finished mounting at boot, is exactly
+                    // the case that fixes itself a minute later.
                     eprintln!(
-                        "Warning: could not open log file {}: {} — file logging disabled.",
+                        "Warning: could not open log file {}: {} — retrying every {}s.",
                         p.path.display(),
-                        e
+                        e,
+                        RETRY_BACKOFF_START.as_secs()
                     );
-                    *slot = None;
+                    *slot = Sink::Paused {
+                        policy: p,
+                        retry_at: Instant::now() + RETRY_BACKOFF_START,
+                        backoff: RETRY_BACKOFF_START,
+                        dropped: 0,
+                    };
                 }
             }
         }
     }
     // Whatever was decided, the pre-arm window closes here: flush the backlog
     // into the file if we have one, then drop it.
-    retire_prearm_backlog(slot.as_mut());
+    retire_prearm_backlog(&mut slot);
 }
 
 /// Write any pre-arm backlog into `sink` (if there is one) and stop collecting.
@@ -253,11 +337,14 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
 /// Called with the sink lock held, so the lock order is FILE_SINK → BACKLOG.
 /// [`log()`] never holds both at once — it finishes with the sink before touching
 /// the backlog — so there is no cycle and no deadlock.
-fn retire_prearm_backlog(sink: Option<&mut FileSink>) {
+fn retire_prearm_backlog(slot: &mut Sink) {
     let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
     // `None` means the window already closed; a second configure call is a no-op.
     let Some(lines) = held.take() else { return };
-    if let Some(sink) = sink {
+    // A paused sink has no open file, so the backlog is dropped rather than
+    // queued: those lines are already on stderr, and holding them for a retry
+    // that may never come is the unbounded buffer this cap exists to avoid.
+    if let Sink::Armed(sink) = slot {
         drain_backlog_into(lines, sink);
     }
 }
@@ -299,15 +386,15 @@ fn push_bounded(lines: &mut VecDeque<String>, line: &str, cap: usize) {
 /// An owned sink has no such coupling.
 ///
 /// Returns `Err` if the line could not be written, in which case the caller is
-/// expected to disarm — a sink that cannot be written to is not usable.
+/// expected to pause the sink — a file that cannot be written to is not usable
+/// right now, though it may well be again shortly (see [`Sink::Paused`]).
 fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
     let bytes = line.len() as u64 + 1; // + newline
     if should_rotate(sink.written, bytes, sink.policy.max_bytes) {
         // Errors go to stderr, never through log(): the caller holds the sink
-        // mutex, so logging here would deadlock.
-        let f = rotate(&sink.policy).inspect_err(|e| {
-            eprintln!("Log rotation failed: {} — file logging disabled.", e);
-        })?;
+        // mutex, so logging here would deadlock.  `rotate` has already said which
+        // step failed and that nothing was truncated.
+        let f = rotate(&sink.policy)?;
         sink.file = f;
         sink.written = 0;
     }
@@ -318,9 +405,7 @@ fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
     sink.file
         .write_all(line.as_bytes())
         .and_then(|()| sink.file.write_all(b"\n"))
-        .inspect_err(|e| {
-            eprintln!("Log write failed: {} — file logging disabled.", e);
-        })?;
+        .inspect_err(|e| eprintln!("Log write failed: {}", e))?;
     sink.written = sink.written.saturating_add(bytes);
     Ok(())
 }
@@ -333,12 +418,88 @@ fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
 /// the same time (see [`retire_prearm_backlog`]).
 fn write_to_file(line: &str) -> bool {
     let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(sink) = slot.as_mut() else { return false };
-    if write_line_to(sink, line).is_err() {
-        *slot = None;
-        return false;
+    write_to_file_at(&mut slot, line, Instant::now())
+}
+
+/// The whole write-and-recover state machine, over a caller-owned [`Sink`] and an
+/// explicit `now`.
+///
+/// Split out from [`write_to_file`] for the same two reasons as
+/// [`write_line_to`]: the global sink is shared with every other test in the
+/// binary, and the clock is not something a test should be made to wait on.
+/// `now` is passed in so the backoff can be driven forward instantly.
+fn write_to_file_at(slot: &mut Sink, line: &str, now: Instant) -> bool {
+    match std::mem::replace(slot, Sink::Off) {
+        Sink::Off => false,
+        Sink::Armed(mut sink) => {
+            if write_line_to(&mut sink, line).is_ok() {
+                *slot = Sink::Armed(sink);
+                return true;
+            }
+            // Said once, here — not once per line.  A failing disk that printed
+            // this for every message would bury the reason it started.
+            eprintln!(
+                "File logging paused after the error above; retrying in {}s.",
+                RETRY_BACKOFF_START.as_secs()
+            );
+            *slot = Sink::Paused {
+                policy: sink.policy,
+                retry_at: now + RETRY_BACKOFF_START,
+                backoff: RETRY_BACKOFF_START,
+                dropped: 1,
+            };
+            false
+        }
+        Sink::Paused { policy, retry_at, backoff, dropped } => {
+            if now < retry_at {
+                // Not due yet: count the line and stay quiet.  This is the branch
+                // that runs for all but a handful of lines during an outage, so
+                // it must do no I/O at all.
+                *slot = Sink::Paused { policy, retry_at, backoff, dropped: dropped.saturating_add(1) };
+                return false;
+            }
+            match resume(&policy, dropped, line) {
+                Some(sink) => {
+                    eprintln!(
+                        "File logging resumed; {} line(s) were lost while it was paused.",
+                        dropped
+                    );
+                    *slot = Sink::Armed(sink);
+                    true
+                }
+                None => {
+                    // Still broken: wait longer before the next attempt, so a
+                    // permanent failure settles into one reopen every 5 min.
+                    let backoff = next_backoff(backoff);
+                    *slot = Sink::Paused {
+                        policy,
+                        backoff,
+                        retry_at: now + backoff,
+                        dropped: dropped.saturating_add(1),
+                    };
+                    false
+                }
+            }
+        }
     }
-    true
+}
+
+/// Try to bring a paused log back: reopen it, record the gap, then write `line`.
+///
+/// The gap notice goes in the **file**, not just on stderr, because the file is
+/// what an operator reads afterwards — and a log that resumes with no mention of
+/// the outage reads as a quiet period rather than as missing data.
+fn resume(policy: &FilePolicy, dropped: u64, line: &str) -> Option<FileSink> {
+    let file = open_log(&policy.path, false).ok()?;
+    let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut sink = FileSink { policy: policy.clone(), file, written };
+    let notice = format!(
+        "--- file logging resumed after an error; {} line(s) were not written ---",
+        dropped
+    );
+    write_line_to(&mut sink, &notice).ok()?;
+    write_line_to(&mut sink, line).ok()?;
+    Some(sink)
 }
 
 /// Hold a line that could not be written yet, while the pre-arm window is open.
@@ -623,6 +784,213 @@ mod tests {
 
         drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rotation that cannot rename must leave the active log **alone**.
+    ///
+    /// This was a real data-loss path: `rotate` warned about the failed rename
+    /// and then reopened the active file with `truncate(true)` anyway, so a log
+    /// that could not be moved aside was emptied instead of rotated — the one
+    /// outcome rotation exists to prevent.
+    ///
+    /// The rename is made to fail portably by putting a **non-empty directory**
+    /// where generation `.1` belongs: `remove_file` will not delete it and
+    /// `rename` will not replace it, on Unix or Windows, without needing
+    /// permission games that behave differently on each.
+    #[test]
+    fn test_rotation_failure_leaves_the_log_intact() {
+        let dir = std::env::temp_dir().join(format!("eg_log_rotfail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("t.log");
+
+        // `t.log.1` is a non-empty directory: nothing can rename onto it.
+        let blocker = rotated_path(&base, 1);
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("keep"), b"x").unwrap();
+
+        // 50-byte cap against ~40-byte lines: the first line fits, the second
+        // must rotate.
+        let policy = FilePolicy { path: base.clone(), max_bytes: 50, max_files: 1 };
+        let mut sink = FileSink {
+            file: open_log(&policy.path, false).unwrap(),
+            written: 0,
+            policy,
+        };
+
+        // Under the cap: written normally.
+        write_line_to(&mut sink, "keep me ------------------------------").unwrap();
+        // Over the cap: rotation is attempted, fails, and must report failure
+        // rather than silently truncating.
+        let err = write_line_to(&mut sink, "this one triggers the rotation --------");
+        assert!(err.is_err(), "a failed rotation must be reported to the caller");
+
+        let body = std::fs::read_to_string(&base).unwrap();
+        assert!(
+            body.contains("keep me"),
+            "the active log was truncated after a failed rename: {body:?}"
+        );
+
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The backoff doubles and stops at the ceiling — it must never grow without
+    /// bound (a week-long delay is indistinguishable from the old "disabled until
+    /// restart" behaviour this replaced).
+    #[test]
+    fn test_backoff_doubles_and_caps() {
+        assert_eq!(next_backoff(RETRY_BACKOFF_START), RETRY_BACKOFF_START * 2);
+        assert_eq!(next_backoff(RETRY_BACKOFF_MAX), RETRY_BACKOFF_MAX);
+        assert_eq!(next_backoff(RETRY_BACKOFF_MAX / 2 + Duration::from_secs(1)), RETRY_BACKOFF_MAX);
+        // Iterating always lands exactly on the cap and stays there.
+        let mut d = RETRY_BACKOFF_START;
+        for _ in 0..20 {
+            d = next_backoff(d);
+        }
+        assert_eq!(d, RETRY_BACKOFF_MAX);
+        assert!(RETRY_BACKOFF_START < RETRY_BACKOFF_MAX, "the sequence must actually back off");
+    }
+
+    /// A write error must **pause** file logging, not end it for the life of the
+    /// process — and the recovery must say how much was lost, in the file.
+    ///
+    /// The old behaviour dropped the sink on the first error, so one full disk or
+    /// one momentary write failure stopped logging until the gateway was
+    /// restarted, with nothing in the log to say so.
+    ///
+    /// Drives an owned [`Sink`] and an explicit clock: no globals (every other
+    /// test in the binary logs into whatever sink is armed) and no waiting.
+    #[test]
+    fn test_write_error_pauses_then_re_arms_and_reports_the_gap() {
+        let dir = std::env::temp_dir().join(format!("eg_log_pause_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("p.log");
+
+        let policy = FilePolicy { path: base.clone(), max_bytes: 0, max_files: 0 };
+        // A read-only handle to a writable path: writes through it fail, but
+        // reopening it (which is what recovery does) succeeds.  That is exactly
+        // the shape of a transient failure.
+        std::fs::write(&base, b"").unwrap();
+        let mut slot = Sink::Armed(FileSink {
+            file: std::fs::File::open(&base).unwrap(),
+            written: 0,
+            policy,
+        });
+
+        let t0 = Instant::now();
+        assert!(!write_to_file_at(&mut slot, "lost one", t0), "a failed write must report failure");
+        match &slot {
+            Sink::Paused { dropped, backoff, .. } => {
+                assert_eq!(*dropped, 1);
+                assert_eq!(*backoff, RETRY_BACKOFF_START, "first retry uses the starting delay");
+            }
+            _ => panic!("a write error must leave the sink paused, not off or armed"),
+        }
+
+        // Before the retry is due: lines are counted, and nothing is reopened.
+        assert!(!write_to_file_at(&mut slot, "lost two", t0 + Duration::from_secs(1)));
+        assert!(matches!(slot, Sink::Paused { dropped: 2, .. }), "lines during the pause must be counted");
+
+        // Once it is due, the file reopens and logging carries on by itself.
+        let due = t0 + RETRY_BACKOFF_START + Duration::from_secs(1);
+        assert!(write_to_file_at(&mut slot, "after recovery", due), "the sink must re-arm itself");
+        assert!(matches!(slot, Sink::Armed(_)), "a successful retry must leave the sink armed");
+        assert!(write_to_file_at(&mut slot, "still logging", due), "and stay armed afterwards");
+
+        let body = std::fs::read_to_string(&base).unwrap();
+        assert!(
+            body.contains("2 line(s) were not written"),
+            "the resumed log must record the size of the gap: {body:?}"
+        );
+        assert!(body.contains("after recovery") && body.contains("still logging"), "got {body:?}");
+        assert!(
+            !body.contains("lost one") && !body.contains("lost two"),
+            "lines written while paused cannot appear — they were never held: {body:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A retry that fails backs off further instead of hammering the disk, and
+    /// keeps counting what was lost.
+    #[test]
+    fn test_failed_retry_backs_off_further() {
+        // A path inside a directory that does not exist: reopening always fails.
+        let missing = std::env::temp_dir()
+            .join(format!("eg_log_absent_{}", std::process::id()))
+            .join("nope")
+            .join("x.log");
+        let policy = FilePolicy { path: missing, max_bytes: 0, max_files: 0 };
+        let t0 = Instant::now();
+        let mut slot = Sink::Paused {
+            policy,
+            retry_at: t0,
+            backoff: RETRY_BACKOFF_START,
+            dropped: 3,
+        };
+
+        assert!(!write_to_file_at(&mut slot, "still nowhere to go", t0));
+        match &slot {
+            Sink::Paused { dropped, backoff, .. } => {
+                assert_eq!(*dropped, 4, "the line must still be counted as lost");
+                assert_eq!(*backoff, next_backoff(RETRY_BACKOFF_START), "the delay must grow");
+            }
+            _ => panic!("a failed retry must stay paused"),
+        }
+    }
+
+    /// An unchanged policy must not reset a pause.  The server re-reads its
+    /// config on every restart cycle, and an operator saving settings during a
+    /// disk-full outage would otherwise drive the retries back down to every 30 s
+    /// — turning a bounded backoff into a busy loop.
+    #[test]
+    fn test_reconfiguring_the_same_policy_keeps_the_backoff() {
+        let _guard = FileLogTestGuard::new();
+        let policy = FilePolicy {
+            path: std::env::temp_dir().join(format!("eg_log_same_{}.log", std::process::id())),
+            max_bytes: 0,
+            max_files: 2,
+        };
+        let far_off = Instant::now() + RETRY_BACKOFF_MAX;
+        {
+            let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            *slot = Sink::Paused {
+                policy: policy.clone(),
+                retry_at: far_off,
+                backoff: RETRY_BACKOFF_MAX,
+                dropped: 9,
+            };
+        }
+
+        configure_file_logging(Some(policy.clone()));
+        {
+            let slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            match &*slot {
+                Sink::Paused { backoff, dropped, retry_at, .. } => {
+                    assert_eq!(*backoff, RETRY_BACKOFF_MAX, "an unchanged policy must not reset the backoff");
+                    // `>=`, not `==`: nothing serialises the ~1650 tests that
+                    // merely call `log()`, and each of those lands on the armed
+                    // sink — here, bumping the paused count.  What matters is
+                    // that the count was carried over, not reset.
+                    assert!(*dropped >= 9, "nor the count of what was lost (got {dropped})");
+                    assert_eq!(*retry_at, far_off, "nor bring the retry forward");
+                }
+                _ => panic!("an unchanged policy must leave a paused sink paused"),
+            }
+        }
+
+        // A *changed* policy is a different instruction, and does reopen.
+        let changed = FilePolicy { max_files: 3, ..policy };
+        configure_file_logging(Some(changed));
+        {
+            let slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            assert!(matches!(&*slot, Sink::Armed(_)), "a changed policy must be applied");
+        }
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("eg_log_same_{}.log", std::process::id())),
+        );
     }
 
     /// The pre-arm backlog reaches the file, in order, once one is armed.
