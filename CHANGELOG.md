@@ -50,6 +50,18 @@ follow-up quality/stability pass of our own.
   five-digit box as the floor — one rule for every field rather than a second
   CSS class per key. Measured in a browser at four widths, since the visible
   width comes from the CSS, not the `size` attribute.
+- **The long-standing `test_cpm_dir_operand` flake is root-caused and fixed.**
+  It failed roughly once in thirty full-suite runs and had never been caught in
+  the act. It was not the config race everyone assumed: `cpm_dir` resolves the
+  configured `transfer_dir` against the process's current directory, the
+  shipped value is the relative `transfer`, and a bookmark test changes the CWD
+  process-wide and then deletes the directory it changed into. Nothing
+  serialised the two, because the config lock guards the config, not the CWD.
+  Caught by making the test print its own state on failure, then racing it
+  against the bookmark test: 1 failure in 60, reporting `transfer_dir` unmoved
+  and the subtree simply gone — which is what ruled the config out. The test now
+  uses an absolute transfer directory, which a CWD change cannot re-base:
+  0 failures in 120 of the same paired runs.
 - **A CRLF checkout made a source-scanning test read the wrong setting.**
   `test_numeric_confirmations_fit_every_screen` delimits each call it scans
   with a `)\n` anchor, which matches nothing in a Windows checkout: the scan

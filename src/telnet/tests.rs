@@ -3971,11 +3971,38 @@ async fn test_cpm_dir_operand_selects_directory_or_pattern() {
     use tokio::io::AsyncReadExt;
 
     let _lock = config::CONFIG_TEST_LOCK.lock().await;
-    let cfg = config::get_config();
-    let base = std::path::PathBuf::from(&cfg.transfer_dir);
+
+    // Point `transfer_dir` at an ABSOLUTE path for the duration.
+    //
+    // This is the flake, caught: `cpm_dir` resolves the configured path against
+    // the process's current directory, the shipped `transfer_dir` is the
+    // relative "transfer", and `webbrowser::tests::test_bookmarks` changes the
+    // CWD process-wide (then deletes the directory it changed into). Nothing
+    // serialises the two — CONFIG_TEST_LOCK guards the config, not the CWD — so
+    // this test intermittently looked for its subtree in a directory that had
+    // just been removed. Reproduced by running the two together: 1 failure in
+    // 60, with the diagnostic below reporting `transfer_dir` unmoved and the
+    // root simply gone, which is what pointed at the CWD rather than the config.
+    //
+    // An absolute path cannot be re-based by a CWD change, so this test no
+    // longer cares what any other test does with it.
+    struct TransferDirGuard(String);
+    impl Drop for TransferDirGuard {
+        fn drop(&mut self) {
+            // Inside the lock, like ConfigTestGuard: a failed assertion returns
+            // early, and leaving a temp path in the global config would break
+            // every later test that reads it.
+            config::update_config_value("transfer_dir", &self.0);
+        }
+    }
+    let _dir_guard = TransferDirGuard(config::get_config().transfer_dir);
+
+    let base = std::env::temp_dir().join(format!("eg_cpm_dir_{}", std::process::id()));
     if std::fs::create_dir_all(&base).is_err() {
         return; // no transfer dir available; nothing to assert against
     }
+    config::update_config_value("transfer_dir", &base.to_string_lossy());
+    let cfg = config::get_config();
     // Unique per run so this can't collide with a parallel test.
     let root = base.join(format!("dirtest_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -4010,37 +4037,81 @@ async fn test_cpm_dir_operand_selects_directory_or_pattern() {
     //    case, and the error must come from resolving that parent.
     let badpath = run(&rootname, Some("NOSUCH/ANY")).await;
 
+    // Snapshot the world BEFORE cleaning up, and attach it to every assertion
+    // below.  This test has flaked roughly once in thirty full-suite runs and
+    // has never been caught in the act; the output alone does not say why,
+    // because the two candidate causes are invisible in it — `transfer_dir`
+    // moving under us (cpm_dir calls get_config() itself, once per run above)
+    // and the subtree disappearing. Both are answered here, and the tree is
+    // still on disk at the point it is read. Cheap: five lines of formatting on
+    // the passing path, and the only chance of diagnosing the next occurrence
+    // without reproducing it.
+    let diag = {
+        let after = config::get_config().transfer_dir.clone();
+        let listing = |p: &std::path::Path| -> String {
+            match std::fs::read_dir(p) {
+                Ok(rd) => {
+                    let mut names: Vec<String> = rd
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    names.sort();
+                    names.join(",")
+                }
+                Err(e) => format!("<unreadable: {e}>"),
+            }
+        };
+        format!(
+            "transfer_dir at start={:?}, at end={:?} (moved={}), root={:?} exists={}, \
+             root contains [{}], SUB contains [{}]",
+            cfg.transfer_dir,
+            after,
+            after != cfg.transfer_dir,
+            root,
+            root.exists(),
+            listing(&root),
+            listing(&root.join("SUB")),
+        )
+    };
+
     let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&base);
 
     assert!(
         cwd.contains("TOP.TXT") && cwd.contains("OTHER.DAT") && cwd.contains("SUB"),
-        "bare DIR must list the cwd; got {:?}",
+        "bare DIR must list the cwd; got {:?}\n[diag] {}",
         cwd,
+        diag,
     );
     assert!(
         sub.contains("INNER.TXT"),
-        "DIR SUB must list SUB's contents; got {:?}",
+        "DIR SUB must list SUB's contents; got {:?}\n[diag] {}",
         sub,
+        diag,
     );
     assert!(
         !sub.contains("TOP.TXT"),
-        "DIR SUB must not list the parent's files; got {:?}",
+        "DIR SUB must not list the parent's files; got {:?}\n[diag] {}",
         sub,
+        diag,
     );
     assert!(
         glob.contains("TOP.TXT") && !glob.contains("OTHER.DAT"),
-        "DIR *.TXT must match only .TXT in the cwd; got {:?}",
+        "DIR *.TXT must match only .TXT in the cwd; got {:?}\n[diag] {}",
         glob,
+        diag,
     );
     assert!(
         bad.contains("No file"),
-        "DIR NOSUCH is an unmatched name pattern, so 'No file'; got {:?}",
+        "DIR NOSUCH is an unmatched name pattern, so 'No file'; got {:?}\n[diag] {}",
         bad,
+        diag,
     );
     assert!(
         badpath.contains("No such directory"),
-        "DIR NOSUCH/ANY must report the unresolvable parent; got {:?}",
+        "DIR NOSUCH/ANY must report the unresolvable parent; got {:?}\n[diag] {}",
         badpath,
+        diag,
     );
 }
 
