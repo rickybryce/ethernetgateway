@@ -2380,6 +2380,54 @@ h3 { color: var(--amber); margin: 12px 0 4px; font-size: 14px; }
   overflow-y: auto;
   white-space: pre-wrap;
 }
+/* ── Phones ───────────────────────────────────────────────────────────────
+   Everything above is sized for a desktop browser on purpose, including the
+   500px floor on `.grid`: a frame narrower than its own widest row is what
+   pushed the More button outside it, and a page that scrolls was the better of
+   those two. But that trade only exists while both are possible. Below the
+   floor neither is — the frame cannot fit — so the page simply scrolled
+   sideways at every phone width (measured: 516px of content in a 375px
+   viewport, at every viewport down to 345px, because the floor fixes the width
+   rather than the screen doing it).
+
+   So below the floor we re-flow instead: one listener per line rather than
+   two, which is the only row that needed 500px in the first place. Desktop
+   rendering cannot change — every rule here is inside the query, and the
+   breakpoint sits above the floor so the switch happens before the overflow
+   would. */
+@media (max-width: 640px) {
+  /* Give up on multi-column: `auto-fit` with a 500px minimum keeps sizing a
+     column wider than the screen rather than falling back to one.
+     `minmax(0, 1fr)`, not a plain `1fr`: a bare `1fr` is `minmax(auto, 1fr)`,
+     whose floor is the item's own min-content — which measured 450px and left
+     the page overflowing after the column count was already fixed. */
+  .grid { grid-template-columns: minmax(0, 1fr); }
+  .frame { min-width: 0; }
+  /* The XMODEM tunables row is `nowrap` so its right-justified More button
+     stays put; on a phone that row cannot fit on one line at all, and the
+     nowrap floor was part of the 450px. Wrapping costs the button its place at
+     the end of the row, which is the lesser loss here. */
+  .tight-row, .serial-row { flex-wrap: wrap; }
+  /* [listener] [Port:] [number], one per line. */
+  .server-grid { grid-template-columns: 1fr max-content max-content; }
+  /* The More button sits mid-source (between Web and SSH), which is right for
+     two-per-line and wrong for one; `order` moves it to the end, where it gets
+     a line of its own. */
+  .server-grid button.more { order: 99; grid-column: 1 / -1; justify-self: end; }
+  .server-grid .grid-blank { display: none; }
+  /* Fields sized in characters — the 40-char S-register boxes, the 28-char log
+     path, the 366px logo — are all wider than a phone.  `min-width: 0` goes
+     with it: a flex item's automatic minimum is its min-content, so without
+     this the serial rows' port picker refused to shrink and carried the More
+     button ~30px past the frame at 320px. */
+  input[type=text], input[type=password], select, .logo { max-width: 100%; }
+  /* Selects only, NOT inputs.  Applying it to inputs let the 4-digit baud box
+     shrink to three visible digits — the same defect just fixed for the log
+     size (a box showing less than the value it holds), one line later. */
+  .row select { min-width: 0; }
+  /* 16px of modal padding each side is a lot of a 375px screen. */
+  .modal { padding: 3vh 8px; }
+}
 </style>";
 
 const SCRIPT: &str = "<script>
@@ -3791,6 +3839,62 @@ mod tests {
         assert!(
             html.contains(r#"class="row tight-row""#),
             "File-transfer tunables row missing tight-row class"
+        );
+    }
+
+    /// The config page must not scroll sideways on a phone.
+    ///
+    /// It did, at every phone width: the frames have a deliberate 500px floor
+    /// (a frame narrower than its widest row is what pushed the More button
+    /// out), so the page was a fixed 516px wide — measured in a 375px viewport,
+    /// and still 516px in a 345px one, because the floor set the width rather
+    /// than the screen. Below the floor that trade no longer exists, so the
+    /// layout re-flows instead.
+    ///
+    /// Verified with headless Chrome at 320/360/390/480/640/768/1024/1440 —
+    /// `scrollWidth == clientWidth` at every one, with every modal opened too —
+    /// and the desktop rules confirmed unchanged above the breakpoint (rows
+    /// still `nowrap`, the listener grid still 7 columns, two frame columns at
+    /// 1440). These assertions guard the rules that result was measured
+    /// against; a browser is the only thing that can actually measure it.
+    #[test]
+    fn test_narrow_viewports_do_not_scroll_sideways() {
+        let html = render_main_page(&Config::default(), None);
+
+        assert!(
+            html.contains("@media (max-width: 640px)"),
+            "the phone layout block is gone; the page will scroll sideways again"
+        );
+        // The floor is what breaks phones, and a plain `1fr` does not lift it —
+        // `1fr` is `minmax(auto, 1fr)`, whose minimum is the item's min-content.
+        // That was measured: the column count went to one and the page still
+        // overflowed at 450px.
+        assert!(
+            html.contains(".grid { grid-template-columns: minmax(0, 1fr); }"),
+            "the narrow layout must lift the 500px floor with minmax(0, 1fr)"
+        );
+        // ...and the desktop floor must still be there, or the More button bug
+        // it exists to prevent comes back at ordinary window sizes.
+        assert!(
+            html.contains("repeat(auto-fit, minmax(500px, 1fr))"),
+            "the desktop 500px floor is gone — see test_more_buttons_cannot_leave_their_frame"
+        );
+        // Both single-line rows have to be allowed to wrap; the serial rows were
+        // the last thing carrying a More button off-screen, at 320px.
+        assert!(
+            html.contains(".tight-row, .serial-row { flex-wrap: wrap; }"),
+            "the nowrap rows must wrap on a phone"
+        );
+        // Selects may shrink; inputs may NOT.  Letting inputs shrink clipped the
+        // 4-digit baud box to three visible digits — the same defect as the
+        // clipped log size, and invisible unless you look at the pixels.
+        assert!(
+            html.contains(".row select { min-width: 0; }"),
+            "the port picker must be allowed to shrink"
+        );
+        assert!(
+            !html.contains(".row input, .row select { min-width: 0; }"),
+            "inputs must not be shrinkable — that clips the value they are showing"
         );
     }
 

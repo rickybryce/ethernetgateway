@@ -11,6 +11,20 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The web config page scrolled sideways on a phone.** Its frames carry a
+  deliberate 500 px floor — a frame narrower than its own widest row is what
+  pushed the More button outside it — so the page was a fixed 516 px wide
+  whatever the screen: still 516 px in a 345 px viewport. Below the floor that
+  trade no longer exists (the frame cannot fit either way), so narrow screens
+  now re-flow instead of scrolling: one listener per line rather than two, the
+  rows that are pinned to a single line allowed to wrap, and nothing wider than
+  the screen. Desktop rendering is untouched — every rule is inside a
+  `max-width: 640px` query, and the rows, the 7-column listener grid and the
+  two-column frame layout were re-measured above the breakpoint to confirm it.
+  Measured in headless Chrome at eight widths from 320 px to 1440 px, with
+  every popup opened: no horizontal overflow anywhere. (Distinct from the
+  earlier fix that kept the More button inside its frame, and from the
+  phone-fit pass on the reference doc pages — this is the live config page.)
 - **A failed log rotation deleted the log it was rotating.** `rotate()` warned
   about a rename it could not perform and then reopened the active file with
   `truncate(true)` regardless, so a log that could not be moved aside was
