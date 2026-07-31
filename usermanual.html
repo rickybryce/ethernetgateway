@@ -2450,8 +2450,8 @@ are gateway conveniences.
 <table>
     <thead><tr><th>Command</th><th>CP/M</th><th>Action</th></tr></thead>
     <tbody>
-        <tr><td><code>A:</code> &hellip; <code>H:</code></td><td>&#10003;</td><td>Change the current drive (the CP/M <code>d:</code> resident command).</td></tr>
-        <tr><td><code>DIR</code></td><td>&#10003;</td><td>List the files on the current drive.</td></tr>
+        <tr><td><code>A:</code> &hellip; <code>P:</code></td><td>&#10003;</td><td>Change the current drive (the CP/M <code>d:</code> resident command). All sixteen exist, each a folder under <code>transfer_dir/CPM</code>.</td></tr>
+        <tr><td><code>DIR</code> [<em>d:</em>][<em>afn</em>]</td><td>&#10003;</td><td>List files. With no operand, everything on the current drive; with a filespec, only matching names (<code>DIR *.COM</code>); with a drive, that drive without selecting it (<code>DIR B:</code>, <code>DIR B:*.TXT</code>). Wildcards are the same <code>?</code>/<code>*</code> the BDOS directory search and <code>ERA</code> use. A malformed filespec is reported rather than treated as &ldquo;everything&rdquo;.</td></tr>
         <tr><td><code>ERA name</code> (<code>DEL</code>)</td><td>&#10003;</td><td>Erase file(s), wildcards allowed (<code>*.*</code> confirms first).</td></tr>
         <tr><td><code>REN new=old</code> (<code>RENAME</code>)</td><td>&#10003;</td><td>Rename a file (also accepts <code>REN new old</code>). Refuses to overwrite an existing name.</td></tr>
         <tr><td><code>TYPE file</code></td><td>&#10003;</td><td>Stream a text file to the console, stopping at the <code>^Z</code> end-of-file marker. Binary files are refused.</td></tr>

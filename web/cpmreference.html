@@ -688,7 +688,7 @@
                         <tr><th>Command</th><th>Does</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>DIR</code></td><td>List files on the current drive.</td></tr>
+                        <tr><td><code>DIR</code> [<em>d:</em>][<em>afn</em>]</td><td>List files: all of the current drive, or only those matching a filespec (<code>DIR *.COM</code>), or another drive without selecting it (<code>DIR B:</code>, <code>DIR B:*.TXT</code>). Same <code>?</code>/<code>*</code> wildcards as the BDOS search and <code>ERA</code>; a malformed filespec is reported, not read as &ldquo;everything&rdquo;.</td></tr>
                         <tr><td><code>ERA</code> <em>name</em><br><span class="dim-text">also <code>DEL</code></span></td><td>Erase file(s); wildcards accepted.</td></tr>
                         <tr><td><code>REN</code> <em>new</em>=<em>old</em><br><span class="dim-text">also <code>RENAME</code></span></td><td>Rename a file.</td></tr>
                         <tr><td><code>TYPE</code> <em>file</em></td><td>Show a text file.</td></tr>

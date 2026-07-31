@@ -458,24 +458,38 @@ impl CpmFs {
         }
     }
 
-    /// List the valid 8.3 filenames on the current drive, sorted — for the
-    /// CCP-lite's built-in `DIR` (which, like real CP/M, is a command
-    /// processor built-in rather than a `.COM`).  Host files that are not
-    /// legal 8.3 names are omitted, matching what CP/M programs can see.
-    pub fn list_current(&self) -> Vec<String> {
-        let dir = self.drive_dir(self.drive);
+    /// The 8.3 names on the FCB's drive whose name/ext match its (possibly
+    /// wildcarded) pattern, sorted and deduplicated — the listing behind the
+    /// CCP's `DIR [d:][afn]`.
+    ///
+    /// Matching goes through `Fcb::matches`, the same predicate BDOS Search
+    /// First and the built-in `ERA` use, so `DIR *.COM` cannot disagree with
+    /// `ERA *.COM` about which files a wildcard covers.
+    ///
+    /// Deduplicated because CP/M gives a file over 16 KB one directory entry
+    /// per extent, and a listing must still show it once. Host files that are
+    /// not legal 8.3 names are omitted, matching what CP/M programs can see.
+    pub fn list_matching(&self, fcb: &Fcb) -> Vec<String> {
+        let drive0 = match self.drive_index_for(fcb.drive) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        let dir = self.drive_dir(drive0);
         let mut names = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     let fname = e.file_name().to_string_lossy().to_string();
-                    if let Some((n, x)) = split_8_3(&fname) {
+                    if let Some((n, x)) = split_8_3(&fname)
+                        && fcb.matches(&n, &x)
+                    {
                         names.push(super::fcb::format_8_3(&n, &x));
                     }
                 }
             }
         }
         names.sort();
+        names.dedup();
         names
     }
 
@@ -705,7 +719,7 @@ fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::super::fcb::Fcb;
+    use super::super::fcb::{Fcb, FCB_SIZE};
     use super::*;
 
     fn fcb_named(drive: u8, name: &str, ext: &str) -> Fcb {
@@ -896,8 +910,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// `list_matching` backs the CCP's `DIR [d:][afn]`.  Covers what the old
+    /// `list_current` did (current drive, sorted, illegal 8.3 names invisible,
+    /// per-drive) plus the filtering and explicit-drive forms it could not
+    /// express — the gap that let `DIR *.COM` list every file.
     #[test]
-    fn test_list_current() {
+    fn test_list_matching() {
         let base = temp_base("list");
         std::fs::write(base.join("A").join("B.TXT"), b"b").unwrap();
         std::fs::write(base.join("A").join("A.COM"), b"a").unwrap();
@@ -905,9 +923,31 @@ mod tests {
         std::fs::create_dir_all(base.join("B")).unwrap();
         std::fs::write(base.join("B").join("ONLY.B"), b"1").unwrap();
         let mut fs = CpmFs::new(base.clone());
-        assert_eq!(fs.list_current(), vec!["A.COM", "B.TXT"]); // A: sorted
-        fs.select(1); // B:
-        assert_eq!(fs.list_current(), vec!["ONLY.B"]);
+
+        let pat = |spec: &str| {
+            let (drive, name, ext) = super::super::fcb::parse_dir_operand(spec).unwrap();
+            let mut raw = [0u8; FCB_SIZE];
+            raw[0] = drive;
+            raw[1..9].copy_from_slice(&name);
+            raw[9..12].copy_from_slice(&ext);
+            Fcb::from_bytes(&raw)
+        };
+
+        // Bare `DIR`: everything on the current drive, sorted, bad names hidden.
+        assert_eq!(fs.list_matching(&pat("")), vec!["A.COM", "B.TXT"]);
+        // Filtered — the whole point.
+        assert_eq!(fs.list_matching(&pat("*.COM")), vec!["A.COM"]);
+        assert_eq!(fs.list_matching(&pat("*.TXT")), vec!["B.TXT"]);
+        // A concrete name, and one that matches nothing.
+        assert_eq!(fs.list_matching(&pat("A.COM")), vec!["A.COM"]);
+        assert!(fs.list_matching(&pat("NOSUCH.*")).is_empty());
+        // An explicit drive reaches the other drive without selecting it.
+        assert_eq!(fs.list_matching(&pat("B:")), vec!["ONLY.B"]);
+        assert_eq!(fs.current_drive(), 0, "DIR B: must not change the current drive");
+        // And the current drive still follows `select`.
+        fs.select(1);
+        assert_eq!(fs.list_matching(&pat("")), vec!["ONLY.B"]);
+        assert_eq!(fs.list_matching(&pat("A:")), vec!["A.COM", "B.TXT"]);
         let _ = std::fs::remove_dir_all(&base);
     }
 

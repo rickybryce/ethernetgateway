@@ -11,6 +11,22 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The CP/M emulator's `DIR` ignored its operand.** CP/M's `DIR` takes an
+  optional filespec — `DIR afn`, `DIR d:`, `DIR d:afn` — and the built-in
+  accepted none of them: it listed the whole current drive whatever you typed.
+  That is worse than an error, because `DIR *.COM` returned every file on the
+  drive and looked like it had filtered, on the most-used command in the system.
+
+  `DIR` now takes all four forms. Matching goes through `Fcb::matches`, the same
+  predicate the BDOS directory search and the built-in `ERA` use, so
+  `DIR *.COM` cannot disagree with `ERA *.COM` about what a wildcard covers; the
+  listing is deduplicated because a file over 16 KB owns one directory entry per
+  extent. A malformed filespec is reported (`TOOLONGNM.TXT?`) rather than
+  silently widened to everything — conflating "no operand" with "bad operand"
+  would have reintroduced the original bug. `DIR B:` reads the other drive
+  without selecting it, as real CP/M does. Verified in a live session across all
+  six cases; the directory walk now has one implementation rather than two
+  (`list_current` is gone, superseded by `list_matching`).
 - **Five numeric settings printed a confirmation wider than a C64 screen.**
   `xmodem_set_numeric` emits its "X set to N unit." line with `send_line`,
   which does not wrap, so an over-long line broke wherever the terminal ran out

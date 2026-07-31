@@ -61,7 +61,7 @@
 use super::*;
 use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
-use crate::cpm::{parse_afn, parse_command_fcb, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
+use crate::cpm::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -478,7 +478,7 @@ impl TelnetSession {
                     self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
                         .await?;
                 }
-                "DIR" => self.cpmemu_dir(fs).await?,
+                "DIR" => self.cpmemu_dir(fs, trimmed).await?,
                 "ERA" | "DEL" => self.cpmemu_era(fs, trimmed).await?,
                 "REN" | "RENAME" => self.cpmemu_ren(fs, trimmed).await?,
                 "TYPE" => self.cpmemu_type(fs, trimmed).await?,
@@ -520,8 +520,27 @@ impl TelnetSession {
     /// Built-in `DIR`: list the files on the current drive, four per row
     /// (CP/M's `DIR` is a CCP built-in, not a `.COM`).  Prints `No file`
     /// when the drive is empty, as CP/M does.
-    async fn cpmemu_dir(&mut self, fs: &CpmFs) -> Result<(), std::io::Error> {
-        let names = fs.list_current();
+    async fn cpmemu_dir(&mut self, fs: &CpmFs, line: &str) -> Result<(), std::io::Error> {
+        // CP/M's DIR takes an optional filespec: `DIR`, `DIR afn`, `DIR d:`,
+        // `DIR d:afn`.  This used to ignore the operand entirely, so
+        // `DIR *.COM` listed every file on the drive and looked like it had
+        // filtered — silently wrong, on the most-used command there is.
+        let operand = line.split_whitespace().nth(1).unwrap_or("");
+        let (drive, name, ext) = match parse_dir_operand(operand) {
+            Some(triple) => triple,
+            None => {
+                // Malformed filespec.  Reported, not treated as "everything" —
+                // that conflation was the original bug.
+                self.send_line(&format!("  {}?", self.red(&operand.to_ascii_uppercase())))
+                    .await?;
+                return Ok(());
+            }
+        };
+        let mut raw = [0u8; FCB_SIZE];
+        raw[0] = drive;
+        raw[1..9].copy_from_slice(&name);
+        raw[9..12].copy_from_slice(&ext);
+        let names = fs.list_matching(&Fcb::from_bytes(&raw));
         if names.is_empty() {
             self.send_line("  No file").await?;
             return Ok(());
@@ -824,7 +843,7 @@ impl TelnetSession {
     async fn cpmemu_help(&mut self) -> Result<(), std::io::Error> {
         for line in [
             "  Built-in commands:",
-            "  DIR        list files on this drive",
+            "  DIR [d:][afn]  list files (DIR *.COM)",
             "  ERA name   erase file(s) (wildcards)",
             "  REN new=old  rename a file",
             "  TYPE file  show a text file",
@@ -1677,7 +1696,7 @@ mod repl_tests {
         let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
 
         // Empty drive → CP/M's "No file", not a blank screen.
-        sess.cpmemu_dir(&fs).await.unwrap();
+        sess.cpmemu_dir(&fs, "DIR").await.unwrap();
         let empty = drain(&mut peer).await;
         assert!(
             empty.contains("No file"),
@@ -1687,7 +1706,7 @@ mod repl_tests {
 
         std::fs::write(base.join("A").join("ONE.COM"), b"x").unwrap();
         std::fs::write(base.join("A").join("TWO.TXT"), b"y").unwrap();
-        sess.cpmemu_dir(&fs).await.unwrap();
+        sess.cpmemu_dir(&fs, "DIR").await.unwrap();
         let listing = drain(&mut peer).await;
 
         let _ = std::fs::remove_dir_all(&base);

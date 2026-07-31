@@ -198,14 +198,43 @@ pub fn parse_afn(spec: &str) -> Option<([u8; 8], [u8; 3])> {
 /// unparseable token yields an all-blank name on the default drive — exactly
 /// what the CCP leaves in an unused default FCB.
 pub fn parse_command_fcb(token: &str) -> (u8, [u8; 8], [u8; 3]) {
-    let (drive, rest) = match token.split_once(':') {
+    let (drive, rest) = split_drive_prefix(token);
+    let (name, ext) = parse_afn(rest).unwrap_or(([b' '; 8], [b' '; 3]));
+    (drive, name, ext)
+}
+
+/// Split an optional single-letter drive prefix off a CCP token, returning
+/// the FCB drive byte (0 = default/current, 1 = A:, …) and the remainder.
+/// Shared by `parse_command_fcb` and `parse_dir_operand` so the two cannot
+/// disagree about what `B:` means.
+fn split_drive_prefix(token: &str) -> (u8, &str) {
+    match token.split_once(':') {
         Some((d, r)) if d.len() == 1 && d.as_bytes()[0].is_ascii_alphabetic() => {
             (d.as_bytes()[0].to_ascii_uppercase() - b'A' + 1, r)
         }
         _ => (0u8, token),
-    };
-    let (name, ext) = parse_afn(rest).unwrap_or(([b' '; 8], [b' '; 3]));
-    (drive, name, ext)
+    }
+}
+
+/// Parse the optional operand of the CCP's `DIR`, which accepts all four of
+/// `DIR`, `DIR afn`, `DIR d:` and `DIR d:afn`.
+///
+/// An **absent or bare-drive** operand means "every file", which is the
+/// all-`?` pattern — deliberately *not* the all-blank one
+/// `parse_command_fcb` leaves in an unused FCB, since blanks match nothing.
+///
+/// `None` means the operand was present but is not a legal filespec, and the
+/// caller must say so. Distinguishing that from "empty" is the whole point:
+/// the previous `DIR` ignored its operand entirely, so `DIR *.COM` listed
+/// every file on the drive and looked like it had filtered. Silently listing
+/// everything for a *malformed* pattern would reintroduce exactly that.
+pub fn parse_dir_operand(operand: &str) -> Option<(u8, [u8; 8], [u8; 3])> {
+    let (drive, rest) = split_drive_prefix(operand.trim());
+    if rest.trim().is_empty() {
+        return Some((drive, [b'?'; 8], [b'?'; 3]));
+    }
+    let (name, ext) = parse_afn(rest)?;
+    Some((drive, name, ext))
 }
 
 /// Expand one field of an ambiguous filename into `WIDTH` space-padded
@@ -339,6 +368,54 @@ mod tests {
         // Illegal.
         assert!(parse_afn("").is_none());
         assert!(parse_afn("TOOLONGNM.TXT").is_none()); // >8 no '*'
+    }
+
+    /// `DIR`'s operand: all four CP/M forms, and — the part that matters —
+    /// "absent" must mean every file while "malformed" must be rejected.
+    /// Conflating those is the original bug: the old `DIR` ignored its operand,
+    /// so `DIR *.COM` listed the whole drive and looked like it had filtered.
+    #[test]
+    fn test_parse_dir_operand() {
+        // `DIR` — no operand: every file on the current drive.
+        let (d, n, e) = parse_dir_operand("").unwrap();
+        assert_eq!(d, 0, "no drive prefix means the current drive");
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"???", "absent operand must be all-?, never all-blank");
+
+        // `DIR B:` — bare drive: every file on B:.
+        let (d, n, e) = parse_dir_operand("B:").unwrap();
+        assert_eq!(d, 2);
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"???");
+
+        // `DIR *.COM` — pattern on the current drive.
+        let (d, n, e) = parse_dir_operand("*.COM").unwrap();
+        assert_eq!(d, 0);
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"COM");
+
+        // `DIR B:*.TXT` — both at once.
+        let (d, n, e) = parse_dir_operand("B:*.TXT").unwrap();
+        assert_eq!(d, 2);
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"TXT");
+
+        // A concrete name is a legal (if narrow) pattern.
+        let (_, n, e) = parse_dir_operand("EGT80.COM").unwrap();
+        assert_eq!(&n, b"EGT80   ");
+        assert_eq!(&e, b"COM");
+
+        // Case-insensitive, and surrounding space is not an operand.
+        let (d, n, e) = parse_dir_operand("  b:*.com  ").unwrap();
+        assert_eq!(d, 2);
+        assert_eq!(&n, b"????????");
+        assert_eq!(&e, b"COM", "operands are upper-cased like every CP/M filespec");
+
+        // Malformed: rejected, NOT silently widened to everything.
+        assert!(
+            parse_dir_operand("TOOLONGNM.TXT").is_none(),
+            "an over-long name must be reported, not listed as every file"
+        );
     }
 
     #[test]

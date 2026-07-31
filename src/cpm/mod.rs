@@ -35,7 +35,7 @@ pub mod hbios;
 mod machine;
 pub mod uart;
 
-pub use fcb::{parse_afn, parse_command_fcb, split_8_3, Fcb, FCB_SIZE};
+pub use fcb::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE};
 pub use fs::CpmFs;
 pub use machine::CpmMachine;
 pub use uart::{resolve_access, ModemAccess};
