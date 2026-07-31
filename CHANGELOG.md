@@ -37,8 +37,10 @@ follow-up quality/stability pass of our own.
   drive or a momentary NFS hiccup silently ended file logging for the life of
   the process — with nothing in the log to say why it stopped. The sink now
   keeps its settings and *pauses*: it reopens the file after 30 seconds,
-  doubling to a 5-minute ceiling, and records in the file how many lines were
-  lost while it was away. This is not the per-line retry rejected earlier — a
+  doubling to a 5-minute ceiling, and records how many lines were lost while it
+  was away — in the file, and on the console panes, since the GUI and web
+  consoles are where an operator would actually notice logging had stopped and
+  neither of them shows stderr. This is not the per-line retry rejected earlier — a
   failing disk costs one reopen attempt per interval, not one failed write per
   message — and re-saving an unchanged configuration no longer resets a live
   backoff.

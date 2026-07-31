@@ -933,7 +933,15 @@ impl App {
                 singleline_with_menu(ui, &mut self.cfg.log_file, false, None);
             });
             ui.horizontal(|ui| {
-                labeled_field(ui, "Rotate at (KB):", &mut self.log_max_size_kb_buf, 60.0);
+                // 80px, not 60: this is a u64 in KB, so a 1 GB cap is seven
+                // digits and a 60px box showed six of them.  The web UI had the
+                // same defect and was fixed by measurement; this width is
+                // derived instead from the frame's own PORT_W (50px for the five
+                // digits of a port number, so ~10px a digit) — the egui font API
+                // would not measure headlessly, and the alternative was opening
+                // a window on the operator's live desktop.  Eight digits of room
+                // for a value that is realistically at most seven.
+                labeled_field(ui, "Rotate at (KB):", &mut self.log_max_size_kb_buf, 80.0);
                 ui.add_space(8.0);
                 labeled_field(ui, "Keep old:", &mut self.log_max_files_buf, 40.0);
             });
@@ -4063,3 +4071,4 @@ mod tests {
         assert_eq!(logo_w, logo_h * 2.0);
     }
 }
+

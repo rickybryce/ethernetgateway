@@ -356,10 +356,11 @@ fn retire_prearm_backlog(slot: &mut Sink) {
 /// on the rest of the suite (the same reasoning as [`write_line_to`]).
 fn drain_backlog_into(lines: VecDeque<String>, sink: &mut FileSink) {
     for line in lines {
-        // A write failure has already reported itself; stop rather than repeat
-        // the message once per backlogged line.  The next ordinary log() call
-        // disarms the sink.
-        if write_line_to(sink, &line).is_err() {
+        // Reported once, then stop — repeating it per backlogged line would
+        // bury it.  The next ordinary log() call pauses the sink and tells the
+        // operator; this only explains the startup lines that did not make it.
+        if let Err(e) = write_line_to(sink, &line) {
+            eprintln!("Log write failed while writing the startup backlog: {}", e);
             break;
         }
     }
@@ -405,20 +406,41 @@ fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
     sink.file
         .write_all(line.as_bytes())
         .and_then(|()| sink.file.write_all(b"\n"))
-        .inspect_err(|e| eprintln!("Log write failed: {}", e))?;
+        // No message here: each caller reports it with the context that makes
+        // it useful — write_to_file_at turns it into the operator-facing pause
+        // notice (which reaches the console panes, where a bare stderr line
+        // would not), and the backlog drain says which stage failed.
+        ?;
     sink.written = sink.written.saturating_add(bytes);
     Ok(())
 }
 
 /// Append one line to the process-wide on-disk log, if one is armed.
 ///
-/// Returns `false` when the line did not reach a file, so [`log()`] can hold it
-/// in the pre-arm backlog instead.  The sink lock is released before returning,
+/// Reports whether the line reached a file, so [`log()`] can hold it in the
+/// pre-arm backlog instead, plus any state-change notice for [`log()`] to emit
+/// once the lock is gone.  The sink lock is released before returning,
 /// which is what keeps `log()` from ever holding the sink and backlog locks at
 /// the same time (see [`retire_prearm_backlog`]).
-fn write_to_file(line: &str) -> bool {
+fn write_to_file(line: &str) -> FileWrite {
     let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
     write_to_file_at(&mut slot, line, Instant::now())
+}
+
+/// What one attempt to write a line to the on-disk log did.
+struct FileWrite {
+    /// Did the line reach a file?
+    wrote: bool,
+    /// A state change the operator should hear about — file logging pausing or
+    /// coming back.
+    ///
+    /// Returned rather than printed because this is produced while the sink
+    /// mutex is held, and the console rings must not be fed from under it.
+    /// [`log()`] emits it once the lock is gone, which is what puts it in the
+    /// GUI and web consoles too: before this it went only to stderr, so the one
+    /// message saying "your logs stopped" was invisible on the two surfaces an
+    /// operator actually watches.
+    notice: Option<String>,
 }
 
 /// The whole write-and-recover state machine, over a caller-owned [`Sink`] and an
@@ -428,27 +450,37 @@ fn write_to_file(line: &str) -> bool {
 /// [`write_line_to`]: the global sink is shared with every other test in the
 /// binary, and the clock is not something a test should be made to wait on.
 /// `now` is passed in so the backoff can be driven forward instantly.
-fn write_to_file_at(slot: &mut Sink, line: &str, now: Instant) -> bool {
+fn write_to_file_at(slot: &mut Sink, line: &str, now: Instant) -> FileWrite {
+    let quiet = |wrote| FileWrite { wrote, notice: None };
     match std::mem::replace(slot, Sink::Off) {
-        Sink::Off => false,
+        Sink::Off => quiet(false),
         Sink::Armed(mut sink) => {
-            if write_line_to(&mut sink, line).is_ok() {
-                *slot = Sink::Armed(sink);
-                return true;
-            }
-            // Said once, here — not once per line.  A failing disk that printed
-            // this for every message would bury the reason it started.
-            eprintln!(
-                "File logging paused after the error above; retrying in {}s.",
-                RETRY_BACKOFF_START.as_secs()
-            );
+            let err = match write_line_to(&mut sink, line) {
+                Ok(()) => {
+                    *slot = Sink::Armed(sink);
+                    return quiet(true);
+                }
+                Err(e) => e,
+            };
             *slot = Sink::Paused {
                 policy: sink.policy,
                 retry_at: now + RETRY_BACKOFF_START,
                 backoff: RETRY_BACKOFF_START,
                 dropped: 1,
             };
-            false
+            // Said once, on the transition — not once per line.  A failing disk
+            // that repeated this for every message would bury the reason it
+            // started.  Self-contained: it names the error rather than pointing
+            // at a previous line, because on the GUI and web consoles there is
+            // no previous line to point at.
+            FileWrite {
+                wrote: false,
+                notice: Some(format!(
+                    "File logging paused: {} — retrying in {}s.",
+                    err,
+                    RETRY_BACKOFF_START.as_secs()
+                )),
+            }
         }
         Sink::Paused { policy, retry_at, backoff, dropped } => {
             if now < retry_at {
@@ -456,16 +488,18 @@ fn write_to_file_at(slot: &mut Sink, line: &str, now: Instant) -> bool {
                 // that runs for all but a handful of lines during an outage, so
                 // it must do no I/O at all.
                 *slot = Sink::Paused { policy, retry_at, backoff, dropped: dropped.saturating_add(1) };
-                return false;
+                return quiet(false);
             }
             match resume(&policy, dropped, line) {
                 Some(sink) => {
-                    eprintln!(
-                        "File logging resumed; {} line(s) were lost while it was paused.",
-                        dropped
-                    );
                     *slot = Sink::Armed(sink);
-                    true
+                    FileWrite {
+                        wrote: true,
+                        notice: Some(format!(
+                            "File logging resumed; {} line(s) were lost while it was paused.",
+                            dropped
+                        )),
+                    }
                 }
                 None => {
                     // Still broken: wait longer before the next attempt, so a
@@ -477,7 +511,7 @@ fn write_to_file_at(slot: &mut Sink, line: &str, now: Instant) -> bool {
                         retry_at: now + backoff,
                         dropped: dropped.saturating_add(1),
                     };
-                    false
+                    quiet(false)
                 }
             }
         }
@@ -536,22 +570,39 @@ pub fn log(msg: String) {
     // A line that predates the config (the version banner, the config-load
     // diagnostics) has no file to go to yet, so it waits in the backlog and is
     // written when one is armed.
-    if !write_to_file(&msg) {
+    let outcome = write_to_file(&msg);
+    if !outcome.wrote {
         buffer_prearm_line(&msg);
     }
-    // Recover from a poisoned lock rather than dropping the line: if a
-    // thread panicked while holding the log mutex, logging is exactly when
-    // we most want it to keep working.  Matches config.rs / gui.rs.
+    push_to_rings(msg);
+    // The sink lock is released by now, so a pause/resume notice can go through
+    // the same rings as everything else — the GUI console and the web console
+    // are where an operator would notice that logging stopped, and neither of
+    // them sees stderr.  Pushed directly rather than via log(), which would
+    // re-enter the sink and, on the pause transition, count its own notice as a
+    // dropped line.
+    if let Some(notice) = outcome.notice {
+        eprintln!("{}", notice);
+        push_to_rings(notice);
+    }
+}
+
+/// Append `line` to both in-memory console buffers.
+///
+/// Recovers from a poisoned lock rather than dropping the line: if a thread
+/// panicked while holding one of these, logging is exactly when we most want it
+/// to keep working.  Matches config.rs / gui.rs.
+fn push_to_rings(line: String) {
     if let Some(buf) = LOG_BUFFER.get() {
         let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-        buf.push_back(msg.clone());
+        buf.push_back(line.clone());
         while buf.len() > MAX_LINES {
             buf.pop_front();
         }
     }
     if let Some(buf) = HISTORY_BUFFER.get() {
         let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-        buf.push_back(msg);
+        buf.push_back(line);
         while buf.len() > MAX_LINES {
             buf.pop_front();
         }
@@ -880,7 +931,13 @@ mod tests {
         });
 
         let t0 = Instant::now();
-        assert!(!write_to_file_at(&mut slot, "lost one", t0), "a failed write must report failure");
+        let first = write_to_file_at(&mut slot, "lost one", t0);
+        assert!(!first.wrote, "a failed write must report failure");
+        assert!(
+            first.notice.as_deref().is_some_and(|n| n.contains("paused") && n.contains("retrying")),
+            "the pause must be announced through log()'s rings, not only stderr: {:?}",
+            first.notice,
+        );
         match &slot {
             Sink::Paused { dropped, backoff, .. } => {
                 assert_eq!(*dropped, 1);
@@ -890,14 +947,25 @@ mod tests {
         }
 
         // Before the retry is due: lines are counted, and nothing is reopened.
-        assert!(!write_to_file_at(&mut slot, "lost two", t0 + Duration::from_secs(1)));
+        let during = write_to_file_at(&mut slot, "lost two", t0 + Duration::from_secs(1));
+        assert!(!during.wrote);
+        assert!(
+            during.notice.is_none(),
+            "only the transition is announced; a line during the pause must be silent"
+        );
         assert!(matches!(slot, Sink::Paused { dropped: 2, .. }), "lines during the pause must be counted");
 
         // Once it is due, the file reopens and logging carries on by itself.
         let due = t0 + RETRY_BACKOFF_START + Duration::from_secs(1);
-        assert!(write_to_file_at(&mut slot, "after recovery", due), "the sink must re-arm itself");
+        let back = write_to_file_at(&mut slot, "after recovery", due);
+        assert!(back.wrote, "the sink must re-arm itself");
+        assert!(
+            back.notice.as_deref().is_some_and(|n| n.contains("resumed") && n.contains("2 line")),
+            "the recovery notice must reach the consoles and state the loss: {:?}",
+            back.notice,
+        );
         assert!(matches!(slot, Sink::Armed(_)), "a successful retry must leave the sink armed");
-        assert!(write_to_file_at(&mut slot, "still logging", due), "and stay armed afterwards");
+        assert!(write_to_file_at(&mut slot, "still logging", due).wrote, "and stay armed afterwards");
 
         let body = std::fs::read_to_string(&base).unwrap();
         assert!(
@@ -931,7 +999,9 @@ mod tests {
             dropped: 3,
         };
 
-        assert!(!write_to_file_at(&mut slot, "still nowhere to go", t0));
+        let retry = write_to_file_at(&mut slot, "still nowhere to go", t0);
+        assert!(!retry.wrote);
+        assert!(retry.notice.is_none(), "a failed retry must not re-announce the pause");
         match &slot {
             Sink::Paused { dropped, backoff, .. } => {
                 assert_eq!(*dropped, 4, "the line must still be counted as lost");
