@@ -11,6 +11,38 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **A failed log rotation deleted the log it was rotating.** `rotate()` warned
+  about a rename it could not perform and then reopened the active file with
+  `truncate(true)` regardless, so a log that could not be moved aside was
+  emptied instead — the exact outcome rotation exists to prevent. A read-only
+  directory, a `.1` generation held open by another process, or a `.1` that is
+  not a file was enough to trigger it. Any failed rename now abandons the
+  rotation and says so, leaving every byte already on disk alone.
+- **One write error stopped file logging until the gateway was restarted.** The
+  sink was thrown away on the first failure, so a full disk, an unplugged
+  drive or a momentary NFS hiccup silently ended file logging for the life of
+  the process — with nothing in the log to say why it stopped. The sink now
+  keeps its settings and *pauses*: it reopens the file after 30 seconds,
+  doubling to a 5-minute ceiling, and records in the file how many lines were
+  lost while it was away. This is not the per-line retry rejected earlier — a
+  failing disk costs one reopen attempt per interval, not one failed write per
+  message — and re-saving an unchanged configuration no longer resets a live
+  backoff.
+- **A 6- or 7-digit log size was clipped in the web UI.** `log_max_size_kb` is
+  a `u64` in KB, so a 1 GB cap is seven digits, but every numeric input was
+  pinned to a five-digit width. The value was intact and the box scrolled, yet
+  a config screen showing `104857` for a setting of `1048576` reads as data
+  loss. Numeric boxes now size to the value they hold, with the tight
+  five-digit box as the floor — one rule for every field rather than a second
+  CSS class per key. Measured in a browser at four widths, since the visible
+  width comes from the CSS, not the `size` attribute.
+- **A CRLF checkout made a source-scanning test read the wrong setting.**
+  `test_numeric_confirmations_fit_every_screen` delimits each call it scans
+  with a `)\n` anchor, which matches nothing in a Windows checkout: the scan
+  ran to the end of the file and reported a limit belonging to another
+  setting. It failed on windows-latest only. Note the asymmetry, because it is
+  easy to over-correct: a *leading* `\n` anchor is safe (it still matches
+  inside `\r\n`); only a trailing one breaks.
 - **The CP/M emulator's `DIR` ignored its operand.** CP/M's `DIR` takes an
   optional filespec — `DIR afn`, `DIR d:`, `DIR d:afn` — and the built-in
   accepted none of them: it listed the whole current drive whatever you typed.
