@@ -1024,7 +1024,7 @@
                     <tbody>
                         <tr><td><code>13</code></td><td>Reset Disk System</td><td>Back to drive A:, DMA <code>0x0080</code>, and every software write-protect released. Returns <code>0FFH</code> in A when the drive it logs in (A:) holds a temporary file whose name starts with <code>$</code> &mdash; any such name, as the real BDOS tests only the first byte &mdash; otherwise <code>0</code>. That flag is how a command processor discovers a <code>SUBMIT</code> batch is already running.</td></tr>
                         <tr><td><code>14</code></td><td>Select Disk</td><td>Also maintains the page-zero CDISK byte, which some transients read directly to find their login drive.</td></tr>
-                        <tr><td><code>15</code> / <code>16</code></td><td>Open / Close File</td><td>Writes are write-through, so close has nothing to flush.</td></tr>
+                        <tr><td><code>15</code> / <code>16</code></td><td>Open / Close File</td><td>Writes are write-through, so close has no directory to rewrite &mdash; but it still answers like the real thing: <code>0</code> when the file is there, <code>0FFH</code> when the name is not in the directory. A software write-protected drive, and an FCB whose byte&nbsp;14 has its high bit set, both return success without looking, as CP/M&rsquo;s own <code>CLOSEF</code> short-circuits.</td></tr>
                         <tr><td><code>17</code> / <code>18</code></td><td>Search First / Next</td><td>Wildcard directory search.</td></tr>
                         <tr><td><code>19</code></td><td>Delete File</td><td></td></tr>
                         <tr><td><code>20</code> / <code>21</code></td><td>Read / Write Sequential</td><td></td></tr>

@@ -829,7 +829,41 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
                 0xFF
             }
         })),
-        16 => Some(0), // close: write-through, nothing to flush
+        16 => Some(with_fcb(cpm, |_cpm, fcb| {
+            // Close: writes here are write-through and there is no directory to
+            // rewrite, so there is nothing to flush — but the RETURN CODE still
+            // has to be right.  Real CP/M answers 0FFH when the file cannot be
+            // closed, and `BDOS22.ASM` spells that exit out:
+            //
+            //     ; ERROR EXIT: RETURN PARAMETER SET TO 0FFH
+            //     ;             MEANING THAT FILE CANNOT BE CLOSED
+            //     CLOSE7: LXI H,RETPAR / DCR M / RET
+            //
+            // matching the documented contract (255 when the name is not in the
+            // directory).  This used to return a flat 0, so closing an FCB
+            // naming a file that is not there reported success.
+            //
+            // Two cases return SUCCESS without looking for the file at all,
+            // taken from the same listing rather than assumed — `CLOSEF` does
+            // `CALL GETRO / RNZ` and `CALL FCB14 / ANI 80H / RNZ`, both with the
+            // return parameter still 0:
+            //   * a software write-protected drive (BDOS 28) — a R/O drive is
+            //     not a close *error*, there is simply nothing to write back;
+            //   * FCB byte 14 (S2) with its high bit set, CP/M's "this extent
+            //     needs no directory update" marker.
+            // Byte 14 is read unmasked by `Fcb::from_bytes`, so the flag
+            // survives to be tested here.
+            // Named rather than inlined into one condition so the two kinds
+            // of success stay distinguishable to a reader: these two answer
+            // without consulting the directory at all, and `||` keeps that
+            // literal — `open_existing` is not called when either holds.
+            let no_directory_work = fs.fcb_drive_is_ro(fcb) || fcb.s2 & 0x80 != 0;
+            if no_directory_work || fs.open_existing(fcb).is_some() {
+                0x00
+            } else {
+                0xFF
+            }
+        })),
         17 => {
             let de = cpm.reg16(Reg16::DE);
             let raw = cpm.read_block(de, FCB_SIZE);
@@ -1348,6 +1382,83 @@ mod tests {
             service_disk_bdos(&mut cpm, &mut fs, 13),
             Some(0),
             "the flag describes A:, the drive reset logs in — not B:"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 16 (Close File): 0 when the file is there, **0FFH when it is not**,
+    /// and 0 without searching in the two cases the real `CLOSEF` short-circuits.
+    ///
+    /// Writes here are write-through and there is no directory to rewrite, so
+    /// close has no work to do — but it used to return a flat 0, which reported
+    /// success for a file that does not exist. `BDOS22.ASM` has an explicit
+    /// error exit for that ("MEANING THAT FILE CANNOT BE CLOSED"), and the
+    /// documented contract is 255 when the name is not in the directory.
+    #[test]
+    fn test_bdos_close_reports_a_missing_file() {
+        let base = std::env::temp_dir()
+            .join(format!("xmodem_cpm_close_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::write(base.join("A").join("NOTE.TXT"), b"body").unwrap();
+
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[0xC9]);
+
+        // FCB naming an existing file, on A:.
+        let fcb_at = 0x0100u16;
+        let mut raw = [b' '; FCB_SIZE];
+        raw[0] = 1; // A:
+        raw[1..5].copy_from_slice(b"NOTE");
+        raw[9..12].copy_from_slice(b"TXT");
+        raw[12..].fill(0);
+        cpm.write_block(fcb_at, &raw);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 16),
+            Some(0x00),
+            "closing a file that exists succeeds"
+        );
+
+        // Same FCB after the file is gone → the error the flat 0 used to hide.
+        std::fs::remove_file(base.join("A").join("NOTE.TXT")).unwrap();
+        cpm.write_block(fcb_at, &raw);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 16),
+            Some(0xFF),
+            "a name not in the directory must report 0FFH, not success"
+        );
+
+        // FCB byte 14 (S2) high bit = "no directory update needed": success
+        // without looking, so it stays 0 even with the file still missing.
+        let mut marked = raw;
+        marked[14] = 0x80;
+        cpm.write_block(fcb_at, &marked);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 16),
+            Some(0x00),
+            "S2 bit 7 short-circuits to success, as CLOSEF's `ANI 80H / RNZ` does"
+        );
+
+        // A software write-protected drive is not a close *error* either —
+        // `CALL GETRO / RNZ` returns with the parameter still 0.
+        //
+        // The file is left MISSING on purpose: with it present both the
+        // short-circuit and the existence check return 0, so the assertion
+        // could not tell them apart and the R/O rule was untested. (Mutation
+        // testing caught exactly that.) Missing, the two disagree — 0 only if
+        // the write-protect check short-circuits.
+        fs.select(0);
+        fs.set_drive_ro();
+        cpm.write_block(fcb_at, &raw);
+        cpm.set_reg16(Reg16::DE, fcb_at);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 16),
+            Some(0x00),
+            "closing on a write-protected drive succeeds; there is just nothing to write back"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -445,6 +445,22 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **BDOS 16 (Close File) reported success for a file that was not there.** It
+  returned a flat `0`. Writes in this emulator are write-through and there is no
+  directory to rewrite, so close genuinely has no work to do — but the *return
+  code* still has to be right, and CP/M 2.2's `BDOS22.ASM` has an explicit exit
+  for it: "ERROR EXIT: RETURN PARAMETER SET TO 0FFH / MEANING THAT FILE CANNOT BE
+  CLOSED", matching the documented contract of 255 when the name is not in the
+  directory. Closing an FCB whose file had been deleted, or was never created,
+  now reports `0FFH`.
+
+  Two cases return success *without* looking for the file, taken from the same
+  listing rather than assumed — `CLOSEF` does `CALL GETRO / RNZ` and
+  `CALL FCB14 / ANI 80H / RNZ` with the return parameter still zero: a software
+  write-protected drive (a R/O drive is not a close error, there is simply
+  nothing to write back), and an FCB whose byte 14 carries CP/M's
+  "no directory update needed" flag. Nothing in the existing suite depended on
+  close always succeeding.
 - **BDOS 13 now returns the temporary-file flag it is supposed to.** Reset Disk
   System always returned `0` in A. Real CP/M 2.2 returns `0FFH` when the drive it
   logs in holds a temporary file, and that value is load-bearing rather than
