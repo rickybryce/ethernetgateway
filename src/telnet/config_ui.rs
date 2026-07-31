@@ -7,6 +7,39 @@
 
 use super::*;
 
+/// Compose the "<label> set to <value> <unit>." confirmation a numeric setting
+/// prints after it is changed, split across two lines when one would not fit.
+///
+/// `content_width` is the room available *after* the caller's two-space indent.
+/// Returns the line contents, without that indent.
+///
+/// This exists because the confirmation is emitted with `send_line`, which does
+/// **not** wrap: an over-long line wraps wherever the terminal happens to run
+/// out, mid-word, on a C64. Five call sites were silently over the 40-column
+/// PETSCII budget — Kermit's idle timeout at 51 characters, and four
+/// "Negotiation timeout set to 300 seconds." at 41 — because every caller was
+/// composing the string itself with no width check anywhere.
+///
+/// Splitting rather than shortening is deliberate: nothing is lost, no caller
+/// has to pick a terser label or unit, and a future caller with a long label
+/// cannot reintroduce the overflow. The split point is chosen so the label
+/// stands alone and the value clause follows, which reads naturally on two
+/// lines. `test_numeric_confirmations_fit_every_screen` checks every real call
+/// site against this.
+pub(in crate::telnet) fn numeric_confirmation_lines(
+    label: &str,
+    value: u64,
+    unit: &str,
+    content_width: usize,
+) -> Vec<String> {
+    let one_line = format!("{} set to {} {}.", label, value, unit);
+    if one_line.chars().count() <= content_width {
+        return vec![one_line];
+    }
+    // Doesn't fit: label on its own line, the value clause under it.
+    vec![label.to_string(), format!("set to {} {}.", value, unit)]
+}
+
 impl TelnetSession {
     // ─── CONFIGURATION ──────────────────────────────────────
 
@@ -3930,10 +3963,18 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn xmodem_set_dir(&mut self, current: &str) -> Result<(), std::io::Error> {
+        // Both path lines are truncated to the screen, the way the log-file
+        // submenu already truncates `log_file`: a transfer dir is unbounded
+        // (`/var/lib/ethernetgateway/transfer` is 33 chars before the label)
+        // and `send_line` does not wrap, so a real path broke mid-name on a
+        // C64.  Same class as the numeric confirmations, found by measuring
+        // the rest of this file after fixing those.
+        let content = self.confirmation_content_width();
+        let path_w = content.saturating_sub("Current directory: ".len());
         self.send_line("").await?;
         self.send_line(&format!(
             "  Current directory: {}",
-            self.amber(current)
+            self.amber(&truncate_to_width(current, path_w))
         ))
         .await?;
         self.send("  New directory: ").await?;
@@ -3951,9 +3992,13 @@ impl TelnetSession {
         .await
         .ok();
         self.send_line("").await?;
+        let shown_w = content.saturating_sub("Transfer dir set to: ".len());
         self.send_line(&format!(
             "  {}",
-            self.green(&format!("Transfer dir set to: {}", input))
+            self.green(&format!(
+                "Transfer dir set to: {}",
+                truncate_to_width(&input, shown_w)
+            ))
         ))
         .await?;
         self.send_line("").await?;
@@ -3961,6 +4006,17 @@ impl TelnetSession {
         self.flush().await?;
         self.wait_for_key().await?;
         Ok(())
+    }
+
+    /// Usable width for a confirmation line, i.e. the screen minus the
+    /// two-space indent every one of them carries.
+    pub(in crate::telnet) fn confirmation_content_width(&self) -> usize {
+        let screen = if self.terminal_type == TerminalType::Petscii {
+            PETSCII_WIDTH
+        } else {
+            80
+        };
+        screen - 2
     }
 
     pub(in crate::telnet) async fn xmodem_set_numeric(
@@ -3997,11 +4053,16 @@ impl TelnetSession {
                 .await
                 .ok();
                 self.send_line("").await?;
-                self.send_line(&format!(
-                    "  {}",
-                    self.green(&format!("{} set to {} {}.", label, val, unit))
-                ))
-                .await?;
+                // Composed by a width-aware helper rather than inline: this
+                // confirmation is ONE unwrapped line, and five call sites were
+                // quietly overflowing a 40-column PETSCII screen (the worst,
+                // Kermit's idle timeout, at 51 chars). Fixing it here rather
+                // than in each caller means a future caller cannot reintroduce
+                // it — see `numeric_confirmation_lines`.
+                let content_width = self.confirmation_content_width();
+                for line in numeric_confirmation_lines(label, val, unit, content_width) {
+                    self.send_line(&format!("  {}", self.green(&line))).await?;
+                }
                 self.send_line("").await?;
                 self.send("  Press any key to continue.").await?;
                 self.flush().await?;

@@ -47,6 +47,10 @@ mod session;
 pub(crate) use session::{match_terminal_name, is_backspace_key};
 mod transfer;
 mod config_ui;
+// Width-aware confirmation formatter; used by config_ui itself and by the
+// test that checks every numeric call site's worst case fits the screen.
+#[cfg(test)]
+pub(in crate::telnet) use config_ui::numeric_confirmation_lines;
 mod serial_ui;
 mod web;
 mod aichat_ui;

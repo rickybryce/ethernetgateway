@@ -2087,6 +2087,121 @@ fn test_accept_relays_ssh_qualifier_fits_petscii() {
     );
 }
 
+/// `numeric_confirmation_lines` itself: one line when it fits, two when it
+/// doesn't, and **nothing dropped** either way. Tested directly as well as
+/// through the call-site scan below, because the scan only ever asserts that
+/// the output fits — it would be satisfied by a function that truncated.
+#[test]
+fn test_numeric_confirmation_lines_splits_without_losing_anything() {
+    // Comfortably short: one line.
+    let one = numeric_confirmation_lines("Terminal width", 40, "columns", 38);
+    assert_eq!(one, vec!["Terminal width set to 40 columns.".to_string()]);
+
+    // The real worst case that prompted this — Kermit's idle timeout, 49 chars
+    // of content against a 38-char PETSCII budget.
+    let two = numeric_confirmation_lines("Idle timeout", 86400, "seconds (0 = disabled)", 38);
+    assert_eq!(
+        two,
+        vec![
+            "Idle timeout".to_string(),
+            "set to 86400 seconds (0 = disabled).".to_string(),
+        ]
+    );
+    for line in &two {
+        assert!(line.chars().count() <= 38, "split line still too wide: {line:?}");
+    }
+
+    // Nothing is lost by splitting: every word of the one-line form survives.
+    let joined = two.join(" ");
+    for word in ["Idle", "timeout", "86400", "seconds", "(0", "disabled)."] {
+        assert!(joined.contains(word), "{word:?} lost in the split: {joined:?}");
+    }
+
+    // A wide screen keeps the single line even for the long case.
+    let wide = numeric_confirmation_lines("Idle timeout", 86400, "seconds (0 = disabled)", 78);
+    assert_eq!(wide.len(), 1, "78 columns is plenty; should not split");
+}
+
+/// Every numeric-setting confirmation must fit the screen it is printed on,
+/// at that setting's WORST-CASE value.
+///
+/// `xmodem_set_numeric` prints its confirmation with `send_line`, which does
+/// not wrap, and each of its 24 call sites composes a label and a unit of its
+/// own. Five of them were silently over the 40-column PETSCII budget —
+/// Kermit's idle timeout at 51 characters, and four "Negotiation timeout set
+/// to 300 seconds." at 41 — with nothing to catch it, which is why this scrapes
+/// the real call sites out of the source rather than restating them.
+///
+/// The worst case is the site's own `max` argument (widest value it can ever
+/// print), so the assertion tracks a caller that raises its ceiling too.
+#[test]
+fn test_numeric_confirmations_fit_every_screen() {
+    let src = include_str!("config_ui.rs");
+    // .xmodem_set_numeric( "Label", "key", <current>, <min>, <max>, "unit", )
+    let mut checked = 0;
+    for (idx, _) in src.match_indices("self.xmodem_set_numeric(") {
+        let tail = &src[idx..];
+        let close = tail.find(")\n").unwrap_or(tail.len());
+        let call = &tail[..close];
+        // String literals in order: label, key, unit (comments are skipped
+        // because they are stripped below).
+        let decommented: String = call
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let strings: Vec<&str> = decommented
+            .match_indices('"')
+            .collect::<Vec<_>>()
+            .chunks(2)
+            .filter(|c| c.len() == 2)
+            .map(|c| &decommented[c[0].0 + 1..c[1].0])
+            .collect();
+        if strings.len() < 3 {
+            continue; // not a shape we can read; the count floor below catches over-skipping
+        }
+        let (label, key, unit) = (strings[0], strings[1], strings[2]);
+        // The numeric args: current, min, max — take the last one before the unit.
+        let nums: Vec<&str> = decommented
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.ends_with(',') && !l.contains('"'))
+            .collect();
+        let max_raw = nums.last().copied().unwrap_or("0,").trim_end_matches(',');
+        // Values like `u16::MAX as u64` or `86400`; resolve the ones we can and
+        // fall back to the widest u64 so an unparsed cap is never optimistic.
+        let max_val: u64 = if max_raw.contains("u16::MAX") {
+            u16::MAX as u64
+        } else if max_raw.contains("u32::MAX") {
+            u32::MAX as u64
+        } else {
+            max_raw.parse().unwrap_or(u64::MAX)
+        };
+        for (screen, name) in [(PETSCII_WIDTH, "PETSCII"), (80usize, "ANSI/ASCII")] {
+            let content_width = screen - 2;
+            for line in numeric_confirmation_lines(label, max_val, unit, content_width) {
+                assert!(
+                    line.chars().count() <= content_width,
+                    "{name}: confirmation line {line:?} for `{key}` is {} chars, \
+                     over the {content_width}-char content budget ({screen}-col \
+                     screen minus the 2-space indent). Shorten the label or unit.",
+                    line.chars().count(),
+                );
+            }
+        }
+        checked += 1;
+    }
+    // Floor-asserted so a changed call shape can't leave this checking nothing.
+    assert!(
+        checked >= 20,
+        "only parsed {checked} xmodem_set_numeric call sites; the scan has \
+         stopped matching the real code"
+    );
+}
+
 /// Log-file submenu (Other Settings -> L) must fit the 22-row PETSCII screen.
 /// header(3) + blank + 5 values (state/file/rotate/keep/max-disk) + blank
 /// + 4 items (E/F/S/K) + blank + Q + prompt = 17, well inside the budget.

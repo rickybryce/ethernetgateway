@@ -11,6 +11,37 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **Five numeric settings printed a confirmation wider than a C64 screen.**
+  `xmodem_set_numeric` emits its "X set to N unit." line with `send_line`,
+  which does not wrap, so an over-long line broke wherever the terminal ran out
+  — mid-word, on a 40-column screen. Kermit's idle timeout was the worst at 51
+  characters ("Idle timeout set to 86400 seconds (0 = disabled)."), and the four
+  protocol negotiation timeouts sat 1 character over at 41. Found by measuring
+  every one of the 24 call sites rather than by reading them.
+
+  Fixed in the helper instead of in the callers, so a future caller with a long
+  label cannot reintroduce it: a new `numeric_confirmation_lines` composes the
+  line and, when it will not fit, splits it so the label stands alone and the
+  value clause follows. Nothing is shortened and nothing is lost — the previous
+  alternative, trimming labels and units, would have cost the "(0 = disabled)"
+  that tells an operator what zero does. Verified on a live PETSCII session:
+  the worst case now renders as 14 and 38 characters. A test scrapes all 24 call
+  sites out of the source and checks each one's **worst-case** value against both
+  screen widths, so raising a setting's ceiling is caught too.
+- **The transfer-directory prompt echoed an unbounded path.** Same class,
+  found by measuring the rest of the file after fixing the numeric
+  confirmations: `Current directory:` and `Transfer dir set to:` printed a path
+  of any length through non-wrapping `send_line`, so a real path
+  (`/var/lib/ethernetgateway/transfer` is 33 characters before the label) broke
+  mid-name on a C64. Both are now truncated to the screen exactly as the
+  log-file submenu already truncates `log_file`; an 80-column terminal still
+  shows the path in full.
+- **The two PETSCII output translators disagreed about ASCII DEL.** After the
+  backspace fix the gateway's filter mapped `0x7F` to cursor-left while
+  `serial.rs` let it through to render as an arbitrary C64 glyph — a split that
+  contradicted the rest of the codebase, where `is_backspace_key` and terminal
+  detection both accept `0x08` and `0x7F` as the same key. `serial.rs` now
+  treats the pair identically, as the gateway already did.
 - **A C64 on the gateway had every long command mangled, because a host's
   backspace was translated into a *destructive* PETSCII delete.** The PETSCII
   output filter mapped ASCII `0x08` to PETSCII `0x14`, and those are not

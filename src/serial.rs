@@ -5399,11 +5399,17 @@ fn translate_petscii_to_ascii_byte(byte: u8) -> u8 {
 /// deliberately writes a bare `0x14`: there the emulator is *originating* an
 /// erase for its own local echo, so the self-contained destructive delete is
 /// the right primitive.  Here we are *translating someone else's* stream.
+/// ASCII DEL (0x7F) is treated exactly like BS, which is how this codebase
+/// treats the pair everywhere else — `is_backspace_key` accepts both, terminal
+/// detection accepts both, and the gateway's `filter_gateway_output` maps both.
+/// Leaving 0x7F to fall through rendered it as an arbitrary PETSCII glyph on
+/// the C64, so the two PETSCII output translators disagreed about a byte they
+/// agree about on input.
 fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
     match byte {
         b'A'..=b'Z' => byte + 32,
         b'a'..=b'z' => byte - 32,
-        0x08 => 0x9D,
+        0x08 | 0x7F => 0x9D,
         _ => byte,
     }
 }
@@ -8465,6 +8471,9 @@ mod tests {
         // old mapping silently ate characters the host believed were still on
         // screen — worst on long lines, which readline repositions the most.
         assert_eq!(translate_ascii_to_petscii_byte(0x08), 0x9D);
+        // ASCII DEL is treated as BS, matching the gateway's filter and this
+        // file's own is_backspace_key, which both accept the pair.
+        assert_eq!(translate_ascii_to_petscii_byte(0x7F), 0x9D);
         // Pass-through for digits/punctuation/CR/LF.
         for b in [b'0', b'9', b' ', b'!', b':', b'-', 0x0D, 0x0A] {
             assert_eq!(translate_ascii_to_petscii_byte(b), b);
