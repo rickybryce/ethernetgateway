@@ -347,9 +347,29 @@ the right length full of the wrong bytes. `PST`/`PIN`/`POST`/`POUT` now save
 `BC`/`DE`/`HL`, as `CST`/`CIN` always did. It was invisible in the emulator
 because our HBIOS preserved `HL`; it no longer does, for exactly this reason.
 
+**ASCII is the shipped default; ANSI is opt-in.** The two failure modes are not
+symmetric. An ANSI terminal shows plain ASCII perfectly, so defaulting to ASCII
+costs that user only colour, which Settings → `A` turns on. A plain or PETSCII
+terminal shows ANSI as litter — escape sequences printed as text, over every
+screen — so defaulting to ANSI costs *that* user a program they cannot read well
+enough to find the setting that would fix it. The default therefore goes to the
+reading that is merely plainer rather than the one that is broken. (Note the
+clear-screen dialect is a separate setting and still defaults to the ANSI
+`ESC [ 2 J` — see below.)
+
+**The terminal-mode menu deliberately does not offer Settings.** The menu key
+gets you `E)xit`, `H)elp`, `U)pload` and `D)ownload`, and that is all. Settings
+used to be on it and did not work: the settings screen drew, but keystrokes were
+still going to the remote, so nothing could be selected and the way out was not
+obvious. Transfers belong on this menu because the whole point is to dial, ask
+the far end for a file, and fetch it without dropping the line. Settings do not:
+they are a sit-down task, and `E` returns to the main menu where `S` works
+properly. Removing the option is better than a settings screen that ignores you.
+
 **The menus are coloured, and switch themselves off.** Headings are cyan,
 labels cyan with amber values, and the key letter in every menu line is
-highlighted. Colour is governed by the ANSI/ASCII setting that already exists,
+highlighted. Colour is governed by the ANSI/ASCII setting that already exists (which now
+defaults to ASCII, so colour is off until asked for),
 because that setting means precisely the thing colour depends on — whether this
 terminal understands escape sequences. In ASCII mode not one escape byte is
 emitted, so a printing terminal or a PETSCII console sees exactly the plain text

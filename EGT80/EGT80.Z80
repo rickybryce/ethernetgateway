@@ -175,7 +175,12 @@ PABASE: DB      0               ; Z180 internal I/O base for the ASCI family.
                                 ; otherwise set it - so sharing meant ASCI
                                 ; inherited whatever the last family used and
                                 ; addressed registers that do not exist.
-FLTMOD: DB      0               ; 0 = ANSI pass, 1 = ASCII strip
+FLTMOD: DB      1               ; 0 = ANSI pass, 1 = ASCII strip.  ASCII is
+                                ; the default: an ANSI terminal shows plain
+                                ; ASCII correctly, while a plain terminal shows
+                                ; ANSI as litter.  Colour is opt-in (Settings,
+                                ; A) rather than something a new user has to
+                                ; turn off to read the screen.
 ECHOFL: DB      0               ; local echo off (the remote echoes)
 CRLFFL: DB      0               ; do not add LF to a typed CR
 ESCCH:  DB      19H             ; ^Y, as the QTERM builds here use
@@ -1314,8 +1319,6 @@ TESC:   CALL    CRLF
         JR      Z,TESCEX
         CP      'H'
         JR      Z,TESCHL
-        CP      'S'
-        JR      Z,TESCST
         CP      'U'
         JR      Z,TESCU
         CP      'D'
@@ -1326,8 +1329,6 @@ TESCLI: LD      A,(ESCCH)
         CALL    PSEND
         JP      TLOOP
 TESCHL: CALL    SCHELP
-        JP      TLOOP
-TESCST: CALL    SCSETT
         JP      TLOOP
 ; A transfer started from inside the session does NOT wait for a key: the
 ; far end has its own "press any key" right behind ours, and two prompts in
@@ -2440,12 +2441,13 @@ CFGCH1: LD      A,(DE)
         CALL    ESCOK           ; would trap that key for ever - and a letter
         JR      C,CFGBAD        ; would swallow ordinary typing
         RET
-CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ANSI
+CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ASCII
         LD      (PKIND),A
+        LD      A,1             ; FLTMOD 1 = ASCII, matching the shipped
+        LD      (FLTMOD),A      ; default above (the XOR below would undo it)
         XOR     A
         LD      (PABASE),A
         LD      (PCHAN),A
-        LD      (FLTMOD),A
         LD      (ECHOFL),A
         LD      (CRLFFL),A
         LD      (LPAR),A        ; 9600 8N1, and programming switched off -
@@ -4284,7 +4286,7 @@ MTERM2: DB      ' for the terminal menu.',CR,LF
         DB      'To return to the main menu, press ',0
 MTERM3: DB      ' then E.',CR,LF,CR,LF,0
 MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
-MESCMN: DB      'Menu: E)xit  H)elp  S)ettings  U)pload  D)ownload',CR,LF
+MESCMN: DB      'Menu: E)xit  H)elp  U)pload  D)ownload',CR,LF
         DB      '      ',0
 MESCM2: DB      ' again sends ',0
 MESCM3: DB      ' itself.   Choice: ',0
@@ -4295,8 +4297,9 @@ MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
 MDEAD:  DB      'Nothing was sent: the port did not accept the',CR,LF
         DB      'character.  Selected port is ',0
 MDEAD2: DB      'Either no serial chip answers at that address,',CR,LF
-        DB      'or it is held off by flow control.  Press S for',CR,LF
-        DB      'Settings, then P, to pick a different port.',CR,LF,0
+        DB      'or it is held off by flow control.  Go to the',CR,LF
+        DB      'main menu, press S for Settings, then P, to pick',CR,LF
+        DB      'a different port.',CR,LF,0
 
 MXSFIL: DB      CR,LF,'Send which file? ',0
 MXRFIL: DB      CR,LF,'Receive as which file? ',0

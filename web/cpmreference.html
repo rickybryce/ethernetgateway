@@ -789,6 +789,16 @@
                     <code>EGT80.COM</code> restores the shipped copy on the next launch.
                 </p>
 
+                <p class="note">
+                    <strong>It starts in ASCII mode.</strong> An ANSI terminal displays plain ASCII perfectly, so
+                    defaulting to ASCII costs that user only colour &mdash; Settings &rarr; <code>A</code> turns
+                    ANSI (and with it colour) on. A plain or PETSCII terminal shows ANSI as litter printed over
+                    every screen, which costs that user a program too garbled to find the setting that would fix
+                    it. Note this governs escape sequences and colour; the <em>clear-screen</em> dialect is a
+                    separate setting (Settings &rarr; <code>C</code>) and still defaults to the ANSI
+                    <code>ESC [ 2 J</code>.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Main menu</h3>
                 <table class="data-table">
                     <thead><tr><th>Key</th><th>Does</th></tr></thead>
@@ -802,6 +812,29 @@
                         <tr><td><code>X</code></td><td>Exit to CP/M.</td></tr>
                     </tbody>
                 </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Terminal-mode menu &mdash; the menu key (<code>^Y</code> by default)</h3>
+                <p>
+                    Pressing the menu key inside terminal mode does <em>not</em> hang up, so a transfer can be
+                    started mid-call: dial, ask the far end for a file, then fetch it.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Key</th><th>Does</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>E</code></td><td>Exit terminal mode, back to the main menu.</td></tr>
+                        <tr><td><code>H</code></td><td>Help.</td></tr>
+                        <tr><td><code>U</code></td><td>Upload a file to the far end (XMODEM), without leaving the session.</td></tr>
+                        <tr><td><code>D</code></td><td>Download a file from the far end (XMODEM), without leaving the session.</td></tr>
+                        <tr><td>the menu key again</td><td>Sends the menu key itself to the far end.</td></tr>
+                        <tr><td>anything else</td><td>Returns to the session.</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">
+                    <strong>Settings is deliberately not on this menu.</strong> It used to be, and it did not work:
+                    the settings screen drew, but keystrokes were still going to the remote, so nothing could be
+                    selected. Press <code>E</code> first &mdash; Settings works properly from the main menu, and
+                    leaving terminal mode does not drop the line.
+                </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Selecting a port &mdash; keys from <code>S</code> &rarr; <code>P</code></h3>
                 <p>

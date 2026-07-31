@@ -650,7 +650,7 @@
                         <ul>
                             <li>XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter C1</li>
                             <li><strong>Gateway Shell</strong> &mdash; a CP/M-inspired <code>A&gt;</code> prompt (DIR, TYPE, COPY, MOVE, ERA, MKDIR&hellip;) that manages the transfer directory as drive A:, over telnet or SSH</li>
-                            <li><strong>CP/M emulator</strong> &mdash; an optional, default-off mode that runs real CP/M&nbsp;2.2 <code>.COM</code> software (PIP, STAT, WordStar&hellip;) on an emulated Z80, over telnet or SSH</li>
+                            <li><strong>CP/M emulator</strong> &mdash; runs real CP/M&nbsp;2.2 <code>.COM</code> software (PIP, STAT, ED, ASM, DDT, WordStar&hellip;) on an emulated Z80, over telnet or SSH. On by default and bounded three ways: every file call is jailed under the transfer directory, a runaway is stopped by <code>cpm_emu_max_minstr</code>, and a double-<code>ESC</code> always returns to <code>A&gt;</code>. Set <code>cpm_emu_enabled = false</code> to shut the door entirely, or <code>cpm_emu_uart = off</code> to keep it while denying guest code any network access. The bundled <strong>EGT80</strong> terminal is placed on drive A: for you</li>
                             <li><strong>Peer-to-peer file transfers</strong> &mdash; dial another serial port directly and pipe two devices end to end, like calling a friend's modem</li>
                             <li>Hayes-compatible modem emulator with ATDT TCP dial-out and a phone book</li>
                             <li>Binary-transparent bridging for clean, reliable transfers</li>
@@ -1813,6 +1813,14 @@ relay_transport = ssh</span></code></pre>
                     confirmation dialogs that warn before disabling the web server or
                     changing its port (either action will break the operator's current
                     browser session).
+                </p>
+                <p class="dim-text">
+                    <strong>It works on a phone.</strong> Below 640&nbsp;px the layout
+                    re-flows &mdash; one listener per line instead of two, and the rows
+                    that are pinned to a single line on a desktop are allowed to wrap
+                    &mdash; so the page fits the screen instead of scrolling sideways.
+                    Verified from 320&nbsp;px up, with every <code>More&hellip;</code>
+                    popup open.
                 </p>
             </div>
 

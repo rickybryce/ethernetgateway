@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
+### Changed
+- **EGT80's terminal-mode menu no longer offers Settings.** It did, and it did
+  not work: the settings screen drew, but keystrokes were still going to the
+  remote, so nothing could be selected and the way out was not obvious. The menu
+  key now gives `E)xit`, `H)elp`, `U)pload` and `D)ownload` — transfers stay,
+  because starting one mid-call without dropping the line is the whole point of
+  that menu, while settings are a sit-down task that `E` reaches properly.
+- **EGT80 starts in ASCII mode instead of ANSI.** The two failure modes are not
+  symmetric: an ANSI terminal shows plain ASCII perfectly, so this costs that
+  user only colour, which Settings → `A` turns on; a plain or PETSCII terminal
+  showed ANSI as litter printed over every screen, which cost that user a program
+  too garbled to find the setting that would fix it. The clear-screen dialect is
+  a separate setting and still defaults to the ANSI `ESC [ 2 J`.
+
+  Both are in `EGT80.Z80`, so `EGT80.COM` was rebuilt with the period SLR
+  assembler and re-gated through M80+L80 and ZMAC, and its pinned hash updated.
+  **Existing installs are unaffected**: the copy on drive A: is never
+  overwritten, because it holds your saved settings. Delete `EGT80.COM` to get
+  the new defaults.
+
 ### Fixed
 - **The CP/M emulator leaked the DMA address from one program to the next.**
   CP/M's own CCP resets the DMA to 0080H immediately before running a transient
