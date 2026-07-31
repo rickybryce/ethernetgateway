@@ -11,6 +11,16 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **The CP/M emulator leaked the DMA address from one program to the next.**
+  CP/M's own CCP resets the DMA to 0080H immediately before running a transient
+  (`CCP22.ASM`'s `TRANS7` calls `SETDMA` on the line before `CALL TPA`); we did
+  not. `PIP` moves the DMA to its own buffer, so a following `DUMP TEST.TXT`
+  printed the stale contents of 0080H — the command tail — instead of the file,
+  with no error to say so. Every program that reads a record without setting its
+  own DMA first was exposed, which is most of them. Only visible when programs
+  were run in sequence: each one alone in a fresh session was always correct,
+  which is how it survived this long. Found by running the real DRI transients
+  from a CP/M 2.2 distribution back to back rather than one at a time.
 - **The web config page scrolled sideways on a phone.** Its frames carry a
   deliberate 500 px floor — a frame narrower than its own widest row is what
   pushed the More button outside it — so the page was a fixed 516 px wide

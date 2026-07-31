@@ -992,6 +992,19 @@ impl TelnetSession {
         // looks for its data on A: and hangs.  `load_com` reinstalls the low
         // vectors, so this has to come after it.
         cpm.set_current_disk(fs.current_drive(), fs.current_user());
+        // Reset the DMA to the default buffer, exactly where CP/M's own CCP
+        // does it: `CCP22.ASM`'s `TRANS7` calls `SETDMA` (function 26 with
+        // 0080H) on the line before `CALL TPA`.
+        //
+        // Without this, the DMA a program left behind was inherited by the next
+        // one. Found by running the real DRI transients in sequence: `PIP`
+        // moves the DMA to its own buffer, so a following `DUMP TEST.TXT`
+        // printed the stale contents of 0080H — the command tail — instead of
+        // the file, silently and with no error. Every program that reads a
+        // record without setting its own DMA was exposed, which is most of
+        // them; `DUMP` on its own in a fresh session was always correct, which
+        // is why this survived.
+        fs.set_dma(crate::cpm::DEFAULT_DMA);
         // Runaway ceiling for this run, from config (millions of Z80
         // instructions) — the last-resort backstop.  Interactively, a
         // double-`ESC` breaks out: at a console prompt via `cpmemu_conin`, and
@@ -1920,6 +1933,51 @@ mod repl_tests {
             Some(""),
             "a zero-length record is an empty command line, not corruption"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every program starts with the DMA at 0080H, whatever the last one left
+    /// it at.
+    ///
+    /// CP/M's own CCP does this — `CCP22.ASM`'s `TRANS7` calls `SETDMA` on the
+    /// line before `CALL TPA` — and we did not, so the DMA leaked from one
+    /// program into the next. It was found by running the real DRI transients
+    /// in sequence rather than one at a time: `PIP` moves the DMA to its own
+    /// buffer, and a following `DUMP TEST.TXT` then printed the stale contents
+    /// of 0080H (the command tail) instead of the file, with no error. Any
+    /// program that reads a record without setting its own DMA first was
+    /// exposed, which is most of them.
+    #[tokio::test]
+    async fn test_each_program_starts_with_the_default_dma() {
+        let (base, mut fs) = scratch_fs("dma");
+        let (mut sess, _peer) = make_test_session_with_peer(TerminalType::Ascii);
+        let mut cpm = Cpm::new();
+        let mut modem = CpmModem::new(false);
+
+        // MVI C,26 / LXI D,1234h / CALL 5 / JMP 0  — set DMA, then warm-boot
+        // out, exactly as PIP leaves it moved.
+        let set_dma: [u8; 9] = [0x0E, 26, 0x11, 0x34, 0x12, 0xCD, 0x05, 0x00, 0xC7];
+        sess.cpmemu_run_program(&mut cpm, &mut modem, &set_dma, "", &mut fs)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.dma(),
+            0x1234,
+            "the test program did not actually move the DMA — it cannot prove anything"
+        );
+
+        // JMP 0: does nothing but leave.  Its DMA must be the default again.
+        let noop: [u8; 1] = [0xC7];
+        sess.cpmemu_run_program(&mut cpm, &mut modem, &noop, "", &mut fs)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.dma(),
+            crate::cpm::DEFAULT_DMA,
+            "a program inherited the previous program's DMA; reads land in its buffer, \
+             not at 0080H"
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
