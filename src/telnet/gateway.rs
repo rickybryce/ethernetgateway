@@ -159,7 +159,37 @@ pub(in crate::telnet) fn filter_gateway_output(input: &[u8], state: &mut u8, is_
                 } else if is_petscii {
                     match b {
                         b'~' => {}  // tilde has no PETSCII equivalent
-                        0x08 | 0x7F => out.push(0x14),  // backspace/DEL → PETSCII DEL
+                        // Host BS → PETSCII CURSOR LEFT (0x9D), *not* PETSCII
+                        // DEL (0x14).  They are not equivalents and the
+                        // difference corrupted the screen on every edited line:
+                        //
+                        //   ASCII 0x08  = move left one column, NON-destructive
+                        //   PETSCII 0x14 = delete the char to the left and pull
+                        //                  the rest of the line back (see the
+                        //                  same point made from the other side
+                        //                  in serial.rs's AT-echo handler)
+                        //   PETSCII 0x9D = move left one column — the actual
+                        //                  equivalent
+                        //
+                        // A host uses BS two ways, and 0x14 broke both.
+                        // Readline repositions the cursor with bare BS after
+                        // redrawing a line — each one silently DELETED a
+                        // character the remote still believes is on screen — and
+                        // it erases with the universal `BS SPACE BS`, which
+                        // became `DEL SPACE DEL`: delete a char, insert a space,
+                        // delete that.  Both leave the C64's screen disagreeing
+                        // with the host, and the damage grows with line length
+                        // because longer lines are repositioned more, which is
+                        // why short commands always looked fine.
+                        //
+                        // With 0x9D, `BS SPACE BS` renders as left, space, left
+                        // — the character is overwritten with a blank and the
+                        // cursor ends up before it, which is exactly what the
+                        // host means.  0x7F (ASCII DEL) is treated the same as
+                        // BS, as it was before; a host emitting it as output at
+                        // all is vanishingly rare, and a non-destructive move is
+                        // the safe reading.
+                        0x08 | 0x7F => out.push(0x9D),
                         b'A'..=b'Z' => out.push(b + 32),
                         b'a'..=b'z' => out.push(b - 32),
                         _ => out.push(b),

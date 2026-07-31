@@ -4251,7 +4251,23 @@ Gateway, and every other feature that rides the same serial link.
     <li><strong>Use 1200 baud, not 2400</strong>, on bit-banged userport adapters. Set <code>serial_<em>x</em>_baud = 1200</code> on the gateway port <em>and</em> set your C64 terminal program (e.g. CCGMS) to 1200. This roughly doubles the per-bit timing budget and is the reliable cure.</li>
     <li>If you must run faster, a hardware-UART interface (SwiftLink / Turbo232) or a WiFi modem with its own UART removes the bit-banging entirely and is not affected.</li>
     <li>To confirm the diagnosis on your own hardware, enable the gateway byte-trace (&sect;16.10) and watch the per-byte timing and the assembled <code>[gw-in] line</code>.</li>
+    <li><strong>If the bytes in that trace are correct</strong> and only the
+    <em>drawing</em> is wrong &mdash; wrap in the wrong column, backspace
+    deleting the wrong character on screen, leftovers after a history recall
+    &mdash; then this is not a timing fault at all. See &sect;16.15 first (a
+    PETSCII translation bug fixed in this release, which corrupted long lines on
+    every C64 gateway session regardless of adapter), then &sect;16.14 if the
+    remote has been told the wrong terminal width.</li>
 </ul>
+
+<aside class="note">
+<span class="label">Fixed in this release, and it looked exactly like this</span>
+Before this version the gateway translated a remote host's <strong>backspace</strong>
+into PETSCII <code>0x14</code> (DEL), which <em>deletes</em> a character instead
+of just moving over it. Long lines were mangled on every C64 gateway session,
+bit-banged adapter or not. If you are chasing this on an older build, that is the
+first thing to rule out &mdash; see &sect;16.15.
+</aside>
 
 <h2 id="ch16-trace">16.10 Gateway Byte-Trace (Debug Mode)</h2>
 
@@ -4447,6 +4463,70 @@ wizard's), from the telnet menu, or with <code>systemctl reload</code> /
 this warning appears right after such a restart, it is reporting a conflict that
 was already there &mdash; the restart re-ran the binds and put the failure back
 in front of you.
+</aside>
+
+<h2 id="ch16-petsciibs">16.15 Long Commands Corrupted on a C64 Gateway Session (fixed)</h2>
+
+<p>
+<strong>Symptom:</strong> on the SSH or Telnet Gateway from a C64 in PETSCII
+mode, short commands work perfectly but a command long enough to pass the
+40-column margin comes out mangled &mdash; characters missing, the visible line
+disagreeing with what you typed &mdash; and editing with DEL makes it worse. On
+older builds this happened on every C64 gateway session, whatever serial
+interface was in use.
+</p>
+
+<p>
+<strong>Cause (a real bug, fixed in this release):</strong> the gateway
+translated a host's ASCII backspace into PETSCII <code>0x14</code>. Those are
+not equivalents:
+</p>
+
+<ul>
+    <li>ASCII <code>0x08</code> (BS) moves the cursor left one column and
+    <strong>erases nothing</strong>.</li>
+    <li>PETSCII <code>0x14</code> (DEL) <strong>deletes</strong> the character
+    to the left and pulls the rest of the line back.</li>
+    <li>PETSCII <code>0x9D</code> (CRSR LEFT) is the actual equivalent, and is
+    what the gateway now sends.</li>
+</ul>
+
+<p>
+A host uses backspace two ways, and the old mapping broke both. Measured against
+a real <code>bash</code> at <code>TERM=dumb</code> in a 40-column window: as soon
+as a typed line passes the margin, readline redraws it and then emits a run of
+<strong>bare backspaces purely to reposition the cursor</strong> &mdash; eleven of
+them in one observed case. Each one used to <em>delete</em> a character the host
+still believed was on screen. Separately, readline erases a character with the
+universal <code>BS SPACE BS</code>, which became <code>DEL SPACE DEL</code>:
+delete a character, insert a space, delete that.
+</p>
+
+<p>
+Short commands never trigger a redraw, which is exactly why they always looked
+fine. With <code>0x9D</code>, <code>BS SPACE BS</code> renders as left, space,
+left &mdash; the character is overwritten with a blank and the cursor ends up
+before it, which is what the host means.
+</p>
+
+<p>
+<strong>Two paths were affected</strong> and both are fixed: the SSH and Telnet
+Gateways, and a C64 dialling out through the modem emulator with
+<code>AT+PETSCII=1</code>. If you run an older build, both show the same
+corruption. The modem emulator&rsquo;s own <code>AT</code>-command echo is
+unaffected and always was correct &mdash; there it deliberately sends
+<code>0x14</code> to erase a character it echoed itself, which is the right
+primitive when you are the one originating the erase rather than translating
+someone else&rsquo;s output.
+</p>
+
+<aside class="note">
+<span class="label">Why the ANSI filter was not the problem</span>
+It is natural to suspect the PETSCII path's escape-sequence stripping, since it
+discards every CSI sequence. Measurement ruled it out: at <code>TERM=dumb</code>
+readline emits <strong>no CSI sequences at all</strong> &mdash; it has no
+clr_eol or cursor-addressing capability to use, so it redraws with carriage
+return, spaces and backspaces only. There was nothing for the filter to discard.
 </aside>
 
 <!-- ═══════════════════ Appendix A ═══════════════════ -->

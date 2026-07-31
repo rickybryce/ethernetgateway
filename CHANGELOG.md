@@ -11,6 +11,46 @@ Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
 ### Fixed
+- **A C64 on the gateway had every long command mangled, because a host's
+  backspace was translated into a *destructive* PETSCII delete.** The PETSCII
+  output filter mapped ASCII `0x08` to PETSCII `0x14`, and those are not
+  equivalents: ASCII BS moves the cursor left and erases nothing, while PETSCII
+  `0x14` deletes the character to its left and pulls the rest of the line back.
+  The real equivalent is `0x9D` (CRSR LEFT), which is what the gateway now
+  sends. This affected every C64 gateway session in PETSCII mode, on any serial
+  interface — it is not the bit-banged-timing fault documented in the manual's
+  §16.9, though the two look alike.
+
+  **Two independent sites had the identical defect**, so fixing one would have
+  been half a fix: `filter_gateway_output` (the SSH and Telnet gateways) and
+  `translate_ascii_to_petscii_byte` in `serial.rs` (a C64 dialling out through
+  the modem emulator with `AT+PETSCII=1`). Both are corrected, and a test scans
+  both translators' bodies so the destructive mapping cannot return to either.
+  The CP/M emulator's terminal layer (`cpm_term.rs`) already had it right —
+  `PET_LEFT = 0x9D` — which is independent corroboration that the two older
+  sites were the outliers. The modem emulator's *own* AT-command echo still
+  writes a bare `0x14` on purpose and is correct: there it originates a
+  destructive erase rather than translating someone else's stream.
+
+  A host uses backspace two ways and the old mapping broke both, which was
+  established by measuring a real `bash` at `TERM=dumb` in a 40-column window
+  rather than by reading the spec. The moment a typed line passes the margin,
+  readline redraws it and then emits a **run of bare backspaces purely to
+  reposition the cursor** — eleven of them in one observed case — and each one
+  used to *delete* a character the host still believed was on screen. Separately,
+  readline erases with the universal `BS SPACE BS`, which became
+  `DEL SPACE DEL`: delete a character, insert a space, delete that. Short
+  commands never trigger a redraw, which is exactly why they always looked fine
+  and long ones did not. With `0x9D`, `BS SPACE BS` renders as left, space, left
+  — the character is overwritten with a blank and the cursor ends up before it,
+  which is what the host means.
+
+  The same measurement cleared the obvious suspect: at `TERM=dumb` readline emits
+  **no CSI sequences at all** (it has no clr_eol or cursor-addressing capability
+  to use), so the PETSCII path's escape-sequence stripping was never involved.
+  The test that had pinned the old mapping asserted `0x14` with no stated reason
+  and never covered `BS SPACE BS` at all; it now states why `0x14` is wrong and
+  covers both uses. Documented in the manual's new §16.15.
 - **The PDF manual was silently clipping content, and had been for some time.**
   Adding one sentence to a config-key row exposed it: the five-column key appendix
   is wider than the printable text block, and WeasyPrint neither shrinks nor clips

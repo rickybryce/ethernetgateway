@@ -5376,12 +5376,34 @@ fn translate_petscii_to_ascii_byte(byte: u8) -> u8 {
 /// character mapping is case-shifted relative to ASCII — sending
 /// `'a'` (0x61) renders as uppercase `A`, sending `'A'` (0x41) renders
 /// as lowercase `a` — so we case-swap letters before writing them to
-/// the wire.  ASCII BS (0x08) becomes PETSCII DEL (0x14).
+/// the wire.
+///
+/// ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, not PETSCII DEL
+/// (0x14).  This mapping was `0x14` and that was wrong for the same reason it
+/// was wrong in the gateway's `filter_gateway_output` — both sites had the same
+/// defect, so fixing only one would have left a C64 dialling out through the
+/// modem emulator (`AT+PETSCII=1`) still corrupted:
+///
+///   ASCII 0x08   = move the cursor left one column, erasing nothing
+///   PETSCII 0x14 = DELETE the character to the left, pulling the line back
+///   PETSCII 0x9D = move the cursor left one column — the real equivalent
+///
+/// A host uses BS both to reposition the cursor (readline emits runs of bare
+/// BS after redrawing a line, which used to delete characters the host still
+/// believed were on screen) and to erase via the universal `BS SPACE BS`
+/// (which became `DEL SPACE DEL`).  With `0x9D` the erase idiom renders as
+/// left, space, left — the character is overwritten and the cursor ends up
+/// before it, exactly as intended.
+///
+/// Note the contrast with the AT-command echo in `process_at_byte`, which
+/// deliberately writes a bare `0x14`: there the emulator is *originating* an
+/// erase for its own local echo, so the self-contained destructive delete is
+/// the right primitive.  Here we are *translating someone else's* stream.
 fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
     match byte {
         b'A'..=b'Z' => byte + 32,
         b'a'..=b'z' => byte - 32,
-        0x08 => 0x14,
+        0x08 => 0x9D,
         _ => byte,
     }
 }
@@ -8437,12 +8459,33 @@ mod tests {
         // ASCII a-z → bytes that render as lowercase on a C64.
         assert_eq!(translate_ascii_to_petscii_byte(b'a'), b'A');
         assert_eq!(translate_ascii_to_petscii_byte(b'z'), b'Z');
-        // ASCII BS → PETSCII DEL.
-        assert_eq!(translate_ascii_to_petscii_byte(0x08), 0x14);
+        // ASCII BS → PETSCII CRSR LEFT (0x9D), the non-destructive move.
+        // NOT PETSCII DEL (0x14): a host's BS erases nothing, while 0x14
+        // deletes the character to its left and pulls the line back, so the
+        // old mapping silently ate characters the host believed were still on
+        // screen — worst on long lines, which readline repositions the most.
+        assert_eq!(translate_ascii_to_petscii_byte(0x08), 0x9D);
         // Pass-through for digits/punctuation/CR/LF.
         for b in [b'0', b'9', b' ', b'!', b':', b'-', 0x0D, 0x0A] {
             assert_eq!(translate_ascii_to_petscii_byte(b), b);
         }
+    }
+
+    /// The `BS SPACE BS` erase idiom — the case the old assertion never covered,
+    /// and the one that matters most in practice, since it is how every
+    /// terminal-driving program erases a character.
+    #[test]
+    fn test_translate_bs_space_bs_becomes_an_overwrite() {
+        let translated: Vec<u8> = [0x08u8, b' ', 0x08]
+            .iter()
+            .map(|&b| translate_ascii_to_petscii_byte(b))
+            .collect();
+        assert_eq!(
+            translated,
+            vec![0x9D, b' ', 0x9D],
+            "BS SPACE BS must become left, space, left — an overwrite, not \
+             DEL SPACE DEL, which deletes a character and inserts a space"
+        );
     }
 
     #[test]

@@ -1030,10 +1030,102 @@ fn test_filter_ascii_keeps_tilde() {
     assert_eq!(filter_output(b"~$ ", false), b"~$ ");
 }
 
+/// A host's backspace becomes PETSCII **cursor left** (0x9D), not PETSCII DEL
+/// (0x14).
+///
+/// This test previously asserted 0x14 with no stated reason, and the mapping
+/// was wrong: ASCII BS moves the cursor without erasing, while PETSCII 0x14
+/// deletes the character to its left and pulls the line back (serial.rs's
+/// AT-echo handler documents the same asymmetry from the other direction).
+/// So every bare BS a remote used to reposition its cursor silently deleted a
+/// character the remote still believed was on screen — corruption that grows
+/// with line length, which is why short commands looked fine and long ones
+/// did not.
 #[test]
-fn test_filter_petscii_translates_backspace() {
-    assert_eq!(filter_output(b"ab\x08c", true), b"AB\x14C");
-    assert_eq!(filter_output(b"ab\x7Fc", true), b"AB\x14C");
+fn test_filter_petscii_translates_backspace_to_cursor_left() {
+    assert_eq!(filter_output(b"ab\x08c", true), b"AB\x9DC");
+    assert_eq!(filter_output(b"ab\x7Fc", true), b"AB\x9DC");
+}
+
+/// Neither PETSCII output translator may map a host's backspace to the
+/// destructive PETSCII DEL again.
+///
+/// There are two of them — `filter_gateway_output` here and
+/// `translate_ascii_to_petscii_byte` in `serial.rs` (the modem emulator's
+/// `AT+PETSCII=1` path) — and **both carried the identical defect**, so fixing
+/// one would have left a C64 dialling out through the modem still corrupted.
+/// They live in different modules with different signatures, so they cannot
+/// share a unit test; this scans both sources instead, the same technique
+/// `config::test_every_written_key_can_be_applied` uses on its `match`.
+///
+/// Scoped to each translator's own body so an unrelated, legitimate `0x14`
+/// elsewhere in either file — notably serial.rs's AT-echo, which *originates* a
+/// destructive erase on purpose and is correct — cannot trip it.
+#[test]
+fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
+    // (file label, source, marker that opens the translator, bytes to scan)
+    let sites: [(&str, &str, &str, usize); 2] = [
+        (
+            "telnet/gateway.rs filter_gateway_output",
+            include_str!("gateway.rs"),
+            "} else if is_petscii {",
+            400,
+        ),
+        (
+            "serial.rs translate_ascii_to_petscii_byte",
+            include_str!("../serial.rs"),
+            "fn translate_ascii_to_petscii_byte",
+            300,
+        ),
+    ];
+    for (label, src, marker, span) in sites {
+        // Strip `//` comments from the WHOLE source before locating anything.
+        // Both translators now carry a comment explaining why 0x14 is wrong, so
+        // a scan that reads comments fires on the explanation instead of the
+        // code — and stripping only inside the window doesn't help either,
+        // because a byte span measured against commented source barely reaches
+        // the code. Both mistakes were made here before this worked.
+        // Comment-only lines are dropped entirely rather than blanked: leaving
+        // their indentation behind spends the byte window on whitespace, which
+        // is how an earlier version of this scan failed to reach the code.
+        let stripped: String = src
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => l[..i].trim_end(),
+                None => l.trim_end(),
+            })
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let at = stripped
+            .find(marker)
+            .unwrap_or_else(|| panic!("{label}: marker {marker:?} not found — renamed?"));
+        let body = &stripped[at..(at + span).min(stripped.len())];
+        // The mapping must be present and must be the cursor-left one.
+        assert!(
+            body.contains("0x9D"),
+            "{label}: no 0x9D (PETSCII CRSR LEFT) in the translator — a host's \
+             backspace has to map to the non-destructive move"
+        );
+        assert!(
+            !body.contains("0x14"),
+            "{label}: maps a byte to PETSCII DEL 0x14, which DELETES a character \
+             the host only meant to move over. This corrupted every long line on \
+             a C64 gateway session; use 0x9D (CRSR LEFT). Body scanned:\n{body}"
+        );
+    }
+}
+
+/// The case that actually matters, and which the old assertion never covered:
+/// `BS SPACE BS` is the universal way a terminal-driving program erases one
+/// character. Translated to cursor-left it renders as left, space, left — the
+/// character is overwritten with a blank and the cursor ends up before it,
+/// which is precisely the host's intent. Translated to 0x14 it became
+/// `DEL SPACE DEL`: delete a character, insert a space, delete that — leaving
+/// the screen and the host's model of it disagreeing.
+#[test]
+fn test_filter_petscii_renders_bs_space_bs_as_an_overwrite() {
+    assert_eq!(filter_output(b"x\x08 \x08", true), b"X\x9D \x9D");
 }
 
 #[test]
