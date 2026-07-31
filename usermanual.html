@@ -2463,8 +2463,49 @@ are gateway conveniences.
         <tr><td><code>ECHO</code></td><td>&mdash;</td><td>Demo: echo typed keys (press <code>.</code> to end).</td></tr>
         <tr><td><code>EXIT</code> (<code>BYE</code>, <code>QUIT</code>)</td><td>&mdash;</td><td>Leave the emulator and return to the gateway.</td></tr>
         <tr><td><code>name</code></td><td>&mdash;</td><td>Any other word loads and runs <code>name.COM</code> from the drive.</td></tr>
+        <tr><td><em>batch</em> (<code>$$$.SUB</code>)</td><td>&#10003;</td><td>While <code>A:$$$.SUB</code> exists, each command comes from it instead of the keyboard, echoed as it runs. Written by CP/M&rsquo;s own <code>SUBMIT.COM</code> &mdash; see below.</td></tr>
     </tbody>
 </table>
+
+<h3>Batch files (<code>SUBMIT</code>)</h3>
+
+<p>
+CP/M&nbsp;2.2 batch jobs work. <code>SUBMIT.COM</code> is a transient you supply
+(it ships with CP/M&nbsp;2.2 distributions and with RomWBW): running
+<code>SUBMIT&nbsp;<em>name</em></code> reads <code><em>name</em>.SUB</code> and
+compiles it into a file called <code>$$$.SUB</code>, one command per 128-byte
+record. The command processor then takes each command from that file instead of
+the keyboard, echoing it as it runs, and erases the file when the batch
+finishes.
+</p>
+
+<p>
+Three behaviours are inherited from real CP/M&nbsp;2.2 rather than invented, and
+are worth knowing because two of them surprise people:
+</p>
+
+<ul>
+    <li><strong>An error ends the batch.</strong> A command the processor does
+    not recognise erases <code>$$$.SUB</code> and returns you to the keyboard;
+    the remaining lines do not run. This is CP/M&rsquo;s behaviour, not a
+    limitation of the emulator.</li>
+    <li><strong>Batches only work from drive A:.</strong> The command processor
+    reads <code>$$$.SUB</code> from A: whatever drive is current, while
+    <code>SUBMIT.COM</code> writes it to the <em>current</em> drive. Start a
+    submit from B: and the file lands on B:, where nothing reads it &mdash; so
+    nothing happens. That is exactly how real CP/M&nbsp;2.2 behaves.</li>
+    <li><strong>Leaving the emulator abandons a running batch</strong> rather
+    than resuming it in a later session.</li>
+</ul>
+
+<p>
+The richer <code>SUBMIT</code> of CP/M&nbsp;3 &mdash; conditional
+<code>IF</code>/<code>ELSE</code>, <code>$1</code>&hellip;<code>$9</code>
+parameters, <code>PROFILE.SUB</code> at boot &mdash; is not part of
+CP/M&nbsp;2.2 and is not emulated. Feeding keystrokes to a running
+<em>program</em> (as opposed to command lines to the processor) needed
+CP/M&nbsp;2.2&rsquo;s separate <code>XSUB.COM</code>, which is not supported.
+</p>
 
 <p>
 All six authentic CP/M&nbsp;2.2 resident commands (<code>DIR</code>,

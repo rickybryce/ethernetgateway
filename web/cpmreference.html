@@ -698,6 +698,7 @@
                         <tr><td><code>VER</code><br><span class="dim-text">also <code>VERSION</code></span></td><td>Emulator version and TPA size.</td></tr>
                         <tr><td><code>HELLO</code></td><td>BDOS print-string demo (function 9).</td></tr>
                         <tr><td><code>ECHO</code></td><td>Interactive console demo.</td></tr>
+                        <tr><td><em>batch</em><br><span class="dim-text"><code>$$$.SUB</code></span></td><td>While <code>A:$$$.SUB</code> exists the next command is taken from it instead of the keyboard and echoed as it runs; the file is consumed a record at a time and erased when done. Written by CP/M's own <code>SUBMIT.COM</code>. As on real CP/M&nbsp;2.2: an unrecognised command ends the batch, and batches only work from A: (SUBMIT writes to the current drive, the processor reads A:). CP/M&nbsp;3's conditionals/parameters and <code>XSUB</code> are not emulated.</td></tr>
                         <tr><td><code>HELP</code><br><span class="dim-text">also <code>?</code></span></td><td>This command list.</td></tr>
                         <tr><td><code>EXIT</code><br><span class="dim-text">also <code>BYE</code>, <code>QUIT</code></span></td><td>Leave CP/M and return to the gateway menu.</td></tr>
                         <tr><td><em>name</em></td><td>Run <code>name.COM</code> from the drive. A drive prefix works (<code>B:PIP</code>); the extension is always forced to <code>COM</code>, as the real CCP does.</td></tr>

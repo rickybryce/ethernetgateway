@@ -458,6 +458,30 @@ impl CpmFs {
         }
     }
 
+    /// Shrink the file the FCB names to `records` 128-byte records, returning
+    /// the new record count, or `None` if it does not resolve/exist.
+    ///
+    /// This is how the CCP consumes a `$$$.SUB`: real CP/M decrements the
+    /// FCB's record count and closes the file, which the BDOS turns into a
+    /// shorter file.  We have no directory to rewrite, so the host file is
+    /// truncated directly — the same observable result.
+    ///
+    /// Refuses on a software-write-protected drive (BDOS 28), like every other
+    /// mutating path here.
+    pub fn truncate_to_records(&self, fcb: &Fcb, records: u32) -> Option<u32> {
+        if self.fcb_drive_is_ro(fcb) {
+            return None;
+        }
+        let path = self.open_existing(fcb)?;
+        let len = (records as u64) * 128;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_len(len))
+            .ok()?;
+        Some(records)
+    }
+
     /// The 8.3 names on the FCB's drive whose name/ext match its (possibly
     /// wildcarded) pattern, sorted and deduplicated — the listing behind the
     /// CCP's `DIR [d:][afn]`.

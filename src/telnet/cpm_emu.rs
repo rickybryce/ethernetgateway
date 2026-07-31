@@ -440,9 +440,22 @@ impl TelnetSession {
             self.send(&prompt).await?;
             self.flush().await?;
 
-            let line = match self.get_line_input().await? {
-                Some(s) => s,
-                None => return Ok(()), // disconnected
+            // A running batch supplies the command instead of the keyboard,
+            // and the CCP echoes it so the operator can see what ran (CCP22's
+            // `PMSG` after the read).  `submitted` is remembered because an
+            // unrecognised command has to abort the batch, as it does on real
+            // CP/M ("if an error is encountered, the $$$.SUB file is erased").
+            let submitted_line = Self::cpmemu_next_submit_line(fs);
+            let submitted = submitted_line.is_some();
+            let line = match submitted_line {
+                Some(s) => {
+                    self.send_line(&s).await?;
+                    s
+                }
+                None => match self.get_line_input().await? {
+                    Some(s) => s,
+                    None => return Ok(()), // disconnected
+                },
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -462,12 +475,20 @@ impl TelnetSession {
                     ccp_drive = d - b'A'; // a bare `d:` moves the CCP default
                 } else {
                     self.send_line(&format!("  {}?", self.red(&verb))).await?;
+                    if submitted {
+                        Self::cpmemu_abort_submit(fs);
+                    }
                 }
                 continue;
             }
 
             match verb.as_str() {
-                "EXIT" | "BYE" | "QUIT" => return Ok(()),
+                "EXIT" | "BYE" | "QUIT" => {
+                    // Leaving is a break: don't strand a half-consumed batch
+                    // for the next session to resume out of nowhere.
+                    Self::cpmemu_abort_submit(fs);
+                    return Ok(());
+                }
                 "HELP" | "?" => self.cpmemu_help().await?,
                 "VER" | "VERSION" => {
                     self.send_line(&format!(
@@ -510,6 +531,12 @@ impl TelnetSession {
                         Some(false) => return Ok(()),       // session gone
                         None => {
                             self.send_line(&format!("  {}?", self.red(other))).await?;
+                            // "if an error is encountered, the $$$.SUB file is
+                            // erased and control reverts to the keyboard"
+                            // (CCP22.ASM).  An unknown command is that error.
+                            if submitted {
+                                Self::cpmemu_abort_submit(fs);
+                            }
                         }
                     }
                 }
@@ -520,6 +547,84 @@ impl TelnetSession {
     /// Built-in `DIR`: list the files on the current drive, four per row
     /// (CP/M's `DIR` is a CCP built-in, not a `.COM`).  Prints `No file`
     /// when the drive is empty, as CP/M does.
+    /// The FCB naming `$$$.SUB` on **drive A:** — the batch file the CCP
+    /// consumes one command at a time.
+    ///
+    /// Drive A: explicitly (FCB drive byte 1), not the current drive, because
+    /// that is what CP/M 2.2's CCP does: `CCP22.ASM` selects disk 0 before
+    /// opening the file and re-selects the caller's drive afterwards. The
+    /// comment beside that code says "on current disk" and is misleading — the
+    /// `MVI A,00H` / `CNZ SELDSK` pair immediately above it switches to A:.
+    ///
+    /// This is also why the historical rule "SUBMIT only works from drive A:"
+    /// exists: `SUBMIT.COM` writes `$$$.SUB` to the *current* drive (verified
+    /// by running the real DRI binary in this emulator from B:, which produced
+    /// `B:$$$.SUB`), while the CCP only ever reads A:. Submitting from B:
+    /// therefore does nothing, on real CP/M and here alike.
+    fn cpmemu_sub_fcb() -> Fcb {
+        let mut raw = [0u8; FCB_SIZE];
+        raw[0] = 1; // 1 = A: (0 would mean "current drive")
+        raw[1..9].copy_from_slice(b"$$$     ");
+        raw[9..12].copy_from_slice(b"SUB");
+        Fcb::from_bytes(&raw)
+    }
+
+    /// Take the next command line from `A:$$$.SUB`, or `None` when no batch is
+    /// running.
+    ///
+    /// The format was established by running DRI's real `SUBMIT.COM` inside
+    /// this emulator and dumping the file it wrote: 128-byte records, byte 0 a
+    /// character count, the text following it — and **the records are in
+    /// reverse order**, which `CCP22.ASM` states outright ("Yes $$$.SUB files
+    /// are backwards") and implements by reading record `RC-1`. So the *last*
+    /// record is the *next* command.
+    ///
+    /// Everything after the counted text is uninitialised buffer content — the
+    /// real dump showed leftovers like `$ *.COM\r\n` after the NUL — so the
+    /// length byte is the only trustworthy delimiter and nothing here scans for
+    /// a terminator.
+    ///
+    /// The record is consumed **before** it is returned (the file is truncated,
+    /// and deleted once empty), matching the CCP's decrement-and-close. That
+    /// ordering is what stops a command which crashes or aborts from being
+    /// re-read forever.
+    fn cpmemu_next_submit_line(fs: &mut CpmFs) -> Option<String> {
+        let fcb = Self::cpmemu_sub_fcb();
+        let records = fs.file_size_records(&fcb)?;
+        if records == 0 {
+            // An empty batch file is a finished one.
+            fs.delete(&fcb);
+            return None;
+        }
+        let last = records - 1;
+        let rec = fs.read_record(&fcb, last).ok().flatten()?;
+        // Consume first, then interpret.
+        if last == 0 {
+            fs.delete(&fcb);
+        } else {
+            fs.truncate_to_records(&fcb, last);
+        }
+        // A count of 0 is a blank line; anything past the record is junk, so a
+        // count that cannot fit is treated as a corrupt record rather than
+        // trusted (it would otherwise read uninitialised bytes as a command).
+        let len = rec[0] as usize;
+        if len > 127 {
+            return None;
+        }
+        let text: String = rec[1..1 + len]
+            .iter()
+            .map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { ' ' })
+            .collect();
+        Some(text.trim().to_string())
+    }
+
+    /// Abandon any running batch: erase `A:$$$.SUB`.  The CCP's `EXITSB` does
+    /// exactly this, and calls it on a keyboard break, on a command error, and
+    /// when the last line has run.
+    fn cpmemu_abort_submit(fs: &mut CpmFs) {
+        fs.delete(&Self::cpmemu_sub_fcb());
+    }
+
     async fn cpmemu_dir(&mut self, fs: &CpmFs, line: &str) -> Result<(), std::io::Error> {
         // CP/M's DIR takes an optional filespec: `DIR`, `DIR afn`, `DIR d:`,
         // `DIR d:afn`.  This used to ignore the operand entirely, so
@@ -1688,6 +1793,134 @@ mod repl_tests {
             out.extend_from_slice(&buf[..n]);
         }
         String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// Write a `$$$.SUB` the way DRI's `SUBMIT.COM` does: 128-byte records,
+    /// byte 0 a character count, **records in reverse order**, and everything
+    /// past the counted text left as uninitialised junk.
+    ///
+    /// The junk is not incidental — the real file dumped out of this emulator
+    /// had `$ *.COM\r\n` leftovers sitting after the NUL, so a reader that
+    /// scanned for a terminator instead of trusting the count byte would
+    /// execute garbage. This fixture reproduces that hazard deliberately.
+    fn write_sub_file(dir: &std::path::Path, lines: &[&str]) {
+        let mut data = Vec::new();
+        for line in lines.iter().rev() {
+            let mut rec = [0x00u8; 128];
+            rec[0] = line.len() as u8;
+            rec[1..1 + line.len()].copy_from_slice(line.as_bytes());
+            // Uninitialised-buffer residue after the text, as the real one has.
+            rec[1 + line.len()..].fill(b'$');
+            data.extend_from_slice(&rec);
+        }
+        std::fs::write(dir.join("$$$.SUB"), data).unwrap();
+    }
+
+    /// The CCP consumes `A:$$$.SUB` last-record-first, so commands come out in
+    /// the order the `.SUB` file listed them, and the file shrinks by a record
+    /// each time until it is deleted.
+    ///
+    /// Format and ordering were both established empirically — DRI's real
+    /// `SUBMIT.COM` was run inside this emulator and the file it produced was
+    /// dumped — and confirmed against CP/M 2.2's own `CCP22.ASM`, which reads
+    /// record `RC-1` and says "Yes $$$.SUB files are backwards".
+    #[test]
+    fn test_submit_lines_come_out_in_file_order_then_the_file_is_erased() {
+        let (base, mut fs) = scratch_fs("sub");
+        write_sub_file(&base.join("A"), &["VER", "DIR *.COM", "HELLO"]);
+        let path = base.join("A").join("$$$.SUB");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 * 128);
+
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs).as_deref(),
+            Some("VER"),
+            "the first line of the .SUB must run first, i.e. the LAST record"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            2 * 128,
+            "the record must be consumed before it is returned"
+        );
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs).as_deref(),
+            Some("DIR *.COM")
+        );
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs).as_deref(),
+            Some("HELLO")
+        );
+        assert!(
+            !path.exists(),
+            "an exhausted batch must be erased, as the CCP's EXITSB does"
+        );
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs),
+            None,
+            "no batch file means keyboard input"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `$$$.SUB` is read from **A: only**, whatever drive is current. That is
+    /// what CP/M 2.2's CCP does, and it is the reason for the historical rule
+    /// that SUBMIT only works from A: — `SUBMIT.COM` writes the file to the
+    /// *current* drive, so a submit started on B: leaves a file nothing reads.
+    /// Verified against the real binary, which wrote `B:$$$.SUB` when run from
+    /// B: in this emulator.
+    #[test]
+    fn test_submit_is_read_from_drive_a_only() {
+        let (base, mut fs) = scratch_fs("subdrive");
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        write_sub_file(&base.join("B"), &["VER"]);
+
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs),
+            None,
+            "a batch on B: must be ignored while A: has none"
+        );
+        fs.select(1); // B: current — still must not be consumed
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs),
+            None,
+            "selecting B: must not make B:$$$.SUB run; the CCP reads A:"
+        );
+        assert!(base.join("B").join("$$$.SUB").exists(), "and must not erase it");
+
+        // The same file on A: does run, even with B: selected.
+        write_sub_file(&base.join("A"), &["DIR"]);
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs).as_deref(),
+            Some("DIR"),
+            "A:$$$.SUB runs regardless of the current drive"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A corrupt count byte must not be trusted. Everything past the counted
+    /// text in a real `$$$.SUB` is uninitialised buffer content, so a length
+    /// that cannot fit the record would otherwise turn stale bytes into a
+    /// command line.
+    #[test]
+    fn test_submit_rejects_a_corrupt_length_byte() {
+        let (base, mut fs) = scratch_fs("subbad");
+        let mut rec = [b'X'; 128];
+        rec[0] = 200; // impossible: a record holds at most 127 text bytes
+        std::fs::write(base.join("A").join("$$$.SUB"), rec).unwrap();
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs),
+            None,
+            "an impossible count must not be executed as a command"
+        );
+        // A zero count is a blank line, which is legal and simply does nothing.
+        let mut blank = [b'$'; 128];
+        blank[0] = 0;
+        std::fs::write(base.join("A").join("$$$.SUB"), blank).unwrap();
+        assert_eq!(
+            TelnetSession::cpmemu_next_submit_line(&mut fs).as_deref(),
+            Some(""),
+            "a zero-length record is an empty command line, not corruption"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

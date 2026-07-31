@@ -445,6 +445,39 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **The CP/M emulator runs `SUBMIT` batch jobs.** While `A:$$$.SUB` exists, the
+  command processor takes each command from it instead of the keyboard, echoes
+  it as it runs, consumes it a record at a time, and erases the file when the
+  batch finishes. `SUBMIT.COM` itself is a transient the operator supplies — it
+  ships with CP/M 2.2 distributions and with RomWBW — so nothing is bundled.
+
+  Both the file format and the behaviour were established from primary sources
+  rather than memory, which mattered because the format is peculiar. DRI's real
+  `SUBMIT.COM` was run inside this emulator and the file it wrote was dumped:
+  128-byte records, byte 0 a character count, and **the records are in reverse
+  order** — so the *last* record is the *next* command. Everything after the
+  counted text is uninitialised buffer residue (the dump showed `$ *.COM\r\n`
+  leftovers after the NUL), so the count byte is the only safe delimiter and a
+  count that cannot fit the record is rejected rather than executed. CP/M 2.2's
+  own `CCP22.ASM` confirms both points: it reads record `RC-1` and comments
+  "Yes $$$.SUB files are backwards".
+
+  Three inherited behaviours are deliberate, not shortcuts:
+  - **An unrecognised command ends the batch** and returns to the keyboard —
+    `CCP22.ASM`: "if an error is encountered, the $$$.SUB file is erased".
+  - **Batches only work from drive A:.** The processor reads `$$$.SUB` from A:
+    whatever drive is current, while `SUBMIT.COM` writes it to the *current*
+    drive — verified by running the real binary from B:, which produced
+    `B:$$$.SUB` that nothing reads. That mismatch is the origin of the
+    historical "SUBMIT only works from A:" rule, and it is reproduced rather
+    than papered over.
+  - **Leaving the emulator abandons a running batch** instead of resuming it in
+    a later session.
+
+  CP/M 3's richer SUBMIT (conditionals, `$1`–`$9` parameters, `PROFILE.SUB`) is
+  not CP/M 2.2 and is not emulated; feeding keystrokes to a running *program*
+  needed 2.2's separate `XSUB.COM`, also not supported. Documented in the
+  manual and `cpmreference.html`.
 - **The terminal size reported to a gateway's remote host is now configurable,
   and the SSH gateway no longer ignores what the client told us.** Two new keys,
   `gateway_term_width` and `gateway_term_height`, both `0` for automatic. They
