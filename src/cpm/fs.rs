@@ -9,7 +9,7 @@
 //! container base, a guest can never escape to the host filesystem — the
 //! same jail guarantee the transfer subsystem relies on.
 
-use super::fcb::{format_8_3, split_8_3, Fcb};
+use super::fcb::{format_8_3, split_8_3, Fcb, FCB_SIZE};
 use std::path::{Path, PathBuf};
 
 /// Number of emulated drives.  CP/M 2.2's FCB drive field is 4 bits, so the
@@ -458,6 +458,33 @@ impl CpmFs {
         }
     }
 
+    /// Does the current drive hold a temporary `$`-prefixed file?
+    ///
+    /// This is what BDOS 13 (Reset Disk System) reports in `A`, and the CCP is
+    /// its consumer: `CCP22.ASM` does `CALL RESET` (function 13) then
+    /// `STA SUBFL`, so this flag is how a fresh CCP discovers that a `SUBMIT`
+    /// batch is already in progress.
+    ///
+    /// The test is deliberately **any name beginning with `$`**, not `$$$.SUB`
+    /// specifically. CP/M 2.2's `BDOS22.ASM` drive-login scan compares only the
+    /// first filename byte — `SUI '$'` — and its own comment calls it "some
+    /// sort of TEMPORARY FILE OF THE $$$.EXT VARIETY", so `$FOO.BAR` sets the
+    /// flag too. Narrowing it to `$$$.SUB` would be a plausible-looking
+    /// deviation from the real thing.
+    ///
+    /// Real CP/M also requires the directory entry's user byte to match the
+    /// current user. This filesystem keeps one flat namespace per drive (a
+    /// documented simplification — see `user`), so there is no per-user
+    /// directory to filter and every visible file counts.
+    pub fn has_temp_dollar_file(&self) -> bool {
+        // `$` then all-wildcard: the same matcher every other directory
+        // operation uses, rather than a second ad-hoc scan.
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1] = b'$';
+        raw[2..12].fill(b'?');
+        !self.list_matching(&Fcb::from_bytes(&raw)).is_empty()
+    }
+
     /// Shrink the file the FCB names to `records` 128-byte records, returning
     /// the new record count, or `None` if it does not resolve/exist.
     ///
@@ -743,7 +770,7 @@ fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::super::fcb::{Fcb, FCB_SIZE};
+    use super::super::fcb::Fcb;
     use super::*;
 
     fn fcb_named(drive: u8, name: &str, ext: &str) -> Fcb {
@@ -812,10 +839,58 @@ mod tests {
 
     /// Create an isolated `CPM/` base with an `A` drive directory.
     fn temp_base(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("xmodem_cpmfs_{tag}"));
+        // PID-scoped like `cpm_emu`'s sibling `scratch_fs`: each of these
+        // tests starts by `remove_dir_all`ing its base, so a path shared
+        // between two overlapping `cargo test` processes means one run wipes
+        // the other's fixture mid-test. Unique tags make it safe *within* a
+        // run; the PID makes it safe between them.
+        let base = std::env::temp_dir()
+            .join(format!("xmodem_cpmfs_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("A")).unwrap();
         base
+    }
+
+    /// BDOS 13's return flag: set when the logged-in drive holds a temporary
+    /// `$`-prefixed file.  This is how a fresh CCP discovers a `SUBMIT` batch
+    /// is already running (`CCP22.ASM`: `CALL RESET` then `STA SUBFL`).
+    ///
+    /// Pins the rule the real BDOS actually implements — **any** name starting
+    /// with `$`, from the single `SUI '$'` comparison on the first filename
+    /// byte in `BDOS22.ASM` — rather than the narrower `$$$.SUB` it would be
+    /// tempting to check for.
+    #[test]
+    fn test_has_temp_dollar_file() {
+        let base = temp_base("dollar");
+        let mut fs = CpmFs::new(base.clone());
+        assert!(!fs.has_temp_dollar_file(), "a clean drive sets no flag");
+
+        std::fs::write(base.join("A").join("PIP.COM"), b"x").unwrap();
+        assert!(
+            !fs.has_temp_dollar_file(),
+            "an ordinary file must not set the flag"
+        );
+
+        // The submit file itself.
+        std::fs::write(base.join("A").join("$$$.SUB"), b"x").unwrap();
+        assert!(fs.has_temp_dollar_file(), "$$$.SUB must set the flag");
+
+        // Any `$`-prefixed name counts, which is what the BDOS scan tests.
+        std::fs::remove_file(base.join("A").join("$$$.SUB")).unwrap();
+        std::fs::write(base.join("A").join("$WORK.TMP"), b"x").unwrap();
+        assert!(
+            fs.has_temp_dollar_file(),
+            "the real BDOS compares only the first byte, so $WORK.TMP counts"
+        );
+
+        // Per-drive: a flag on A: must not follow you to B:.
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        fs.select(1);
+        assert!(
+            !fs.has_temp_dollar_file(),
+            "the flag describes the logged-in drive, not the whole disk set"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -445,6 +445,21 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **BDOS 13 now returns the temporary-file flag it is supposed to.** Reset Disk
+  System always returned `0` in A. Real CP/M 2.2 returns `0FFH` when the drive it
+  logs in holds a temporary file, and that value is load-bearing rather than
+  decorative: `CCP22.ASM` calls function 13 and stores A straight into its submit
+  flag, which is how a command processor discovers a `SUBMIT` batch is already in
+  progress. Returning a flat `0` was only *accidentally* harmless because our own
+  command processor checks for `A:$$$.SUB` directly.
+
+  Taken from `BDOS22.ASM`'s drive-login scan rather than from memory, which
+  changed the rule: the real BDOS compares only the **first filename byte**
+  (`SUI '$'`, commented "some sort of TEMPORARY FILE OF THE $$$.EXT VARIETY"), so
+  `$WORK.TMP` sets the flag just as `$$$.SUB` does. Checking for `$$$.SUB`
+  specifically would have been a plausible-looking deviation. The flag describes
+  the drive the reset logs in — A: — not whichever drive was current when the
+  call was made.
 - **The CP/M emulator runs `SUBMIT` batch jobs.** While `A:$$$.SUB` exists, the
   command processor takes each command from it instead of the keyboard, echoes
   it as it runs, consumes it a record at a time, and erases the file when the

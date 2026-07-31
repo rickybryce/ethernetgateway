@@ -798,7 +798,16 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             fs.set_dma(fs::DEFAULT_DMA);
             fs.clear_all_drive_ro();
             cpm.set_current_disk(fs.current_drive(), fs.current_user());
-            Some(0)
+            // A = 0FFH when the drive just logged in holds a temporary
+            // `$`-prefixed file, else 0.  Not decoration: this is how a fresh
+            // CCP learns a SUBMIT batch is already running — `CCP22.ASM` does
+            // `CALL RESET` (this function) and stores A straight into its
+            // submit flag.  Real CP/M sets it from the login directory scan in
+            // `BDOS22.ASM` (`SUI '$'` on the first filename byte); we ask the
+            // filesystem the same question.  Returning a flat 0 here was only
+            // *accidentally* harmless because our own CCP-lite checks for
+            // `A:$$$.SUB` directly rather than trusting this.
+            Some(if fs.has_temp_dollar_file() { 0xFF } else { 0 })
         }
         14 => {
             // Select disk: E = drive (0 = A:).  Keep the page-zero CDISK
@@ -1288,6 +1297,58 @@ mod tests {
         let mut cpm = Cpm::new();
         // BDOS 24: HL bitmap with all sixteen drives A:–P: active.
         assert_eq!(disk_info_bdos(&mut cpm, &fs, 24), Some(0xFFFF));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 13 (Reset Disk System) through the dispatch a guest actually
+    /// reaches: it resets drive/DMA/write-protect **and** returns 0FFH when the
+    /// drive it logs in holds a temporary `$`-prefixed file, else 0.
+    ///
+    /// That return value is load-bearing, which is why it gets a test rather
+    /// than being left at the flat `0` it used to be: `CCP22.ASM` calls this
+    /// function and stores A straight into its submit flag, so a real CCP
+    /// running here would never notice a `SUBMIT` batch already in progress.
+    #[test]
+    fn test_bdos_reset_reports_temp_file_and_resets_state() {
+        let base = std::env::temp_dir().join("xmodem_cpm_reset13");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        // Nothing temporary on A: → 0.
+        std::fs::write(base.join("A").join("PIP.COM"), b"x").unwrap();
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 13), Some(0));
+
+        // The reset half still happens: drive back to A:, default DMA, and any
+        // BDOS 28 write-protect released.
+        fs.select(1);
+        fs.set_drive_ro();
+        fs.set_dma(0x1234);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 13), Some(0));
+        assert_eq!(fs.current_drive(), 0, "reset selects A:");
+        assert_eq!(fs.dma(), fs::DEFAULT_DMA, "reset restores the default DMA");
+        assert_eq!(fs.ro_vector(), 0, "reset releases every write-protect");
+
+        // A submit file on A: → 0FFH, which is how a CCP detects a batch.
+        std::fs::write(base.join("A").join("$$$.SUB"), b"x").unwrap();
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 13),
+            Some(0xFF),
+            "a $-prefixed file on the logged-in drive must set the flag"
+        );
+
+        // Reset logs in A:, so a temp file sitting on B: must NOT set it —
+        // even if B: was current when the call was made.
+        std::fs::remove_file(base.join("A").join("$$$.SUB")).unwrap();
+        std::fs::write(base.join("B").join("$$$.SUB"), b"x").unwrap();
+        fs.select(1);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 13),
+            Some(0),
+            "the flag describes A:, the drive reset logs in — not B:"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
