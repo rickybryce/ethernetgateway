@@ -725,6 +725,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>. Ignored when <code>telnet_gateway_raw</code> is set &mdash; raw TCP has no IAC layer to negotiate over &mdash; so every config surface greys this control in raw mode and leaves its stored value alone.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>Byte-level trace of SSH/Telnet gateway sessions. Toggle from the GUI/web General frame or the telnet Other / Serial Configuration menus; takes effect next session. <code>EGATEWAY_GATEWAY_DEBUG</code> env var forces it on. See §16.10.</td></tr>
+        <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>Columns reported to the remote host by both gateways (SSH PTY request / telnet NAWS). <code>0</code> = automatic: your client&rsquo;s NAWS if it sent one, else the terminal-type default. Set it when a client cannot report its real width &mdash; see §16.14.</td></tr>
+        <tr><td><code>gateway_term_height</code></td><td>u16</td><td><code>0</code></td><td>Rows counterpart of <code>gateway_term_width</code>. <code>0</code> = automatic. Resolved independently, so you can pin the width and leave the rows automatic.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
         <tr><td><code>setup_wizard_completed</code></td><td>bool</td><td><code>false</code></td><td>Set once the GUI's first-run setup wizard has been completed or skipped; the wizard appears only while it is <code>false</code>. A config file missing the key reads as <code>true</code> (an upgrade is never sent through the wizard). See §3.1.</td></tr>
         <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>Require username/password login on telnet, SSH, and the web UI.</td></tr>
@@ -4465,6 +4467,76 @@ was already there &mdash; the restart re-ran the binds and put the failure back
 in front of you.
 </aside>
 
+<h2 id="ch16-termwidth">16.14 The Remote Wraps Lines in the Wrong Place</h2>
+
+<p>
+<strong>Symptom:</strong> on a gateway session, everything is fine until a line
+gets long. Past a certain column the remote&rsquo;s echo lands in the wrong
+place: line wrap happens early or late, backspace deletes the wrong character
+on screen, and recalling a command from history or pressing Tab leaves stale
+characters behind. Short commands are always fine.
+</p>
+
+<p>
+<strong>Cause:</strong> the remote host has been told the wrong terminal width.
+The gateway reports a size to the remote &mdash; the SSH Gateway in its PTY
+request, the Telnet Gateway via NAWS &mdash; and <code>bash</code>/readline does
+all of its cursor arithmetic against that number. If it disagrees with your
+screen, every redraw past the real margin is computed for a screen you do not
+have. Nothing is lost on the wire; the remote receives exactly what you typed.
+But if you then correct what you <em>see</em>, you can end up running a command
+that differs from the one you meant.
+</p>
+
+<p>
+By default the gateway uses the size your client negotiated over telnet NAWS,
+falling back to the terminal-type default &mdash; 40&times;25 for PETSCII,
+80&times;24 for ANSI/ASCII. That guess is wrong more often than it looks,
+because <strong>terminal type does not imply terminal width</strong>:
+</p>
+
+<ul>
+    <li>A C64 running <strong>CCGMS in ASCII mode</strong> sends <code>0x08</code>
+    for backspace, so the gateway detects it as ANSI and would report
+    <strong>80 columns for a 40-column screen</strong>.</li>
+    <li>CCGMS&rsquo;s soft <strong>80-column mode</strong> is the same mistake in
+    reverse: detected as PETSCII, reported as 40 columns, actually 80.</li>
+    <li>WiFi modems and <code>tcpser</code> do not send NAWS on the C64&rsquo;s
+    behalf, so there is nothing for the automatic path to use.</li>
+</ul>
+
+<p>
+<strong>Fix:</strong> pin the geometry with <code>gateway_term_width</code> and
+<code>gateway_term_height</code> &mdash; telnet <em>Configuration &rarr; Gateway</em>
+(<code>W</code> and <code>R</code>), or <em>Server &rarr; More</em> in the GUI and
+web UI. Set the width to what your screen actually is (40 for a stock C64) and
+leave the rows at <code>0</code> if you only need the width corrected; the two
+resolve independently. <code>0</code> means automatic on both. An override beats
+client NAWS on purpose &mdash; the point is to correct a client that cannot
+report itself accurately. Changes apply to the next gateway connection with no
+restart.
+</p>
+
+<p>
+To see what is actually being sent, enable the byte-trace (&sect;16.10) and read
+the diagnostic line, which names both the resolved geometry and which input won:
+</p>
+
+<pre><code>[gw-diag] window (NAWS):   &lt;not negotiated&gt;
+[gw-diag] onward geometry:  40x25  (from config override)</code></pre>
+
+<aside class="note">
+<span class="label">Not the same as a garbled character</span>
+If instead of misplaced <em>drawing</em> you are getting genuinely wrong
+<em>bytes</em> &mdash; a stray PETSCII graphics character in place of one you
+typed, intermittently &mdash; that is a different fault with a different fix:
+see &sect;16.9, which is a C64 transmit-timing problem on bit-banged userport
+adapters and is cured by dropping to 1200 baud. The two look alike because both
+show up on long lines that wrap. The byte-trace tells them apart: a timing fault
+corrupts the bytes in the <code>[gw-in]</code> log, a width mismatch leaves them
+perfectly correct.
+</aside>
+
 <h2 id="ch16-petsciibs">16.15 Long Commands Corrupted on a C64 Gateway Session (fixed)</h2>
 
 <p>
@@ -4561,6 +4633,8 @@ numeric values fall back to the default.
         <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from this network&rsquo;s router (the default route&rsquo;s next hop, queried from the OS &mdash; see &sect;7.6; falls back to <code>*.*.*.1</code> if the query fails) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
         <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
+        <tr><td><code>gateway_term_height</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Rows reported to the remote host by the SSH and Telnet gateways. <code>0</code> = automatic, resolved independently of the width &mdash; see <code>gateway_term_width</code>.</td></tr>
+        <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Columns reported to the remote host by the SSH gateway (in its PTY request) and the Telnet Gateway (via NAWS). <code>0</code> = automatic: the size the local client negotiated by NAWS, else the terminal-type default (40&times;25 PETSCII, 80&times;24 ANSI/ASCII). Set it when the automatic answer is wrong, which it is for most retro clients: terminal <em>type</em> does not imply terminal <em>width</em>. A C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it is detected as ANSI and would be told it has 80 columns for a physically 40-column screen; CCGMS&rsquo;s soft 80-column mode is the same mistake in reverse under PETSCII. WiFi modems and tcpser do not send NAWS on the C64&rsquo;s behalf, so only the operator can say. When the remote has the wrong width, everything past the real margin &mdash; line wrap, backspace, history recall, tab completion &mdash; is drawn in the wrong place. Set from the telnet Gateway Configuration menu (<code>W</code>/<code>R</code>), or Server &rarr; More in the GUI and web UI. Takes effect on the next gateway connection, no restart. See §16.14.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
         <tr><td><code>gui_window_geometry</code></td><td>string</td><td>empty</td><td><code>x,y,w,h</code></td><td>Last desktop-GUI window position and size, written automatically so the window reopens where you left it. <strong>Auto-managed — not a setting</strong>: it appears in no configuration UI and is normally never hand-edited. Empty = default size and window-manager placement.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>0 = disabled</td><td>Per-session idle timeout. Applies to every prompt, including login.</td></tr>

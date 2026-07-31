@@ -756,10 +756,66 @@ pub(in crate::telnet) fn gateway_terminal_name(tt: TerminalType) -> &'static str
 
 /// Default window dimensions to report via `SB NAWS` when the local
 /// client hasn't supplied any via its own NAWS.
-fn gateway_default_window(tt: TerminalType) -> (u16, u16) {
+pub(in crate::telnet) fn gateway_default_window(tt: TerminalType) -> (u16, u16) {
     match tt {
         TerminalType::Petscii => (PETSCII_WIDTH as u16, 25),
         TerminalType::Ansi | TerminalType::Ascii => (80, 24),
+    }
+}
+
+/// The terminal geometry a gateway session reports to the remote host —
+/// the SSH gateway's PTY request and the Telnet Gateway's NAWS both ask
+/// this, so the two can't drift apart.
+///
+/// Precedence, applied to each dimension independently:
+///   1. the operator's `gateway_term_width` / `gateway_term_height`, when
+///      non-zero;
+///   2. what the local client negotiated via its own NAWS;
+///   3. the per-terminal-type default (`gateway_default_window`).
+///
+/// Each dimension resolves on its own so pinning just the width — the
+/// common case, a 40-column C64 — leaves the row count automatic.
+///
+/// The override exists because terminal *type* does not determine terminal
+/// *width*: a C64 in CCGMS ASCII mode reports backspace as `0x08` and is
+/// detected as ANSI, which would otherwise claim 80 columns for a
+/// 40-column screen, and CCGMS's soft 80-column mode is the same mistake
+/// in reverse under PETSCII.  Retro clients arrive through WiFi modems and
+/// tcpser, which never send NAWS on the C64's behalf, so the operator is
+/// the only source of truth.  `0` means auto and must stay reachable —
+/// neither value is floored to 1 anywhere.
+pub(in crate::telnet) fn gateway_window(
+    tt: TerminalType,
+    client: (Option<u16>, Option<u16>),
+    override_cols: u16,
+    override_rows: u16,
+) -> (u16, u16) {
+    let (default_cols, default_rows) = gateway_default_window(tt);
+    let pick = |ovr: u16, negotiated: Option<u16>, fallback: u16| {
+        if ovr > 0 { ovr } else { negotiated.unwrap_or(fallback) }
+    };
+    (
+        pick(override_cols, client.0, default_cols),
+        pick(override_rows, client.1, default_rows),
+    )
+}
+
+/// Which of `gateway_window`'s three inputs decided ONE dimension — the label
+/// the `[gw-diag]` block prints, since "the remote was told the wrong width" is
+/// invisible without it.
+///
+/// Deliberately adjacent to the `pick` above rather than re-derived at the log
+/// site: it is the same precedence expressed a second way, and a precedence
+/// change has to be able to see both.  The test named
+/// `gateway_window_source_agrees_with_the_resolver` pins that they never
+/// disagree.
+pub(in crate::telnet) fn gateway_window_source(ovr: u16, negotiated: Option<u16>) -> &'static str {
+    if ovr > 0 {
+        "config override"
+    } else if negotiated.is_some() {
+        "client NAWS"
+    } else {
+        "terminal-type default"
     }
 }
 
@@ -1312,14 +1368,24 @@ impl TelnetSession {
             }
         };
 
-        let (cols, rows, term) = match self.terminal_type {
-            TerminalType::Petscii => (40, 25, "dumb"),
-            TerminalType::Ascii => (80, 24, "dumb"),
-            TerminalType::Ansi => (80, 24, "xterm"),
+        // Geometry comes from the shared resolver (operator override →
+        // client NAWS → terminal-type default), not from the terminal type
+        // alone: this used to hardcode 80 columns for anything detected as
+        // ANSI, which is wrong for a C64 running CCGMS in ASCII mode.  TERM
+        // stays keyed to the type — that part type really does decide.
+        let (cols, rows) = gateway_window(
+            self.terminal_type,
+            (self.window_width, self.window_height),
+            cfg.gateway_term_width,
+            cfg.gateway_term_height,
+        );
+        let term = match self.terminal_type {
+            TerminalType::Petscii | TerminalType::Ascii => "dumb",
+            TerminalType::Ansi => "xterm",
         };
 
         if let Err(e) = channel
-            .request_pty(false, term, cols, rows, 0, 0, &[])
+            .request_pty(false, term, cols.into(), rows.into(), 0, 0, &[])
             .await
         {
             let _ = session
@@ -1670,9 +1736,19 @@ impl TelnetSession {
         // negotiation paths are bypassed — see the `raw` checks below.
         let raw = cfg.telnet_gateway_raw;
         let terminal_name = gateway_terminal_name(self.terminal_type).to_string();
-        let (cols_default, rows_default) = gateway_default_window(self.terminal_type);
-        let cols = self.window_width.unwrap_or(cols_default);
-        let rows = self.window_height.unwrap_or(rows_default);
+        // One closure answers "what geometry do we report?" for BOTH the
+        // initial NAWS and every mid-session resize below.  Two call sites
+        // asking separately is how an operator's pinned width would silently
+        // lapse the moment the client sent a resize — the initial report would
+        // honour the override and the resize would forward the client's own
+        // number straight past it.  Captures plain values (not `self`) so the
+        // loop can still borrow `self` mutably.
+        let term_type = self.terminal_type;
+        let (ovr_cols, ovr_rows) = (cfg.gateway_term_width, cfg.gateway_term_height);
+        let resolve_window = move |client: (Option<u16>, Option<u16>)| {
+            gateway_window(term_type, client, ovr_cols, ovr_rows)
+        };
+        let (cols, rows) = resolve_window((self.window_width, self.window_height));
         let (mut iac, initial_offers) = GatewayTelnetIac::new(
             !raw && cfg.telnet_gateway_negotiate,
             terminal_name,
@@ -1764,8 +1840,21 @@ impl TelnetSession {
                             if !write_ok { break; }
                             if remote_writer.flush().await.is_err() { break; }
                         }
-                        Ok(GatewayInboundEvent::NawsResize(cols, rows)) => {
+                        Ok(GatewayInboundEvent::NawsResize(new_cols, new_rows)) => {
                             if !raw {
+                                // Through the same resolver as the initial
+                                // report: an operator override outranks a
+                                // client resize too, or pinning a width would
+                                // only hold until the client next resized.
+                                // With an override set this resolves to the
+                                // same numbers every time, so the remote gets
+                                // a NAWS repeating the pinned size rather than
+                                // the client's real one (`send_naws_update`
+                                // does not suppress an unchanged size — a
+                                // redundant SB is harmless, a wrong width is
+                                // the bug being fixed).
+                                let (cols, rows) =
+                                    resolve_window((Some(new_cols), Some(new_rows)));
                                 let mut naws_update = Vec::new();
                                 iac.send_naws_update(cols, rows, &mut naws_update);
                                 if !naws_update.is_empty() {

@@ -429,6 +429,46 @@ follow-up quality/stability pass of our own.
   env var when it is set.
 
 ### Added
+- **The terminal size reported to a gateway's remote host is now configurable,
+  and the SSH gateway no longer ignores what the client told us.** Two new keys,
+  `gateway_term_width` and `gateway_term_height`, both `0` for automatic. They
+  set what the SSH Gateway sends in its PTY request and what the Telnet Gateway
+  sends as NAWS. Automatic means the size the local client negotiated over
+  NAWS, falling back to the terminal-type default — 40x25 for PETSCII, 80x24
+  for ANSI/ASCII — so nothing changes for anyone who doesn't set them.
+
+  Two problems prompted this. The first is a plain inconsistency: the Telnet
+  Gateway already honoured the client's NAWS, while the **SSH gateway
+  hardcoded** its geometry from the terminal *type* alone and never looked at
+  it. The second is that terminal type does not imply terminal width, and the
+  gap lands squarely on the retro hardware this gateway exists for. A C64
+  running CCGMS in ASCII mode sends `0x08` for backspace, so it is detected as
+  ANSI and was told it had **80 columns for a physically 40-column screen**;
+  CCGMS's soft 80-column mode is the same mistake in reverse under PETSCII. A
+  WiFi modem or `tcpser` never sends NAWS on the C64's behalf, so nothing but
+  an operator setting can carry the truth. When the remote has the wrong width,
+  readline computes every redraw past the real margin for a screen that isn't
+  there: wrap in the wrong column, backspace deleting the wrong character on
+  screen, leftovers after a history recall or a Tab. Nothing is lost on the
+  wire — but correcting what you *see* can then run a command you didn't mean.
+
+  Each dimension resolves independently, so pinning a C64's 40 columns leaves
+  the row count automatic. An override deliberately beats client NAWS: the
+  whole point is to correct a client that cannot report itself. `0` is
+  load-bearing on both — it is the only way back to automatic — so neither is
+  floored to 1 in any surface. Set from the telnet Gateway Configuration menu
+  (`W` / `R`), or Server → More in the GUI and web UI; applies to the next
+  gateway connection with no restart. Documented in the manual's new §16.14,
+  which is cross-linked with §16.9 both ways because the two share a symptom
+  and have different fixes — a bit-banged C64 corrupts the *bytes*, a width
+  mismatch leaves them perfectly correct and misplaces only the drawing.
+
+  One resolver (`gateway_window`) answers for both gateways and for the
+  `[gw-diag]` line, which now reports the resolved geometry **and which input
+  won** (`onward geometry: 40x25 (from config override)`) — previously that
+  diagnostic restated "80x24" as a hardcoded string of its own, and would have
+  gone on saying it. The web and GUI hint likewise comes from a single
+  `Config::gateway_term_hint`.
 - **The log file now begins at the beginning.** The log path comes from the
   config, so nothing could be written to disk until the config had been read —
   which meant the version banner and every `load_or_create_config` diagnostic

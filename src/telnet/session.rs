@@ -312,13 +312,33 @@ impl TelnetSession {
             (None, None) => "<not negotiated>".to_string(),
         };
 
-        let ssh_term = match self.terminal_type {
-            TerminalType::Petscii => "dumb (40x25)",
-            TerminalType::Ascii => "dumb (80x24)",
-            TerminalType::Ansi => "xterm (80x24)",
-        };
-
         let cfg = config::get_config();
+
+        // Ask the same resolver the gateways use rather than restating the
+        // geometry here — this line used to hardcode "80x24" for ANSI and
+        // would have gone on reporting it after the override landed.
+        let (gw_cols, gw_rows) = gateway_window(
+            self.terminal_type,
+            (self.window_width, self.window_height),
+            cfg.gateway_term_width,
+            cfg.gateway_term_height,
+        );
+        // Naming which input won is the point of the line: this bug class is
+        // "the remote was told the wrong width", and the answer is invisible
+        // otherwise.  Reported per dimension, because the mixed case is real —
+        // pin a C64's 40 columns and the rows still come from NAWS or the
+        // default, and a single label for both would misreport one of them.
+        let w_src = gateway_window_source(cfg.gateway_term_width, self.window_width);
+        let h_src = gateway_window_source(cfg.gateway_term_height, self.window_height);
+        let geom_source = if w_src == h_src {
+            w_src.to_string()
+        } else {
+            format!("cols: {}, rows: {}", w_src, h_src)
+        };
+        let ssh_term = match self.terminal_type {
+            TerminalType::Petscii | TerminalType::Ascii => "dumb",
+            TerminalType::Ansi => "xterm",
+        };
 
         glog!("[gw-diag] ----- terminal diagnostic ----------------------------");
         glog!("[gw-diag] session:         {}", session);
@@ -341,8 +361,14 @@ impl TelnetSession {
             ssh_term,
         );
         glog!(
-            "[gw-diag] config:          telnet_gateway_negotiate={}",
+            "[gw-diag] onward geometry:  {}x{}  (from {})",
+            gw_cols, gw_rows, geom_source,
+        );
+        glog!(
+            "[gw-diag] config:          telnet_gateway_negotiate={} gateway_term_width={} gateway_term_height={}",
             cfg.telnet_gateway_negotiate,
+            cfg.gateway_term_width,
+            cfg.gateway_term_height,
         );
 
         if self.is_serial

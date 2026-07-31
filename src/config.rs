@@ -84,6 +84,23 @@ const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
 /// each gateway session, so toggling it takes effect on the next session
 /// without restarting the program.
 const DEFAULT_GATEWAY_DEBUG: bool = false;
+/// Operator override for the terminal geometry a gateway session reports to
+/// the remote host (SSH PTY request / Telnet NAWS).  `0` means "auto": use
+/// the size the local client negotiated via NAWS, and fall back to the
+/// per-terminal-type default when it negotiated none.
+///
+/// This exists because terminal *type* does not determine terminal *width*.
+/// A C64 running CCGMS in ASCII mode reports its backspace as `0x08`, so we
+/// detect ANSI and would otherwise claim 80 columns for a physically
+/// 40-column screen; CCGMS's soft 80-column mode is the mirror case in
+/// PETSCII.  Retro clients reach us through WiFi modems and tcpser, which
+/// never send NAWS on the C64's behalf, so nothing but the operator can
+/// tell us the truth.  Getting it wrong misplaces every readline redraw and
+/// backspace past the real margin.  `0` is load-bearing — it is the only way
+/// to ask for auto, so neither value may be floored to 1.
+const DEFAULT_GATEWAY_TERM_WIDTH: u16 = 0;
+/// Rows counterpart of `DEFAULT_GATEWAY_TERM_WIDTH`.  `0` = auto.
+const DEFAULT_GATEWAY_TERM_HEIGHT: u16 = 0;
 const DEFAULT_ENABLE_CONSOLE: bool = true;
 /// Whether the desktop GUI's first-run setup wizard has already been shown.
 ///
@@ -610,6 +627,14 @@ pub struct Config {
     /// next session without a restart.  The `EGATEWAY_GATEWAY_DEBUG`
     /// environment variable still forces it on regardless of this flag.
     pub gateway_debug: bool,
+    /// Columns to report to the remote for SSH/Telnet gateway sessions, or
+    /// `0` for auto (client NAWS, else the per-terminal-type default).
+    /// Terminal type does not imply terminal width — see
+    /// `DEFAULT_GATEWAY_TERM_WIDTH` for why an operator override is the only
+    /// thing that can get a C64's real width to the remote.
+    pub gateway_term_width: u16,
+    /// Rows counterpart of `gateway_term_width`.  `0` = auto.
+    pub gateway_term_height: u16,
     /// Show the GUI configuration/console window on startup.
     pub enable_console: bool,
     /// Set once the desktop GUI's first-run setup wizard has been completed
@@ -863,6 +888,8 @@ impl Default for Config {
             telnet_gateway_negotiate: DEFAULT_TELNET_GATEWAY_NEGOTIATE,
             telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
             gateway_debug: DEFAULT_GATEWAY_DEBUG,
+            gateway_term_width: DEFAULT_GATEWAY_TERM_WIDTH,
+            gateway_term_height: DEFAULT_GATEWAY_TERM_HEIGHT,
             enable_console: DEFAULT_ENABLE_CONSOLE,
             setup_wizard_completed: DEFAULT_SETUP_WIZARD_COMPLETED,
             security_enabled: DEFAULT_SECURITY_ENABLED,
@@ -976,6 +1003,43 @@ impl Config {
             && self.master_accept_relays
             && self.relay_transport == "ssh"
             && !self.ssh_enabled
+    }
+
+    /// One-line explanation of the current gateway terminal-geometry setting,
+    /// for the web and GUI panels that both show it under Server → More.
+    ///
+    /// Written once rather than per surface, for the reason
+    /// `relays_blocked_by_ssh_off` above exists: the two copies of the
+    /// log-file hint had already drifted (one said "the console above only",
+    /// which was wrong inside a popup) before they were collapsed into
+    /// `logger::log_state_hint`.  The telnet UI is deliberately not a caller —
+    /// it has a full paginated help page, not a one-liner.
+    ///
+    /// Both dimensions are arguments rather than read from `self` so the GUI's
+    /// hint tracks a half-typed field instead of the last saved value — the
+    /// same reason `log_state_hint` takes its numbers.
+    pub fn gateway_term_hint(width: u16, height: u16) -> String {
+        match (width, height) {
+            (0, 0) => "Auto: the size your client reports via NAWS, else 40x25 \
+                       for PETSCII and 80x24 for ANSI/ASCII. Set these when a \
+                       client cannot report its real size — a C64 running CCGMS \
+                       in ASCII mode is detected as ANSI and would be told it \
+                       has 80 columns for a 40-column screen."
+                .to_string(),
+            (w, 0) => format!(
+                "Reporting {w} columns to the remote; rows stay automatic. \
+                 A wrong width misplaces line wrap, backspace and tab \
+                 completion past the real margin."
+            ),
+            (0, h) => format!(
+                "Reporting {h} rows to the remote; width stays automatic \
+                 (client NAWS, else the terminal-type default)."
+            ),
+            (w, h) => format!(
+                "Reporting {w}x{h} to the remote, overriding whatever the \
+                 client negotiated. Set both to 0 for automatic."
+            ),
+        }
     }
 
     /// Resolve `gui_zoom` to an absolute pixels-per-point override for the
@@ -1179,6 +1243,16 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("gateway_debug")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_GATEWAY_DEBUG),
+        // No `>= 1` filter on either: 0 means "auto" and is the only way to
+        // ask for it, so flooring these would make auto unreachable.
+        gateway_term_width: map
+            .get("gateway_term_width")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_GATEWAY_TERM_WIDTH),
+        gateway_term_height: map
+            .get("gateway_term_height")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_GATEWAY_TERM_HEIGHT),
         enable_console: map
             .get("enable_console")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1834,6 +1908,25 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
+# Terminal geometry reported to the remote host by the SSH and Telnet
+# gateways (SSH PTY request / telnet NAWS).  Leave both 0 for automatic:
+# the size your client negotiated via NAWS, or the terminal-type default
+# (40x25 for PETSCII, 80x24 for ANSI/ASCII) when it negotiated none.
+#
+# Set these when the automatic answer is wrong, which it is for most retro
+# clients: terminal *type* does not imply terminal *width*.  A C64 running
+# CCGMS in ASCII mode sends 0x08 for backspace, so it is detected as ANSI
+# and told it has 80 columns for a physically 40-column screen; CCGMS's
+# soft 80-column mode is the mirror case in PETSCII.  WiFi modems and
+# tcpser don't send NAWS for the C64, so only you can say.  When the remote
+# has the wrong width, everything past the real margin -- line wrap,
+# backspace, history recall, tab completion -- is drawn in the wrong place.
+");
+    write_kv(&mut content, "gateway_term_width", cfg.gateway_term_width);
+    write_kv(&mut content, "gateway_term_height", cfg.gateway_term_height);
+    content.push('\n');
+
+    content.push_str("\
 # Show the GUI configuration/console window on startup.
 # Set to false when running as a headless service.
 ");
@@ -2450,6 +2543,18 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             cfg.telnet_gateway_raw = value.eq_ignore_ascii_case("true");
         }
         "gateway_debug" => cfg.gateway_debug = value.eq_ignore_ascii_case("true"),
+        // Both accept 0 deliberately — 0 is "auto", not an invalid width, so
+        // these must not carry the `v >= 1` guard the port keys use.
+        "gateway_term_width" => {
+            if let Ok(v) = value.parse::<u16>() {
+                cfg.gateway_term_width = v;
+            }
+        }
+        "gateway_term_height" => {
+            if let Ok(v) = value.parse::<u16>() {
+                cfg.gateway_term_height = v;
+            }
+        }
         "enable_console" => cfg.enable_console = value.eq_ignore_ascii_case("true"),
         "setup_wizard_completed" => {
             cfg.setup_wizard_completed = value.eq_ignore_ascii_case("true")
@@ -3134,6 +3239,41 @@ mod tests {
         assert_eq!(cfg.log_max_files, 0);
     }
 
+    /// The gateway terminal-geometry override must survive `apply_config_key`
+    /// (telnet + web write through it), and `0` must survive as the "auto"
+    /// sentinel.  Flooring these to 1 — the guard every *port* key carries —
+    /// would make automatic geometry unreachable from every UI, which is the
+    /// same trap `log_max_size_kb` / `log_max_files` sit in.
+    #[test]
+    fn test_gateway_term_geometry_keys_apply() {
+        let mut cfg = Config {
+            gateway_term_width: 132,
+            gateway_term_height: 50,
+            ..Config::default()
+        };
+
+        apply_config_key(&mut cfg, "gateway_term_width", "40");
+        assert_eq!(cfg.gateway_term_width, 40);
+        apply_config_key(&mut cfg, "gateway_term_height", "25");
+        assert_eq!(cfg.gateway_term_height, 25);
+
+        // Zero is "auto", not an invalid width.
+        apply_config_key(&mut cfg, "gateway_term_width", "0");
+        assert_eq!(cfg.gateway_term_width, 0, "0 must be accepted as auto");
+        apply_config_key(&mut cfg, "gateway_term_height", "0");
+        assert_eq!(cfg.gateway_term_height, 0, "0 must be accepted as auto");
+
+        // Junk and out-of-range leave the previous value alone rather than
+        // resetting it to the default.
+        apply_config_key(&mut cfg, "gateway_term_width", "80");
+        apply_config_key(&mut cfg, "gateway_term_width", "wide");
+        assert_eq!(cfg.gateway_term_width, 80, "junk must not clobber");
+        apply_config_key(&mut cfg, "gateway_term_width", "70000");
+        assert_eq!(cfg.gateway_term_width, 80, "past u16 must not clobber");
+        apply_config_key(&mut cfg, "gateway_term_width", "-1");
+        assert_eq!(cfg.gateway_term_width, 80, "negative must not clobber");
+    }
+
     /// Drift-proof version of the test above, for every key rather than four:
     /// each key the config *writer* emits must also have an `apply_config_key`
     /// arm, or the telnet and web UIs cannot set it.  Scans this file's own
@@ -3423,6 +3563,8 @@ mod tests {
             telnet_gateway_negotiate: true,
             telnet_gateway_raw: true,
             gateway_debug: true,
+            gateway_term_width: 40,
+            gateway_term_height: 25,
             enable_console: true,
             setup_wizard_completed: true,
             security_enabled: true,
@@ -3568,6 +3710,8 @@ mod tests {
         );
         assert_eq!(loaded.telnet_gateway_raw, original.telnet_gateway_raw);
         assert_eq!(loaded.gateway_debug, original.gateway_debug);
+        assert_eq!(loaded.gateway_term_width, original.gateway_term_width);
+        assert_eq!(loaded.gateway_term_height, original.gateway_term_height);
         assert_eq!(loaded.enable_console, original.enable_console);
         assert_eq!(
             loaded.setup_wizard_completed,

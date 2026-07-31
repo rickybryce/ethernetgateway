@@ -1190,6 +1190,223 @@ fn test_filter_csi_interrupted_by_new_esc() {
     assert_eq!(out, b"text");
 }
 
+// ─── Gateway onward window geometry ──────────────────
+
+/// The geometry a gateway session reports to the remote: operator override
+/// wins, else the client's NAWS, else the terminal-type default.
+///
+/// This is the fix for the C64 long-line corruption class: the SSH gateway
+/// used to hardcode 80 columns for anything detected as ANSI, and a C64
+/// running CCGMS in ASCII mode is detected as ANSI (it sends 0x08 for
+/// backspace) while being physically 40 columns wide.
+#[test]
+fn test_gateway_window_precedence() {
+    // Nothing set anywhere: per-terminal-type defaults.
+    assert_eq!(
+        gateway_window(TerminalType::Petscii, (None, None), 0, 0),
+        (40, 25),
+        "PETSCII default"
+    );
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (None, None), 0, 0),
+        (80, 24),
+        "ANSI default"
+    );
+    assert_eq!(
+        gateway_window(TerminalType::Ascii, (None, None), 0, 0),
+        (80, 24),
+        "ASCII default"
+    );
+
+    // A client that negotiated NAWS beats the type default.
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (Some(132), Some(50)), 0, 0),
+        (132, 50),
+        "client NAWS should beat the type default"
+    );
+
+    // The operator override beats both — the case that matters, since a C64
+    // arrives through tcpser / a WiFi modem that reports nothing.
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (None, None), 40, 25),
+        (40, 25),
+        "override should beat the type default"
+    );
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (Some(132), Some(50)), 40, 25),
+        (40, 25),
+        "override should beat client NAWS — the operator is correcting a lying client"
+    );
+}
+
+/// Each dimension resolves independently, so an operator can pin the width
+/// of a 40-column C64 and leave the row count automatic.  A single shared
+/// "is anything overridden?" test would pass even if one dimension ignored
+/// its override.
+#[test]
+fn test_gateway_window_dimensions_are_independent() {
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (None, None), 40, 0),
+        (40, 24),
+        "width pinned, rows should stay automatic"
+    );
+    assert_eq!(
+        gateway_window(TerminalType::Ansi, (None, None), 0, 25),
+        (80, 25),
+        "rows pinned, width should stay automatic"
+    );
+    // Mixed sources: width from the override, rows from client NAWS.
+    assert_eq!(
+        gateway_window(TerminalType::Petscii, (Some(80), Some(50)), 40, 0),
+        (40, 50),
+        "width from override, rows from NAWS"
+    );
+}
+
+/// `0` means "auto" and is the ONLY way to ask for it, so it must never be
+/// treated as a width of zero or floored to 1 — the mistake that would make
+/// auto unreachable from every UI (the same trap `log_max_size_kb` has).
+#[test]
+fn test_gateway_window_zero_means_auto_not_zero() {
+    let (cols, rows) = gateway_window(TerminalType::Petscii, (None, None), 0, 0);
+    assert_eq!((cols, rows), (40, 25), "0/0 must resolve to auto, not 0x0");
+    // And a zero override must not shadow a client that did negotiate.
+    assert_eq!(
+        gateway_window(TerminalType::Petscii, (Some(64), Some(16)), 0, 0),
+        (64, 16),
+        "a 0 override must fall through to client NAWS"
+    );
+}
+
+/// Every surface that explains the automatic geometry quotes the default sizes
+/// as prose — the telnet help (both widths) and the shared web/GUI hint. Those
+/// numbers are a hand-copy of `gateway_default_window`, which is the drift class
+/// that left `test_all_error_messages_fit_petscii` checking a dead string and
+/// the CP/M submenu hint naming the wrong keys. Derive them instead: change a
+/// default and this names the docs that still quote the old one.
+#[test]
+fn test_documented_default_geometry_matches_the_code() {
+    let pairs: Vec<String> = [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii]
+        .iter()
+        .map(|&tt| {
+            let (w, h) = gateway_default_window(tt);
+            format!("{}x{}", w, h)
+        })
+        .collect();
+    // ANSI and ASCII share a default, so dedupe before asserting.
+    let mut wanted: Vec<&String> = Vec::new();
+    for p in &pairs {
+        if !wanted.contains(&p) {
+            wanted.push(p);
+        }
+    }
+    assert!(
+        wanted.len() >= 2,
+        "expected at least two distinct default geometries, got {wanted:?} — \
+         has the default table collapsed?"
+    );
+
+    for petscii in [true, false] {
+        let help = TelnetSession::gateway_config_help_lines(petscii).join(" ");
+        for pair in &wanted {
+            assert!(
+                help.contains(pair.as_str()),
+                "the {} gateway help never states the {} default from \
+                 gateway_default_window — update the help text",
+                if petscii { "PETSCII" } else { "80-col" },
+                pair,
+            );
+        }
+    }
+
+    // The one-line hint the web and GUI share must agree too.
+    let hint = crate::config::Config::gateway_term_hint(0, 0);
+    for pair in &wanted {
+        assert!(
+            hint.contains(pair.as_str()),
+            "config::gateway_term_hint's auto text never states the {} default \
+             from gateway_default_window",
+            pair,
+        );
+    }
+}
+
+/// The `[gw-diag]` "which input won" label must never contradict the value the
+/// resolver actually produced.  They express the same precedence twice — the
+/// resolver returns the number, the label names the source — which is exactly
+/// the shape that drifts in this codebase, so the agreement is pinned across
+/// the whole input matrix rather than trusted.
+#[test]
+fn test_gateway_window_source_agrees_with_the_resolver() {
+    let tt = TerminalType::Ansi;
+    // Derived, not hand-copied — the point of the test above.
+    let (default_cols, _) = gateway_default_window(tt);
+    for &ovr in &[0u16, 40] {
+        for &negotiated in &[None, Some(132u16)] {
+            let (cols, _) = gateway_window(tt, (negotiated, negotiated), ovr, ovr);
+            match gateway_window_source(ovr, negotiated) {
+                "config override" => assert_eq!(
+                    cols, ovr,
+                    "label says override but the resolver returned {cols} \
+                     (ovr={ovr}, naws={negotiated:?})"
+                ),
+                "client NAWS" => assert_eq!(
+                    cols,
+                    negotiated.unwrap(),
+                    "label says client NAWS but the resolver returned {cols}"
+                ),
+                "terminal-type default" => assert_eq!(
+                    cols, default_cols,
+                    "label says type default but the resolver returned {cols}"
+                ),
+                other => panic!("unexpected source label {other:?}"),
+            }
+        }
+    }
+}
+
+/// A mid-session NAWS resize must be filtered through the geometry resolver,
+/// not forwarded raw.
+///
+/// This was a real defect in the first cut of the override: the connect-time
+/// report honoured `gateway_term_width`, but the resize arm called
+/// `send_naws_update(cols, rows)` with the client's own numbers, so an
+/// operator's pinned width silently lapsed the moment the client resized. The
+/// resolver-level rule ("an override beats client NAWS") is already covered by
+/// `test_gateway_window_precedence`; what this guards is the *call site* using
+/// it at all, which no unit test can reach — the resize lives inside
+/// `gateway_telnet`'s `tokio::select!` loop, which needs a live socket pair and
+/// a remote peer.
+///
+/// So it is checked the way `config::test_every_written_key_can_be_applied`
+/// checks its `match`: by reading the source. Every `send_naws_update` call
+/// must be preceded, within its own arm, by a `resolve_window(` call.
+#[test]
+fn test_naws_resize_goes_through_the_geometry_resolver() {
+    let src = include_str!("gateway.rs");
+    // Only the call sites, not the definition.
+    let calls: Vec<usize> = src
+        .match_indices("iac.send_naws_update(")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "no send_naws_update call sites found — this scan has stopped matching"
+    );
+    for at in calls {
+        // Look back a short window: the resolve must be in the same arm, not
+        // merely somewhere earlier in the 2000-line file.
+        let from = at.saturating_sub(900);
+        let window = &src[from..at];
+        assert!(
+            window.contains("resolve_window("),
+            "a send_naws_update call at byte {at} is not fed by resolve_window() — \
+             a raw client size forwarded here discards the operator's \
+             gateway_term_width/height override mid-session"
+        );
+    }
+}
+
 // ─── Gateway input normalization ─────────────────────
 
 #[test]
@@ -2087,6 +2304,15 @@ fn test_accept_relays_ssh_qualifier_fits_petscii() {
     );
 }
 
+/// Log-file submenu (Other Settings -> L) must fit the 22-row PETSCII screen.
+/// header(3) + blank + 5 values (state/file/rotate/keep/max-disk) + blank
+/// + 4 items (E/F/S/K) + blank + Q + prompt = 17, well inside the budget.
+#[test]
+fn test_log_settings_menu_row_count() {
+    let rows = 3 + 1 + 5 + 1 + 4 + 1 + 1 + 1; // 17
+    assert!(rows <= 22, "log settings menu is {} rows, exceeds 22", rows);
+}
+
 /// `numeric_confirmation_lines` itself: one line when it fits, two when it
 /// doesn't, and **nothing dropped** either way. Tested directly as well as
 /// through the call-site scan below, because the scan only ever asserts that
@@ -2202,13 +2428,42 @@ fn test_numeric_confirmations_fit_every_screen() {
     );
 }
 
-/// Log-file submenu (Other Settings -> L) must fit the 22-row PETSCII screen.
-/// header(3) + blank + 5 values (state/file/rotate/keep/max-disk) + blank
-/// + 4 items (E/F/S/K) + blank + Q + prompt = 17, well inside the budget.
+/// The Gateway Configuration screen must fit the 22-row PETSCII budget.
+///
+/// Counted from the source rather than by hand: its siblings above assert a
+/// hand-written sum, which is the drift class that left the Master/Slave
+/// row test asserting a pre-`9f72b85` shape and checking nothing. This walks
+/// the real render block (everything before the menu-input read, since the
+/// key handlers below it don't draw rows) and counts the `send_line` calls,
+/// plus one for the trailing `send` prompt that occupies a row without
+/// ending it. Add a row to that menu and this number moves on its own.
 #[test]
-fn test_log_settings_menu_row_count() {
-    let rows = 3 + 1 + 5 + 1 + 4 + 1 + 1 + 1; // 17
-    assert!(rows <= 22, "log settings menu is {} rows, exceeds 22", rows);
+fn test_gateway_config_menu_row_count() {
+    let src = include_str!("config_ui.rs");
+    let start = src
+        .find("async fn gateway_configuration")
+        .expect("gateway_configuration not found — did it get renamed?");
+    let body = &src[start..];
+    // The render block ends where the menu reads a keypress.
+    let end = body
+        .find("let input = match self.get_menu_input")
+        .expect("gateway_configuration has no get_menu_input — shape changed");
+    let render = &body[..end];
+
+    let rows = render.matches("self.send_line(").count() + 1; // +1 = the prompt
+    // Floor-asserted so a refactor that stops matching can't silently pass
+    // by finding zero rows.
+    assert!(
+        rows >= 10,
+        "only found {} rows in the gateway config render block — the scan \
+         has stopped matching the real code",
+        rows,
+    );
+    assert!(
+        rows <= 22,
+        "gateway configuration menu is {} rows, exceeds the 22-row PETSCII screen",
+        rows,
+    );
 }
 
 /// Other settings help lines (PETSCII) must fit 40 cols.

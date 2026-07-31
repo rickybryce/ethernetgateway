@@ -927,6 +927,7 @@ fn collect_form_updates(
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
         "ssh_gateway_auth",
+        "gateway_term_width", "gateway_term_height",
         "gateway_role", "slave_master_host", "slave_master_port",
         "slave_master_username", "slave_master_password",
         // `relay_transport` is intentionally NOT here: no UI (telnet, web,
@@ -1650,6 +1651,8 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"key\" {key_sel}>Key</option>\
          <option value=\"password\" {pwd_sel}>Password</option>\
          </select></div>\
+         <div class=\"row\">{gwcols} {gwrows}</div>\
+         <div class=\"row\"><span class=\"hint\">{gwgeom_hint}</span></div>\
          {master_slave}\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
@@ -1681,6 +1684,16 @@ fn render_more_popups(cfg: &Config) -> String {
         ),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
         pwd_sel = if cfg.ssh_gateway_auth == "password" { "selected" } else { "" },
+        // Plain number fields, not checkboxes — an unsubmitted plain key
+        // preserves the stored value, so these need no skip-list entry and no
+        // re-enabling JS (the asymmetry from review pass #3).  Never greyed:
+        // both are meaningful whatever else is set.
+        gwcols = numfield("gateway_term_width", "Gateway cols (0=auto)", cfg.gateway_term_width),
+        gwrows = numfield("gateway_term_height", "Gateway rows (0=auto)", cfg.gateway_term_height),
+        gwgeom_hint = html_escape(&Config::gateway_term_hint(
+            cfg.gateway_term_width,
+            cfg.gateway_term_height,
+        )),
         // Master/Slave lives under Server → More (mirrors the GUI); the modal's
         // own Save-and-Restart covers the restart a role change needs.
         master_slave = master_slave_rows(cfg),
@@ -3332,6 +3345,73 @@ mod tests {
             updates.iter().find(|(k, _)| k == "log_to_file").map(|(_, v)| v.as_str()),
             Some("false"),
             "an unticked log_to_file must be saved as false"
+        );
+    }
+
+    /// The gateway terminal-geometry keys must be rendered in the Server popup
+    /// (where the rest of the gateway settings live) AND reach the save.  Same
+    /// shape as the log-keys guard above, and for the same reason: these keys
+    /// had a parser, a writer, a struct field and a default before they had a
+    /// `apply_config_key` arm, which is the combination that looks wired and
+    /// silently drops every telnet/web save.
+    #[test]
+    fn test_gateway_term_keys_are_rendered_and_saved() {
+        let cfg = Config::default();
+        let html = render_more_popups(&cfg);
+        // Slice out the Server popup so the assertion can't pass on a field
+        // that happens to live in a different popup.
+        let popup = {
+            let start = html.find("id=\"more-server\"").expect("server popup");
+            let end = html[start + 1..]
+                .find("class=\"modal\"")
+                .map(|e| start + 1 + e)
+                .unwrap_or(html.len());
+            &html[start..end]
+        };
+        for name in ["gateway_term_width", "gateway_term_height"] {
+            assert!(
+                popup.contains(&format!("name=\"{}\"", name)),
+                "{} has no input in the Server More popup",
+                name
+            );
+        }
+
+        // One form, so exactly once — twice and the last value silently wins.
+        let page = render_main_page(&cfg, None);
+        for name in ["gateway_term_width", "gateway_term_height"] {
+            let n = page.matches(&format!("name=\"{}\"", name)).count();
+            assert_eq!(n, 1, "{name} appears {n} times in the form; it must appear once");
+        }
+
+        // Plain fields, so they are collected whenever present.
+        let mut form = empty_form();
+        form.insert("gateway_term_width".into(), "40".into());
+        form.insert("gateway_term_height".into(), "25".into());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+        let lookup = |k: &str| {
+            updates.iter().find(|(uk, _)| uk == k).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(lookup("gateway_term_width"), Some("40"));
+        assert_eq!(lookup("gateway_term_height"), Some("25"));
+
+        // `0` is the auto sentinel and must survive the form layer too — it is
+        // the only way to get back to automatic once a width has been pinned.
+        let mut zero = empty_form();
+        zero.insert("gateway_term_width".into(), "0".into());
+        zero.insert("gateway_term_height".into(), "0".into());
+        let (updates, _) = collect_form_updates(&zero, &cfg);
+        let lookup = |k: &str| {
+            updates.iter().find(|(uk, _)| uk == k).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(lookup("gateway_term_width"), Some("0"), "0 must reach the config");
+        assert_eq!(lookup("gateway_term_height"), Some("0"), "0 must reach the config");
+
+        // Being plain keys (not checkboxes), they are never greyed and so need
+        // no entry in the disabled/re-enable machinery.  Pin that: a future
+        // `disabled` here without matching JS is the allow_relay_kermit bug.
+        assert!(
+            !popup.contains("name=\"gateway_term_width\" value=\"0\" size=\"5\" class=\"num-tight\" disabled"),
+            "the width field must not render disabled without re-enabling JS"
         );
     }
 

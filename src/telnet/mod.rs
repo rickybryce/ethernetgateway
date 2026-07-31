@@ -35,12 +35,13 @@ use crate::logger::glog;
 mod colors;
 pub(crate) use colors::{swap_case_for_petscii, petscii_to_ascii_byte, to_latin1_bytes};
 mod gateway;
-pub(in crate::telnet) use gateway::{gw_debug_enabled, gateway_terminal_name};
+pub(in crate::telnet) use gateway::{gw_debug_enabled, gateway_terminal_name, gateway_window,
+    gateway_window_source};
 // Gateway plumbing types/fns referenced only from tests.
 #[cfg(test)]
 pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     GatewayInboundEvent, REMOTE_PORT_DISPLAY_CAP, read_gateway_event,
-    filter_gateway_output, normalize_gateway_input};
+    filter_gateway_output, normalize_gateway_input, gateway_default_window};
 mod io;
 pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
 mod session;

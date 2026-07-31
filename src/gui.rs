@@ -509,6 +509,10 @@ struct App {
     /// half-typed number never becomes a config value.
     log_max_size_kb_buf: String,
     log_max_files_buf: String,
+    /// Gateway terminal geometry reported to the remote, `0` = auto.  Text
+    /// buffers like every other numeric field here.
+    gateway_term_width_buf: String,
+    gateway_term_height_buf: String,
     /// Numeric text buffers for the CP/M modem profile, same pattern as every
     /// other numeric field here: edited as text, parsed back on sync so a
     /// half-typed value never becomes a config value.
@@ -617,6 +621,8 @@ impl App {
         let cpm_emu_max_minstr_buf = cfg.cpm_emu_max_minstr.to_string();
         let log_max_size_kb_buf = cfg.log_max_size_kb.to_string();
         let log_max_files_buf = cfg.log_max_files.to_string();
+        let gateway_term_width_buf = cfg.gateway_term_width.to_string();
+        let gateway_term_height_buf = cfg.gateway_term_height.to_string();
         let cpm_emu_x_code_buf = cfg.cpm_emu_modem.x_code.to_string();
         let cpm_emu_dcd_mode_buf = cfg.cpm_emu_modem.dcd_mode.to_string();
         let serial_baud_buf = [
@@ -668,6 +674,8 @@ impl App {
             cpm_emu_max_minstr_buf,
             log_max_size_kb_buf,
             log_max_files_buf,
+            gateway_term_width_buf,
+            gateway_term_height_buf,
             cpm_emu_x_code_buf,
             cpm_emu_dcd_mode_buf,
             serial_baud_buf,
@@ -725,6 +733,11 @@ impl App {
         // config-file loader and `logger::should_rotate`/`rotate`.
         if let Ok(v) = self.log_max_size_kb_buf.parse::<u64>() { self.cfg.log_max_size_kb = v; }
         if let Ok(v) = self.log_max_files_buf.parse::<u32>() { self.cfg.log_max_files = v; }
+        // Same reasoning, same absent floor: `0` is the "auto" sentinel for
+        // both, so a `>= 1` guard here would make automatic geometry
+        // unreachable from the GUI (see config::gateway_term_hint).
+        if let Ok(v) = self.gateway_term_width_buf.parse::<u16>() { self.cfg.gateway_term_width = v; }
+        if let Ok(v) = self.gateway_term_height_buf.parse::<u16>() { self.cfg.gateway_term_height = v; }
         // Clamped to the ranges the AT layer itself produces (ATX0-4, AT&C0/1),
         // so a typo here cannot leave the modem in a state no command could set.
         if let Ok(v) = self.cpm_emu_x_code_buf.parse::<u8>() && v <= 4 { self.cfg.cpm_emu_modem.x_code = v; }
@@ -1127,6 +1140,39 @@ impl App {
             let mut key_display = pubkey;
             multiline_with_menu(ui, &mut key_display, 2);
         }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        // Applies to BOTH gateways, so it gets its own group rather than
+        // sitting under Telnet Gateway or SSH Gateway — the SSH gateway sends
+        // it as its PTY request, the Telnet Gateway as NAWS, and both resolve
+        // it through the one `gateway_window()`.
+        ui.label(
+            egui::RichText::new("Terminal size reported to remote")
+                .strong()
+                .color(AMBER),
+        );
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Columns:", &mut self.gateway_term_width_buf, 50.0);
+            ui.add_space(8.0);
+            labeled_field(ui, "Rows:", &mut self.gateway_term_height_buf, 50.0);
+        });
+        // Hint reads the live buffers, not the saved config, so it tracks a
+        // half-typed field — and comes from the one fn the web asks too.
+        let hint_w = self
+            .gateway_term_width_buf
+            .parse::<u16>()
+            .unwrap_or(self.cfg.gateway_term_width);
+        let hint_h = self
+            .gateway_term_height_buf
+            .parse::<u16>()
+            .unwrap_or(self.cfg.gateway_term_height);
+        ui.label(
+            egui::RichText::new(Config::gateway_term_hint(hint_w, hint_h))
+                .italics()
+                .small(),
+        );
     }
 
     /// Render the Master/Slave serial-extender (relay) options.  Role is a
@@ -2145,6 +2191,8 @@ impl App {
         self.cpm_emu_max_minstr_buf = self.cfg.cpm_emu_max_minstr.to_string();
         self.log_max_size_kb_buf = self.cfg.log_max_size_kb.to_string();
         self.log_max_files_buf = self.cfg.log_max_files.to_string();
+        self.gateway_term_width_buf = self.cfg.gateway_term_width.to_string();
+        self.gateway_term_height_buf = self.cfg.gateway_term_height.to_string();
         self.cpm_emu_x_code_buf = self.cfg.cpm_emu_modem.x_code.to_string();
         self.cpm_emu_dcd_mode_buf = self.cfg.cpm_emu_modem.dcd_mode.to_string();
         for id in crate::config::SERIAL_PORT_IDS {
@@ -3368,6 +3416,8 @@ impl eframe::App for App {
                 || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
                 || self.log_max_size_kb_buf != self.last_synced_cfg.log_max_size_kb.to_string()
                 || self.log_max_files_buf != self.last_synced_cfg.log_max_files.to_string()
+                || self.gateway_term_width_buf != self.last_synced_cfg.gateway_term_width.to_string()
+                || self.gateway_term_height_buf != self.last_synced_cfg.gateway_term_height.to_string()
                 || self.cpm_emu_x_code_buf != self.last_synced_cfg.cpm_emu_modem.x_code.to_string()
                 || self.cpm_emu_dcd_mode_buf != self.last_synced_cfg.cpm_emu_modem.dcd_mode.to_string()
                 || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
@@ -3542,6 +3592,86 @@ mod tests {
         let app = test_app();
         assert_eq!(app.log_max_size_kb_buf, app.cfg.log_max_size_kb.to_string());
         assert_eq!(app.log_max_files_buf, app.cfg.log_max_files.to_string());
+    }
+
+    /// The gateway geometry buffers get the same three-way treatment as the
+    /// log limits: seeded by `App::new`, `0` survives `sync_numeric_fields`
+    /// (it is the "auto" sentinel, so a `>= 1` floor copied from the port
+    /// fields above would make automatic geometry unreachable from the GUI),
+    /// and `refresh_from_global` rebuilds them so the popup can't show one
+    /// number while the config holds another.
+    #[test]
+    fn test_gateway_term_buffers_seed_sync_and_refresh() {
+        let mut app = test_app();
+        assert_eq!(
+            app.gateway_term_width_buf,
+            app.cfg.gateway_term_width.to_string(),
+            "App::new must seed the width buffer"
+        );
+        assert_eq!(
+            app.gateway_term_height_buf,
+            app.cfg.gateway_term_height.to_string(),
+            "App::new must seed the rows buffer"
+        );
+
+        app.gateway_term_width_buf = "40".into();
+        app.gateway_term_height_buf = "25".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.gateway_term_width, 40);
+        assert_eq!(app.cfg.gateway_term_height, 25);
+
+        app.gateway_term_width_buf = "0".into();
+        app.gateway_term_height_buf = "0".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.gateway_term_width, 0, "0 columns means auto");
+        assert_eq!(app.cfg.gateway_term_height, 0, "0 rows means auto");
+
+        // Half-typed / junk / past-u16 leaves the last good value alone.
+        app.gateway_term_width_buf = "80".into();
+        app.sync_numeric_fields();
+        app.gateway_term_width_buf = "".into();
+        app.gateway_term_height_buf = "70000".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.gateway_term_width, 80, "empty must not clobber");
+        assert_eq!(app.cfg.gateway_term_height, 0, "past u16 must not clobber");
+
+        // Perturb the snapshot (not the global) so refresh_from_global runs —
+        // same reason as test_refresh_rebuilds_log_buffers.
+        app.last_synced_cfg.gateway_term_width = app.cfg.gateway_term_width.wrapping_add(1);
+        app.dirty = false;
+        app.gateway_term_width_buf = "9999".into();
+        app.gateway_term_height_buf = "9999".into();
+        app.refresh_from_global();
+        assert_eq!(app.gateway_term_width_buf, app.cfg.gateway_term_width.to_string());
+        assert_eq!(app.gateway_term_height_buf, app.cfg.gateway_term_height.to_string());
+    }
+
+    /// The hint both the GUI and the web show is one function, and it must
+    /// describe what is actually configured — the log hint existed twice and
+    /// had already drifted (one copy said "the console above only", wrong
+    /// inside a popup) before it was collapsed.
+    #[test]
+    fn test_gateway_term_hint_describes_each_state() {
+        let auto = Config::gateway_term_hint(0, 0);
+        assert!(auto.contains("Auto"), "0/0 must read as automatic: {auto}");
+
+        let both = Config::gateway_term_hint(40, 25);
+        assert!(
+            both.contains("40x25"),
+            "a full override should state the geometry: {both}"
+        );
+
+        let width_only = Config::gateway_term_hint(40, 0);
+        assert!(
+            width_only.contains("40") && width_only.contains("rows stay automatic"),
+            "a width-only override should say the rows are still automatic: {width_only}"
+        );
+
+        let rows_only = Config::gateway_term_hint(0, 25);
+        assert!(
+            rows_only.contains("25") && rows_only.contains("width stays automatic"),
+            "a rows-only override should say the width is still automatic: {rows_only}"
+        );
     }
 
     #[test]

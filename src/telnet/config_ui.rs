@@ -2002,6 +2002,37 @@ impl TelnetSession {
             };
             self.send_line(&format!("  SSH auth:    {}", ssh_auth))
                 .await?;
+
+            // What the remote will actually be told, resolved by the same
+            // fn the gateways use.  "in use" is this session's answer, so an
+            // operator can see immediately whether their override took or
+            // whether client NAWS / the type default is winning.
+            let (in_use_cols, in_use_rows) = gateway_window(
+                self.terminal_type,
+                (self.window_width, self.window_height),
+                cfg.gateway_term_width,
+                cfg.gateway_term_height,
+            );
+            let width_set = if cfg.gateway_term_width == 0 {
+                self.dim("auto")
+            } else {
+                self.amber(&cfg.gateway_term_width.to_string())
+            };
+            let rows_set = if cfg.gateway_term_height == 0 {
+                self.dim("auto")
+            } else {
+                self.amber(&cfg.gateway_term_height.to_string())
+            };
+            self.send_line(&format!(
+                "  Term width:  {}  ({} in use)",
+                width_set, in_use_cols
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Term rows:   {}  ({} in use)",
+                rows_set, in_use_rows
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -2017,6 +2048,16 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle SSH auth (Key/Password)",
                 self.cyan("S")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set terminal width (0 = auto)",
+                self.cyan("W")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set terminal rows (0 = auto)",
+                self.cyan("R")
             ))
             .await?;
             self.send_line("").await?;
@@ -2072,12 +2113,41 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                // 0 is "auto" and must stay reachable, so min is 0, not 1.
+                // The range is the full u16 the config parser accepts — no
+                // surface invents a tighter cap of its own.
+                "w" => {
+                    self.xmodem_set_numeric(
+                        "Terminal width",
+                        "gateway_term_width",
+                        cfg.gateway_term_width as u64,
+                        0,
+                        u16::MAX as u64,
+                        // Unit kept short: this confirmation is emitted as ONE
+                        // unwrapped line, and "columns (0 = auto)" pushed it to
+                        // 46 chars on a 40-column PETSCII screen. The menu item
+                        // and the prompt both already say 0 = auto.
+                        "columns",
+                    )
+                    .await?;
+                }
+                "r" => {
+                    self.xmodem_set_numeric(
+                        "Terminal rows",
+                        "gateway_term_height",
+                        cfg.gateway_term_height as u64,
+                        0,
+                        u16::MAX as u64,
+                        "rows",
+                    )
+                    .await?;
+                }
                 "h" => {
                     self.gateway_config_show_help().await?;
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, C, S, H, or Q.").await?;
+                    self.show_error("Press T, C, S, W, R, H, or Q.").await?;
                 }
             }
         }
@@ -2129,7 +2199,29 @@ impl TelnetSession {
                 "               account's password on",
                 "               each connect.",
                 "",
-                "  Both settings are saved to",
+                "  Terminal width / rows:",
+                "    The size reported to the remote",
+                "    (SSH PTY / telnet NAWS). Leave",
+                "    both 0 for auto: your client's",
+                "    NAWS if it sent one, else the",
+                "    terminal-type default (40x25",
+                "    PETSCII, 80x24 ANSI/ASCII).",
+                "",
+                "    Set them when auto is wrong.",
+                "    Terminal TYPE does not imply",
+                "    WIDTH: CCGMS in ASCII mode",
+                "    sends 0x08 for backspace, so",
+                "    it looks like ANSI and would",
+                "    be told 80 columns for a",
+                "    40-column screen. WiFi modems",
+                "    and tcpser never send NAWS",
+                "    for the C64, so only you can",
+                "    say. A wrong width misplaces",
+                "    line wrap, backspace, history",
+                "    and tab completion past the",
+                "    real right margin.",
+                "",
+                "  All settings are saved to",
                 "  egateway.conf and take effect on",
                 "  the next gateway connection.",
                 "  No server restart is required.",
@@ -2178,6 +2270,33 @@ impl TelnetSession {
                 "    fingerprints are saved to gateway_hosts;",
                 "    a changed key triggers a prominent",
                 "    HOST KEY CHANGED warning.",
+                "",
+                "  Terminal width / rows:",
+                "    The geometry reported to the remote",
+                "    host (SSH PTY request / telnet NAWS).",
+                "    Leave both 0 for automatic: the size",
+                "    your client negotiated via NAWS, or",
+                "    the terminal-type default (40x25 for",
+                "    PETSCII, 80x24 for ANSI/ASCII) when it",
+                "    negotiated none. Each is independent,",
+                "    so you can pin the width and leave the",
+                "    row count automatic.",
+                "",
+                "    Set them when the automatic answer is",
+                "    wrong, which it is for most retro",
+                "    clients: terminal TYPE does not imply",
+                "    terminal WIDTH. A C64 running CCGMS in",
+                "    ASCII mode sends 0x08 for backspace, so",
+                "    it is detected as ANSI and would be told",
+                "    it has 80 columns for a physically",
+                "    40-column screen; CCGMS's soft 80-column",
+                "    mode is the same mistake in reverse.",
+                "    WiFi modems and tcpser don't send NAWS",
+                "    on the C64's behalf, so only you can say.",
+                "    When the remote has the wrong width,",
+                "    everything past the real margin -- line",
+                "    wrap, backspace, history recall, tab",
+                "    completion -- is drawn in the wrong place.",
                 "",
                 "  Changes are saved immediately and take",
                 "  effect on the next gateway connection.",
