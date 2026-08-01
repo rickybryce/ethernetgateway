@@ -28,5 +28,6 @@
 #![allow(dead_code)]
 
 pub mod format;
+pub mod identify;
 pub mod fs;
 pub mod media;
