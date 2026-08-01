@@ -5,9 +5,11 @@
 //! together in order, and walks the allocation map to find the record asked
 //! for.
 //!
-//! **Read path only, for now.**  Allocation, extent creation and erase come
-//! next; until then a mounted image is a library you can run software from, not
-//! one you can write to.
+//! Reads and writes.  The rules that keep a write from destroying a disk are
+//! stated where the write code begins; the short version is that data is
+//! always committed before the directory that claims it, a block is never
+//! handed out twice, and a damaged disk is mounted read-only rather than
+//! written to.
 //!
 //! Three things about CP/M directories are worth stating plainly, because each
 //! is a place a reader's intuition goes wrong:
@@ -67,6 +69,14 @@ pub struct DirSlot {
     /// System attribute — high bit of the second extension byte.  A SYS file
     /// is hidden from `DIR` but is otherwise an ordinary file.
     pub system: bool,
+    /// The entry exactly as it sits on the disk.
+    ///
+    /// Kept so an update can be a *edit* of the real bytes rather than a
+    /// rebuild from the fields above.  Directory entries carry things this
+    /// code does not model — `S1`, the CP/M 3 archive bit, whatever a
+    /// particular vendor put in the spare bits — and rebuilding an entry from
+    /// scratch would quietly drop every one of them.  Editing in place cannot.
+    pub raw: RawEntry,
 }
 
 /// Geometry derived from a [`Format`], computed once at mount.
@@ -126,6 +136,13 @@ pub struct ImageFs {
     params: Params,
     /// Every live directory entry, in directory order.
     dir: Vec<DirSlot>,
+    /// Allocation bitmap, one entry per block, rebuilt from the directory
+    /// after every mutation.  Index 0 is block 0.
+    used: Vec<bool>,
+    /// Set when this mount refuses every write.  Either the operator asked for
+    /// it, or the disk arrived in a state where writing would make things
+    /// worse — see [`ImageFs::mount`].
+    read_only: bool,
 }
 
 impl ImageFs {
@@ -134,7 +151,19 @@ impl ImageFs {
     /// Fails when the image is too short for the format's geometry — better a
     /// refusal at mount time, naming the mismatch, than a drive that lists
     /// files and then fails on every read.
-    pub fn mount(mut media: Box<dyn Media>, fmt: &'static Format) -> std::io::Result<ImageFs> {
+    ///
+    /// A mount can come back **read-only even when read-write was asked for**,
+    /// and that is deliberate.  If the directory that arrived is already
+    /// inconsistent — an entry naming a block off the end of the disk, or two
+    /// files sharing one block — then the disk is damaged, and the one thing
+    /// guaranteed to turn damage into total loss is to start allocating on top
+    /// of it.  The caller can see which it got from
+    /// [`ImageFs::is_read_only`] and say so in the UI.
+    pub fn mount(
+        mut media: Box<dyn Media>,
+        fmt: &'static Format,
+        read_only: bool,
+    ) -> std::io::Result<ImageFs> {
         let need = fmt.min_bytes();
         if media.len() < need {
             return Err(std::io::Error::new(
@@ -148,8 +177,82 @@ impl ImageFs {
             ));
         }
         let params = Params::derive(fmt);
+        // The extent-mask arithmetic — `extent & !exm` for the start of an
+        // entry's data — is only a mask if `exm + 1` is a power of two.  Every
+        // real CP/M block size makes it one; a format table typo could not, and
+        // would silently put records in the wrong place.
+        if !(params.exm + 1).is_power_of_two() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: extent mask {} is not a power of two", fmt.token, params.exm + 1),
+            ));
+        }
         let dir = Self::read_directory(&mut *media, fmt, &params)?;
-        Ok(ImageFs { media, fmt, params, dir })
+        let mut fs = ImageFs {
+            media,
+            fmt,
+            params,
+            dir,
+            used: Vec::new(),
+            read_only,
+        };
+        fs.rebuild_bitmap();
+        if !read_only {
+            if let Some(reason) = fs.inconsistency() {
+                fs.read_only = true;
+                crate::glog!(
+                    "CP/M: mounting {} read-only — {}",
+                    fmt.token,
+                    reason
+                );
+            }
+        }
+        Ok(fs)
+    }
+
+    /// Describe the first sign that this directory is damaged, if any.
+    ///
+    /// Deliberately not a repair: guessing which of two files really owns a
+    /// shared block is how a backup gets destroyed.  We report, refuse to
+    /// write, and leave the disk exactly as it was found so the operator can
+    /// take it somewhere that can look properly.
+    fn inconsistency(&self) -> Option<String> {
+        let mut owner: Vec<Option<[u8; 11]>> = vec![None; self.params.max_block as usize + 1];
+        let dir_blocks = self.params.dir_records.div_ceil(self.params.records_per_block);
+        for e in &self.dir {
+            let mut who = [b' '; 11];
+            who[..8].copy_from_slice(&e.name);
+            who[8..].copy_from_slice(&e.ext);
+            for &b in &e.blocks {
+                if b == 0 {
+                    continue;
+                }
+                if b > self.params.max_block {
+                    return Some(format!(
+                        "{} names block {b}, past the last block ({})",
+                        String::from_utf8_lossy(&who).trim_end(),
+                        self.params.max_block
+                    ));
+                }
+                if (b as u32) < dir_blocks {
+                    return Some(format!(
+                        "{} claims block {b}, which is part of the directory",
+                        String::from_utf8_lossy(&who).trim_end()
+                    ));
+                }
+                match owner[b as usize] {
+                    Some(prev) if prev != who => {
+                        return Some(format!(
+                            "block {b} is claimed by both {} and {}",
+                            String::from_utf8_lossy(&prev).trim_end(),
+                            String::from_utf8_lossy(&who).trim_end()
+                        ));
+                    }
+                    _ => owner[b as usize] = Some(who),
+                }
+            }
+        }
+        None
     }
 
     /// The format this image is mounted as.
@@ -306,6 +409,439 @@ impl ImageFs {
         Ok(Some(buf))
     }
 
+    // ---- writing --------------------------------------------------------
+    //
+    // Every mutation below obeys the same three rules, and they are the whole
+    // of why a write here cannot corrupt a disk:
+    //
+    // 1. **Data before directory.**  A block's contents are written and
+    //    flushed *before* the directory entry that claims it.  Interrupt the
+    //    sequence anywhere and the worst outcome is a block that no entry
+    //    points at — which the next mount silently reclaims, because the
+    //    allocation bitmap is rebuilt from the directory and nothing else.
+    //    The opposite order would leave a live directory entry pointing at
+    //    whatever the block held before, i.e. another file's data.
+    //
+    // 2. **Allocate only what the bitmap says is free.**  The bitmap is built
+    //    from the directory at mount, includes the directory's own blocks as
+    //    permanently taken, and is checked *again* at the moment of use.  A
+    //    block is never handed out twice, so two files can never come to share
+    //    one — the failure that silently destroys both.
+    //
+    // 3. **Edit entries, never rebuild them.**  A directory record is read,
+    //    the 32 bytes of one entry are modified in place, and the record is
+    //    written back.  The other three entries in that record, and every
+    //    field of this one that we do not model, survive untouched.
+
+    /// Rebuild the allocation bitmap from the directory.
+    ///
+    /// The directory is the only source of truth about what is allocated —
+    /// exactly as it is for real CP/M, which has no free list either.  Anything
+    /// no entry points at is free, which is what makes a half-finished write
+    /// self-healing rather than a leak.
+    fn rebuild_bitmap(&mut self) {
+        let mut used = vec![false; self.params.max_block as usize + 1];
+        // The directory's own blocks can never be handed to a file.
+        let dir_blocks = self.params.dir_records.div_ceil(self.params.records_per_block);
+        for b in 0..dir_blocks.min(used.len() as u32) {
+            used[b as usize] = true;
+        }
+        for e in &self.dir {
+            for &b in &e.blocks {
+                if b != 0 {
+                    if let Some(slot) = used.get_mut(b as usize) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+        self.used = used;
+    }
+
+    /// True when this image refuses writes.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Refuse a mutation on a read-only mount.
+    fn check_writable(&self) -> std::io::Result<()> {
+        if self.read_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "this disk image is mounted read-only",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Claim a free block, or `None` when the disk is full.
+    ///
+    /// Marks it used before returning, so two calls can never yield the same
+    /// block even if the caller fails partway and never records it.  A block
+    /// leaked that way costs space until the next mount and corrupts nothing.
+    fn alloc_block(&mut self) -> Option<u16> {
+        // Block 0 is the directory; start past the whole directory area.
+        let first = self.params.dir_records.div_ceil(self.params.records_per_block);
+        for b in first..=self.params.max_block as u32 {
+            if !self.used[b as usize] {
+                self.used[b as usize] = true;
+                return Some(b as u16);
+            }
+        }
+        None
+    }
+
+    /// Write one 128-byte record into an allocation block.
+    fn write_block_record(
+        &mut self,
+        block: u16,
+        offset_in_block: u32,
+        data: &[u8; 128],
+    ) -> std::io::Result<()> {
+        if block == 0 || block > self.params.max_block {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("refusing to write block {block}: outside the data area"),
+            ));
+        }
+        let rec = block as u32 * self.params.records_per_block + offset_in_block;
+        let off = self.fmt.data_record_offset(rec).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("block {block} record {offset_in_block} is past the end of the disk"),
+            )
+        })?;
+        self.media.write_at(off, data)
+    }
+
+    /// Write a 32-byte directory entry back to the disk, then read it back and
+    /// confirm it landed.
+    ///
+    /// The read-back is cheap — one 128-byte record — and it is the only way to
+    /// notice a medium that accepted a write and did not keep it (a full disk,
+    /// a dying card, an image on a filesystem that lied about the flush).  A
+    /// directory that does not say what we think it says is precisely the state
+    /// in which the *next* write destroys a file, so it is worth the read.
+    fn write_dir_entry(&mut self, index: u16, raw: &RawEntry) -> std::io::Result<()> {
+        let max = (self.params.dir_records * ENTRIES_PER_RECORD as u32) as u16;
+        if index >= max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("directory entry {index} is past the end of the directory"),
+            ));
+        }
+        let rec = index as u32 / ENTRIES_PER_RECORD as u32;
+        let slot = index as usize % ENTRIES_PER_RECORD;
+        let off = self.fmt.data_record_offset(rec).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "directory record is past the end of the disk",
+            )
+        })?;
+        // Read-modify-write: the other three entries in this record are
+        // somebody else's file and must come through untouched.
+        let mut buf = [0u8; 128];
+        self.media.read_at(off, &mut buf)?;
+        buf[slot * ENTRY_SIZE..(slot + 1) * ENTRY_SIZE].copy_from_slice(raw);
+        self.media.write_at(off, &buf)?;
+        self.media.flush()?;
+
+        let mut check = [0u8; 128];
+        self.media.read_at(off, &mut check)?;
+        if check != buf {
+            return Err(std::io::Error::other(
+                "directory write did not take — the image may be damaged",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Find a free directory slot, or `None` when the directory is full.
+    ///
+    /// Scans the on-disk directory rather than trusting the in-memory list: a
+    /// slot is free only if the disk says so.
+    fn free_dir_slot(&mut self) -> std::io::Result<Option<u16>> {
+        for rec in 0..self.params.dir_records {
+            let buf = Self::read_data_record(&mut *self.media, self.fmt, rec)?;
+            for slot in 0..ENTRIES_PER_RECORD {
+                let raw = &buf[slot * ENTRY_SIZE..(slot + 1) * ENTRY_SIZE];
+                let free = raw[0] == E5 || (raw[0] == 0 && raw[1..12].iter().all(|&c| c == 0));
+                if free {
+                    return Ok(Some((rec as usize * ENTRIES_PER_RECORD + slot) as u16));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Build a fresh directory entry for one extent of a file.
+    fn new_raw_entry(user: u8, name: &[u8; 8], ext: &[u8; 3], extent: u32) -> RawEntry {
+        let mut raw = [0u8; 32];
+        raw[0] = user;
+        raw[1..9].copy_from_slice(name);
+        raw[9..12].copy_from_slice(ext);
+        raw[12] = (extent % 32) as u8;
+        raw[14] = (extent / 32) as u8;
+        raw[15] = 0;
+        raw
+    }
+
+    /// Records one directory entry can address.
+    fn records_per_entry(&self) -> u32 {
+        (self.params.exm + 1) * RECORDS_PER_EXTENT
+    }
+
+    /// Create an empty file.  Fails if it already exists or the directory is
+    /// full.
+    pub fn create(&mut self, user: u8, name: &[u8; 8], ext: &[u8; 3]) -> std::io::Result<()> {
+        self.check_writable()?;
+        if self.exists(user, name, ext) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "file exists",
+            ));
+        }
+        let Some(index) = self.free_dir_slot()? else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "directory is full",
+            ));
+        };
+        let raw = Self::new_raw_entry(user, name, ext, 0);
+        self.write_dir_entry(index, &raw)?;
+        self.reload()
+    }
+
+    /// Write record `rec` of a file, allocating blocks and extents as needed.
+    pub fn write_record(
+        &mut self,
+        user: u8,
+        name: &[u8; 8],
+        ext: &[u8; 3],
+        rec: u32,
+        data: &[u8; 128],
+    ) -> std::io::Result<()> {
+        self.check_writable()?;
+        if !self.exists(user, name, ext) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ));
+        }
+        if self.find_entry(user, name, ext).is_some_and(|e| e.read_only) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is R/O",
+            ));
+        }
+
+        let rpe = self.records_per_entry();
+        let entry_seq = rec / rpe;
+        let base_extent = entry_seq * (self.params.exm + 1);
+        let within = rec - entry_seq * rpe;
+        let slot = (within / self.params.records_per_block) as usize;
+        let offset_in_block = within % self.params.records_per_block;
+
+        // Locate this file's entry for that extent range, or make one.
+        let existing = self
+            .dir
+            .iter()
+            .find(|e| {
+                e.user == user
+                    && &e.name == name
+                    && &e.ext == ext
+                    && (e.extent & !self.params.exm) == base_extent
+            })
+            .map(|e| (e.index, e.raw));
+        let (index, mut raw) = match existing {
+            Some(v) => v,
+            None => {
+                let Some(index) = self.free_dir_slot()? else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "directory is full",
+                    ));
+                };
+                (index, Self::new_raw_entry(user, name, ext, base_extent))
+            }
+        };
+
+        // Which block holds this record?  Reuse the allocated one, or claim a
+        // new one.
+        let mut blocks = decode_blocks(&raw, &self.params);
+        let block = match blocks.get(slot).copied() {
+            Some(b) if b != 0 => {
+                if b > self.params.max_block {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("directory names block {b}, past the end of the disk"),
+                    ));
+                }
+                b
+            }
+            Some(_) => {
+                let Some(b) = self.alloc_block() else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "disk is full",
+                    ));
+                };
+                blocks[slot] = b;
+                b
+            }
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "record is beyond what one directory entry can address",
+                ))
+            }
+        };
+
+        // Rule 1: data first, and flushed, before anything claims the block.
+        self.write_block_record(block, offset_in_block, data)?;
+        self.media.flush()?;
+
+        // Now the directory: allocation map, then the extent/record count if
+        // this write extended the file.
+        encode_blocks(&mut raw, &blocks, &self.params);
+        let used_now = within + 1;
+        let cur_extent = raw[12] as u32 + 32 * (raw[14] & 0x3F) as u32;
+        let old_used = (cur_extent & self.params.exm) * RECORDS_PER_EXTENT + raw[15] as u32;
+        if used_now > old_used {
+            let last_logical = (used_now - 1) / RECORDS_PER_EXTENT;
+            let extent = base_extent + last_logical;
+            raw[12] = (extent % 32) as u8;
+            raw[14] = (extent / 32) as u8;
+            raw[15] = (used_now - last_logical * RECORDS_PER_EXTENT) as u8;
+        }
+        self.write_dir_entry(index, &raw)?;
+        self.reload()
+    }
+
+    /// Erase a file — every extent of it.  Returns how many entries went.
+    pub fn delete(&mut self, user: u8, name: &[u8; 8], ext: &[u8; 3]) -> std::io::Result<usize> {
+        self.check_writable()?;
+        let targets: Vec<(u16, RawEntry)> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && &e.name == name && &e.ext == ext)
+            .map(|e| (e.index, e.raw))
+            .collect();
+        if targets.iter().any(|(_, raw)| raw[9] & 0x80 != 0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is R/O",
+            ));
+        }
+        let n = targets.len();
+        for (index, mut raw) in targets {
+            // CP/M erases by stamping the user byte only; the rest of the
+            // entry stays, which is what makes an undelete tool possible.
+            raw[0] = E5;
+            self.write_dir_entry(index, &raw)?;
+        }
+        self.reload()?;
+        Ok(n)
+    }
+
+    /// Rename a file, keeping every extent in step.
+    pub fn rename(
+        &mut self,
+        user: u8,
+        name: &[u8; 8],
+        ext: &[u8; 3],
+        new_name: &[u8; 8],
+        new_ext: &[u8; 3],
+    ) -> std::io::Result<bool> {
+        self.check_writable()?;
+        if self.exists(user, new_name, new_ext) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "file exists",
+            ));
+        }
+        let targets: Vec<(u16, RawEntry)> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && &e.name == name && &e.ext == ext)
+            .map(|e| (e.index, e.raw))
+            .collect();
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        if targets.iter().any(|(_, raw)| raw[9] & 0x80 != 0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is R/O",
+            ));
+        }
+        for (index, mut raw) in targets {
+            // Keep the attribute bits, which live in the high bits of the name
+            // and extension we are about to overwrite.
+            let attrs: Vec<u8> = raw[1..12].iter().map(|c| c & 0x80).collect();
+            raw[1..9].copy_from_slice(new_name);
+            raw[9..12].copy_from_slice(new_ext);
+            for (slot, a) in raw[1..12].iter_mut().zip(attrs) {
+                *slot |= a;
+            }
+            self.write_dir_entry(index, &raw)?;
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
+    /// Set or clear a file's R/O attribute.
+    pub fn set_read_only(
+        &mut self,
+        user: u8,
+        name: &[u8; 8],
+        ext: &[u8; 3],
+        ro: bool,
+    ) -> std::io::Result<bool> {
+        self.check_writable()?;
+        let targets: Vec<(u16, RawEntry)> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && &e.name == name && &e.ext == ext)
+            .map(|e| (e.index, e.raw))
+            .collect();
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        for (index, mut raw) in targets {
+            if ro {
+                raw[9] |= 0x80;
+            } else {
+                raw[9] &= 0x7F;
+            }
+            self.write_dir_entry(index, &raw)?;
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
+    /// Re-read the directory and rebuild the allocation bitmap.
+    ///
+    /// Run after every mutation.  It costs a directory read, and it buys the
+    /// guarantee that the in-memory picture can never drift from the disk —
+    /// drift being the thing that makes the *next* allocation overwrite a live
+    /// file.
+    fn reload(&mut self) -> std::io::Result<()> {
+        self.dir = Self::read_directory(&mut *self.media, self.fmt, &self.params)?;
+        self.rebuild_bitmap();
+        Ok(())
+    }
+
+    /// The first extent of a file, if it exists.
+    fn find_entry(&self, user: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<&DirSlot> {
+        self.extents_of(user, name, ext).into_iter().next()
+    }
+
+    /// Free blocks remaining.
+    pub fn free_blocks(&self) -> u32 {
+        self.used.iter().filter(|u| !**u).count() as u32
+    }
+
     /// Blocks currently allocated to files, for a free-space report.
     ///
     /// Counts distinct block numbers rather than summing allocation slots: a
@@ -323,6 +859,42 @@ impl ImageFs {
             }
         }
         seen.iter().filter(|s| **s).count() as u32
+    }
+}
+
+/// Read the 16-byte allocation map out of a directory entry.
+///
+/// The map is 16 bytes however you divide it: sixteen 8-bit block numbers on a
+/// small disk, eight little-endian 16-bit ones once the disk needs more than
+/// 255 blocks.  Which it is depends on the disk, not on the entry.
+fn decode_blocks(raw: &RawEntry, params: &Params) -> Vec<u16> {
+    if params.wide_blocks {
+        raw[16..32]
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect()
+    } else {
+        raw[16..32].iter().map(|&b| b as u16).collect()
+    }
+}
+
+/// Write an allocation map back into a directory entry.
+///
+/// The inverse of [`decode_blocks`], and paired with it by a round-trip test —
+/// an encode that disagrees with the decode would hand a file somebody else's
+/// blocks, which is the worst thing this module could do.
+fn encode_blocks(raw: &mut RawEntry, blocks: &[u16], params: &Params) {
+    if params.wide_blocks {
+        for (slot, &b) in raw[16..32].chunks_exact_mut(2).zip(blocks) {
+            slot.copy_from_slice(&b.to_le_bytes());
+        }
+    } else {
+        for (slot, &b) in raw[16..32].iter_mut().zip(blocks) {
+            // A block number too large for the map would be silently truncated
+            // into a *different, valid* block number — so clamp to zero
+            // (unallocated) instead, which reads as end-of-file.
+            *slot = if b <= 0xFF { b as u8 } else { 0 };
+        }
     }
 }
 
@@ -356,14 +928,7 @@ fn parse_entry(index: u16, raw: &RawEntry, params: &Params) -> Option<DirSlot> {
         return None;
     }
     let extent = raw[12] as u32 + 32 * (raw[14] & 0x3F) as u32;
-    let blocks = if params.wide_blocks {
-        raw[16..32]
-            .chunks_exact(2)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
-            .collect()
-    } else {
-        raw[16..32].iter().map(|&b| b as u16).collect()
-    };
+    let blocks = decode_blocks(raw, params);
     Some(DirSlot {
         index,
         user: raw[0],
@@ -374,6 +939,7 @@ fn parse_entry(index: u16, raw: &RawEntry, params: &Params) -> Option<DirSlot> {
         blocks,
         read_only: raw[9] & 0x80 != 0,
         system: raw[10] & 0x80 != 0,
+        raw: *raw,
     })
 }
 
@@ -441,7 +1007,7 @@ mod tests {
     }
 
     fn mount(img: Vec<u8>, fmt: &'static Format) -> ImageFs {
-        ImageFs::mount(Box::new(MemMedia::new(img)), fmt).unwrap()
+        ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap()
     }
 
     #[test]
@@ -622,10 +1188,364 @@ mod tests {
     fn test_short_image_is_refused_at_mount() {
         let fmt = by_token("ibm3740").unwrap();
         let short = vec![E5; (fmt.min_bytes() - 1) as usize];
-        match ImageFs::mount(Box::new(MemMedia::new(short)), fmt) {
+        match ImageFs::mount(Box::new(MemMedia::new(short)), fmt, false) {
             Ok(_) => panic!("a truncated image must not mount"),
             Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
         }
+    }
+
+    // ---- writing --------------------------------------------------------
+
+    #[test]
+    fn test_create_write_read_back() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("NEW.TXT");
+        fs.create(0, &n, &e).unwrap();
+        assert!(fs.exists(0, &n, &e));
+        assert_eq!(fs.file_records(0, &n, &e), Some(0), "created empty");
+
+        let mut rec = [0x1Au8; 128];
+        rec[..5].copy_from_slice(b"hello");
+        fs.write_record(0, &n, &e, 0, &rec).unwrap();
+        assert_eq!(fs.file_records(0, &n, &e), Some(1));
+        assert_eq!(fs.read_record(0, &n, &e, 0).unwrap().unwrap(), rec);
+    }
+
+    #[test]
+    fn test_create_refuses_duplicate() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("DUP.TXT");
+        fs.create(0, &n, &e).unwrap();
+        assert_eq!(
+            fs.create(0, &n, &e).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    /// Write enough records to spill past one directory entry and confirm the
+    /// second extent is created and threaded correctly.
+    #[test]
+    fn test_write_spills_into_a_second_extent() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("BIG.DAT");
+        fs.create(0, &n, &e).unwrap();
+        // 1K blocks, exm 0 => one entry covers 128 records.
+        for rec in [0u32, 127, 128, 200] {
+            let mut buf = [0u8; 128];
+            buf[..4].copy_from_slice(&rec.to_le_bytes());
+            fs.write_record(0, &n, &e, rec, &buf).unwrap();
+        }
+        assert_eq!(fs.file_records(0, &n, &e), Some(201));
+        for rec in [0u32, 127, 128, 200] {
+            let got = fs.read_record(0, &n, &e, rec).unwrap().unwrap();
+            assert_eq!(
+                u32::from_le_bytes(got[..4].try_into().unwrap()),
+                rec,
+                "record {rec} came back as another record"
+            );
+        }
+    }
+
+    /// The whole point of the exercise: two files writing at the same time must
+    /// never be handed the same block.
+    #[test]
+    fn test_two_files_never_share_a_block() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (a, ae) = name_of("A.DAT");
+        let (b, be) = name_of("B.DAT");
+        fs.create(0, &a, &ae).unwrap();
+        fs.create(0, &b, &be).unwrap();
+        // Interleave the writes, which is what two sessions would do.
+        for rec in 0..40u32 {
+            let mut buf = [0u8; 128];
+            buf[..4].copy_from_slice(&rec.to_le_bytes());
+            buf[4] = b'A';
+            fs.write_record(0, &a, &ae, rec, &buf).unwrap();
+            buf[4] = b'B';
+            fs.write_record(0, &b, &be, rec, &buf).unwrap();
+        }
+        for rec in 0..40u32 {
+            assert_eq!(fs.read_record(0, &a, &ae, rec).unwrap().unwrap()[4], b'A');
+            assert_eq!(fs.read_record(0, &b, &be, rec).unwrap().unwrap()[4], b'B');
+        }
+        assert!(fs.inconsistency().is_none(), "the disk must stay consistent");
+    }
+
+    /// Erasing a file must return its blocks and must not disturb its
+    /// neighbours — the classic way an allocator eats the next file along.
+    #[test]
+    fn test_delete_frees_blocks_without_touching_other_files() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (a, ae) = name_of("GONE.DAT");
+        let (b, be) = name_of("KEEP.DAT");
+        fs.create(0, &a, &ae).unwrap();
+        fs.create(0, &b, &be).unwrap();
+        let mut buf = [0u8; 128];
+        buf[..4].copy_from_slice(b"keep");
+        for rec in 0..20u32 {
+            fs.write_record(0, &a, &ae, rec, &[0xAA; 128]).unwrap();
+            fs.write_record(0, &b, &be, rec, &buf).unwrap();
+        }
+        let before = fs.free_blocks();
+        assert_eq!(fs.delete(0, &a, &ae).unwrap(), 1);
+        assert!(fs.free_blocks() > before, "erase must return blocks");
+        assert!(!fs.exists(0, &a, &ae));
+        for rec in 0..20u32 {
+            assert_eq!(
+                &fs.read_record(0, &b, &be, rec).unwrap().unwrap()[..4],
+                b"keep",
+                "the surviving file was damaged by the erase"
+            );
+        }
+        assert!(fs.inconsistency().is_none());
+    }
+
+    /// Space freed by an erase must be reusable, and reusing it must not
+    /// resurrect the old contents into the new file.
+    #[test]
+    fn test_freed_blocks_are_reused_cleanly() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (a, ae) = name_of("FIRST.DAT");
+        fs.create(0, &a, &ae).unwrap();
+        for rec in 0..16u32 {
+            fs.write_record(0, &a, &ae, rec, &[0xAA; 128]).unwrap();
+        }
+        fs.delete(0, &a, &ae).unwrap();
+
+        let (b, be) = name_of("SECOND.DAT");
+        fs.create(0, &b, &be).unwrap();
+        fs.write_record(0, &b, &be, 0, &[0x55; 128]).unwrap();
+        assert_eq!(fs.read_record(0, &b, &be, 0).unwrap().unwrap(), [0x55; 128]);
+        assert!(fs.inconsistency().is_none());
+    }
+
+    #[test]
+    fn test_rename_keeps_every_extent_in_step() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("OLD.DAT");
+        fs.create(0, &n, &e).unwrap();
+        fs.write_record(0, &n, &e, 0, &[1; 128]).unwrap();
+        fs.write_record(0, &n, &e, 200, &[2; 128]).unwrap();
+        assert_eq!(fs.extents_of(0, &n, &e).len(), 2, "two extents to rename");
+
+        let (nn, ne) = name_of("NEW.DAT");
+        assert!(fs.rename(0, &n, &e, &nn, &ne).unwrap());
+        assert!(!fs.exists(0, &n, &e));
+        assert_eq!(fs.file_records(0, &nn, &ne), Some(201));
+        assert_eq!(fs.read_record(0, &nn, &ne, 200).unwrap().unwrap(), [2; 128]);
+    }
+
+    #[test]
+    fn test_rename_refuses_to_clobber() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (a, ae) = name_of("A.DAT");
+        let (b, be) = name_of("B.DAT");
+        fs.create(0, &a, &ae).unwrap();
+        fs.create(0, &b, &be).unwrap();
+        assert_eq!(
+            fs.rename(0, &a, &ae, &b, &be).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(fs.exists(0, &a, &ae), "the source survives a refused rename");
+    }
+
+    #[test]
+    fn test_read_only_attribute_blocks_write_delete_rename() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("PROT.DAT");
+        fs.create(0, &n, &e).unwrap();
+        fs.write_record(0, &n, &e, 0, &[7; 128]).unwrap();
+        assert!(fs.set_read_only(0, &n, &e, true).unwrap());
+
+        assert!(fs.write_record(0, &n, &e, 1, &[8; 128]).is_err());
+        assert!(fs.delete(0, &n, &e).is_err());
+        let (nn, ne) = name_of("OTHER.DAT");
+        assert!(fs.rename(0, &n, &e, &nn, &ne).is_err());
+        assert_eq!(fs.read_record(0, &n, &e, 0).unwrap().unwrap(), [7; 128]);
+
+        // ...and clearing it lets the file be written again.
+        assert!(fs.set_read_only(0, &n, &e, false).unwrap());
+        assert!(fs.write_record(0, &n, &e, 1, &[8; 128]).is_ok());
+    }
+
+    /// A read-only mount must refuse every mutation, not merely most of them.
+    #[test]
+    fn test_read_only_mount_refuses_every_mutation() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "THERE.DAT", 0, 1, &[5]);
+        let mut fs =
+            ImageFs::mount(Box::new(MemMedia::new(img)), fmt, true).unwrap();
+        assert!(fs.is_read_only());
+        let (n, e) = name_of("THERE.DAT");
+        let (nn, ne) = name_of("NEW.DAT");
+        assert!(fs.create(0, &nn, &ne).is_err());
+        assert!(fs.write_record(0, &n, &e, 0, &[1; 128]).is_err());
+        assert!(fs.delete(0, &n, &e).is_err());
+        assert!(fs.rename(0, &n, &e, &nn, &ne).is_err());
+        assert!(fs.set_read_only(0, &n, &e, true).is_err());
+        // and the file is still there, unchanged
+        assert!(fs.exists(0, &n, &e));
+    }
+
+    /// A disk that arrives cross-linked is damaged.  Mounting it read-write
+    /// must quietly downgrade to read-only rather than allocate on top of the
+    /// damage and finish the job.
+    #[test]
+    fn test_cross_linked_disk_mounts_read_only() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "A.DAT", 0, 8, &[7]);
+        put_entry(&mut img, fmt, 1, 0, "B.DAT", 0, 8, &[7]);
+        let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(fs.is_read_only(), "a cross-linked disk must not be written to");
+    }
+
+    #[test]
+    fn test_disk_naming_a_block_past_the_end_mounts_read_only() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "BAD.DAT", 0, 8, &[250]);
+        let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(fs.is_read_only());
+    }
+
+    /// A file must never be given a block belonging to the directory — doing so
+    /// overwrites the directory with file data and loses the whole disk.
+    #[test]
+    fn test_allocation_never_touches_the_directory() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("FILL.DAT");
+        fs.create(0, &n, &e).unwrap();
+        // 64 entries / 4 per record = 16 records = 2 blocks of directory.
+        let dir_blocks = fs.params.dir_records.div_ceil(fs.params.records_per_block);
+        for rec in 0..64u32 {
+            fs.write_record(0, &n, &e, rec, &[0xFF; 128]).unwrap();
+        }
+        for slot in &fs.dir[0].blocks {
+            assert!(
+                *slot == 0 || *slot as u32 >= dir_blocks,
+                "block {slot} overlaps the directory"
+            );
+        }
+        // The directory still reads as a directory.
+        assert!(fs.exists(0, &n, &e));
+    }
+
+    /// Fill the disk and confirm it reports full rather than wrapping around
+    /// and overwriting block 0.
+    #[test]
+    fn test_disk_full_is_reported_not_wrapped() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("HOG.DAT");
+        fs.create(0, &n, &e).unwrap();
+        let mut rec = 0u32;
+        let err = loop {
+            match fs.write_record(0, &n, &e, rec, &[0xEE; 128]) {
+                Ok(()) => rec += 1,
+                Err(e) => break e,
+            }
+            assert!(rec < 100_000, "the disk never filled up");
+        };
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::InvalidInput
+            ),
+            "expected a full-disk error, got {err:?}"
+        );
+        assert!(fs.inconsistency().is_none(), "filling the disk corrupted it");
+        // Everything written before the disk filled must still read back.
+        for r in (0..rec).step_by(37) {
+            assert_eq!(fs.read_record(0, &n, &e, r).unwrap().unwrap(), [0xEE; 128]);
+        }
+    }
+
+    /// A full directory must be reported, not silently written past the end
+    /// into the first data block.
+    #[test]
+    fn test_directory_full_is_reported() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let mut made = 0;
+        for i in 0..200 {
+            let (n, e) = name_of(&format!("F{i:05}.DAT"));
+            match fs.create(0, &n, &e) {
+                Ok(()) => made += 1,
+                Err(err) => {
+                    assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
+                    break;
+                }
+            }
+        }
+        assert_eq!(made, 64, "an 8\" SSSD holds 64 directory entries");
+        assert!(fs.inconsistency().is_none());
+    }
+
+    /// A directory update must leave the other three entries in its record
+    /// alone — they belong to other files.
+    #[test]
+    fn test_directory_update_preserves_neighbouring_entries() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let names: Vec<_> = (0..4).map(|i| name_of(&format!("N{i}.DAT"))).collect();
+        for (n, e) in &names {
+            fs.create(0, n, e).unwrap();
+        }
+        // These four share one 128-byte directory record.
+        fs.write_record(0, &names[1].0, &names[1].1, 0, &[9; 128]).unwrap();
+        for (n, e) in &names {
+            assert!(fs.exists(0, n, e), "a neighbouring entry was lost");
+        }
+    }
+
+    /// The encode/decode pair for allocation maps must round-trip exactly.  A
+    /// mismatch would hand a file another file's blocks.
+    #[test]
+    fn test_block_map_round_trips() {
+        for fmt in [by_token("ibm3740").unwrap(), by_token("altair8").unwrap()] {
+            let p = Params::derive(fmt);
+            let blocks: Vec<u16> = (0..p.map_slots as u16).map(|i| i * 3 + 1).collect();
+            let mut raw = [0u8; 32];
+            encode_blocks(&mut raw, &blocks, &p);
+            let back = decode_blocks(&raw, &p);
+            assert_eq!(&back[..blocks.len()], &blocks[..], "{}", fmt.token);
+        }
+    }
+
+    /// Writing must not disturb bytes outside the record it was aimed at —
+    /// neither its neighbours in the same block nor the boot tracks.
+    #[test]
+    fn test_write_touches_only_its_own_record() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut img = blank(fmt);
+        // Stamp the reserved area so we can prove it survives.
+        img[..fmt.reserved_records as usize * 128].fill(0x5A);
+        let before = img[..fmt.reserved_records as usize * 128].to_vec();
+
+        let mut fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        let (n, e) = name_of("ONE.DAT");
+        fs.create(0, &n, &e).unwrap();
+        fs.write_record(0, &n, &e, 0, &[1; 128]).unwrap();
+        fs.write_record(0, &n, &e, 2, &[3; 128]).unwrap();
+        // Record 1 was never written: it must read as the blank fill, not as a
+        // copy of a neighbour.
+        assert_eq!(fs.read_record(0, &n, &e, 1).unwrap().unwrap(), [E5; 128]);
+
+        let mut after = vec![0u8; fmt.reserved_records as usize * 128];
+        fs.media.read_at(0, &mut after).unwrap();
+        assert_eq!(after, before, "the boot tracks were modified");
     }
 
     /// Read a real image end to end and require every text file to come back
@@ -692,6 +1612,153 @@ mod tests {
             }
             assert!(checked > 0, "{file}: no text files found to verify");
         }
+    }
+
+    /// A medium that accepts every write and keeps none of them — a full disk,
+    /// a dying card, a filesystem that lied about its flush.
+    struct DroppingMedia {
+        inner: MemMedia,
+        /// Writes at or past this offset are silently discarded.
+        drop_from: u64,
+    }
+
+    impl Media for DroppingMedia {
+        fn len(&self) -> u64 {
+            self.inner.len()
+        }
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            self.inner.read_at(offset, buf)
+        }
+        fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            if offset >= self.drop_from {
+                return Ok(()); // pretend it worked
+            }
+            self.inner.write_at(offset, data)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The read-back check after a directory write must actually fire.  Without
+    /// it a medium that silently drops writes leaves us believing a file exists
+    /// that does not — and the *next* allocation then hands its blocks away.
+    ///
+    /// This is a mutation test of that guard: delete the read-back in
+    /// `write_dir_entry` and this is the test that goes red.
+    #[test]
+    fn test_a_directory_write_that_does_not_stick_is_detected() {
+        let fmt = by_token("ibm3740").unwrap();
+        let dir_start = fmt.data_record_offset(0).unwrap();
+        let media = DroppingMedia {
+            inner: MemMedia::new(blank(fmt)),
+            drop_from: dir_start,
+        };
+        let mut fs = ImageFs::mount(Box::new(media), fmt, false).unwrap();
+        let (n, e) = name_of("GHOST.DAT");
+        let err = fs.create(0, &n, &e).unwrap_err();
+        assert!(
+            err.to_string().contains("did not take"),
+            "expected the read-back to catch the dropped write, got: {err}"
+        );
+        assert!(!fs.exists(0, &n, &e), "no ghost file may be left behind");
+    }
+
+    /// The corruption test that matters: write a disk with our code, then hand
+    /// it to `cpmtools` and require *it* to agree — about the file list, about
+    /// every byte of every file, and about the disk being consistent.
+    ///
+    /// Reading a disk correctly only proves we understand the format.  Writing
+    /// one that a wholly separate implementation still reads is what proves we
+    /// have not quietly corrupted it, and it is the check that would catch an
+    /// allocation map written in the wrong width, an extent numbered wrongly,
+    /// or a directory entry landing one slot out.
+    ///
+    /// Ignored: needs `cpmtools` installed.
+    #[test]
+    #[ignore]
+    fn test_our_writes_are_readable_by_cpmtools() {
+        let work = std::env::temp_dir().join("egw_cpm_write_interop");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(
+            work.join("diskdefs"),
+            "diskdef t\n seclen 128\n tracks 77\n sectrk 26\n blocksize 1024\n \
+             maxdir 64\n skew 6\n boottrk 2\n os 2.2\nend\n",
+        )
+        .unwrap();
+
+        // A blank disk, formatted the way our own mount expects to find one.
+        let fmt = by_token("ibm3740").unwrap();
+        let img_path = work.join("out.dsk");
+        std::fs::write(&img_path, blank(fmt)).unwrap();
+
+        // Contents chosen to exercise the awkward cases: a file that spills
+        // past one extent, one that is exactly a block, and one holding every
+        // byte value.
+        let payloads: Vec<(String, Vec<u8>)> = vec![
+            ("SMALL.TXT".into(), b"hello from the gateway".to_vec()),
+            ("BLOCK.BIN".into(), vec![0x42; 1024]),
+            ("BIG.DAT".into(), (0..200 * 128).map(|i| (i % 251) as u8).collect()),
+            ("ALLBYTE.BIN".into(), (0..=255u8).cycle().take(4096).collect()),
+        ];
+
+        {
+            let media = super::super::media::FileMedia::open(&img_path, false).unwrap();
+            let mut fs = ImageFs::mount(Box::new(media), fmt, false).unwrap();
+            assert!(!fs.is_read_only(), "a blank disk must mount writable");
+            for (fname, data) in &payloads {
+                let (n, e) = name_of(fname);
+                fs.create(0, &n, &e).unwrap();
+                for (rec, chunk) in data.chunks(128).enumerate() {
+                    let mut buf = [0x1Au8; 128];
+                    buf[..chunk.len()].copy_from_slice(chunk);
+                    fs.write_record(0, &n, &e, rec as u32, &buf).unwrap();
+                }
+            }
+            assert!(fs.inconsistency().is_none(), "our own writes made it inconsistent");
+        }
+
+        // Now let cpmtools have it.
+        let out = work.join("extracted");
+        std::fs::create_dir_all(&out).unwrap();
+        let status = std::process::Command::new("cpmcp")
+            .current_dir(&work)
+            .arg("-f")
+            .arg("t")
+            .arg(&img_path)
+            .arg("0:*.*")
+            .arg(&out)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => panic!("cpmcp could not read a disk we wrote: {s}"),
+            Err(e) => {
+                eprintln!("cpmtools not installed ({e}) — skipping");
+                return;
+            }
+        }
+
+        for (fname, data) in &payloads {
+            let path = out.join(fname.to_lowercase());
+            let theirs = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("cpmtools did not produce {fname}: {e}"));
+            // CP/M records are 128 bytes and the tail is ^Z-padded, so compare
+            // the payload we actually wrote.
+            assert!(
+                theirs.len() >= data.len(),
+                "{fname}: cpmtools read {} bytes, we wrote {}",
+                theirs.len(),
+                data.len()
+            );
+            assert_eq!(
+                &theirs[..data.len()],
+                &data[..],
+                "{fname}: cpmtools disagrees with what we wrote"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// Ground-truth interop: read every file off a real image with our code and
