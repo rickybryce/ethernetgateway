@@ -116,8 +116,35 @@ FORMATS
 WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO
 -----------------------------------------------
 
-The gateway ships no disk images.  Two well-known collections work well;
-download them yourself and rename copies as below.
+The gateway ships no disk images.  They are not ours to distribute; the
+collections below are maintained by other people, under their own terms,
+and are worth getting from the source.
+
+  z80pack - Udo Munk
+    https://github.com/udo-munk/z80pack
+    The IMSAI 8080 disk library is in  imsaisim/disks/library  and is the
+    best starting point: about twenty 8\" single-density disks holding
+    CP/M 2.2, CP/M 3, IMDOS, BASICs, comms tools and graphics demos.
+    Every one of them is the ibm3740 layout this gateway reads.
+
+  Altair 8800 Simulator - David Hansel
+    https://github.com/dhansel/Altair8800
+    The  disks  folder holds the MITS Altair, Tarbell and Cromemco
+    collections.  The 256,256-byte disks (TDISKnn, CDISK01) are ibm3740.
+
+  Altair-Duino-Disks - J.P. McNeely
+    https://github.com/jpmcneely/AltairDuino-Disks
+    Hard-disk images for the Altair-Duino, including BASIC, COBOL and
+    dBase II.  These are the altairhd format.
+
+Two more places worth knowing for CP/M software in general, though you
+will usually be downloading individual programs there rather than whole
+disks:
+
+  http://www.retroarchive.org/cpm/
+  http://cpmarchives.classiccmp.org/
+
+Rename copies as below.  Sizes are the reliable guide.
 
 ALTAIR-DUINO / ALTAIR 8800 SIMULATOR disks come named after the emulated
 controller they belonged to, which says nothing about their layout.  Map

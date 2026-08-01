@@ -296,6 +296,23 @@ pub fn current_mounts_value() -> String {
     format_mounts(&mounts)
 }
 
+/// Extensions the mount pickers offer.
+///
+/// Filtering by extension rather than excluding `readme.txt` by name: the
+/// folder is a place people keep notes, and every one of those files would
+/// otherwise be offered as a disk and then refused for its size.
+const IMAGE_EXTENSIONS: &[&str] = &["dsk", "img", "ima", "image", "cpm"];
+
+/// Does this filename look like a disk image rather than a note?
+fn looks_like_an_image_name(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((_, ext)) => IMAGE_EXTENSIONS
+            .iter()
+            .any(|known| ext.eq_ignore_ascii_case(known)),
+        None => false,
+    }
+}
+
 /// Every `.dsk` sitting in the images folder, sorted, for the mount pickers.
 // Read by the mount UIs; see `unmount_drive`.
 #[allow(dead_code)]
@@ -307,7 +324,7 @@ pub fn available_images(cpm_base: &Path) -> Vec<String> {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if is_safe_image_name(&name) && !name.eq_ignore_ascii_case("readme.txt") {
+            if is_safe_image_name(&name) && looks_like_an_image_name(&name) {
                 out.push(name);
             }
         }
@@ -561,6 +578,18 @@ mod tests {
         let text = format_mounts(&mounts);
         assert_eq!(text, "A=one.dsk,F=two.dsk");
         assert_eq!(parse_mounts(&text), mounts);
+    }
+
+    /// The images folder is also where people keep notes; those must not be
+    /// offered as disks and then refused for their size.
+    #[test]
+    fn test_only_image_like_names_are_offered() {
+        assert!(looks_like_an_image_name("ibm3740_cpm22.dsk"));
+        assert!(looks_like_an_image_name("DISK01.DSK"));
+        assert!(looks_like_an_image_name("hd.img"));
+        assert!(!looks_like_an_image_name("readme.txt"));
+        assert!(!looks_like_an_image_name("images-catalogue.txt"));
+        assert!(!looks_like_an_image_name("notes"));
     }
 
     #[test]
