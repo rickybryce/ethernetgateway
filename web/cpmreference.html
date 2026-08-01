@@ -795,8 +795,10 @@
                     ANSI (and with it colour) on. A plain or PETSCII terminal shows ANSI as litter printed over
                     every screen, which costs that user a program too garbled to find the setting that would fix
                     it. Note this governs escape sequences and colour; the <em>clear-screen</em> dialect is a
-                    separate setting (Settings &rarr; <code>C</code>) and still defaults to the ANSI
-                    <code>ESC [ 2 J</code>.
+                    separate setting (Settings &rarr; <code>C</code>), and it defaults to the ADM-3A
+                    <code>^Z</code> to match &mdash; the gateway translates that for whichever client
+                    is connected, so an ASCII terminal receives no escape byte at all. Pick the ANSI
+                    <code>ESC [ 2 J</code> there if you are on real hardware with a modern terminal.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Main menu</h3>

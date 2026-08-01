@@ -195,16 +195,21 @@ LSAPP:  DB      0               ; 0 = never program the port - the default, and
                                 ; up, which is the arrangement that already
                                 ; works on the machine.  1 = apply the line
                                 ; settings above whenever the port is selected.
-CLSMOD: DB      1               ; how to clear the screen: 0 = ADM-3A ^Z,
-                                ; 1 = ANSI ESC [ 2 J, 2 = don't.  ANSI is the
-                                ; default because that is what the terminals
-                                ; people actually sit at understand today -
-                                ; a terminal emulator over USB serial, or the
-                                ; gateway's own ANSI clients.  ^Z is the
-                                ; ADM-3A code, right for a period terminal and
-                                ; for a PETSCII C64 through the gateway (whose
-                                ; translation re-renders it), and is one
-                                ; keystroke away in Settings.
+CLSMOD: DB      0               ; how to clear the screen: 0 = ADM-3A ^Z,
+                                ; 1 = ANSI ESC [ 2 J, 2 = don't.  ^Z is the
+                                ; default, to match the ASCII display default
+                                ; above: the two settings answer different
+                                ; questions, but shipping an ANSI clear under
+                                ; an ASCII default meant the one program that
+                                ; promised not to emit escape sequences opened
+                                ; by emitting one.  ^Z is also the code the
+                                ; gateway itself translates for whatever client
+                                ; is connected, which is where most copies of
+                                ; this program run.  Its failure mode on a
+                                ; terminal that does not know it is "nothing
+                                ; happens"; ANSI is one keystroke away in
+                                ; Settings, next to the ANSI display mode that
+                                ; wants it.
 
 CFGADR  EQU     0180H           ; where the block lives
 CFGREC  EQU     1               ; ...which is file record 1
@@ -2459,7 +2464,8 @@ CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ASCII
         LD      A,1
         LD      (LSTOP),A
         LD      (LADIV),A
-        LD      (CLSMOD),A      ; 1 = the ANSI clear, the shipped default
+        XOR     A               ; 0 = the ADM-3A ^Z clear, the shipped default
+        LD      (CLSMOD),A      ; (A was 1 here for LSTOP/LADIV)
         LD      A,19H           ; ^Y
         LD      (ESCCH),A
         CALL    CRLF

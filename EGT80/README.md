@@ -323,14 +323,21 @@ this default and the gateway's ever drift apart.
 entering terminal mode, so it is always clear which program you are talking to
 once a remote system has filled the screen. There is no portable clear on CP/M —
 the terminal is not the computer's and the BIOS offers nothing — so Settings → `C`
-picks the dialect: the ANSI `ESC [ 2 J` (**the default** — what the terminals
-people actually sit at understand, whether a terminal emulator over USB serial or
-the gateway's own ANSI clients), the ADM-3A's `^Z` for a period terminal or a
-PETSCII C64 through the gateway (whose translation re-renders it for the client),
-or off for a printing terminal, where clearing the screen means feeding paper.
-The default was `^Z` at first, on the reasoning that its failure mode is "nothing
-happens" rather than `[2J` printed as litter; it moved to ANSI because "nothing
-happens" is what a modern terminal on real hardware actually got. Clearing the screen also
+picks the dialect: the ADM-3A's `^Z` (**the default**), the ANSI `ESC [ 2 J`, or
+off for a printing terminal, where clearing the screen means feeding paper.
+
+This default has moved twice, which is worth recording because each move was
+right at the time. It began as `^Z`, on the reasoning that its failure mode is
+"nothing happens" rather than `[2J` printed as litter. It moved to ANSI because
+"nothing happens" is what a modern terminal on real hardware actually got. It is
+back to `^Z` now that the display mode defaults to ASCII: the two settings answer
+different questions, but shipping an ANSI clear under an ASCII default meant the
+one program that promises not to emit escape sequences opened by emitting one.
+`^Z` is also the code the gateway itself translates for whichever client is
+connected — measured: an ASCII client now receives no escape byte at all where it
+used to receive `ESC [ 2 J` — and the gateway is where most copies of this program
+run. On real hardware with a modern terminal, ANSI is one keystroke away in
+Settings, next to the ANSI display mode that wants it. Clearing the screen also
 means a message can be wiped before it is read, so the places where a message is
 the only feedback — a damaged settings block, a save, a refused port family —
 now pause for a keypress.
@@ -354,8 +361,8 @@ terminal shows ANSI as litter — escape sequences printed as text, over every
 screen — so defaulting to ANSI costs *that* user a program they cannot read well
 enough to find the setting that would fix it. The default therefore goes to the
 reading that is merely plainer rather than the one that is broken. (Note the
-clear-screen dialect is a separate setting and still defaults to the ANSI
-`ESC [ 2 J` — see below.)
+clear-screen dialect is a separate setting, and defaults to the ADM-3A `^Z` to
+match — see below.)
 
 **The terminal-mode menu deliberately does not offer Settings.** The menu key
 gets you `E)xit`, `H)elp`, `U)pload` and `D)ownload`, and that is all. Settings

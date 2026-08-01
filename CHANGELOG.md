@@ -22,7 +22,12 @@ follow-up quality/stability pass of our own.
   user only colour, which Settings → `A` turns on; a plain or PETSCII terminal
   showed ANSI as litter printed over every screen, which cost that user a program
   too garbled to find the setting that would fix it. The clear-screen dialect is
-  a separate setting and still defaults to the ANSI `ESC [ 2 J`.
+  a separate setting and now defaults to the ADM-3A `^Z` to match: shipping an
+  ANSI clear under an ASCII default meant the one program that promises not to
+  emit escape sequences opened by emitting one. The gateway translates `^Z` for
+  whichever client is connected, so an ASCII terminal now receives no escape
+  byte at all where it used to receive `ESC [ 2 J`. ANSI remains one keystroke
+  away in Settings → `C`, for real hardware with a modern terminal.
 
   Both are in `EGT80.Z80`, so `EGT80.COM` was rebuilt with the period SLR
   assembler and re-gated through M80+L80 and ZMAC, and its pinned hash updated.
