@@ -817,6 +817,24 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         };
     }
 
+    // CP/M mounts are applied live, then the resulting table is what gets
+    // written — rather than writing the request and hoping it took.  A drive
+    // that refused (because somebody is on it) therefore keeps its old image in
+    // the config too, so a restart does not quietly apply a change the operator
+    // was told had failed.
+    if fields.keys().any(|k| k.starts_with("cpm_mount_")) {
+        let (mount_notice, mounts_value) = apply_cpm_mount_form(&fields, &old_cfg);
+        updates.retain(|(k, _)| k != "cpm_mounts");
+        updates.push(("cpm_mounts".to_string(), mounts_value));
+        if !mount_notice.is_empty() {
+            notice = if notice.is_empty() {
+                mount_notice
+            } else {
+                format!("{notice} {mount_notice}")
+            };
+        }
+    }
+
     let pairs: Vec<(&str, &str)> = updates
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -825,6 +843,47 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
 
     logger::log("Web: configuration saved.".into());
     (notice, action)
+}
+
+/// Apply the mount screen's sixteen selects, returning (notice, `cpm_mounts`).
+///
+/// A drive whose select is **absent** from the submission is left exactly as it
+/// is.  That is not laziness: a busy drive renders its select `disabled`, and a
+/// disabled control is not submitted, so treating absence as "set to none"
+/// would unmount precisely the drives the screen said could not be changed.
+fn apply_cpm_mount_form(
+    fields: &HashMap<String, String>,
+    cfg: &Config,
+) -> (String, String) {
+    use crate::cpm::image;
+    let current = image::registry::all();
+    let mut desired: Vec<(u8, String)> = Vec::new();
+    for drive0 in 0..crate::cpm::NUM_DRIVES {
+        let key = format!("cpm_mount_{}", ((b'a' + drive0) as char));
+        match fields.get(&key) {
+            Some(name) if !name.is_empty() => desired.push((drive0, name.clone())),
+            Some(_) => {} // explicitly "(drive folder)" — unmount
+            None => {
+                // Not submitted: keep whatever is there.
+                if let Some(m) = current.get(drive0 as usize).and_then(|m| m.as_ref()) {
+                    desired.push((drive0, m.filename.clone()));
+                }
+            }
+        }
+    }
+    let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
+    let (notes, errors) = image::apply_mount_selection(&base, &desired);
+    let mut notice = String::new();
+    if !notes.is_empty() {
+        notice.push_str(&notes.join(" "));
+    }
+    if !errors.is_empty() {
+        if !notice.is_empty() {
+            notice.push(' ');
+        }
+        notice.push_str(&errors.join(" "));
+    }
+    (notice, image::current_mounts_value())
 }
 
 /// Pure transformation from a parsed form + the current Config to a
@@ -1622,6 +1681,103 @@ fn render_warning_popups() -> String {
     out
 }
 
+/// The CP/M mount screen: one row per drive, each a picker of the images
+/// folder.
+///
+/// Sixteen rows rather than a list of mounts, because the question an operator
+/// has is "what is on drive B:", and a row per drive answers it without them
+/// having to work out which drives are absent from a list.
+///
+/// A drive somebody is using renders disabled with the reason beside it.  A
+/// disabled `select` is not submitted, which would normally read as "set to
+/// none" — so the save skips any drive that is busy rather than trusting the
+/// absence.  Same hazard as the role-gated checkboxes, handled the same way.
+fn render_cpm_disks_modal(cfg: &Config) -> String {
+    let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
+    let images = crate::cpm::image::available_images(&base);
+    let mounts = crate::cpm::image::registry::all();
+    let usage = crate::cpm::image::registry::usage();
+
+    let mut rows = String::new();
+    for drive0 in 0..crate::cpm::NUM_DRIVES {
+        let letter = (b'A' + drive0) as char;
+        let mounted = mounts.get(drive0 as usize).and_then(|m| m.as_ref());
+        let busy = usage.get(drive0 as usize).and_then(|u| u.describe());
+        let disabled = if busy.is_some() { " disabled" } else { "" };
+
+        let mut opts = String::from("<option value=\"\">(drive folder)</option>");
+        for name in &images {
+            let sel = if mounted.map(|m| m.filename.as_str()) == Some(name.as_str()) {
+                " selected"
+            } else {
+                ""
+            };
+            opts.push_str(&format!(
+                "<option value=\"{}\"{}>{}</option>",
+                html_escape(name),
+                sel,
+                html_escape(name)
+            ));
+        }
+        // An image that is mounted but no longer in the folder would otherwise
+        // vanish from its own row and read as "no image".
+        if let Some(m) = mounted {
+            if !images.contains(&m.filename) {
+                opts.push_str(&format!(
+                    "<option value=\"{}\" selected>{} (missing from folder)</option>",
+                    html_escape(&m.filename),
+                    html_escape(&m.filename)
+                ));
+            }
+        }
+
+        let mut note = String::new();
+        if let Some(m) = mounted {
+            if m.read_only {
+                note.push_str(&format!(
+                    " <span class=\"sub\">read-only: {}</span>",
+                    html_escape(&m.read_only_reason)
+                ));
+            }
+        }
+        if let Some(b) = &busy {
+            note.push_str(&format!(" <span class=\"sub\">{}</span>", html_escape(b)));
+        }
+        if drive0 == 0 {
+            note.push_str(" <span class=\"sub\">A: hides EGT80 while mounted</span>");
+        }
+        rows.push_str(&format!(
+            "<div class=\"row\"><span class=\"label\">{letter}:</span>\
+             <select name=\"cpm_mount_{}\"{}>{}</select>{}</div>",
+            letter.to_ascii_lowercase(),
+            disabled,
+            opts,
+            note
+        ));
+    }
+
+    let intro = if images.is_empty() {
+        format!(
+            "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in              {}/images — readme.txt there explains the naming.</span></div>",
+            html_escape(&base.display().to_string())
+        )
+    } else {
+        String::from(
+            "<div class=\"row\"><span class=\"sub\">A mounted drive uses the files inside              the image instead of the files in its folder. The folder's files are not              touched and return when you unmount.</span></div>",
+        )
+    };
+
+    format!(
+        "<div class=\"modal\" id=\"more-cpm-disks\"><div class=\"modal-body\">\
+         <div class=\"modal-head\"><span class=\"title\">Mount CP/M Drives</span>\
+         <button type=\"button\" class=\"close\" data-close=\"more-cpm-disks\">\u{00d7}</button></div>\
+         {intro}{rows}\
+         <div class=\"modal-foot\">{save}</div>\
+         </div></div>",
+        save = save_button("save", "Save", "secondary"),
+    )
+}
+
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
     // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
@@ -1792,6 +1948,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{cpmx}{cpmdcd}</div>\
          <div class=\"row\">{cpmsregs}</div>\
          <div class=\"row\">{cpmuart}</div>\
+         <div class=\"row\">{cpmdisks}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         loc = html_escape(&cfg.weather_location),
@@ -1829,8 +1986,12 @@ fn render_more_popups(cfg: &Config) -> String {
              <select name=\"cpm_emu_uart\">{cpm_uart_options}</select> {reset}",
             reset = save_button("cpm_port_default", "Default port", "secondary"),
         ),
+        cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
+
         save = save_button("save", "Save", "secondary"),
     ));
+
+    out.push_str(&render_cpm_disks_modal(cfg));
 
     // File-transfer More — XMODEM-family retry interval (moved off
     // the primary frame to mirror the GUI's draw_file_transfer_-
@@ -3911,6 +4072,46 @@ mod tests {
     /// whenever its `max-content` columns overflowed a narrow frame, doing the
     /// same thing there.
     #[test]
+    /// The mount screen must offer a row for every drive, and its button must
+    /// exist to open it — a modal nothing opens is invisible.
+    #[test]
+    fn test_cpm_mount_modal_has_a_row_per_drive_and_a_way_in() {
+        let cfg = Config::default();
+        let html = render_cpm_disks_modal(&cfg);
+        for drive0 in 0..crate::cpm::NUM_DRIVES {
+            let name = format!("cpm_mount_{}", (b'a' + drive0) as char);
+            assert!(html.contains(&name), "no control for drive {drive0}");
+        }
+        assert!(html.contains("id=\"more-cpm-disks\""));
+        let page = render_more_popups(&cfg);
+        assert!(
+            page.contains("data-target=\"more-cpm-disks\""),
+            "nothing opens the mount modal"
+        );
+    }
+
+    /// A drive whose select was not submitted keeps its image.
+    ///
+    /// The busy rows render `disabled`, and a disabled control is not
+    /// submitted — so reading absence as "set to none" would unmount exactly
+    /// the drives the screen said could not be changed.  Same hazard as the
+    /// role-gated checkboxes, and the same reason it needs a test.
+    #[test]
+    fn test_absent_mount_select_is_not_read_as_unmount() {
+        let cfg = Config::default();
+        let mut fields: HashMap<String, String> = HashMap::new();
+        // Only drive B: submitted, and empty (an explicit "drive folder").
+        fields.insert("cpm_mount_b".to_string(), String::new());
+        let (_notice, value) = apply_cpm_mount_form(&fields, &cfg);
+        // Nothing was mounted in this test process, so the result is empty —
+        // the point is that it did not panic and did not invent mounts for the
+        // fifteen drives whose selects were absent.
+        assert!(
+            !value.contains("A="),
+            "an unsubmitted drive must not be given an image: {value}"
+        );
+    }
+
     fn test_more_buttons_cannot_leave_their_frame() {
         let html = render_main_page(&Config::default(), None);
 

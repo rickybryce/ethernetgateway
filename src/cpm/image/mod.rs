@@ -229,6 +229,73 @@ pub fn apply_config_mounts(cpm_base: &Path, value: &str) {
     }
 }
 
+/// Make the live mount table match `desired`, and report what happened.
+///
+/// The mount screens hand over the whole set of sixteen drives rather than
+/// individual changes, so this works out the difference: a drive whose image
+/// did not change is left strictly alone (remounting would drop and reopen a
+/// disk somebody may be using), one that lost its image is unmounted, and one
+/// that gained or changed image is mounted.
+///
+/// Shared by the web and desktop screens on purpose.  They present the same set
+/// of controls, and letting each work out its own diff is exactly how two
+/// surfaces come to disagree about what "no change" means.
+///
+/// Returns (notes, errors) — both human-readable, both possibly non-empty at
+/// once, because one drive being busy must not stop the other fifteen.
+pub fn apply_mount_selection(
+    cpm_base: &Path,
+    desired: &[(u8, String)],
+) -> (Vec<String>, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    let current = registry::all();
+    for drive0 in 0..crate::cpm::NUM_DRIVES {
+        let want = desired
+            .iter()
+            .find(|(d, _)| *d == drive0)
+            .map(|(_, n)| n.as_str());
+        let have = current
+            .get(drive0 as usize)
+            .and_then(|m| m.as_ref())
+            .map(|m| m.filename.as_str());
+        match (have, want) {
+            // Unchanged, including both-absent: touch nothing.
+            (a, b) if a == b => {}
+            (Some(_), None) => match unmount_drive(drive0) {
+                Ok(n) => notes.push(n),
+                Err(e) => errors.push(e),
+            },
+            (_, Some(name)) => {
+                // Replacing one image with another: take the old one off first
+                // so the drive is not briefly holding two.
+                if have.is_some() {
+                    if let Err(e) = unmount_drive(drive0) {
+                        errors.push(e);
+                        continue;
+                    }
+                }
+                match mount_image(cpm_base, drive0, name) {
+                    Ok(n) => notes.push(n),
+                    Err(e) => errors.push(e),
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    (notes, errors)
+}
+
+/// The live mount table in `cpm_mounts` form, for writing back to the config.
+pub fn current_mounts_value() -> String {
+    let mounts: Vec<(u8, String)> = registry::all()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.as_ref().map(|m| (i as u8, m.filename.clone())))
+        .collect();
+    format_mounts(&mounts)
+}
+
 /// Every `.dsk` sitting in the images folder, sorted, for the mount pickers.
 // Read by the mount UIs; see `unmount_drive`.
 #[allow(dead_code)]
