@@ -25,6 +25,20 @@ follow-up quality/stability pass of our own.
   the command to getting the prompt back.
 
 ### Changed
+- **The CP/M emulator's help now fits the screen it is printed on.** It was the
+  one help screen in the gateway that never went through the paginator, and the
+  file-loading section added earlier in this release took it to 21 lines, five
+  of them over 50 characters — so on a 40-column, 22-row C64 the top scrolled
+  away while the bottom wrapped mid-word. It is now paginated like every other
+  help, with its lines extracted so a test asserts the real text.
+
+  Twelve help screens had a width test each and fourteen had none, which is how
+  this got through: **one test now iterates every screen**, so a new one is
+  covered as soon as it is added to the list. The fourteen untested screens all
+  turned out to fit — the emulator's was the only offender.
+- **The main menu help said the CP/M emulator was "off by default"** (it ships
+  on) **and that File Transfer used "the XMODEM protocol"** (it has spoken
+  YMODEM, ZMODEM, Kermit and Punter for months). Both corrected.
 - **Two sessions can no longer write the same CP/M file at once.** Every
   session has its own Z80 and its own 64 KB, but they share one set of drive
   folders — and the BDOS here opens the host file per record, so two writers'

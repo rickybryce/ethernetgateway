@@ -1941,8 +1941,8 @@ fn test_main_menu_error_hint() {
 fn test_main_help_content_line_count() {
     assert_eq!(
         TelnetSession::main_help_lines().len(),
-        19,
-        "main help should have exactly 19 content lines"
+        20,
+        "main help should have exactly 20 content lines"
     );
 }
 
@@ -2485,6 +2485,151 @@ fn test_other_help_lines_fit_petscii() {
             line.len(),
             PETSCII_WIDTH,
         );
+    }
+}
+
+/// EVERY help screen must fit the narrowest terminal that can be shown it.
+///
+/// Twelve screens had a width test each and fourteen had none — including the
+/// CP/M emulator's, which is how it came to be printed 55 characters wide on a
+/// 40-column C64. Testing them one function at a time is what let the list
+/// drift, so this iterates all of them: a new help screen is covered the moment
+/// it is added to the table below, and a screen that is missing from the table
+/// is far more visible here than an absent test file was.
+///
+/// A screen taking a `petscii` flag is checked in both widths. One with no flag
+/// is shown to every terminal type, so it is held to the PETSCII width.
+#[test]
+fn test_every_help_screen_fits_its_terminal() {
+    // (name, lines, width) — the wide screens at 80, the shared ones at 40.
+    let mut screens: Vec<(&str, &[&str], usize)> = Vec::new();
+
+    // No flag: one text for all terminals, so it must fit the narrowest.
+    screens.push(("main", TelnetSession::main_help_lines(), PETSCII_WIDTH));
+    screens.push(("ai_chat", TelnetSession::ai_chat_help_lines(), PETSCII_WIDTH));
+    screens.push(("bookmarks", TelnetSession::bookmarks_help_lines(), PETSCII_WIDTH));
+    screens.push(("form", TelnetSession::form_help_lines(), PETSCII_WIDTH));
+    screens.push(("download", TelnetSession::download_help_lines(), PETSCII_WIDTH));
+    screens.push(("delete", TelnetSession::delete_help_lines(), PETSCII_WIDTH));
+    screens.push((
+        "file_transfer_menu",
+        TelnetSession::file_transfer_menu_help_lines(),
+        PETSCII_WIDTH,
+    ));
+    screens.push(("dialup", TelnetSession::dialup_help_lines(), PETSCII_WIDTH));
+    screens.push(("gateway_shell", TelnetSession::cpm_help_lines(), PETSCII_WIDTH));
+    screens.push((
+        "serial_config",
+        TelnetSession::serial_config_help_lines(),
+        PETSCII_WIDTH,
+    ));
+
+    // Flagged: a narrow text and a wide one, each held to its own width.
+    for (name, narrow, wide) in [
+        (
+            "config_submenu",
+            TelnetSession::config_submenu_help_lines(true),
+            TelnetSession::config_submenu_help_lines(false),
+        ),
+        (
+            "console",
+            TelnetSession::console_help_lines(true),
+            TelnetSession::console_help_lines(false),
+        ),
+        (
+            "kermit_mode",
+            TelnetSession::kermit_mode_help_lines(true),
+            TelnetSession::kermit_mode_help_lines(false),
+        ),
+        (
+            "gateway_config",
+            TelnetSession::gateway_config_help_lines(true),
+            TelnetSession::gateway_config_help_lines(false),
+        ),
+        (
+            "master_slave",
+            TelnetSession::master_slave_help_lines(true),
+            TelnetSession::master_slave_help_lines(false),
+        ),
+        (
+            "cpm_emulator",
+            TelnetSession::cpmemu_help_lines(true),
+            TelnetSession::cpmemu_help_lines(false),
+        ),
+    ] {
+        screens.push((name, narrow, PETSCII_WIDTH));
+        screens.push((name, wide, 80));
+    }
+
+    let mut over: Vec<String> = Vec::new();
+    for (name, lines, width) in &screens {
+        for line in *lines {
+            let n = line.chars().count();
+            if n > *width {
+                over.push(format!("{name}: {n} chars (max {width}): {line:?}"));
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} help line(s) are wider than the screen they are printed on:\n  {}",
+        over.len(),
+        over.join("\n  "),
+    );
+}
+
+/// The CP/M emulator's HELP must fit the screens it is printed on, and stay
+/// paginated.
+///
+/// It was neither. The help is printed from inside the emulator's own REPL, so
+/// it never went through `show_help_page` like the rest of the gateway's help
+/// — and when the file-loading section was added it reached 21 lines, five of
+/// them over 50 characters. On a C64 that means the top scrolls away while the
+/// bottom wraps mid-word. This asserts the real lines, both widths, and that
+/// the pager is what bounds the page rather than the screen height.
+#[test]
+fn test_cpm_emulator_help_fits_its_screens() {
+    for (petscii, width) in [(true, PETSCII_WIDTH), (false, 80usize)] {
+        let lines = TelnetSession::cpmemu_help_lines(petscii);
+        assert!(lines.len() > 10, "the help lost its content");
+        for line in lines {
+            assert!(
+                line.chars().count() <= width,
+                "CP/M help ({}) line {:?} is {} chars, over {}",
+                if petscii { "petscii" } else { "wide" },
+                line,
+                line.chars().count(),
+                width,
+            );
+        }
+        // Every page must fit the pager's own budget — that is what keeps the
+        // first line on screen when the last one is printed.
+        for page in TelnetSession::paginate_help(lines, HELP_MAX_CONTENT_LINES) {
+            assert!(
+                page.len() <= HELP_MAX_CONTENT_LINES,
+                "a CP/M help page is {} lines, over the {} the pager allows",
+                page.len(),
+                HELP_MAX_CONTENT_LINES,
+            );
+        }
+    }
+}
+
+/// The help has to name the things a user cannot otherwise discover: how to get
+/// a file onto a drive (the drives are folders, but nothing else says so), that
+/// the drives are shared with other sessions, and that there is a clock.
+#[test]
+fn test_cpm_emulator_help_covers_the_undiscoverable() {
+    for petscii in [true, false] {
+        let help = TelnetSession::cpmemu_help_lines(petscii).join(" ");
+        for needle in ["CPM/A", "SHARED", "clock", "SUBMIT"] {
+            assert!(
+                help.contains(needle),
+                "CP/M help ({}) never mentions {:?}",
+                if petscii { "petscii" } else { "wide" },
+                needle,
+            );
+        }
     }
 }
 

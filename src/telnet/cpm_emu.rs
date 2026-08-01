@@ -993,33 +993,92 @@ impl TelnetSession {
     }
 
     /// One-screen help for the CCP-lite built-ins.
+    /// The emulator's `HELP`, paginated like every other help screen.
+    ///
+    /// Paginated rather than simply printed, and the lines kept inside the
+    /// PETSCII width, because this is the one help in the gateway that was
+    /// neither: it grew past the 22-row screen and 40 columns the moment the
+    /// file-loading section was added, so on a C64 the top of it scrolled away
+    /// while the bottom wrapped mid-word.
     async fn cpmemu_help(&mut self) -> Result<(), std::io::Error> {
-        for line in [
-            "  Built-in commands:",
-            "  DIR [d:][afn]  list files (DIR *.COM)",
-            "  ERA name   erase file(s) (wildcards)",
-            "  REN new=old  rename a file",
-            "  TYPE file  show a text file",
-            "  SAVE n file  save n TPA pages",
-            "  USER n     select user area (0)",
-            "  A: .. P:   change drive",
-            "  VER        emulator version",
-            "  HELLO      BDOS print-string demo",
-            "  ECHO       interactive console demo",
-            "  name       run name.COM from the drive",
-            "  HELP / ?   this help",
-            "  EXIT/BYE/QUIT  leave CP/M",
-            "",
-            "  Getting files onto a drive:",
-            "  The drives are folders under the transfer directory,",
-            "  CPM/A .. CPM/P.  In the gateway's File Transfer menu,",
-            "  change directory to CPM/A and upload there - the file",
-            "  is then on drive A: as soon as it lands.  EGT80 can",
-            "  also fetch one over the virtual modem from in here.",
-        ] {
-            self.send_line(line).await?;
+        let lines = Self::cpmemu_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("CP/M HELP", lines).await
+    }
+
+    /// The help text itself, extracted so a test can assert the REAL lines fit
+    /// (the convention every other help screen here follows — a hand-copied
+    /// duplicate in a test drifts from what is printed).
+    pub(in crate::telnet) fn cpmemu_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
+            &[
+                "  Built-in commands:",
+                "  DIR [d:][afn]  list files",
+                "  ERA name   erase (wildcards)",
+                "  REN new=old  rename",
+                "  TYPE file  show a text file",
+                "  SAVE n file  save n TPA pages",
+                "  USER n     user area (0-15)",
+                "  A: .. P:   change drive",
+                "  VER        emulator version",
+                "  name       run name.COM",
+                "  HELP / ?   this help",
+                "  EXIT       leave CP/M",
+                "",
+                "  Loading your own files:",
+                "  The drives are folders under the",
+                "  transfer directory: CPM/A..CPM/P.",
+                "  In File Transfer, change to CPM/A",
+                "  and upload - it is on drive A: at",
+                "  once.  EGT80 can also fetch one",
+                "  over the virtual modem.",
+                "",
+                "  The drives are SHARED with other",
+                "  sessions.  A file one session is",
+                "  writing is refused to the rest",
+                "  until it is closed.",
+                "",
+                "  SUBMIT runs a .SUB batch job.",
+                "  Under an hbios port profile, the",
+                "  HBIOS clock (RTCGETTIM) reports",
+                "  the host's date and time.",
+            ]
+        } else {
+            &[
+                "  Built-in commands:",
+                "  DIR [d:][afn]  list files (DIR *.COM)",
+                "  ERA name   erase file(s) (wildcards)",
+                "  REN new=old  rename a file",
+                "  TYPE file  show a text file",
+                "  SAVE n file  save n TPA pages",
+                "  USER n     select user area (0-15)",
+                "  A: .. P:   change drive",
+                "  VER        emulator version",
+                "  HELLO      BDOS print-string demo",
+                "  ECHO       interactive console demo",
+                "  name       run name.COM from the drive",
+                "  HELP / ?   this help",
+                "  EXIT/BYE/QUIT  leave CP/M",
+                "",
+                "  Loading your own files:",
+                "  The drives are folders under the transfer",
+                "  directory, CPM/A .. CPM/P.  In the gateway's",
+                "  File Transfer menu, change directory to",
+                "  CPM/A and upload there - the file is on",
+                "  drive A: as soon as it lands.  EGT80 can",
+                "  also fetch one over the virtual modem.",
+                "",
+                "  The drives are SHARED with any other session",
+                "  in the emulator.  A file one session is",
+                "  writing is refused to the others until it",
+                "  closes the file or leaves; reads are free.",
+                "",
+                "  SUBMIT runs a .SUB batch job, as CP/M 2.2's",
+                "  own CCP does.  Under an hbios_* port profile",
+                "  the HBIOS clock (RTCGETTIM) reports the",
+                "  host's date and time - CP/M 2.2 has none of",
+                "  its own.",
+            ]
         }
-        Ok(())
     }
 
     /// Run a loaded program on the emulated Z80, servicing the console BDOS
