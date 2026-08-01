@@ -3,9 +3,10 @@
 A telnet/SSH file-transfer gateway for retro and modern terminals, written in
 Rust. It speaks **XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter**,
 emulates a **Hayes AT modem** on two independent serial ports, bridges out to
-remote **telnet and SSH** hosts, and adds a CP/M-inspired **Gateway Shell**
-(an `A>` file manager over the transfer directory), a text-mode **web browser**,
-**AI chat**, and a **weather** service. Supports PETSCII (Commodore 64), ANSI,
+remote **telnet and SSH** hosts, runs real **CP/M 2.2** software on an emulated
+Z80, and adds a CP/M-inspired **Gateway Shell** (an `A>` file manager over the
+transfer directory), a text-mode **web browser**, **AI chat**, and a **weather**
+service. Supports PETSCII (Commodore 64), ANSI,
 and ASCII terminals. Designed for local-network use. An optional
 **master/slave** mode extends one gateway's serial ports to another over SSH.
 
@@ -68,6 +69,15 @@ options, and the full AT command set.
   with auto-detection on upload and a protocol prompt on download.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
+- **CP/M 2.2 emulator** — a separate thing from the shell above: a real Z80
+  running real `.COM` software (PIP, STAT, ED, ASM, DDT, WordStar…), with the
+  CCP built-ins, `SUBMIT` batch jobs, and drives A:–P: as folders under the
+  transfer directory. Ships **EGT80**, this project's own CP/M terminal in Z80
+  assembly, and a virtual modem so guest software can dial out. On by default
+  and bounded three ways: every file call jailed under `transfer_dir/CPM`, a
+  runaway stopped by an instruction ceiling, and a double-`ESC` always returning
+  to `A>`. `cpm_emu_enabled = false` shuts it off; `cpm_emu_uart = off` keeps it
+  while denying guest code any network access.
 - **Modem emulator** — Hayes-compatible AT command set on **two physically
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.
@@ -174,6 +184,9 @@ Everything below the quick start is covered in depth online:
   RFC compliance, and the Gateway Shell command set.
 - **[Kermit Reference](http://ethernetgateway.com/kermit.html)** — the full
   Kermit surface (client, server, tunables, and G-subcommands).
+- **[CP/M Reference](http://ethernetgateway.com/cpmreference.html)** — the
+  emulator: `cpm_emu_*` settings, the CCP built-ins, every virtual-modem port
+  profile, the bundled EGT80 terminal, and BDOS/BIOS coverage.
 
 ## Disclaimer
 

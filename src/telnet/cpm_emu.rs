@@ -2393,7 +2393,7 @@ mod egt80_tests {
         use sha2::{Digest, Sha256};
 
         const PINNED: &str =
-            "b5103c8eabb76e794dfec76f401f353d79baa608a57a54c7775f2f3e51ec5525";
+            "404b9e6def2d6e26e8434186e0e9eaf69f13c20e08fbe36dffa7d99335fad58e";
 
         let actual = format!("{:x}", Sha256::digest(EGT80_COM));
         assert_eq!(

@@ -25,6 +25,17 @@ follow-up quality/stability pass of our own.
   the command to getting the prompt back.
 
 ### Changed
+- **EGT80 quotes Romans 6:23 on the way out.** Printed after the sign-off,
+  before CP/M takes the screen back — wrapped to forty columns rather than the
+  eighty the program's other text assumes, because the C64s that reach it
+  through the gateway have half a screen and a verse that wraps mid-word is not
+  much of a parting word.
+- **The README never mentioned the CP/M emulator.** It described the Gateway
+  Shell — the pure-Rust `A>` file manager — and stopped there, so the headline
+  feature of running real Z80 `.COM` software was absent from the project's
+  front page entirely. Added to the summary, the feature list (naming the
+  distinction between the two, since both say "CP/M") and the documentation
+  links.
 - **The CP/M emulator's help now fits the screen it is printed on.** It was the
   one help screen in the gateway that never went through the paginator, and the
   file-loading section added earlier in this release took it to 21 lines, five

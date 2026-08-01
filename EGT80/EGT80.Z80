@@ -1218,6 +1218,8 @@ DOEXIT: CALL    CRLF
         CALL    XHUP            ; don't leave a call up behind us
         LD      HL,MBYE
         CALL    PSTR
+        LD      HL,MVERSE       ; the parting word, before CP/M takes the screen
+        CALL    PSTR
         JP      WBOOT
 
 ;=======================================================================
@@ -4404,6 +4406,16 @@ MCTRLC: DB      CR,LF,'Press Ctrl-C for the menu.  Anything else you',CR,LF
         DB      'run a menu command by accident. ',0
 MHUP:   DB      'Hanging up...',0
 MBYE:   DB      'EGT80 done.',CR,LF,0
+
+; Printed on the way out, after the sign-off and before CP/M takes the screen
+; back.  Wrapped to fit FORTY columns rather than the eighty this program's
+; other text assumes: the C64s that reach it through the gateway have half a
+; screen, and a verse that wraps mid-word is not much of a parting word.
+MVERSE: DB      CR,LF
+        DB      'For the wages of sin is death; but',CR,LF
+        DB      'the gift of God is eternal life',CR,LF
+        DB      'through Jesus Christ our Lord.',CR,LF
+        DB      '        - Romans 6:23, KJV',CR,LF,0
 
 MHELP:  DB      'Help - the serial port',CR,LF
         DB      '----------------------',CR,LF,CR,LF
