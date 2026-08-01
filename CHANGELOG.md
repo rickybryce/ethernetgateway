@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image is opened **read-only** unless you say otherwise, and a **double-`ESC`**
   always gets you back to the gateway.
 
+  **EGT80 runs inside a booted disk and its serial ports line up with the
+  gateway's.** Those are two independent settings that have to name the same
+  hardware, and now a test walks EGT80's own menus to select a port and then
+  moves bytes both ways over it: the 88-2SIO port B (`altair_2sio2`), the
+  gateway's own emulated port (`rc2014_1b`) and the original 88-SIO
+  (`altair_sio`) all pass, and a deliberately mismatched pair passes nothing —
+  which is what makes the other three mean anything.
+
   Proven end to end and byte for byte: a booted Altair CP/M receives EGT80 with
   its own `PCGET.COM` over the virtual modem at `0x12`/`0x13`, writes it with
   its own BDOS, lists it in its own `DIR`, and sends it back with `PCPUT` —
@@ -76,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A booted disk now runs on a Z80 core rather than an 8080.** The Altair
+  shipped with an 8080, so that is the more literal machine — but the Z80 is a
+  superset that runs all of it, Altairs were commonly fitted with Z80 upgrade
+  boards, and the CP/M emulator next door was already a Z80. The deciding case
+  was our own: EGT80 is Z80 code and says so in its version line, so on an 8080
+  core it loaded, executed a Z80-only opcode as something else and took CP/M
+  down with it — the sign-on came back corrupted on the warm boot. All twenty
+  bootable images produce byte-identical sign-ons on the Z80 core.
 - **A sector was written to whichever track the head had moved to, not the one
   it was written on.** CP/M writes a directory entry on the directory track and
   then seeks away to write the file's data; the controller read the drive's

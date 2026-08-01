@@ -133,7 +133,7 @@ impl TelnetSession {
         // booted guest is dialable exactly as an emulator session is.
         let _peer_reg = cpm_peer_register(modem.enabled());
 
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         if let Err(e) = machine.boot(&mut cpu, 0) {
             self.send_line(&format!("  {}", self.red(&e.to_string()))).await?;
             self.send_line("").await?;

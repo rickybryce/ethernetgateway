@@ -146,6 +146,23 @@ impl BootMachine {
         }
     }
 
+    /// The CPU a booted disk runs on.
+    ///
+    /// A **Z80**, and one place decides so the driver and the tests cannot
+    /// disagree. The Altair shipped with an 8080 and every MITS disk here is
+    /// 8080 code, so an 8080 core is the more literal machine — but the Z80 is
+    /// a superset that runs all of it, Altairs were very commonly fitted with
+    /// Z80 upgrade boards, and the CP/M emulator next door is already a Z80.
+    ///
+    /// The deciding case is our own: EGT80 is Z80 code and declares itself so.
+    /// On an 8080 core it loads, executes a Z80-only opcode as something else,
+    /// and takes CP/M down with it — the sign-on comes back corrupted on the
+    /// warm boot. A machine that cannot run the terminal we ship with it is the
+    /// wrong machine.
+    pub fn new_cpu() -> Cpu {
+        Cpu::new_z80()
+    }
+
     /// Offer the configured virtual modem to this machine.
     ///
     /// A booted disk *can* have our modem, and on a real Altair it is obvious
@@ -787,7 +804,7 @@ mod tests {
         img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
         let mut m = BootMachine::new();
         m.insert(0, img, true).unwrap();
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
         // Status is active low: the move-OK bit reads 0 when it is safe.
         let status = m.port_in(0x08);
@@ -808,7 +825,7 @@ mod tests {
         img[3..3 + code.len()].copy_from_slice(&code);
         let mut m = BootMachine::new();
         m.insert(0, img, true).unwrap();
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
         assert_eq!(cpu.registers().pc(), 0x0000);
         assert_eq!(m.peek(0x0000), 0x31, "the payload is in memory");
@@ -818,7 +835,7 @@ mod tests {
     #[test]
     fn test_booting_an_empty_drive_reports_it() {
         let mut m = BootMachine::new();
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         assert!(matches!(m.boot(&mut cpu, 0), Err(BootError::NoDisk(0))));
     }
 
@@ -906,7 +923,7 @@ mod tests {
             ModemAttach::Ports(0x12, 0x13),
         );
 
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
 
         let banner = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
@@ -1149,7 +1166,7 @@ mod tests {
         // A modem that is off-hook, since the guest is entitled to look.
         m.modem().set_carrier(true);
 
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
         let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
         assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
@@ -1232,6 +1249,145 @@ mod tests {
         );
     }
 
+    /// Type at a booted guest and let it settle.
+    #[cfg(test)]
+    fn type_at(m: &mut BootMachine, cpu: &mut Cpu, keys: &[u8], budget: u64) -> String {
+        for &b in keys {
+            m.send_key(b);
+        }
+        printable(&run_until_quiet(m, cpu, budget))
+    }
+
+    /// Boot a disk, pull EGT80 onto it with the guest's own `PCGET`, and hand
+    /// back the resulting image.
+    ///
+    /// Done once and reused, because it is the slow part and every case below
+    /// wants the same disk.
+    #[cfg(test)]
+    fn image_with_egt80(path: &str, egt80: &[u8]) -> Vec<u8> {
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(path).unwrap(), false).expect("an 88-DCDD image");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13)
+        );
+        m.modem().set_carrier(true);
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        run_until_quiet(&mut m, &mut cpu, 60_000_000);
+        type_at(&mut m, &mut cpu, b"PCGET EGT80.COM B\r", 200_000_000);
+        let (done, _) = xmodem_send_to_guest(&mut m, &mut cpu, egt80, 4_000_000_000);
+        assert!(done, "could not put EGT80 on the disk");
+        run_until_quiet(&mut m, &mut cpu, 400_000_000);
+        m.take_dirty().pop().expect("the guest wrote the image").1
+    }
+
+    /// **Every comms port EGT80 offers, driven from inside a booted disk.**
+    ///
+    /// The question this answers is not "does the modem work" — `PCGET` already
+    /// showed that — but "does the port the *operator* picks in EGT80 line up
+    /// with the port they picked in the gateway". Those are two independent
+    /// settings that have to name the same hardware, and nothing until now
+    /// checked that they do.
+    ///
+    /// Each case boots the disk fresh, runs EGT80, walks its menus to select a
+    /// port, and then moves bytes both ways over that port. The mismatch case
+    /// at the end is the control: if it passed, the others would prove nothing,
+    /// because a modem answering at every address would satisfy them all.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
+    #[test]
+    #[ignore]
+    fn test_egt80_comms_ports_inside_a_booted_disk() {
+        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
+            return;
+        };
+        let disk = image_with_egt80(&path, EGT80_COM);
+        println!("EGT80 is on the disk; now testing its ports.\n");
+
+        // (gateway profile, EGT80 menu keys, what its Port: line should say,
+        //  whether the two should reach each other)
+        // The expected text is EGT80's own "Port:" wording — the chip family
+        // *and* the address — because a bare address matches all sorts of
+        // unrelated things on that screen and would let a case pass without the
+        // port having been selected at all.
+        let cases: &[(&str, &[u8], &str, bool)] = &[
+            // The pairing a booted Altair wants: 2SIO port B at both ends.
+            ("altair_2sio2", b"SP32", "6850 ACIA at 12", true),
+            // The gateway's own default port, which EGT80 offers by our name.
+            ("rc2014_1b", b"SP1", "Z80 SIO/2 at 82", true),
+            // The original MITS board.
+            // `4` then `1`: EGT80 asks which address, as it does for the 2SIO.
+            ("altair_sio", b"SP41", "Altair 88-SIO at 00", true),
+            // The control: both ends working, aimed at different addresses.
+            ("altair_2sio2", b"SP1", "Z80 SIO/2 at 82", false),
+        ];
+
+        for (uart, keys, want_port, should_reach) in cases {
+            let mut m = BootMachine::new();
+            m.insert(0, disk.clone(), true).unwrap();
+            let attach = m.attach_modem(crate::cpm::resolve_access(uart));
+            assert!(
+                matches!(attach, ModemAttach::Ports(_, _)),
+                "{uart} should be usable in a booted machine, got {attach:?}"
+            );
+            m.modem().set_carrier(true);
+
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).expect("boots");
+            run_until_quiet(&mut m, &mut cpu, 60_000_000);
+
+            let start = type_at(&mut m, &mut cpu, b"EGT80\r", 400_000_000);
+            assert!(
+                start.contains("Ethernet Gateway Terminal"),
+                "EGT80 did not start under {uart}: {start:?}"
+            );
+
+            // Settings -> Serial port -> the choice for this case.
+            let picked = type_at(&mut m, &mut cpu, keys, 200_000_000);
+            if !picked.contains(want_port) {
+                // The screen is the evidence: a menu that asked something we
+                // did not answer looks identical to a port that did not take.
+                println!("--- {uart}: EGT80 after {} ---\n{picked}", String::from_utf8_lossy(keys));
+                panic!("EGT80 does not report {want_port:?} under {uart}");
+            }
+
+            // Back out to the main menu and into terminal mode.
+            type_at(&mut m, &mut cpu, b"Q", 100_000_000);
+            type_at(&mut m, &mut cpu, b"T", 100_000_000);
+
+            // Peer -> guest: what we queue should appear on EGT80's screen.
+            m.modem().queue_rx(b"PING-FROM-GATEWAY");
+            let seen = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+
+            // Guest -> peer: what we type should leave through the modem.
+            let _ = m.modem().drain_tx();
+            type_at(&mut m, &mut cpu, b"xyz", 100_000_000);
+            let sent = String::from_utf8_lossy(&m.modem().drain_tx()).to_string();
+
+            let reached = seen.contains("PING-FROM-GATEWAY");
+            let replied = sent.contains("xyz");
+            println!(
+                "  {uart:<14} EGT80 {:<6} port {want_port}: in={} out={}",
+                String::from_utf8_lossy(keys),
+                if reached { "yes" } else { "no " },
+                if replied { "yes" } else { "no" },
+            );
+            if *should_reach {
+                assert!(reached, "{uart}: EGT80 never showed what we sent — {seen:?}");
+                assert!(replied, "{uart}: typing never reached the modem — {sent:?}");
+            } else {
+                assert!(
+                    !reached && !replied,
+                    "{uart} answered a port EGT80 was not pointed at — \
+                     the matching cases prove nothing if this one passes"
+                );
+            }
+        }
+    }
+
     /// Boot every image in a folder and print what each one says.
     ///
     /// The survey behind the single-disk test: one run tells you which
@@ -1261,7 +1417,7 @@ mod tests {
             }
             let mut m = BootMachine::new();
             m.insert(0, bytes, true).unwrap();
-            let mut cpu = Cpu::new_8080();
+            let mut cpu = BootMachine::new_cpu();
             if let Err(e) = m.boot(&mut cpu, 0) {
                 println!("  refused  {name}: {e}");
                 continue;
@@ -1310,7 +1466,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let mut m = BootMachine::new();
         m.insert(0, bytes, true).expect("an 88-DCDD image");
-        let mut cpu = Cpu::new_8080();
+        let mut cpu = BootMachine::new_cpu();
         match std::env::var("CPM_BOOT_STEP").ok().and_then(|s| s.parse::<u8>().ok()) {
             Some(step) => {
                 m.boot_with_step(&mut cpu, 0, step).expect("boots");
