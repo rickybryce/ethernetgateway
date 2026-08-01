@@ -2450,13 +2450,15 @@ it, and the folder&rsquo;s files return the moment you unmount.
 
 <p>
 Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
-<code>altair8_wordstar.dsk</code>, <code>ibm3740_cpm22.dsk</code>,
-<code>altairhd_cobol.dsk</code>. Three formats are supported, all measured from
-real images and verified against <code>cpmtools</code>: <code>ibm3740</code>
-(the 256,256-byte 8&Prime; single-density disk used by Tarbell, Cromemco and the
-IMSAI/z80pack library), <code>altair8</code> (the 337,568-byte Altair 88-DCDD
-floppy) and <code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk
-from the Altair-Duino set).
+<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Two formats are
+supported, both measured from real images and verified against
+<code>cpmtools</code> byte for byte: <code>ibm3740</code> (the 256,256-byte
+8&Prime; single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack
+library) and <code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk
+from the Altair-Duino set). The 337,568-byte Altair 88-DCDD <em>floppy</em> is
+not supported yet &mdash; its directory reads but file content past the first
+allocation block does not, and a format that quietly returns wrong bytes is
+worse than one that is absent.
 </p>
 
 <aside class="note">

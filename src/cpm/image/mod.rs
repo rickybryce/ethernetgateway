@@ -329,7 +329,7 @@ mod tests {
         use crate::cpm::fs::CpmFs;
 
         let _g = registry::tests_lock();
-        registry::clear_all();
+        registry::tests_reset();
 
         // A CPM/ container with an images folder and a blank named image.
         let base = std::env::temp_dir().join("egw_backend_switch");
@@ -397,7 +397,7 @@ mod tests {
         assert!(!fs.open_existing(&fcb("HELLO", "TXT")));
 
         drop(fs);
-        registry::clear_all();
+        registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -413,7 +413,7 @@ mod tests {
         use crate::cpm::fs::CpmFs;
 
         let _g = registry::tests_lock();
-        registry::clear_all();
+        registry::tests_reset();
         let base = std::env::temp_dir().join("egw_image_claim");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(images_dir(&base)).unwrap();
@@ -446,7 +446,53 @@ mod tests {
 
         drop(one);
         drop(two);
-        registry::clear_all();
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A mounted image's free space must survive the round trip into the
+    /// virtual disk's units and back.
+    ///
+    /// The first version of this reported a floppy with 32 KB free as
+    /// completely full, because it returned an absolute used-block count while
+    /// the caller adds the directory reserve on top — pushing the total into
+    /// its clamp.  The number STAT prints is the free one, so an off-by-the-
+    /// directory error there is the difference between a usable disk and one
+    /// that looks like it has no room at all.
+    #[test]
+    fn test_mounted_image_free_space_survives_the_unit_conversion() {
+        use crate::cpm::fs::CpmFs;
+
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_freespace");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_free.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        mount_image(&base, 0, "ibm3740_free.dsk").expect("mount");
+
+        // The same numbers the BDOS allocation-vector call uses.
+        const VD_BLS: u64 = 4096;
+        const TOTAL: u64 = 2048;
+        const DIR: u64 = 8;
+
+        let fs = CpmFs::new(base.clone());
+        let used = (DIR + fs.current_drive_used_blocks(VD_BLS, TOTAL, DIR)).min(TOTAL);
+        let free_bytes = (TOTAL - used) * VD_BLS;
+
+        // A blank 8" SSSD holds about 241K of files.
+        assert!(
+            free_bytes > 200_000 && free_bytes < 260_000,
+            "a blank floppy should report roughly its capacity free, got {free_bytes}"
+        );
+
+        drop(fs);
+        registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -455,7 +501,7 @@ mod tests {
     #[test]
     fn test_mount_change_is_refused_on_a_busy_drive() {
         let _g = registry::tests_lock();
-        registry::clear_all();
+        registry::tests_reset();
         registry::session_start(4242);
         registry::session_select(4242, 3);
 
@@ -465,7 +511,7 @@ mod tests {
         assert!(err.contains("in use"), "{err}");
 
         registry::session_end(4242);
-        registry::clear_all();
+        registry::tests_reset();
     }
 
     #[test]
@@ -547,6 +593,42 @@ mod tests {
 mod live_tests {
     use super::*;
 
+    /// Dump the first bytes of one file from one image, using our own reader.
+    /// Ignored: set `CPM_DUMP_IMAGE` and `CPM_DUMP_FILE`.
+    #[test]
+    #[ignore]
+    fn dump_one_file_from_an_image() {
+        let (Ok(img), Ok(want)) = (
+            std::env::var("CPM_DUMP_IMAGE"),
+            std::env::var("CPM_DUMP_FILE"),
+        ) else {
+            eprintln!("set CPM_DUMP_IMAGE and CPM_DUMP_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(&img);
+        let base = path.parent().unwrap().parent().unwrap().to_path_buf();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        mount_image(&base, 0, &name).expect("mount");
+        let m = registry::get(0).unwrap();
+        let mut guard = m.fs.lock().unwrap();
+        let (n, e) = {
+            let (b, x) = want.split_once('.').unwrap_or((want.as_str(), ""));
+            let mut nn = [b' '; 8];
+            let mut ee = [b' '; 3];
+            for (s, c) in nn.iter_mut().zip(b.bytes()) { *s = c; }
+            for (s, c) in ee.iter_mut().zip(x.bytes()) { *s = c; }
+            (nn, ee)
+        };
+        let recs = guard.file_records(0, &n, &e).expect("file exists");
+        let r0 = guard.read_record(0, &n, &e, 0).unwrap().unwrap();
+        println!("{want}: {recs} records ({} bytes)", recs * 128);
+        println!("first 16 bytes: {:02x?}", &r0[..16]);
+        drop(guard);
+        registry::tests_reset();
+    }
+
     /// Mount every image sitting in a real `CPM/images` folder and report what
     /// happened — the end-to-end check that the naming convention, the
     /// read-only rule and the refusals all behave on real files.
@@ -562,7 +644,7 @@ mod live_tests {
         };
         let base = std::path::PathBuf::from(base);
         let _g = registry::tests_lock();
-        registry::clear_all();
+        registry::tests_reset();
 
         let images = available_images(&base);
         assert!(!images.is_empty(), "no images in {}", images_dir(&base).display());
@@ -589,6 +671,6 @@ mod live_tests {
             }
             let _ = unmount_drive(drive);
         }
-        registry::clear_all();
+        registry::tests_reset();
     }
 }

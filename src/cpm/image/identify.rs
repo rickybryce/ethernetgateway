@@ -4,7 +4,7 @@
 //! There are two ways to arrive at a format, and they do not deserve the same
 //! confidence:
 //!
-//! * **Named** — the filename carries a format token, `altair8_games.dsk`.  The
+//! * **Named** — the filename carries a format token, `ibm3740_cpm22.dsk`.  The
 //!   operator said what this is.  Mounts read-write.
 //!
 //! * **Sniffed** — no token, so the format is inferred from the file's size and
@@ -18,8 +18,6 @@
 //! *misidentified format* is the one failure none of those can catch: every
 //! offset is computed from the wrong geometry, so every check agrees with every
 //! other check, and the first write lands in the middle of somebody's files.
-//! Two of the sample disks measured here share a size while differing in
-//! layout, so this is not a theoretical worry.
 //!
 //! Sniffing is therefore for *reading* an image someone dropped in the folder
 //! unlabelled.  Renaming it with a token is how you say "I know what this is",
@@ -86,7 +84,7 @@ impl std::fmt::Display for Unknown {
             Unknown::NoMatchingFormat { size } => write!(
                 f,
                 "no known format is {size} bytes — rename it with a format prefix, \
-                 e.g. altair8_mydisk.dsk (see readme.txt)"
+                 e.g. ibm3740_mydisk.dsk (see readme.txt)"
             ),
             Unknown::NoDirectory { candidates } => write!(
                 f,
@@ -223,9 +221,9 @@ mod tests {
 
     #[test]
     fn test_named_image_is_trusted_and_writable() {
-        let fmt = by_token("altair8").unwrap();
-        let id = identify("altair8_games.dsk", fmt.min_bytes(), |_| None).unwrap();
-        assert_eq!(id.format.token, "altair8");
+        let fmt = by_token("altairhd").unwrap();
+        let id = identify("altairhd_games.dsk", fmt.min_bytes(), |_| None).unwrap();
+        assert_eq!(id.format.token, "altairhd");
         assert_eq!(id.confidence, Confidence::Named);
         assert!(!id.force_read_only(), "a named image mounts read-write");
     }
@@ -233,12 +231,12 @@ mod tests {
     /// The rule this module exists for.
     #[test]
     fn test_sniffed_image_is_forced_read_only() {
-        let fmt = by_token("altair8").unwrap();
+        let fmt = by_token("altairhd").unwrap();
         let id = identify("games.dsk", fmt.min_bytes(), |f| {
-            (f.token == "altair8").then(|| dir_record("ED      COM"))
+            (f.token == "altairhd").then(|| dir_record("ED      COM"))
         })
         .unwrap();
-        assert_eq!(id.format.token, "altair8");
+        assert_eq!(id.format.token, "altairhd");
         assert_eq!(id.confidence, Confidence::Sniffed);
         assert!(
             id.force_read_only(),
@@ -258,10 +256,10 @@ mod tests {
     /// and left to fail on every read.
     #[test]
     fn test_named_but_wrong_size_is_refused() {
-        let err = identify("altair8_short.dsk", 1000, |_| None).unwrap_err();
+        let err = identify("altairhd_short.dsk", 1000, |_| None).unwrap_err();
         match err {
             Unknown::WrongSize { token, actual, .. } => {
-                assert_eq!(token, "altair8");
+                assert_eq!(token, "altairhd");
                 assert_eq!(actual, 1000);
             }
             other => panic!("expected WrongSize, got {other:?}"),
@@ -272,7 +270,7 @@ mod tests {
     fn test_no_format_of_that_size() {
         let err = identify("mystery.dsk", 12_345, |_| None).unwrap_err();
         assert_eq!(err, Unknown::NoMatchingFormat { size: 12_345 });
-        assert!(err.to_string().contains("altair8_"), "suggest the convention");
+        assert!(err.to_string().contains("ibm3740_"), "suggest the convention");
     }
 
     /// A file the right size that is not a CP/M disk at all — the minidisk and
@@ -318,8 +316,8 @@ mod tests {
 
         // (file, expected token or None if it must be refused)
         let cases: [(&str, Option<&str>); 4] = [
-            ("DISK01.DSK", Some("altair8")),
             ("TDISK01.DSK", Some("ibm3740")),
+            ("DISK01.DSK", None),   // Altair 88-DCDD — format withdrawn, see format.rs
             ("DISK0C.DSK", None),  // Altair minidisk — Disk BASIC, not CP/M
             ("HDSK01.DSK", None),  // hard disk — no CP/M directory anywhere
         ];

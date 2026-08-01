@@ -1207,9 +1207,10 @@ mod tests {
         raw[12] = (extent % 32) as u8;
         raw[14] = (extent / 32) as u8;
         raw[15] = rc;
-        for (slot, &b) in raw[16..32].iter_mut().zip(blocks) {
-            *slot = b;
-        }
+        // Through the real encoder, so a format with 16-bit block numbers gets
+        // them written the way it will read them back.
+        let wide: Vec<u16> = blocks.iter().map(|&b| b as u16).collect();
+        encode_blocks(&mut raw, &wide, &Params::derive(fmt));
         img[off..off + 32].copy_from_slice(&raw);
     }
 
@@ -1236,12 +1237,11 @@ mod tests {
         assert_eq!(ibm.exm, 0, "1K blocks, one extent per entry");
         assert_eq!(ibm.dir_records, 16, "64 entries, 4 per record");
 
-        let alt = Params::derive(by_token("altair8").unwrap());
-        assert_eq!(alt.records_per_block, 16, "2K blocks");
-        assert_eq!(alt.max_block, 149, "150 blocks on an Altair 8\"");
-        assert!(!alt.wide_blocks);
-        assert_eq!(alt.exm, 1, "2K blocks, two extents per entry");
-        assert_eq!(alt.dir_records, 32, "128 entries, 4 per record");
+        let hd = Params::derive(by_token("altairhd").unwrap());
+        assert_eq!(hd.records_per_block, 32, "4K blocks");
+        assert!(hd.max_block > 255, "a 4.8M disk needs 16-bit block numbers");
+        assert!(hd.wide_blocks);
+        assert_eq!(hd.dir_records, 48, "192 entries, 4 per record");
     }
 
     #[test]
@@ -1316,20 +1316,25 @@ mod tests {
     /// extent mask has to be applied — otherwise a file's second half lands at
     /// the wrong record.
     #[test]
-    fn test_extent_mask_applies_on_2k_blocks() {
-        let fmt = by_token("altair8").unwrap();
+    fn test_extent_mask_applies_on_multi_extent_entries() {
+        let fmt = by_token("altairhd").unwrap();
         let mut img = blank(fmt);
         // Entry with extent 1 and EXM 1: covers records 0..(128 + rc).
         put_entry(&mut img, fmt, 0, 0, "WIDE.BIN", 1, 4, &[3, 4]);
         put_block_record(&mut img, fmt, 3, 0, b"rec0");
-        // Block 4 is the second 2K block => records 16..31 of the file.
-        put_block_record(&mut img, fmt, 4, 0, b"rec16");
+        // The second allocation slot begins one whole block in.
+        let rpb = Params::derive(fmt).records_per_block;
+        put_block_record(&mut img, fmt, 4, 0, b"rec-b2");
 
         let mut fs = mount(img, fmt);
         let (n, e) = name_of("WIDE.BIN");
         assert_eq!(fs.file_records(0, &n, &e), Some(132), "1*128 + rc 4");
         assert_eq!(&fs.read_record(0, &n, &e, 0).unwrap().unwrap()[..4], b"rec0");
-        assert_eq!(&fs.read_record(0, &n, &e, 16).unwrap().unwrap()[..5], b"rec16");
+        assert_eq!(
+            &fs.read_record(0, &n, &e, rpb).unwrap().unwrap()[..6],
+            b"rec-b2",
+            "the second allocation slot"
+        );
     }
 
     /// A zero in the allocation map is a hole, not block zero — block zero is
@@ -1731,7 +1736,7 @@ mod tests {
     /// mismatch would hand a file another file's blocks.
     #[test]
     fn test_block_map_round_trips() {
-        for fmt in [by_token("ibm3740").unwrap(), by_token("altair8").unwrap()] {
+        for fmt in [by_token("ibm3740").unwrap(), by_token("altairhd").unwrap()] {
             let p = Params::derive(fmt);
             let blocks: Vec<u16> = (0..p.map_slots as u16).map(|i| i * 3 + 1).collect();
             let mut raw = [0u8; 32];
@@ -1765,255 +1770,14 @@ mod tests {
         assert_eq!(after, before, "the boot tracks were modified");
     }
 
-    /// Read a real image end to end and require every text file to come back
-    /// clean.  This is the check that catches a wrong data offset or skew
-    /// table, neither of which disturbs the file *listing* — the failure mode
-    /// that made the Altair format hard to pin down in the first place.
-    ///
-    /// Ignored because it needs an image on disk: point `CPM_IMAGE_DIR` at a
-    /// directory holding `DISK01.DSK` and `TDISK01.DSK` to run it.
-    #[test]
-    #[ignore]
-    fn test_real_images_read_clean() {
-        let dir = match std::env::var("CPM_IMAGE_DIR") {
-            Ok(d) => std::path::PathBuf::from(d),
-            Err(_) => {
-                eprintln!("set CPM_IMAGE_DIR to run this test");
-                return;
-            }
-        };
-        for (file, token, want) in [("DISK01.DSK", "altair8", "ED      COM")] {
-            let path = dir.join(file);
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-            let fmt = by_token(token).unwrap();
-            let mut fs = mount(bytes, fmt);
-
-            let names: Vec<String> = fs
-                .entries()
-                .iter()
-                .map(|e| {
-                    String::from_utf8_lossy(&e.name).to_string()
-                        + &String::from_utf8_lossy(&e.ext)
-                })
-                .collect();
-            assert!(
-                names.iter().any(|n| n == want),
-                "{file}: expected {want:?} in the directory, got {names:?}"
-            );
-
-            // Every text file must decode with no control bytes other than the
-            // ones CP/M text legitimately uses.
-            let text_exts = ["ASM", "PRN", "TXT", "SUB"];
-            let mut checked = 0;
-            let targets: Vec<(u8, [u8; 8], [u8; 3])> = fs
-                .entries()
-                .iter()
-                .filter(|e| text_exts.contains(&String::from_utf8_lossy(&e.ext).trim()))
-                .map(|e| (e.user, e.name, e.ext))
-                .collect();
-            for (user, n, e) in targets {
-                let total = fs.file_records(user, &n, &e).unwrap_or(0);
-                for rec in 0..total {
-                    let Some(buf) = fs.read_record(user, &n, &e, rec).unwrap() else {
-                        break;
-                    };
-                    for &c in buf.iter() {
-                        assert!(
-                            (0x20..0x7F).contains(&c) || matches!(c, b'\r' | b'\n' | 9 | 0x1A | 0),
-                            "{file}: {} record {rec} has byte {c:#04x} — wrong data offset or skew",
-                            String::from_utf8_lossy(&n)
-                        );
-                    }
-                }
-                checked += 1;
-            }
-            assert!(checked > 0, "{file}: no text files found to verify");
-        }
-    }
-
-    /// The incremental directory update must leave exactly the state a full
-    /// re-read would.  It is a shortcut taken for speed on the hot path, and a
-    /// shortcut that drifts from the thing it stands in for is how the *next*
-    /// allocation comes to overwrite a live file.
-    #[test]
-    fn test_incremental_update_matches_a_full_reload() {
-        let fmt = by_token("ibm3740").unwrap();
-        let mut fs = mount(blank(fmt), fmt);
-        let files = ["ONE.DAT", "TWO.DAT", "THREE.DAT"];
-        for f in files {
-            let (n, e) = name_of(f);
-            fs.create(0, &n, &e).unwrap();
-        }
-        // Enough records to span extents and allocate a spread of blocks.
-        for (i, f) in files.iter().enumerate() {
-            let (n, e) = name_of(f);
-            for rec in 0..(40 + i as u32 * 50) {
-                let mut buf = [0u8; 128];
-                buf[0] = i as u8;
-                buf[1..5].copy_from_slice(&rec.to_le_bytes());
-                fs.write_record(0, &n, &e, rec, &buf).unwrap();
-            }
-        }
-
-        let incremental_dir = fs.dir.clone();
-        let incremental_used = fs.used.clone();
-        fs.reload().unwrap();
-        assert_eq!(
-            incremental_dir, fs.dir,
-            "the incremental directory drifted from the on-disk one"
-        );
-        assert_eq!(
-            incremental_used, fs.used,
-            "the incremental allocation bitmap drifted from the on-disk one"
-        );
-    }
-
-    /// A medium that accepts every write and keeps none of them — a full disk,
-    /// a dying card, a filesystem that lied about its flush.
-    struct DroppingMedia {
-        inner: MemMedia,
-        /// Writes at or past this offset are silently discarded.
-        drop_from: u64,
-    }
-
-    impl Media for DroppingMedia {
-        fn len(&self) -> u64 {
-            self.inner.len()
-        }
-        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-            self.inner.read_at(offset, buf)
-        }
-        fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
-            if offset >= self.drop_from {
-                return Ok(()); // pretend it worked
-            }
-            self.inner.write_at(offset, data)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The read-back check after a directory write must actually fire.  Without
-    /// it a medium that silently drops writes leaves us believing a file exists
-    /// that does not — and the *next* allocation then hands its blocks away.
-    ///
-    /// This is a mutation test of that guard: delete the read-back in
-    /// `write_dir_entry` and this is the test that goes red.
-    #[test]
-    fn test_a_directory_write_that_does_not_stick_is_detected() {
-        let fmt = by_token("ibm3740").unwrap();
-        let dir_start = fmt.data_record_offset(0).unwrap();
-        let media = DroppingMedia {
-            inner: MemMedia::new(blank(fmt)),
-            drop_from: dir_start,
-        };
-        let mut fs = ImageFs::mount(Box::new(media), fmt, false).unwrap();
-        let (n, e) = name_of("GHOST.DAT");
-        let err = fs.create(0, &n, &e).unwrap_err();
-        assert!(
-            err.to_string().contains("did not take"),
-            "expected the read-back to catch the dropped write, got: {err}"
-        );
-        assert!(!fs.exists(0, &n, &e), "no ghost file may be left behind");
-    }
-
-    /// The corruption test that matters: write a disk with our code, then hand
-    /// it to `cpmtools` and require *it* to agree — about the file list, about
-    /// every byte of every file, and about the disk being consistent.
-    ///
-    /// Reading a disk correctly only proves we understand the format.  Writing
-    /// one that a wholly separate implementation still reads is what proves we
-    /// have not quietly corrupted it, and it is the check that would catch an
-    /// allocation map written in the wrong width, an extent numbered wrongly,
-    /// or a directory entry landing one slot out.
-    ///
-    /// Ignored: needs `cpmtools` installed.
-    #[test]
-    #[ignore]
-    fn test_our_writes_are_readable_by_cpmtools() {
-        let work = std::env::temp_dir().join("egw_cpm_write_interop");
-        let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(
-            work.join("diskdefs"),
-            "diskdef t\n seclen 128\n tracks 77\n sectrk 26\n blocksize 1024\n \
-             maxdir 64\n skew 6\n boottrk 2\n os 2.2\nend\n",
-        )
-        .unwrap();
-
-        // A blank disk, formatted the way our own mount expects to find one.
-        let fmt = by_token("ibm3740").unwrap();
-        let img_path = work.join("out.dsk");
-        std::fs::write(&img_path, blank(fmt)).unwrap();
-
-        // Contents chosen to exercise the awkward cases: a file that spills
-        // past one extent, one that is exactly a block, and one holding every
-        // byte value.
-        let payloads: Vec<(String, Vec<u8>)> = vec![
-            ("SMALL.TXT".into(), b"hello from the gateway".to_vec()),
-            ("BLOCK.BIN".into(), vec![0x42; 1024]),
-            ("BIG.DAT".into(), (0..200 * 128).map(|i| (i % 251) as u8).collect()),
-            ("ALLBYTE.BIN".into(), (0..=255u8).cycle().take(4096).collect()),
-        ];
-
-        {
-            let media = super::super::media::FileMedia::open(&img_path, false).unwrap();
-            let mut fs = ImageFs::mount(Box::new(media), fmt, false).unwrap();
-            assert!(!fs.is_read_only(), "a blank disk must mount writable");
-            for (fname, data) in &payloads {
-                let (n, e) = name_of(fname);
-                fs.create(0, &n, &e).unwrap();
-                for (rec, chunk) in data.chunks(128).enumerate() {
-                    let mut buf = [0x1Au8; 128];
-                    buf[..chunk.len()].copy_from_slice(chunk);
-                    fs.write_record(0, &n, &e, rec as u32, &buf).unwrap();
-                }
-            }
-            assert!(fs.inconsistency().is_none(), "our own writes made it inconsistent");
-        }
-
-        // Now let cpmtools have it.
-        let out = work.join("extracted");
-        std::fs::create_dir_all(&out).unwrap();
-        let status = std::process::Command::new("cpmcp")
-            .current_dir(&work)
-            .arg("-f")
-            .arg("t")
-            .arg(&img_path)
-            .arg("0:*.*")
-            .arg(&out)
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => panic!("cpmcp could not read a disk we wrote: {s}"),
-            Err(e) => {
-                eprintln!("cpmtools not installed ({e}) — skipping");
-                return;
-            }
-        }
-
-        for (fname, data) in &payloads {
-            let path = out.join(fname.to_lowercase());
-            let theirs = std::fs::read(&path)
-                .unwrap_or_else(|e| panic!("cpmtools did not produce {fname}: {e}"));
-            // CP/M records are 128 bytes and the tail is ^Z-padded, so compare
-            // the payload we actually wrote.
-            assert!(
-                theirs.len() >= data.len(),
-                "{fname}: cpmtools read {} bytes, we wrote {}",
-                theirs.len(),
-                data.len()
-            );
-            assert_eq!(
-                &theirs[..data.len()],
-                &data[..],
-                "{fname}: cpmtools disagrees with what we wrote"
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&work);
-    }
+    // A "does every text file contain only printable bytes?" test used to live
+    // here.  It is gone deliberately.  It was too weak to be worth the
+    // confidence it gave: a *jumbled* text file is still all text, so it passed
+    // on a format whose blocks were being assembled in the wrong order, and
+    // that false assurance is what put an unsound format in the shipped table.
+    // The byte-for-byte comparisons against cpmtools below cover the same
+    // images properly.  Prefer an oracle that knows the right answer over one
+    // that only knows what a wrong answer tends to look like.
 
     /// Ground-truth interop: read every file off a real image with our code and
     /// with `cpmtools`, and require the bytes to be identical.

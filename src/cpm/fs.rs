@@ -802,20 +802,35 @@ impl CpmFs {
     /// block (as CP/M allocates), summed.  Used to synthesize the allocation
     /// vector for BDOS "get free space" queries (STAT's "bytes remaining").
     /// Only valid 8.3 files count, matching what the directory shows.
-    pub fn current_drive_used_blocks(&self, block_size: u64, total_blocks: u64) -> u64 {
+    pub fn current_drive_used_blocks(
+        &self,
+        block_size: u64,
+        total_blocks: u64,
+        reserved_blocks: u64,
+    ) -> u64 {
         // A mounted image has a real capacity, and it is nothing like the
-        // virtual disk the DPB describes — typically 300 KB against 4 MB.  The
+        // virtual disk the DPB describes — typically 300 KB against 8 MB.  The
         // free *count* is the number anyone actually reads (it is what STAT
         // prints), so report used blocks such that the free figure comes out
         // right for the real disk, rather than a used figure that would leave
         // STAT offering megabytes of room on a floppy.
+        //
+        // The contract is the same one the folder branch below obeys: this
+        // returns the blocks the **files** occupy, *not* counting the
+        // directory reserve, because the caller adds that itself.  Returning
+        // an absolute figure here instead cost 32 KB of a floppy's free space
+        // and read as a completely full disk once the caller's addition pushed
+        // it into the clamp.
         if let Some(mount) = self.mounted(self.drive) {
             let free = mount
                 .fs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .free_bytes();
-            return total_blocks.saturating_sub(free / block_size.max(1));
+            let free_units = free / block_size.max(1);
+            return total_blocks
+                .saturating_sub(reserved_blocks)
+                .saturating_sub(free_units);
         }
         let dir = self.drive_dir(self.drive);
         let mut blocks: u64 = 0;

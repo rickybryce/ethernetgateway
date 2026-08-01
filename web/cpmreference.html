@@ -756,8 +756,7 @@
                     <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash; the format token, an
                     underscore, then whatever you like:
                 </p>
-                <pre><code>altair8_wordstar.dsk
-ibm3740_cpm22.dsk
+                <pre><code>ibm3740_cpm22.dsk
 altairhd_cobol.dsk</code></pre>
                 <p>
                     An image named this way mounts <strong>read-write</strong>. An image with no
@@ -792,13 +791,16 @@ altairhd_cobol.dsk</code></pre>
                     <thead><tr><th>Token</th><th>Format</th><th>Size</th></tr></thead>
                     <tbody>
                         <tr><td><code>ibm3740</code></td><td>IBM 3740 8&quot; SSSD &mdash; the closest thing CP/M had to a universal disk. Tarbell, Cromemco SD, IMSAI / z80pack.</td><td>256,256</td></tr>
-                        <tr><td><code>altair8</code></td><td>Altair 88-DCDD 8&quot; floppy. 137-byte sectors, with the data offset moving partway down the disk.</td><td>337,568</td></tr>
                         <tr><td><code>altairhd</code></td><td>Altair 88-HDSK hard disk (the Altair-Duino set). 256-byte sectors, two CP/M records in each.</td><td>4,988,928</td></tr>
                     </tbody>
                 </table>
                 <p class="dim-text">
                     Every entry was measured from a real image and verified against
                     <code>cpmtools</code> byte for byte, rather than transcribed from a table.
+                    The Altair 88-DCDD 8&Prime; floppy (337,568 bytes) is <em>not</em> yet
+                    supported: its directory reads correctly but file content past the first
+                    allocation block does not, and shipping a format that returns wrong bytes
+                    quietly is worse than leaving it out.
                     <code>CPM/images/readme.txt</code> carries the same list, generated from the
                     same source, along with what to rename an Altair-Duino or IMSAI disk to.
                 </p>

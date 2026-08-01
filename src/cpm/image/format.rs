@@ -77,6 +77,7 @@ pub enum Framing {
     /// lives in the boot region and reads perfectly at the first offset, so a
     /// naive reader gets a correct file listing and then silently mangles every
     /// byte of file content.  That is exactly how it presented when measured.
+    #[allow(dead_code)]
     AltairSplit {
         /// Bytes per physical sector (137 on every image seen).
         seclen: u16,
@@ -161,6 +162,7 @@ impl Skew {
 /// The Altair 88-DCDD sector translation, recovered from the BIOS in the boot
 /// tracks of `DISK01.DSK` (found there as a 1-based permutation; stored 0-based
 /// here).  A four-way interleave: every fourth physical sector, four times over.
+#[allow(dead_code)]
 pub const ALTAIR_SKEW: &[u16] = &[
     0, 8, 16, 24, 2, 10, 18, 26, 4, 12, 20, 28, 6, 14, 22, 30,
     1, 9, 17, 25, 3, 11, 19, 27, 5, 13, 21, 29, 7, 15, 23, 31,
@@ -286,27 +288,20 @@ pub const FORMATS: &[Format] = &[
         skew: Skew::Table(IBM3740_SKEW),
         exact_size: Some(256_256),
     },
-    // ---- Altair 88-DCDD 8" -------------------------------------------------
-    // 137-byte sectors, and the data offset moves from 3 to 7 at track 6.
-    Format {
-        token: "altair8",
-        label: "Altair 88-DCDD 8\" floppy, 308K",
-        total_records: 2464, // 77 tracks x 32 sectors
-        sectrk: 32,
-        records_per_sector: 1,
-        reserved_records: 64, // 2 boot tracks
-        blocksize: 2048,
-        maxdir: 128,
-        framing: Framing::AltairSplit {
-            seclen: 137,
-            sectrk: 32,
-            split_track: 6,
-            first_off: 3,
-            rest_off: 7,
-        },
-        skew: Skew::Table(ALTAIR_SKEW),
-        exact_size: Some(337_568),
-    },
+    // ---- Altair 88-DCDD 8" — WITHDRAWN, see below --------------------------
+    // The entry that was here is deliberately gone.  Its directory and its
+    // first allocation block read correctly, which is exactly what made it
+    // look right: every text file came back with no corrupt bytes, because a
+    // *jumbled* text file is still all text.  Checking continuity across a
+    // block boundary — using an assembler listing on the disk, whose addresses
+    // must ascend — showed the second block of a multi-block file does not
+    // follow the first.  A format that silently returns wrong file content is
+    // worse than one that is absent, so it stays out until the mapping is
+    // solved.  `Framing::AltairSplit` and `ALTAIR_SKEW` below are kept: the
+    // framing is confirmed (the directory and block 0 depend on it) and the
+    // skew table came out of the disk's own BIOS.  What is unresolved is how
+    // blocks after the first are addressed.
+
     // ---- Altair 88-HDSK hard disk (the Altair-Duino disk set) --------------
     // 256-byte sectors, so two CP/M records ride in each and skew moves them
     // as a pair.  The 24-entry translation is a three-way interleave.
@@ -457,18 +452,10 @@ mod tests {
     fn test_directory_starts_where_measured() {
         let ibm = by_token("ibm3740").unwrap();
         assert_eq!(ibm.data_record_offset(0), Some(0x1A00));
-        let alt = by_token("altair8").unwrap();
-        assert_eq!(alt.data_record_offset(0), Some(64 * 137 + 3));
+        let hd = by_token("altairhd").unwrap();
+        assert_eq!(hd.data_record_offset(0), Some(96 * 128));
     }
 
-    #[test]
-    fn test_data_record_offset_applies_skew() {
-        let alt = by_token("altair8").unwrap();
-        // Logical record 1 of the data area is physical sector 8 of track 0
-        // (ALTAIR_SKEW[1] == 8), still inside the boot-offset region.
-        let want = (64 + 8) * 137 + 3;
-        assert_eq!(alt.data_record_offset(1), Some(want));
-    }
 
     /// A disk whose sectors hold two records must keep those two together
     /// when skew moves the sector.  Splitting them scatters every second
@@ -520,16 +507,26 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn test_data_record_offset_applies_skew() {
+        let hd = by_token("altairhd").unwrap();
+        // Logical records 0 and 1 share physical sector 0; record 2 begins the
+        // next logical sector, which the table maps to physical 7.
+        let r0 = hd.data_record_offset(0).unwrap();
+        assert_eq!(hd.data_record_offset(2), Some(r0 + 7 * 2 * 128));
+    }
+
     #[test]
     fn test_data_record_offset_stops_at_end_of_disk() {
-        let alt = by_token("altair8").unwrap();
-        assert!(alt.data_record_offset(alt.data_records() - 1).is_some());
-        assert_eq!(alt.data_record_offset(alt.data_records()), None);
+        let hd = by_token("altairhd").unwrap();
+        assert!(hd.data_record_offset(hd.data_records() - 1).is_some());
+        assert_eq!(hd.data_record_offset(hd.data_records()), None);
     }
 
     #[test]
     fn test_token_parsing() {
-        assert_eq!(token_of("altair8_games.dsk"), Some("altair8"));
+        assert_eq!(token_of("altairhd_games.dsk"), Some("altairhd"));
         assert_eq!(token_of("ibm3740_cpm22.dsk"), Some("ibm3740"));
         assert_eq!(token_of("games.dsk"), None, "no underscore is not a token");
         assert_eq!(token_of("_leading.dsk"), None, "empty token");
@@ -538,8 +535,8 @@ mod tests {
 
     #[test]
     fn test_by_token_is_case_insensitive() {
-        assert!(by_token("ALTAIR8").is_some());
-        assert!(by_token("altair8").is_some());
+        assert!(by_token("ALTAIRHD").is_some());
+        assert!(by_token("altairhd").is_some());
         assert!(by_token("nosuchformat").is_none());
     }
 

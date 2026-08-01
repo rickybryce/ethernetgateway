@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touching it — the files are exactly where they were and come back on unmount.
   Three formats, each measured from real images and verified byte for byte
   against `cpmtools`: `ibm3740` (8" single density — Tarbell, Cromemco,
-  IMSAI/z80pack), `altair8` (Altair 88-DCDD floppy) and `altairhd` (Altair
-  88-HDSK hard disk, the Altair-Duino set).
+  IMSAI/z80pack) and `altairhd` (Altair 88-HDSK hard disk, the Altair-Duino
+  set). The Altair 88-DCDD *floppy* is not supported yet: its directory reads
+  correctly but file content past the first allocation block does not, and a
+  format that quietly returns wrong bytes is worse than one that is absent.
 - Mount and unmount from all three interfaces: a wizard on the telnet CP/M
   settings screen (`I`), and a **Mount CP/M Drives** screen in the web and
   desktop UIs. Changes take effect immediately in every session and are saved

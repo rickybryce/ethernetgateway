@@ -84,8 +84,8 @@ NAMING: PUT THE FORMAT IN THE FILENAME
 Name an image  <format>_<anything>.dsk  — the format token comes first,
 then an underscore, then whatever you like:
 
-    altair8_games.dsk
     ibm3740_cpm22.dsk
+    altairhd_cobol.dsk
 
 An image named this way is trusted and mounts READ-WRITE.
 
@@ -123,15 +123,18 @@ ALTAIR-DUINO / ALTAIR 8800 SIMULATOR disks come named after the emulated
 controller they belonged to, which says nothing about their layout.  Map
 them by their SIZE:
 
-  DISKnn.DSK    337,568 bytes  ->  altair8_<what-it-holds>.dsk
   CDISK01.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
   HDSKnn.DSK  4,988,928 bytes  ->  altairhd_<what-it-holds>.dsk
   TDISKnn.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
 
   So DISK07.DSK holding WordStar becomes  altair8_wordstar.dsk .
 
-  Not every one of these is a CP/M disk.  The Altair DOS, Altair Disk
-  BASIC, Time Sharing BASIC and mini-disk images use their own
+  The 337,568-byte Altair 88-DCDD floppies (DISKnn.DSK) are NOT supported
+  yet.  Their directory reads but file content past the first allocation
+  block does not, so they are refused rather than mounted with bad data.
+
+  Not every one of these is a CP/M disk either.  The Altair DOS, Altair
+  Disk BASIC, Time Sharing BASIC and mini-disk images use their own
   filesystems; they will mount but show no files, because there is no
   CP/M directory in them to read.  That is expected.
 

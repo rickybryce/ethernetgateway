@@ -1815,6 +1815,9 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
     if cfg.cpm_emu_enabled && !was_cpm_enabled {
         ensure_cpm_layout(cfg);
     }
+    if was_cpm_enabled && !cfg.cpm_emu_enabled {
+        crate::cpm::image::registry::clear_all();
+    }
     *guard = Some(cfg.clone());
     result
 }
@@ -2468,6 +2471,12 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     // it on every save would be a filesystem sweep per settings change.
     if cfg.cpm_emu_enabled && !was_cpm_enabled {
         ensure_cpm_layout(&cfg);
+    }
+    // Turning the emulator off releases every mounted image, so the files are
+    // not held open by a feature nobody can reach any more.  `cpm_mounts` is
+    // left alone: turning it back on should restore what was mounted.
+    if was_cpm_enabled && !cfg.cpm_emu_enabled {
+        crate::cpm::image::registry::clear_all();
     }
     // High-frequency runtime persistence (setting toggles, AT&W, etc.):
     // best-effort with a logged warning rather than propagating to every

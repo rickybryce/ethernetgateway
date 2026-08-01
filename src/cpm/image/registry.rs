@@ -99,8 +99,8 @@ macro_rules! lock {
 
 // ---- mount table --------------------------------------------------------
 //
-// `all`, `any_mounted` and `clear_all`, and the `path` / `read_only_reason`
-// fields, are the surface the mount screens read; they land in the next step.
+// `all` and `any_mounted`, and the `path` field, are read by the mount
+// screens and by code that reports on a mount.
 
 /// The image mounted on a drive, if any.
 pub fn get(drive0: u8) -> Option<Mount> {
@@ -144,7 +144,6 @@ pub fn unmount(drive0: u8) -> Option<Mount> {
 }
 
 /// Drop every mount.  Used when the emulator is disabled.
-#[allow(dead_code)]
 pub fn clear_all() {
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     for slot in t.iter_mut() {
@@ -165,13 +164,6 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// True when anything at all is using the drive.  Read by the mount screens
-    /// to grey a row out; `describe` supplies the wording.
-    #[allow(dead_code)]
-    pub fn busy(&self) -> bool {
-        self.sitting > 0 || self.writing > 0
-    }
-
     /// A short phrase for the UIs, or `None` when the drive is idle.
     pub fn describe(&self) -> Option<String> {
         if self.writing > 0 {
@@ -228,6 +220,18 @@ pub fn check_can_change(drive0: u8) -> Result<(), String> {
         )),
         None => Ok(()),
     }
+}
+
+/// Drop every mount *and* every session record.
+///
+/// Tests need both: `CpmFs::new` registers a session sitting on drive A:, and a
+/// session left registered by another test makes A: look busy, which makes
+/// `check_can_change` refuse a mount there.  Clearing only the mounts left that
+/// half in place and produced a failure that appeared only in a full run.
+#[cfg(test)]
+pub fn tests_reset() {
+    clear_all();
+    lock!(sessions()).clear();
 }
 
 /// The registry is process-global, so tests that touch it must not run beside
@@ -287,7 +291,7 @@ mod tests {
     fn test_usage_is_empty_with_no_sessions() {
         let _g = registry_lock();
         reset();
-        assert!(usage().iter().all(|u| !u.busy()));
+        assert!(usage().iter().all(|u| u.describe().is_none()));
         assert!(check_can_change(0).is_ok());
     }
 
@@ -297,8 +301,8 @@ mod tests {
         reset();
         session_start(1);
         session_select(1, 2); // C:
-        assert!(usage_of(2).busy());
-        assert!(!usage_of(0).busy(), "other drives stay free");
+        assert!(usage_of(2).describe().is_some());
+        assert!(usage_of(0).describe().is_none(), "other drives stay free");
         let err = check_can_change(2).unwrap_err();
         assert!(err.contains("drive C:"), "{err}");
         reset();
@@ -355,9 +359,9 @@ mod tests {
         reset();
         session_start(1);
         session_writing(1, 3);
-        assert!(usage_of(3).busy());
+        assert!(usage_of(3).describe().is_some());
         session_end(1);
-        assert!(!usage_of(3).busy());
+        assert!(usage_of(3).describe().is_none());
         reset();
     }
 

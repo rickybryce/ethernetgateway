@@ -826,7 +826,8 @@ pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
             // directory blocks plus the blocks this drive's files occupy — so
             // STAT's free count (zero bits × block size) reflects real usage.
             let total = VD_DSM as u64 + 1; // 2048 blocks
-            let used = (VD_DIR_BLOCKS + fs.current_drive_used_blocks(VD_BLS, total)).min(total);
+            let used =
+                (VD_DIR_BLOCKS + fs.current_drive_used_blocks(VD_BLS, total, VD_DIR_BLOCKS)).min(total);
             let nbytes = (VD_DSM as usize / 8) + 1; // 256 bytes = exactly 2048 bits
             let mut vec = vec![0u8; nbytes];
             for b in 0..used as usize {
