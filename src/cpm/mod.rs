@@ -33,6 +33,7 @@ mod fcb;
 mod fs;
 pub mod hbios;
 pub mod image;
+pub mod layout;
 mod machine;
 pub mod uart;
 

@@ -475,3 +475,38 @@ mod tests {
         assert!(err.contains("no image mounted"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Mount every image sitting in a real `CPM/images` folder and report what
+    /// happened — the end-to-end check that the naming convention, the
+    /// read-only rule and the refusals all behave on real files.
+    ///
+    /// Ignored: needs a populated images folder.  Set `CPM_LIVE_BASE` to a
+    /// `CPM/` container.
+    #[test]
+    #[ignore]
+    fn test_mount_every_image_in_a_real_folder() {
+        let Ok(base) = std::env::var("CPM_LIVE_BASE") else {
+            eprintln!("set CPM_LIVE_BASE to run this test");
+            return;
+        };
+        let base = std::path::PathBuf::from(base);
+        let _g = registry::tests_lock();
+        registry::clear_all();
+
+        let images = available_images(&base);
+        assert!(!images.is_empty(), "no images in {}", images_dir(&base).display());
+        for (i, name) in images.iter().enumerate() {
+            let drive = (i % 16) as u8;
+            match mount_image(&base, drive, name) {
+                Ok(note) => println!("  MOUNTED  {note}"),
+                Err(e) => println!("  refused  {e}"),
+            }
+            let _ = unmount_drive(drive);
+        }
+        registry::clear_all();
+    }
+}

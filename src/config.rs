@@ -1794,11 +1794,26 @@ fn sanitize_value(s: &str) -> String {
 /// instead of silently reporting success.  The in-memory cache is updated
 /// regardless so the running process reflects the requested settings even
 /// when persistence fails.
+/// Lay out the CP/M container for a config that has just enabled the emulator.
+///
+/// Kept here rather than at each call site so telnet, the web server and the
+/// desktop GUI cannot drift about whether they do it — the three-surface rule
+/// this config file lives by.
+fn ensure_cpm_layout(cfg: &Config) {
+    if let Err(e) = crate::cpm::layout::ensure_cpm_tree(&cfg.transfer_dir) {
+        glog!("Warning: could not create the CP/M folders: {}", e);
+    }
+}
+
 pub fn save_config(cfg: &Config) -> Result<(), String> {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    let was_cpm_enabled = guard.as_ref().map(|c| c.cpm_emu_enabled).unwrap_or(false);
     let result = write_config_file(&config_file_path(), cfg);
     if let Err(ref e) = result {
         glog!("Warning: {}", e);
+    }
+    if cfg.cpm_emu_enabled && !was_cpm_enabled {
+        ensure_cpm_layout(cfg);
     }
     *guard = Some(cfg.clone());
     result
@@ -2443,8 +2458,16 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     } else {
         Config::default()
     };
+    let was_cpm_enabled = cfg.cpm_emu_enabled;
     for &(key, value) in pairs {
         apply_config_key(&mut cfg, key, value);
+    }
+    // Turning the emulator on lays out its folders straight away, so an
+    // operator can put software in CPM/A and a disk image in CPM/images
+    // without first having to start a session.  Only on the transition: doing
+    // it on every save would be a filesystem sweep per settings change.
+    if cfg.cpm_emu_enabled && !was_cpm_enabled {
+        ensure_cpm_layout(&cfg);
     }
     // High-frequency runtime persistence (setting toggles, AT&W, etc.):
     // best-effort with a logged warning rather than propagating to every

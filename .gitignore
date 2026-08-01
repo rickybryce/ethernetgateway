@@ -15,3 +15,7 @@ ckermit-*/
 ckermit_*.tar.*
 ckermit_*.dsc
 ethernetgatewaylogo.png.orig
+
+# CP/M emulator runtime state: drive folders and the operator's disk images.
+# Runtime data, and images are often large and third-party.
+transfer/CPM/

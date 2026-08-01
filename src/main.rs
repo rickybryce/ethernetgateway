@@ -128,6 +128,19 @@ fn main() {
             std::process::exit(1);
         }
 
+        // With the emulator enabled, lay out its container now rather than on
+        // someone's first session: the drive folders are where an operator puts
+        // the software they want to run, and CPM/images is where they put a
+        // disk image.  Both are things you want to do before a first session,
+        // not after.  Nothing here overwrites, so it is safe on every start.
+        if cfg.cpm_emu_enabled {
+            if let Err(e) = cpm::layout::ensure_cpm_tree(&cfg.transfer_dir) {
+                // Not fatal: the emulator recreates what it needs on launch,
+                // and a gateway must still come up for its other services.
+                glog!("Warning: could not create the CP/M folders: {}", e);
+            }
+        }
+
         // Start tokio runtime on a worker thread so the main thread is free for the GUI.
         let shutdown_rt = shutdown.clone();
         let restart_rt = restart.clone();

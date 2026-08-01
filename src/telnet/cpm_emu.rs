@@ -358,19 +358,14 @@ impl TelnetSession {
     /// the paths are built under the configured `transfer_dir`.
     async fn cpmemu_ensure_drives(&mut self) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
-        for drive in b'A'..=CPM_LAST_DRIVE {
-            let mut p = PathBuf::from(&cfg.transfer_dir);
-            p.push("CPM");
-            p.push((drive as char).to_string());
-            tokio::fs::create_dir_all(&p).await?;
-        }
+        // The same layout the enable-time hook builds, so a folder deleted
+        // since then is recreated and the two paths cannot disagree about what
+        // the container holds.
+        let transfer_dir = cfg.transfer_dir.clone();
+        tokio::task::spawn_blocking(move || crate::cpm::layout::ensure_cpm_tree(&transfer_dir))
+            .await
+            .map_err(std::io::Error::other)??;
         self.cpmemu_place_egt80(&cfg.transfer_dir).await;
-        // The images folder is created alongside the drives so an operator has
-        // somewhere to put a `.dsk` before they ever open a mount screen.
-        let mut images = PathBuf::from(&cfg.transfer_dir);
-        images.push("CPM");
-        images.push(crate::cpm::image::IMAGES_DIR);
-        tokio::fs::create_dir_all(&images).await?;
         // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
         // holding the requested image is left alone, so a second session
         // entering the emulator does not reopen a disk the first one is using.
