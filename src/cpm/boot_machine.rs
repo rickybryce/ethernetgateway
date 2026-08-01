@@ -59,6 +59,9 @@ pub struct BootMachine {
     /// forever on a *disk* is not, and the two are told apart by this and
     /// `Dcdd::polls_on_sector`.
     idle_status_reads: u64,
+    /// Diagnostic: how many times each port was touched.
+    #[cfg(test)]
+    port_hits: std::collections::BTreeMap<u8, u64>,
 }
 
 impl BootMachine {
@@ -70,6 +73,8 @@ impl BootMachine {
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
             idle_status_reads: 0,
+            #[cfg(test)]
+            port_hits: std::collections::BTreeMap::new(),
         }
     }
 
@@ -217,6 +222,10 @@ impl Machine for BootMachine {
 
     fn port_in(&mut self, address: u16) -> u8 {
         let port = address as u8;
+        #[cfg(test)]
+        {
+            *self.port_hits.entry(port).or_insert(0) += 1;
+        }
         match port {
             0x08..=0x0A => {
                 let (v, req) = self.dcdd.port_in(port);
@@ -255,6 +264,10 @@ impl Machine for BootMachine {
 
     fn port_out(&mut self, address: u16, value: u8) {
         let port = address as u8;
+        #[cfg(test)]
+        {
+            *self.port_hits.entry(port | 0x80).or_insert(0) += 1;
+        }
         match port {
             0x08..=0x0A => {
                 let req = self.dcdd.port_out(port, value);
@@ -485,6 +498,16 @@ mod tests {
         let mut cpu = Cpu::new_8080();
         m.boot(&mut cpu, 0).expect("boots");
 
+        // A short PC trace first: where a boot goes wrong is a control-flow
+        // question, and the answer is always in the first hundred instructions.
+        if std::env::var("CPM_BOOT_TRACE").is_ok() {
+            let mut trace = Vec::new();
+            for _ in 0..400u64 {
+                trace.push(cpu.registers().pc());
+                cpu.execute_instruction(&mut m);
+            }
+            println!("first PCs: {:04x?}", &trace[..60.min(trace.len())]);
+        }
         let mut out = Vec::new();
         for _ in 0..20_000_000u64 {
             cpu.execute_instruction(&mut m);
@@ -498,6 +521,12 @@ mod tests {
             .map(|&b| if (0x20..0x7F).contains(&b) || b == b'\n' { b as char } else { '.' })
             .collect();
         println!("--- {} ---\n{}", path, text);
+        println!("port hits (0x80 bit = OUT): {:?}", m.port_hits);
+        println!("mem[0..12] = {:02x?}", (0..12).map(|a| m.peek(a)).collect::<Vec<_>>());
+        let st = m.port_in(0x08);
+        println!("status={st:#04x}  track0 bit={}  moveok bit={}",
+                 if st & 0x40 == 0 { "AT TRACK 0" } else { "not track 0" },
+                 if st & 0x02 == 0 { "may move" } else { "busy" });
         println!(
             "pc={:#06x} stuck_polls={} idle_console={}",
             cpu.registers().pc(),

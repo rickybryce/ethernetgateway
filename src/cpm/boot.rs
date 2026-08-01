@@ -77,6 +77,32 @@ impl std::fmt::Display for BootError {
     }
 }
 
+// WHERE THIS STANDS, for whoever picks it up next.
+//
+// A real Altair CP/M disk boots, seeks to track 0, and runs its loader.  It
+// does *not* reach a sign-on.  The evidence, gathered by tracing the program
+// counter (set `CPM_BOOT_TRACE` on the boot test) and counting port accesses:
+//
+//   * Control flow is right up to a point: 0000 -> 0020 (the track-0 test,
+//     which passes) -> 0027 -> 002d -> a CALL to 0048, which loops a few times
+//     around 0048..0062, then goes 004d -> 0050 -> 0072 -> 0074 -> **0092**.
+//     0092 is past the 128-byte payload, in memory that was never loaded, and
+//     from there it wanders through zeros until it stops making sense.
+//   * In a whole run the guest touches **only** port 08h (742 reads) and 09h
+//     (371 writes).  It never reads the sector-position register and never
+//     reads the data port — so it never actually transfers a sector, which is
+//     why nothing is loaded for it to jump to.
+//   * The loader sets `HL = 0DD80h` and `BC = 0100h` before that CALL, so it
+//     intends to load CP/M high; the routine it calls is not doing so.
+//
+// So the fault is in the read path the loader uses, not in seeking or in the
+// status bits (both verified: status reads 0xA1 — at track 0, head may move).
+// The next step is to disassemble 0048..0074 from the boot sector and work out
+// which register or status bit the read routine is waiting on that we are not
+// providing.  Sector 1 of the disk is all zeros while sector 2 holds code,
+// which hints the loader expects a sector interleave rather than physically
+// sequential reads.
+
 /// How many position-register reads to allow before giving up.
 ///
 /// Two per sector, so a full revolution is `2 * sectors`. A generous multiple
