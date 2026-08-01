@@ -1205,26 +1205,31 @@ impl App {
         // and web screens build, so the three cannot drift apart.
         ui.horizontal(|ui| {
             ui.label("CP/M runs:");
-            let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
-            let mut choices = crate::cpm::boot::boot_choices(&base);
-            // An image named in the config but no longer in the folder still
-            // has to appear, or selecting anything else would silently discard
-            // a setting the operator cannot see.
-            if !self.cfg.cpm_boot_image.is_empty()
-                && !choices.iter().any(|(v, _)| *v == self.cfg.cpm_boot_image)
-            {
-                choices.push((
-                    self.cfg.cpm_boot_image.clone(),
-                    format!(
-                        "{} (missing)",
-                        crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image)
-                    ),
-                ));
-            }
             egui::ComboBox::from_id_salt("cpm_boot_image_combo")
                 .width(320.0)
+                // Pure — no disk access — because this runs every frame.
                 .selected_text(crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image))
                 .show_ui(ui, |ui| {
+                    // The images folder is read here rather than above it: this
+                    // closure runs only while the list is open, and the same
+                    // code one level out would be a directory scan on every
+                    // frame for as long as the panel is on screen.
+                    let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+                    let mut choices = crate::cpm::boot::boot_choices(&base);
+                    // An image named in the config but no longer in the folder
+                    // still has to appear, or selecting anything else would
+                    // silently discard a setting the operator cannot see.
+                    if !self.cfg.cpm_boot_image.is_empty()
+                        && !choices.iter().any(|(v, _)| *v == self.cfg.cpm_boot_image)
+                    {
+                        choices.push((
+                            self.cfg.cpm_boot_image.clone(),
+                            format!(
+                                "{} (missing)",
+                                crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image)
+                            ),
+                        ));
+                    }
                     for (value, label) in &choices {
                         ui.selectable_value(
                             &mut self.cfg.cpm_boot_image,

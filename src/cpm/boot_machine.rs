@@ -58,9 +58,23 @@ pub const SENSE_SWITCH_PORT: u8 = 0xFF;
 /// decides what hardware MITS software believes it is talking to.
 pub const DEFAULT_SENSE_SWITCHES: u8 = 0x00;
 
+/// Console bytes a guest may have waiting before further ones are dropped.
+///
+/// Matches the emulator's pending-input bound. Generous next to anything a
+/// person types, and small enough that a client streaming into a guest which
+/// never reads its console cannot grow the host's memory.
+const KEY_QUEUE_CAP: usize = 4096;
+
 /// Ports this machine's own hardware answers, which a virtual modem may not
 /// take over: the 88-DCDD controller, the console, and the front panel.
-const RESERVED_PORTS: &[u8] = &[0x08, 0x09, 0x0A, CONSOLE_STATUS_PORT, CONSOLE_DATA_PORT, SENSE_SWITCH_PORT];
+const RESERVED_PORTS: &[u8] = &[
+    0x08,
+    0x09,
+    0x0A,
+    CONSOLE_STATUS_PORT,
+    CONSOLE_DATA_PORT,
+    SENSE_SWITCH_PORT,
+];
 
 /// What happened when the configured virtual modem was offered to a booted
 /// machine.
@@ -289,8 +303,17 @@ impl BootMachine {
     }
 
     /// Give the guest a byte of console input.
+    ///
+    /// Bounded, and it has to be: a real console has no queue at all, and a
+    /// guest that is not reading its own console — sitting in a compute loop, or
+    /// simply wedged — would otherwise let a client stream bytes into this
+    /// buffer for as long as it liked. Dropping the excess is what a real UART
+    /// does when nobody reads the receive register, and it is the same bound the
+    /// emulator puts on its own pending-input queue.
     pub fn send_key(&mut self, byte: u8) {
-        self.rx.push_back(byte);
+        if self.rx.len() < KEY_QUEUE_CAP {
+            self.rx.push_back(byte);
+        }
     }
 
     /// Take everything the guest has printed.
@@ -365,6 +388,17 @@ impl Default for BootMachine {
     }
 }
 
+/// The disk geometries a booted 88-DCDD can carry, with what to call them.
+///
+/// A list rather than two constants because the documentation an operator reads
+/// is rendered from it — the same discipline `image::format::FORMATS` follows,
+/// so a geometry added here cannot go missing from the readme that tells people
+/// which disks work.
+pub const BOOT_GEOMETRIES: &[(Geometry, &str)] = &[
+    (Geometry::EIGHT_INCH, "Altair 88-DCDD 8\" floppy"),
+    (Geometry::MINIDISK, "Altair 88-MDS 5.25\" minidisk"),
+];
+
 /// Which geometry an image of this size has, if any.
 ///
 /// A short trailer is allowed. Several of the images in circulation carry a few
@@ -377,11 +411,14 @@ impl Default for BootMachine {
 /// longer identifies the geometry and accepting it would mean reading a disk we
 /// have not actually recognised.
 pub fn geometry_for(len: u64) -> Option<Geometry> {
-    [Geometry::EIGHT_INCH, Geometry::MINIDISK].into_iter().find(|g| {
+    BOOT_GEOMETRIES.iter().map(|(g, _)| *g).find(|g| {
         let want = g.image_len();
         len >= want && len - want < SECTOR_LEN as u64
     })
 }
+
+/// The largest trailer a bootable image may carry past its last sector.
+pub const MAX_IMAGE_TRAILER: u64 = SECTOR_LEN as u64 - 1;
 
 impl Machine for BootMachine {
     fn peek(&mut self, address: u16) -> u8 {
@@ -536,6 +573,93 @@ mod tests {
         let mut m = BootMachine::new();
         m.port_out(0x40, 0x55);
         assert_eq!(m.port_in(0x40), 0xFF);
+    }
+
+    /// The operator's modem must reach a booted guest at the ports they chose.
+    ///
+    /// This is the whole point of `attach_modem`: a booted Altair CP/M running
+    /// comms software has to find a UART where such software looks for one.
+    #[test]
+    fn test_the_configured_modem_ports_reach_a_booted_guest() {
+        use crate::cpm::resolve_access;
+
+        let mut m = BootMachine::new();
+        assert_eq!(
+            m.attach_modem(resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+            "the second 2SIO port is where an Altair's modem lives"
+        );
+        // What the peer sent reaches the guest...
+        m.modem().queue_rx(b"OK");
+        assert_eq!(m.port_in(0x13), b'O');
+        assert_eq!(m.port_in(0x13), b'K');
+        // ...and what the guest writes comes back for the driver to forward.
+        m.port_out(0x13, b'A');
+        m.port_out(0x13, b'T');
+        assert_eq!(m.modem().drain_tx(), b"AT");
+    }
+
+    /// The profile that catches people out: on a real Altair the console *is*
+    /// 2SIO port A, so pointing the modem at it would have the two fighting
+    /// over `0x10`/`0x11`.
+    #[test]
+    fn test_a_modem_profile_that_lands_on_our_hardware_is_refused() {
+        use crate::cpm::resolve_access;
+
+        let mut m = BootMachine::new();
+        match m.attach_modem(resolve_access("altair_2sio1")) {
+            ModemAttach::Unavailable(why) => {
+                assert!(why.contains("console"), "must name the clash: {why}");
+                assert!(why.contains("altair_2sio2"), "and what to use instead: {why}");
+            }
+            other => panic!("0x10/0x11 is the console, got {other:?}"),
+        }
+        // And the console still works, rather than answering as a UART.
+        assert_ne!(m.port_in(CONSOLE_STATUS_PORT as u16), 0);
+    }
+
+    /// `AUX:` and HBIOS are our BDOS device and RomWBW's firmware.  A booted
+    /// disk brings its own of both, so there is nothing for us to answer — and
+    /// saying why beats a modem that is silently absent.
+    #[test]
+    fn test_the_non_hardware_modem_modes_explain_themselves() {
+        use crate::cpm::resolve_access;
+
+        for key in ["aux", "hbios_1", "hbios_2"] {
+            let mut m = BootMachine::new();
+            match m.attach_modem(resolve_access(key)) {
+                ModemAttach::Unavailable(why) => assert!(!why.is_empty(), "{key} must say why"),
+                other => panic!("{key} cannot exist in a booted machine, got {other:?}"),
+            }
+        }
+        let mut m = BootMachine::new();
+        assert_eq!(m.attach_modem(resolve_access("off")), ModemAttach::Off);
+    }
+
+    /// A client streaming at a guest that never reads its console must not be
+    /// able to grow the host's memory.  A real UART simply drops what nobody
+    /// collects, and so do we.
+    #[test]
+    fn test_console_input_is_bounded() {
+        let mut m = BootMachine::new();
+        for i in 0..(KEY_QUEUE_CAP * 2) {
+            m.send_key((i & 0xFF) as u8);
+        }
+        assert_eq!(m.rx.len(), KEY_QUEUE_CAP, "the queue stops growing");
+        // And the bytes kept are the *earliest*, so a guest that starts reading
+        // sees the beginning of what was typed rather than an arbitrary window.
+        assert_eq!(m.port_in(CONSOLE_DATA_PORT as u16), 0);
+        assert_eq!(m.port_in(CONSOLE_DATA_PORT as u16), 1);
+    }
+
+    /// With no modem attached, its ports must read as an idle bus like any
+    /// other hardware we do not have — not as zero, and not as an echo.
+    #[test]
+    fn test_modem_ports_are_inert_until_one_is_attached() {
+        let mut m = BootMachine::new();
+        m.port_out(0x13, 0x55);
+        assert_eq!(m.port_in(0x12), 0xFF);
+        assert_eq!(m.port_in(0x13), 0xFF);
     }
 
     /// The front panel must answer, and must not answer with the idle bus.
@@ -696,6 +820,125 @@ mod tests {
         let mut m = BootMachine::new();
         let mut cpu = Cpu::new_8080();
         assert!(matches!(m.boot(&mut cpu, 0), Err(BootError::NoDisk(0))));
+    }
+
+    /// Run a booted guest until it stops printing, and return what it said.
+    ///
+    /// "Stops printing" rather than a fixed instruction count: a CP/M command
+    /// takes wildly different times depending on whether it touches the disk,
+    /// and a fixed budget either truncates `DIR` or wastes seconds on a prompt.
+    #[cfg(test)]
+    fn run_until_quiet(m: &mut BootMachine, cpu: &mut Cpu, budget: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut quiet: u64 = 0;
+        for _ in 0..budget {
+            cpu.execute_instruction(m);
+            let o = m.take_output();
+            if o.is_empty() {
+                quiet += 1;
+                // Long enough to cover a seek and a track read.
+                if quiet > 3_000_000 && !out.is_empty() {
+                    break;
+                }
+            } else {
+                quiet = 0;
+                out.extend(o);
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn printable(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|&b| if (0x20..0x7F).contains(&b) || b == b'\n' { b as char } else { '.' })
+            .collect()
+    }
+
+    /// The end-to-end test that exercises everything at once: boot a real disk,
+    /// use its own operating system to list its own directory, run **our**
+    /// terminal on it, and check that our virtual modem's ports reach it.
+    ///
+    /// EGT80 is the sharpest probe available for this. It is a real CP/M
+    /// program, built by a period assembler, that drives a UART directly — so
+    /// if it comes up and talks to `0x12`/`0x13` inside a booted Altair, then
+    /// the controller, the bootstrap, the CPU, the console, the guest's own
+    /// BDOS and our modem ports are all working together.
+    ///
+    /// **Blocked on getting EGT80 onto an Altair floppy in the first place**,
+    /// which is the same unsolved mapping that keeps `altair8` out of
+    /// `image::format::FORMATS`. Writing the file in with `cpmtools` — using
+    /// the measured geometry and the skew recovered from the disk's own boot
+    /// tracks — produces a directory entry for **extent 1 only**, with no
+    /// extent 0 anywhere on the disk. CP/M's `DIR` lists extent-0 entries, so
+    /// the guest correctly does not show it, and the file would be truncated
+    /// even if it did. That is a fact about the Altair block mapping, not about
+    /// booting: the same disk boots, runs its own `DIR` and lists its own
+    /// forty-one files perfectly from the bytes we never touched.
+    ///
+    /// The way in that does not need us to understand the layout at all is the
+    /// guest's own: these disks carry `PCGET.COM`, Mike Douglas's XMODEM
+    /// receiver for the 88-2SIO, so the guest can pull EGT80 in over our
+    /// virtual modem port and write it with its own BDOS. That is the next
+    /// thing to try, and it would test more of the path than this does.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image with `EGT80.COM`
+    /// really on it. Framing an image back up needs two sector checksums, both
+    /// measured from the disks themselves and holding for every sector of
+    /// DISK01 (192/192 and 2272/2272): tracks 0-5 keep a plain sum of the 128
+    /// data bytes at byte 132; tracks 6-76 keep the sum of the data plus header
+    /// bytes 2, 3, 5 and 6, at byte 4.
+    #[test]
+    #[ignore]
+    fn test_run_egt80_inside_a_booted_disk() {
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying EGT80.COM");
+            return;
+        };
+        let bytes = std::fs::read(&path).unwrap();
+        let mut m = BootMachine::new();
+        m.insert(0, bytes, true).expect("an 88-DCDD image");
+
+        // The modem where a real Altair would have put it: 2SIO port B.
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+        );
+
+        let mut cpu = Cpu::new_8080();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{banner}");
+        assert!(banner.contains("CP/M"), "no sign-on: {banner:?}");
+
+        // The guest's own DIR, which is its filesystem answering, not ours.
+        for &b in b"DIR\r" {
+            m.send_key(b);
+        }
+        let dir = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- DIR ---\n{dir}");
+        assert!(
+            dir.to_ascii_uppercase().contains("EGT80"),
+            "the guest's own DIR does not list EGT80: {dir:?}"
+        );
+
+        // Now run it.
+        for &b in b"EGT80\r" {
+            m.send_key(b);
+        }
+        let screen = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- EGT80 ---\n{screen}");
+        assert!(
+            screen.to_ascii_uppercase().contains("EGT80"),
+            "EGT80 did not start: {screen:?}"
+        );
+        println!(
+            "modem: guest wrote {:?}, rx free {}",
+            printable(&m.modem().drain_tx()),
+            m.modem().rx_free()
+        );
     }
 
     /// Boot every image in a folder and print what each one says.

@@ -2102,6 +2102,53 @@ fn test_modem_emulator_row_count() {
     assert!(rows <= 22, "modem emulator is {} rows, exceeds 22", rows);
 }
 
+/// CP/M emulator settings: header(3) + blank + 2 warning lines + blank
+/// + 5 status rows + blank + 6 actions + blank + Back + prompt = 22.
+///
+/// **The screen is full.** It sits exactly on the PETSCII budget, so the next
+/// row added here has to displace one or move to a submenu of its own — which
+/// is how this screen came to exist in the first place, when Other Settings
+/// reached the same limit. Counted against the real function: 21 `send_line`
+/// calls plus the prompt.
+#[test]
+fn test_cpm_settings_row_count() {
+    let header = 3;
+    let warning = 1 + 2; // blank + "be sure you trust..." over two lines
+    let status = 1 + 5; // blank + Emulator/Ceiling/Modem/Images/Runs
+    let actions = 1 + 6; // blank + E, C, U, D, I, B
+    let footer = 1 + 1 + 1; // blank + Back + prompt
+    let rows = header + warning + status + actions + footer;
+    assert_eq!(rows, 22, "the CP/M settings screen is {rows} rows");
+    assert!(rows <= 22, "CP/M settings is {rows} rows, exceeds 22");
+}
+
+/// Every key the CP/M settings screen displays must also be one it handles,
+/// and must appear in the error hint it prints when a user presses something
+/// else.  Both halves have gone wrong here: `I` was displayed for a whole
+/// release while only the parent menu handled it, and the hint had drifted
+/// away from the list twice.
+#[test]
+fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
+    let src = include_str!("config_ui.rs");
+    let start = src.find("pub(in crate::telnet) async fn cpm_settings").expect("the fn");
+    let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
+    let body = &src[start..end];
+
+    let hint = "Press E, C, D, U, I, B, or Q.";
+    assert!(body.contains(hint), "the error hint changed: it must list every key");
+    for key in ["E", "C", "U", "D", "I", "B"] {
+        assert!(
+            body.contains(&format!("self.cyan(\"{key}\")")),
+            "{key} must be a displayed menu item"
+        );
+        assert!(
+            body.contains(&format!("\"{}\" => ", key.to_ascii_lowercase())),
+            "{key} is displayed but never handled — pressing it would just error"
+        );
+        assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
+    }
+}
+
 /// Baud rate screen: header(3) + blank + 9 options + blank + footer + prompt = 15.
 #[test]
 fn test_baud_screen_row_count() {

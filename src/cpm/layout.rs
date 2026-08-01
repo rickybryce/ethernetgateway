@@ -12,6 +12,7 @@
 //! is, and the readme is written only when absent — an operator who has
 //! annotated it keeps their notes.
 
+use super::boot_machine::{BOOT_GEOMETRIES, MAX_IMAGE_TRAILER};
 use super::image::{format::FORMATS, IMAGES_DIR};
 use std::path::{Path, PathBuf};
 
@@ -118,8 +119,11 @@ safe, so that is allowed; writing to one is not.
 To make a read-only image writable, rename it with the right prefix.
 
 
-FORMATS
--------
+FORMATS YOU CAN MOUNT
+---------------------
+
+These hold a CP/M filesystem the gateway reads and writes itself.  Name one
+with its token to make it writable, as above.
 
 ",
     );
@@ -132,6 +136,46 @@ FORMATS
     }
     s.push_str(
         "\
+FORMATS YOU CAN BOOT
+--------------------
+
+These are MITS 88-DCDD floppies.  The gateway does not read their
+filesystem at all — it runs the disk, and the disk's own operating system
+does that work.  There is no naming convention here and nothing to rename:
+an image is bootable if it is the right size.  A few bytes of trailer past
+the last sector are allowed, because several images in circulation have
+one.
+
+",
+    );
+    for (g, label) in BOOT_GEOMETRIES {
+        // The label sits in the mount table's token column: there is no token
+        // to put there, and leaving the gap makes the entry look truncated.
+        s.push_str(&format!("    {label}\n"));
+        s.push_str(&format!(
+            "    {:<10} {} bytes = {} tracks x {} sectors x 137\n",
+            "",
+            g.image_len(),
+            g.tracks,
+            g.sectors,
+        ));
+        s.push_str(&format!(
+            "    {:<10} plus up to {} bytes of trailer\n\n",
+            "", MAX_IMAGE_TRAILER,
+        ));
+    }
+    s.push_str(
+        "\
+This is how the disks that are NOT CP/M run: Altair DOS, Altair Disk
+Extended BASIC and Time Sharing BASIC all boot, and so does CP/M 3.0.
+Mounting any of them shows nothing, which is correct — they are not CP/M
+filesystems.  A programs disk (data, with no boot sector) is refused.
+
+Not all of these are the same disk.  A 337,568-byte image is an 8-inch
+floppy; 76,720 is a minidisk.  The gateway tells them apart by size, so a
+truncated or padded file may be refused even though it looks fine.
+
+
 WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO
 -----------------------------------------------
 
@@ -173,16 +217,20 @@ them by their SIZE:
   HDSKnn.DSK  4,988,928 bytes  ->  altairhd_<what-it-holds>.dsk
   TDISKnn.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
 
-  So DISK07.DSK holding WordStar becomes  altair8_wordstar.dsk .
+  So a 256,256-byte disk holding WordStar becomes
+  ibm3740_wordstar.dsk .
 
-  The 337,568-byte Altair 88-DCDD floppies (DISKnn.DSK) are NOT supported
-  yet.  Their directory reads but file content past the first allocation
-  block does not, so they are refused rather than mounted with bad data.
+  The 337,568-byte Altair 88-DCDD floppies are a different case: they
+  BOOT rather than mount, and need no renaming at all.  Mounting one is
+  still not supported — its directory reads but file content past the
+  first allocation block does not, so it is refused rather than mounted
+  with bad data.  Booting sidesteps that entirely, because the disk's own
+  operating system does the reading.
 
-  Not every one of these is a CP/M disk either.  The Altair DOS, Altair
-  Disk BASIC, Time Sharing BASIC and mini-disk images use their own
-  filesystems; they will mount but show no files, because there is no
-  CP/M directory in them to read.  That is expected.
+  The same goes for the disks that are not CP/M at all: Altair DOS,
+  Altair Disk BASIC, Time Sharing BASIC and the minidisks.  Mounting
+  shows no files, because there is no CP/M directory in them to read.
+  Boot them instead.
 
 IMSAI 8080esp / z80pack images are 256,256-byte 8\" single-density disks
 and are all the IBM 3740 layout:
@@ -302,6 +350,65 @@ mod tests {
         }
     }
 
+    /// Every geometry that BOOTS must appear too.
+    ///
+    /// The readme used to list only the mountable formats, which meant someone
+    /// holding an Altair floppy — the commonest disk there is for this hardware
+    /// — read it and concluded the gateway did not support their image, when in
+    /// fact it boots. Rendered from `BOOT_GEOMETRIES` so a geometry added to
+    /// the code cannot go missing from the file operators actually read.
+    #[test]
+    fn test_readme_documents_every_bootable_geometry() {
+        let text = images_readme();
+        assert!(text.contains("FORMATS YOU CAN BOOT"), "the section must exist");
+        for (g, label) in BOOT_GEOMETRIES {
+            assert!(text.contains(label), "readme omits the bootable {label}");
+            assert!(
+                text.contains(&g.image_len().to_string()),
+                "readme omits the size of {label} ({} bytes)",
+                g.image_len()
+            );
+        }
+    }
+
+    /// Mounting and booting are different things and the readme has to say so —
+    /// it is the one place an operator meets both without any other context.
+    #[test]
+    fn test_readme_distinguishes_mounting_from_booting() {
+        let text = images_readme();
+        assert!(text.contains("MOUNTING IS NOT BOOTING"));
+        assert!(text.contains("FORMATS YOU CAN MOUNT"));
+        assert!(text.contains("ESC twice"), "must say how to get back out");
+        assert!(text.contains("READ-ONLY"), "and that a booted image is protected");
+    }
+
+    /// The readme ships to operators.  Naming the upstream *convention*
+    /// (`DISKnn.DSK`) is useful — it is what a downloaded file is actually
+    /// called — but the index of images and what each one holds is a working
+    /// note of ours, not something we distribute or should appear to.
+    #[test]
+    fn test_readme_carries_no_index_of_sample_images() {
+        let text = images_readme().to_ascii_uppercase();
+        assert!(!text.contains("DISKDIR"), "the sample-image manifest is not ours to ship");
+        // Naming a specific disk and saying what is on it is the shape of that
+        // index, and is what must not leak in.
+        for claim in ["DISK07.DSK HOLDING", "DISK01.DSK:", "DISK08.DSK"] {
+            assert!(!text.contains(claim), "readme describes a specific sample image: {claim}");
+        }
+    }
+
+    /// A claim that stopped being true is worse than no claim.  These floppies
+    /// boot now, and this file is where someone holding one looks first.
+    #[test]
+    fn test_readme_does_not_still_call_altair_floppies_unsupported() {
+        let text = images_readme();
+        assert!(
+            !text.contains("NOT supported\nyet") && !text.contains("are NOT supported"),
+            "the readme still says Altair floppies are unsupported; they boot"
+        );
+        assert!(text.contains("BOOT rather than mount"), "and it must say what to do instead");
+    }
+
     /// The readme must state the read-only rule, since that is the single
     /// behaviour most likely to surprise someone.
     #[test]
@@ -313,6 +420,15 @@ mod tests {
 
     /// Lines must fit a narrow terminal — this file is read over telnet on
     /// hardware that may be 80 columns, and it is a plain text file besides.
+    /// Print the readme exactly as an operator receives it.  Ignored: a
+    /// reading aid, not a check — the file is prose and prose is reviewed by
+    /// reading it, which is how the stale "not supported" claim was found.
+    #[test]
+    #[ignore]
+    fn test_show_the_readme() {
+        println!("{}", images_readme());
+    }
+
     #[test]
     fn test_readme_lines_fit_eighty_columns() {
         for (n, line) in images_readme().lines().enumerate() {

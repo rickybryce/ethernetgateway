@@ -4648,6 +4648,31 @@ mod tests {
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
     }
 
+    /// The boot setting is validated where it is written, not only where it is
+    /// used: it can arrive from a web form, so it is shaped by whoever posted
+    /// it, and a name that could never be opened has no business reaching the
+    /// config file.
+    #[test]
+    fn test_apply_config_key_cpm_boot_image() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.cpm_boot_image, "", "the emulator by default");
+
+        apply_config_key(&mut cfg, "cpm_boot_image", "altair8_cpm.dsk");
+        assert_eq!(cfg.cpm_boot_image, "altair8_cpm.dsk");
+
+        // Empty is always allowed — it means "run the emulator".
+        apply_config_key(&mut cfg, "cpm_boot_image", "");
+        assert_eq!(cfg.cpm_boot_image, "");
+
+        // Anything that is not a bare filename is refused, leaving the value
+        // alone.  These are the shapes a path traversal takes.
+        cfg.cpm_boot_image = "good.dsk".to_string();
+        for bad in ["../../etc/passwd", "/etc/passwd", "sub/dir.dsk", "..", ".hidden.dsk"] {
+            apply_config_key(&mut cfg, "cpm_boot_image", bad);
+            assert_eq!(cfg.cpm_boot_image, "good.dsk", "{bad:?} must be refused");
+        }
+    }
+
     #[test]
     fn test_apply_config_key_cpm_emu_uart() {
         let mut cfg = Config::default();

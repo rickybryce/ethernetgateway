@@ -3145,6 +3145,34 @@ mod tests {
         assert!(html.contains("warnOnEnable(this, 'warn-atdt-kermit')"));
     }
 
+    /// Every config key needs all three UIs, and the web one is the easiest to
+    /// forget because its field is a string in a format! rather than a
+    /// compile-checked reference.
+    #[test]
+    fn test_render_main_page_offers_the_cpm_boot_choice() {
+        let cfg = Config::default();
+        let html = render_main_page(&cfg, None);
+        assert!(html.contains("name=\"cpm_boot_image\""), "the select must be on the page");
+        assert!(html.contains("CP/M runs"), "and be labelled");
+        // The emulator is always offered, and is the empty value so that a
+        // config file written before this key existed keeps its behaviour.
+        assert!(
+            html.contains("<option value=\"\" selected>CP/M Emulator</option>"),
+            "the emulator must be the selected empty option by default"
+        );
+    }
+
+    /// A disk named in the config but no longer in the images folder must still
+    /// be shown — otherwise the next save silently resets it and the operator
+    /// never learns why their gateway is running the emulator.
+    #[test]
+    fn test_a_missing_boot_image_still_appears_in_the_web_list() {
+        let cfg = Config { cpm_boot_image: "vanished.dsk".to_string(), ..Default::default() };
+        let html = render_main_page(&cfg, None);
+        assert!(html.contains("vanished.dsk"), "the setting must be visible");
+        assert!(html.contains("(missing)"), "and marked as not being there");
+    }
+
     #[test]
     fn test_render_main_page_includes_notice() {
         let cfg = Config::default();

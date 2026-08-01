@@ -325,6 +325,49 @@ mod tests {
         c
     }
 
+    /// The list every configuration screen renders.
+    ///
+    /// The emulator must be first and must be the empty value: first because it
+    /// is what CP/M has always meant here, and empty because a config file
+    /// written before this key existed has to keep behaving the same way.
+    #[test]
+    fn test_the_boot_choices_start_with_the_emulator() {
+        let dir = std::env::temp_dir().join("egw_boot_choices_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(super::super::image::IMAGES_DIR)).unwrap();
+
+        let choices = boot_choices(&dir);
+        assert_eq!(choices.len(), 1, "an empty folder still offers the emulator");
+        assert_eq!(choices[0].0, BOOT_EMULATOR);
+        assert!(choices[0].0.is_empty(), "the emulator is the empty setting");
+        assert_eq!(choices[0].1, BOOT_EMULATOR_LABEL);
+
+        let images = dir.join(super::super::image::IMAGES_DIR);
+        std::fs::write(images.join("altair8_cpm.dsk"), [0u8; 8]).unwrap();
+        std::fs::write(images.join("games.dsk"), [0u8; 8]).unwrap();
+        std::fs::write(images.join("readme.txt"), b"not an image").unwrap();
+
+        let choices = boot_choices(&dir);
+        let values: Vec<&str> = choices.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["", "altair8_cpm.dsk", "games.dsk"],
+            "the emulator first, then the disks, sorted — and no readme"
+        );
+        assert!(choices[1].1.starts_with("Boot "), "{}", choices[1].1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A disk named in the config and since deleted must still describe itself.
+    /// The screens are where an operator finds out why their gateway is running
+    /// the emulator when they asked for a disk, so the label cannot depend on
+    /// the file being there.
+    #[test]
+    fn test_a_label_exists_for_a_setting_whose_disk_is_gone() {
+        assert_eq!(boot_choice_label(""), BOOT_EMULATOR_LABEL);
+        assert_eq!(boot_choice_label("vanished.dsk"), "Boot vanished.dsk");
+    }
+
     #[test]
     fn test_cold_boot_loads_the_sector_and_enters_at_zero() {
         let mut c = with_disk();

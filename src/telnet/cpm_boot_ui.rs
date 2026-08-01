@@ -173,8 +173,18 @@ impl TelnetSession {
 
         // Save whatever the guest changed, whatever ended the session — a user
         // who pressed ESC still wants their work.
+        //
+        // Only drive 0, explicitly.  One image is inserted and it goes in drive
+        // 0, so today every dirty entry is that one; writing them all to `image`
+        // regardless of which drive they came from would quietly become a
+        // corrupting bug the moment a second drive is added, and that is exactly
+        // the kind of change nobody would think to re-check this loop for.
         if writable {
-            for (_, bytes) in machine.take_dirty() {
+            for (drive, bytes) in machine.take_dirty() {
+                if drive != 0 {
+                    glog!("CP/M boot: drive {} was written but has no file — not saved", drive);
+                    continue;
+                }
                 if let Err(e) = tokio::fs::write(image, &bytes).await {
                     glog!("CP/M boot: could not save {}: {}", name, e);
                 }
@@ -214,28 +224,37 @@ impl TelnetSession {
             cpu.execute_instruction(machine);
             executed += 1;
 
-            let out = machine.take_output();
-            if !out.is_empty() {
-                // The guest is driving a bare serial console, so its control
-                // codes go out as they are — a booted OS brings whatever
-                // terminal handling it has of its own, and second-guessing it
-                // would break the software that gets it right.
-                //
-                // A Commodore is the exception, and not a cosmetic one: PETSCII
-                // swaps the two cases, so an untranslated banner arrives as
-                // graphics characters. Folding the letters is the least we can
-                // do and leaves everything else untouched.
-                if is_petscii {
-                    let folded: Vec<u8> = out.iter().map(|&b| ascii_to_petscii_byte(b)).collect();
-                    self.send_raw(&folded).await?;
-                } else {
-                    self.send_raw(&out).await?;
-                }
-                self.flush().await?;
-                printed = true;
-            }
-
             if executed.is_multiple_of(KEY_POLL_INTERVAL) {
+                // Everything the guest printed since the last seam, in one
+                // write.  Draining per instruction instead would be a syscall
+                // per character — a guest printing a directory listing would
+                // make two thousand of them — and a seam is a fifth of a
+                // millisecond, so nothing a person could perceive is lost.
+                // It comes first in the seam so that output is always on its
+                // way out before the idle nap below.
+                let out = machine.take_output();
+                if !out.is_empty() {
+                    // The guest is driving a bare serial console, so its
+                    // control codes go out as they are — a booted OS brings
+                    // whatever terminal handling it has of its own, and
+                    // second-guessing it would break the software that gets it
+                    // right.
+                    //
+                    // A Commodore is the exception, and not a cosmetic one:
+                    // PETSCII swaps the two cases, so an untranslated banner
+                    // arrives as graphics characters. Folding the letters is
+                    // the least we can do and leaves everything else untouched.
+                    if is_petscii {
+                        let folded: Vec<u8> =
+                            out.iter().map(|&b| ascii_to_petscii_byte(b)).collect();
+                        self.send_raw(&folded).await?;
+                    } else {
+                        self.send_raw(&out).await?;
+                    }
+                    self.flush().await?;
+                    printed = true;
+                }
+
                 let mut keys = 0usize;
                 // Drain everything waiting rather than one byte per seam, so a
                 // pasted command or a file being sent into the guest's console
@@ -305,6 +324,13 @@ impl TelnetSession {
                 let disk_now = machine.disk_accesses();
                 if keys > 0 || printed || modem_moved || disk_now != disk_before {
                     idle_seams = 0;
+                    // A guest that is printing, loading or moving modem bytes
+                    // is not an abandoned session, so the idle clock is held
+                    // off.  This matches the emulator, where the timeout is
+                    // enforced at a *console read* — a program in the middle of
+                    // its work is never cut off, only one waiting for a person
+                    // who is not there.
+                    last_key = tokio::time::Instant::now();
                 } else {
                     idle_seams = idle_seams.saturating_add(1);
                     if let Some(nap) = idle_nap(idle_seams) {
