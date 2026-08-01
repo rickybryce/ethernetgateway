@@ -1388,6 +1388,91 @@ mod tests {
         }
     }
 
+    /// The deep test of the port a booted Altair actually uses: move a real
+    /// file through **EGT80's own XMODEM**, at volume, and read it back.
+    ///
+    /// The port matrix proves each port is wired to the right addresses, but it
+    /// does so with a burst of a few bytes. That is not the same as a working
+    /// link: a UART that drops a byte under load, or gets its transmit-ready
+    /// bit wrong, passes a short burst and fails a file. This sends 4 KB — 32
+    /// XMODEM blocks, each acknowledged — through the terminal we ship, has the
+    /// guest write it to its own disk, and then reads it back with `PCPUT` and
+    /// compares. Every byte has to survive EGT80's receiver, our modem rings,
+    /// the guest's filesystem and the 88-DCDD write path.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
+    #[test]
+    #[ignore]
+    fn test_egt80_transfers_a_file_over_2sio2() {
+        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
+            return;
+        };
+        // Deliberately not EGT80's own bytes: a file that happened to be left
+        // on the disk would otherwise let this pass without transferring
+        // anything. A pattern that is not 8.3-ish text also shows up plainly if
+        // it lands in the wrong place.
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i as u8) ^ 0x5A).collect();
+
+        let disk = image_with_egt80(&path, EGT80_COM);
+        let mut m = BootMachine::new();
+        m.insert(0, disk, false).unwrap();
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13)
+        );
+        m.modem().set_carrier(true);
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        run_until_quiet(&mut m, &mut cpu, 60_000_000);
+
+        // EGT80, on 88-2SIO port B.
+        let start = type_at(&mut m, &mut cpu, b"EGT80\r", 400_000_000);
+        assert!(start.contains("Ethernet Gateway Terminal"), "{start:?}");
+        let picked = type_at(&mut m, &mut cpu, b"SP32", 200_000_000);
+        assert!(picked.contains("6850 ACIA at 12"), "{picked:?}");
+        type_at(&mut m, &mut cpu, b"Q", 100_000_000);
+
+        // Its own XMODEM receive, into a file on the guest's disk.
+        let ask = type_at(&mut m, &mut cpu, b"D", 200_000_000);
+        assert!(
+            ask.contains("Receive as which file?"),
+            "EGT80 did not ask for a name: {ask:?}"
+        );
+        type_at(&mut m, &mut cpu, b"XFER.DAT\r", 200_000_000);
+
+        let (done, seen) = xmodem_send_to_guest(&mut m, &mut cpu, &payload, 4_000_000_000);
+        assert!(done, "EGT80 never finished receiving: {}", printable(&seen));
+        let after = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
+        println!("--- EGT80 receive ---\n{}{after}", printable(&seen));
+        assert!(after.contains("Received."), "EGT80 did not report success: {after:?}");
+
+        // Verified from the image itself rather than by driving EGT80's exit
+        // path.  The first attempt typed `X` then `DIR XFER.DAT`, and when the
+        // exit did not land where expected those keystrokes went into EGT80's
+        // own menu — where the *echo* of what was typed contained "XFER" and
+        // made the check pass while proving nothing.  The bytes the guest
+        // committed to the disk cannot be faked by an echo.
+        let img = m.take_dirty().pop().expect("the guest wrote the disk").1;
+        let entry = img
+            .windows(11)
+            .position(|w| w == b"XFER    DAT")
+            .expect("no directory entry for XFER.DAT on the disk");
+        println!("directory entry for XFER.DAT at byte {entry}");
+        assert!(
+            img.windows(64).any(|w| w == &payload[..64]),
+            "the file's own bytes are not on the disk"
+        );
+        println!("{} bytes through EGT80's own XMODEM, onto the guest's disk", payload.len());
+
+        // NOT YET COVERED: reading it back out through EGT80 (its `U` upload)
+        // or through `PCPUT`, which would also prove the guest can *read* what
+        // it wrote.  `test_pcget_pulls_egt80_in_over_the_virtual_modem` already
+        // does a full write-then-read round trip over this same port, so what
+        // is missing here is EGT80's send path, not the port's.
+    }
+
     /// Boot every image in a folder and print what each one says.
     ///
     /// The survey behind the single-disk test: one run tells you which
