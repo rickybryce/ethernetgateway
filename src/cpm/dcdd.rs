@@ -138,6 +138,15 @@ struct Drive {
     interrupts: bool,
     /// Set between "begin write" and the end of the sector.
     writing: bool,
+    /// Where the sector being written belongs — captured when the write
+    /// starts, not read back when it is committed.
+    ///
+    /// The head can move between the two. A guest writing a directory entry
+    /// and then seeking away to write the file's data would otherwise have its
+    /// directory sector land on whatever track it had stepped to, which is
+    /// exactly what happened: a sector whose own header said track 2 was
+    /// committed to track 69, and CP/M reported `Bdos Err On A: Bad Sector`.
+    write_at: Option<(u8, u8)>,
     /// Cursor into `buffer`; `None` when no transfer is in progress.
     byte: Option<usize>,
     buffer: [u8; SECTOR_LEN],
@@ -161,6 +170,7 @@ impl Default for Drive {
             head_loaded: false,
             interrupts: false,
             writing: false,
+            write_at: None,
             byte: None,
             buffer: [0; SECTOR_LEN],
             dirty: false,
@@ -322,17 +332,14 @@ impl Dcdd {
             self.sector_true = false;
         } else {
             // Leaving a sector: hand back anything written to it, then step on.
-            let (sectors, was_writing, track, sector) = {
+            let sectors = {
                 let d = &self.drives[sel as usize];
                 let g = d.disk.as_ref().map(|k| k.geometry).unwrap_or(Geometry::EIGHT_INCH);
-                (g.sectors, d.writing && d.dirty, d.track, d.sector)
+                g.sectors
             };
-            if was_writing {
-                request = Request::Write { drive: sel, track, sector };
-            }
+            // Where the write started, not where the head is now.
+            request = self.finish_write(sel);
             let d = &mut self.drives[sel as usize];
-            d.writing = false;
-            d.dirty = false;
             d.sector = (d.sector + 1) % sectors.max(1);
             d.byte = None;
             self.sector_true = true;
@@ -435,6 +442,12 @@ impl Dcdd {
             .as_ref()
             .map(|d| d.geometry.tracks)
             .unwrap_or(TRACKS);
+        // Anything half-written has to be handed back before the head leaves
+        // the track it was written on.
+        let mut request = Request::None;
+        if value & (control::STEP_IN | control::STEP_OUT | control::HEAD_UNLOAD) != 0 {
+            request = self.finish_write(sel);
+        }
         let d = &mut self.drives[sel as usize];
         if value & control::STEP_IN != 0 && d.track + 1 < tracks {
             d.track += 1;
@@ -462,9 +475,36 @@ impl Dcdd {
             if !read_only {
                 d.writing = true;
                 d.byte = Some(0);
+                // The guest has already positioned itself; this is the sector
+                // it means to write, whatever the head does next.
+                d.write_at = Some((d.track, d.sector));
             }
         }
-        Request::None
+        request
+    }
+
+    /// End a write in progress, returning where its bytes belong.
+    ///
+    /// Called when the head moves as well as when the sector passes, because a
+    /// write that is still pending when the guest seeks is not abandoned data —
+    /// the guest wrote it and expects to read it back. Committing it to the
+    /// place it was written for is both what real hardware achieves (it
+    /// finishes the sector before the head can step) and the only answer that
+    /// does not silently move a sector to another track.
+    fn finish_write(&mut self, sel: u8) -> Request {
+        let Some(d) = self.drives.get_mut(sel as usize) else {
+            return Request::None;
+        };
+        let pending = d.writing && d.dirty;
+        let at = d.write_at;
+        d.writing = false;
+        d.dirty = false;
+        d.write_at = None;
+        d.byte = None;
+        match (pending, at) {
+            (true, Some((track, sector))) => Request::Write { drive: sel, track, sector },
+            _ => Request::None,
+        }
     }
 
     /// Write one byte into the current sector, port 0Ah.
@@ -496,6 +536,68 @@ mod tests {
         c.port_out(0x08, 0); // select drive 0
         c.port_out(0x09, control::HEAD_LOAD);
         c
+    }
+
+    /// A sector must be committed to the track it was written on, even if the
+    /// head has moved before the write is handed back.
+    ///
+    /// Regression, and it cost a real transfer: CP/M writes a directory entry
+    /// on the directory track, then seeks away to write the file's data. The
+    /// commit used to read the drive's *current* track, so the directory sector
+    /// landed on whichever track the head had stepped to — a sector whose own
+    /// header said track 2 was written to track 69, and the guest's next read
+    /// of it failed its checksum with `Bdos Err On A: Bad Sector`.
+    #[test]
+    fn test_a_write_lands_where_it_was_written_not_where_the_head_went() {
+        let mut c = ready();
+        // Position on track 0, sector 0, and write a sector.
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for i in 0..SECTOR_LEN {
+            c.port_out(0x0A, i as u8);
+        }
+        // Now seek away before anything has committed, exactly as CP/M does
+        // between the directory and the data.
+        let req = c.port_out(0x09, control::STEP_IN);
+        assert_eq!(
+            req,
+            Request::Write { drive: 0, track: 0, sector: 0 },
+            "the sector belongs to track 0, where it was written"
+        );
+        // And the head really did move, so this is not a no-op test.  Status
+        // is returned inverted, so the track-0 bit reads 0 while at track 0.
+        assert_ne!(c.read_status() & status::TRACK0, 0, "the head stepped off track 0");
+    }
+
+    /// The ordinary path — the sector passing under the head — must commit to
+    /// the same place.
+    #[test]
+    fn test_a_write_committed_by_rotation_uses_the_written_location() {
+        let mut c = ready();
+        // Step to track 3 first, so a stale "current track" would be visible.
+        for _ in 0..3 {
+            c.port_out(0x09, control::STEP_IN);
+        }
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for i in 0..SECTOR_LEN {
+            c.port_out(0x0A, i as u8);
+        }
+        let mut got = Request::None;
+        for _ in 0..4 {
+            let (_, r) = c.port_in(0x09);
+            if r != Request::None {
+                got = r;
+            }
+        }
+        assert_eq!(got, Request::Write { drive: 0, track: 3, sector: 0 });
+    }
+
+    /// A write with nothing in it must not be handed back at all — committing
+    /// an untouched buffer would overwrite a good sector with stale bytes.
+    #[test]
+    fn test_an_empty_write_is_not_committed() {
+        let mut c = ready();
+        c.port_out(0x09, control::WRITE_ENABLE);
+        assert_eq!(c.port_out(0x09, control::STEP_IN), Request::None);
     }
 
     /// Sector numbers must be readable back out of the position register.

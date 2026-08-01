@@ -34,7 +34,14 @@ use super::dcdd::{Dcdd, Request, SECTOR_LEN};
 pub const BOOT_EMULATOR: &str = "";
 
 /// What the emulator is called wherever a user has to choose it.
-pub const BOOT_EMULATOR_LABEL: &str = "CP/M Emulator";
+///
+/// "CP/M Emulator" and not "CCP-lite": the prompt is one part of a thing that
+/// is also a Z80, our BDOS and BIOS, drives A:–P:, EGT80 and the virtual modem,
+/// and `cpm_emu_enabled`, the telnet screen, the web page, the desktop UI and
+/// the manual all already call it this. The qualifier is doing the real work,
+/// because *booting* an Altair CP/M disk is emulation too — what separates them
+/// is whose operating system runs and whose drives you get.
+pub const BOOT_EMULATOR_LABEL: &str = "CP/M Emulator (gateway drives A:-P:)";
 
 /// The choices for `cpm_boot_image`: our emulator, then every image on hand.
 ///

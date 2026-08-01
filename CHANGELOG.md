@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image is opened **read-only** unless you say otherwise, and a **double-`ESC`**
   always gets you back to the gateway.
 
+  Proven end to end and byte for byte: a booted Altair CP/M receives EGT80 with
+  its own `PCGET.COM` over the virtual modem at `0x12`/`0x13`, writes it with
+  its own BDOS, lists it in its own `DIR`, and sends it back with `PCPUT` —
+  18,048 bytes, identical. That exercises the controller both ways, the
+  bootstrap, the CPU, the console, the guest's filesystem and both directions of
+  our modem port, and needs no knowledge of the Altair block layout at all.
+
   Reached two ways. The new `cpm_boot_image` key decides what the CP/M menu
   item runs — empty (the default) is the emulator, a filename in `CPM/images`
   boots that disk — and it is a cycling selector on the telnet CP/M settings
@@ -69,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A sector was written to whichever track the head had moved to, not the one
+  it was written on.** CP/M writes a directory entry on the directory track and
+  then seeks away to write the file's data; the controller read the drive's
+  *current* track when handing the sector back, so the directory sector landed
+  on the data track. A sector whose own header said track 2 was committed to
+  track 69, and the guest's next read of it failed its checksum with
+  `Bdos Err On A: Bad Sector`. The write is now committed to where it began,
+  and a seek or head-unload hands back anything still pending rather than
+  carrying it to the new track. Found by having a booted Altair CP/M receive a
+  file with its own `PCGET.COM` over the virtual modem — the first time a real
+  guest had ever driven the write path.
 - `I` — *Mount/unmount disk images* — was listed on the telnet CP/M settings
   screen but only ever handled on the parent menu, so pressing it there
   answered "Press E, C, D, U, or Q." The screen's own error hint had also

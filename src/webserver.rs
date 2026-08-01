@@ -3156,8 +3156,13 @@ mod tests {
         assert!(html.contains("CP/M runs"), "and be labelled");
         // The emulator is always offered, and is the empty value so that a
         // config file written before this key existed keeps its behaviour.
+        // Built from the label rather than typed out, so renaming the choice
+        // is a one-line change instead of a hunt through the tests.
         assert!(
-            html.contains("<option value=\"\" selected>CP/M Emulator</option>"),
+            html.contains(&format!(
+                "<option value=\"\" selected>{}</option>",
+                html_escape(crate::cpm::boot::BOOT_EMULATOR_LABEL)
+            )),
             "the emulator must be the selected empty option by default"
         );
     }

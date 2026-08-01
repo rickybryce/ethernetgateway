@@ -941,6 +941,297 @@ mod tests {
         );
     }
 
+    /// Send a file to a booted guest with XMODEM, over the virtual modem's
+    /// ports, while the guest runs.
+    ///
+    /// A sender rather than a receiver because that is the direction that puts
+    /// a file *onto* a disk we cannot write ourselves. Deliberately written out
+    /// here in the classic form rather than driven through `crate::xmodem`:
+    /// that one speaks to an async stream, and what is on the other side of
+    /// this is a synchronous pair of rings being clocked by a CPU. Keeping the
+    /// two apart also means this test would notice if our own implementation
+    /// drifted, instead of agreeing with it.
+    ///
+    /// Returns what the guest printed while the transfer ran.
+    #[cfg(test)]
+    fn xmodem_send_to_guest(
+        m: &mut BootMachine,
+        cpu: &mut Cpu,
+        file: &[u8],
+        budget: u64,
+    ) -> (bool, Vec<u8>) {
+        const SOH: u8 = 0x01;
+        const EOT: u8 = 0x04;
+        const ACK: u8 = 0x06;
+        const NAK: u8 = 0x15;
+        const CRC: u8 = b'C';
+
+        let blocks: Vec<Vec<u8>> = file
+            .chunks(128)
+            .map(|c| {
+                let mut b = c.to_vec();
+                // The last block is padded, as XMODEM has no length field.
+                b.resize(128, 0x1A);
+                b
+            })
+            .collect();
+
+        let mut console = Vec::new();
+        let mut sent = 0usize; // blocks fully acknowledged
+        let mut crc_mode = None; // decided by the receiver's first prompt
+        let mut in_flight = false;
+        let mut done = false;
+        let mut eot_sent = false;
+
+        for _ in 0..budget {
+            cpu.execute_instruction(m);
+            console.extend(m.take_output());
+
+            // Whatever the guest wrote at its UART is the receiver talking.
+            for b in m.modem().drain_tx() {
+                match b {
+                    NAK | CRC if crc_mode.is_none() => crc_mode = Some(b == CRC),
+                    ACK if in_flight => {
+                        in_flight = false;
+                        sent += 1;
+                    }
+                    ACK if eot_sent => done = true,
+                    NAK if in_flight => in_flight = false, // resend the same block
+                    _ => {}
+                }
+            }
+            if done {
+                break;
+            }
+            let Some(use_crc) = crc_mode else {
+                continue; // the receiver has not asked yet
+            };
+            if in_flight || eot_sent {
+                continue;
+            }
+            if sent == blocks.len() {
+                m.modem().queue_rx(&[EOT]);
+                eot_sent = true;
+                continue;
+            }
+
+            let n = sent;
+            let mut pkt = vec![SOH, (n as u8).wrapping_add(1), !(n as u8).wrapping_add(1)];
+            pkt.extend_from_slice(&blocks[n]);
+            if use_crc {
+                // CRC-16/XMODEM, written out here rather than borrowed from
+                // `crate::xmodem`: an independent implementation is the whole
+                // value of a cross-check, and one that calls the code under
+                // test would agree with it however wrong it was.
+                let mut c: u16 = 0;
+                for &byte in &blocks[n] {
+                    c ^= (byte as u16) << 8;
+                    for _ in 0..8 {
+                        c = if c & 0x8000 != 0 { (c << 1) ^ 0x1021 } else { c << 1 };
+                    }
+                }
+                pkt.push((c >> 8) as u8);
+                pkt.push(c as u8);
+            } else {
+                pkt.push(blocks[n].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+            }
+            m.modem().queue_rx(&pkt);
+            in_flight = true;
+        }
+        (done, console)
+    }
+
+    /// Receive a file from a booted guest with XMODEM, over the modem's ports.
+    ///
+    /// The other direction, and the only way to check that what the guest wrote
+    /// to its disk is what we sent: read it back with the guest's own reader.
+    #[cfg(test)]
+    fn xmodem_receive_from_guest(
+        m: &mut BootMachine,
+        cpu: &mut Cpu,
+        budget: u64,
+    ) -> (Option<Vec<u8>>, Vec<u8>) {
+        const SOH: u8 = 0x01;
+        const EOT: u8 = 0x04;
+        const ACK: u8 = 0x06;
+        const NAK: u8 = 0x15;
+
+        let mut console = Vec::new();
+        let mut file = Vec::new();
+        let mut wire: Vec<u8> = Vec::new();
+        let mut done = false;
+        // Checksum mode: the plainest thing every sender supports.
+        let mut prompted = 0u64;
+
+        for i in 0..budget {
+            cpu.execute_instruction(m);
+            console.extend(m.take_output());
+            wire.extend(m.modem().drain_tx());
+
+            // Prod the sender until it starts, the way a real receiver does.
+            if wire.is_empty() && file.is_empty() && i.wrapping_sub(prompted) > 20_000_000 {
+                prompted = i;
+                m.modem().queue_rx(&[NAK]);
+            }
+
+            loop {
+                match wire.first() {
+                    Some(&EOT) => {
+                        wire.remove(0);
+                        m.modem().queue_rx(&[ACK]);
+                        done = true;
+                    }
+                    Some(&SOH) if wire.len() >= 132 => {
+                        let pkt: Vec<u8> = wire.drain(..132).collect();
+                        let sum = pkt[3..131].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+                        if pkt[1] == !pkt[2] && sum == pkt[131] {
+                            file.extend_from_slice(&pkt[3..131]);
+                            m.modem().queue_rx(&[ACK]);
+                        } else {
+                            m.modem().queue_rx(&[NAK]);
+                        }
+                    }
+                    // Anything that is not the start of a packet is noise
+                    // between frames; drop it rather than desynchronise.
+                    Some(&b) if b != SOH => {
+                        wire.remove(0);
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        (if done { Some(file) } else { None }, console)
+    }
+
+    /// The whole path, end to end, using nothing but the guest's own software:
+    /// boot an Altair CP/M disk, run **its** XMODEM receiver, push our terminal
+    /// into it through **our** virtual modem's ports, and see the file appear
+    /// in the disk's own directory.
+    ///
+    /// This is the answer to a problem rather than a demonstration. We cannot
+    /// write an Altair floppy from the host — `cpmtools` derives `EXM 1` where
+    /// the disk's BIOS says `EXM 0`, so its directory entry is one the guest
+    /// will not look at — and the block mapping past the first allocation block
+    /// is still unsolved. None of that matters here, because the guest does its
+    /// own filesystem work. It also tests more than the mount path ever could:
+    /// the controller, the bootstrap, the CPU, the console, the guest's BDOS,
+    /// its disk *writes*, and our modem ports, all at once.
+    ///
+    /// `PCGET.COM` is Mike Douglas's XMODEM receiver, on the Altair CP/M disks.
+    /// Given `B` it uses 2SIO port B at 12h/13h — which is exactly the
+    /// `altair_2sio2` profile, and why that is the one to pick for a booted
+    /// Altair.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
+    #[test]
+    #[ignore]
+    fn test_pcget_pulls_egt80_in_over_the_virtual_modem() {
+        /// Our own terminal, the thing worth putting on the disk.
+        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
+            return;
+        };
+        let bytes = std::fs::read(&path).unwrap();
+        let mut m = BootMachine::new();
+        // Writable: the point is that the guest writes to it.
+        m.insert(0, bytes, false).expect("an 88-DCDD image");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+            "PCGET's port B is our altair_2sio2"
+        );
+        // A modem that is off-hook, since the guest is entitled to look.
+        m.modem().set_carrier(true);
+
+        let mut cpu = Cpu::new_8080();
+        m.boot(&mut cpu, 0).expect("boots");
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
+
+        // Ask the guest to receive, on the port our modem is wired to.
+        for &b in b"PCGET EGT80.COM B\r" {
+            m.send_key(b);
+        }
+        let prompt = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- PCGET ---\n{prompt}");
+        assert!(
+            prompt.contains("XMODEM"),
+            "PCGET did not ask for the file: {prompt:?}"
+        );
+
+        let (done, during) = xmodem_send_to_guest(&mut m, &mut cpu, EGT80_COM, 4_000_000_000);
+        println!("--- transfer ---\n{}", printable(&during));
+        // Whatever the guest managed to write, for inspection when this fails:
+        // a sector the guest wrote and cannot read back is a fault in our
+        // controller, and the only way to tell is to look at the bytes.
+        if let Ok(dump) = std::env::var("CPM_BOOT_DUMP") {
+            if let Some((_, img)) = m.take_dirty().first() {
+                std::fs::write(&dump, img).unwrap();
+                println!("(wrote the guest's image to {dump})");
+            } else {
+                println!("(the guest wrote nothing at all)");
+            }
+        }
+        assert!(done, "the transfer never completed");
+
+        let after = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
+        println!("--- after ---\n{after}");
+        assert!(
+            after.contains("Transfer Complete"),
+            "PCGET did not report success: {after:?}"
+        );
+
+        // The disk's own directory is the only witness that counts.
+        for &b in b"DIR EGT80.COM\r" {
+            m.send_key(b);
+        }
+        let dir = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
+        println!("--- DIR ---\n{dir}");
+        assert!(
+            dir.to_ascii_uppercase().contains("EGT80"),
+            "the guest wrote the file but does not list it: {dir:?}"
+        );
+
+        // Now read it back with the guest's own sender, which is the only
+        // check that the bytes on the disk are the bytes we sent: it uses the
+        // guest's filesystem, its block mapping and its BIOS, none of which we
+        // understand well enough to verify ourselves.
+        for &b in b"PCPUT EGT80.COM B\r" {
+            m.send_key(b);
+        }
+        let ready = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
+        println!("--- PCPUT ---\n{ready}");
+        let (got, _) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
+        let got = got.expect("the guest never sent the file back");
+        assert!(
+            got.len() >= EGT80_COM.len(),
+            "got {} bytes back, sent {}",
+            got.len(),
+            EGT80_COM.len()
+        );
+        // XMODEM pads the last block, so compare only what we sent.
+        assert_eq!(
+            &got[..EGT80_COM.len()],
+            EGT80_COM,
+            "the file came back different from the one we sent"
+        );
+        println!("round trip: {} bytes, identical", EGT80_COM.len());
+
+        // And it is in the image the caller would persist.
+        let dirty = m.take_dirty();
+        assert_eq!(dirty.len(), 1, "the written image comes back for saving");
+        assert!(
+            dirty[0].1.windows(5).any(|w| w == b"EGT80"),
+            "the directory entry is in the image we would write out"
+        );
+    }
+
     /// Boot every image in a folder and print what each one says.
     ///
     /// The survey behind the single-disk test: one run tells you which
