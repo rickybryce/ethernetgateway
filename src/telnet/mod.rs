@@ -58,6 +58,7 @@ mod aichat_ui;
 mod weather;
 mod kernel;
 mod cpm_emu;
+mod cpm_boot_ui;
 mod cpm_mount_ui;
 mod cpm_modem;
 mod cpm_term;

@@ -394,6 +394,52 @@ mod tests {
         assert!(v == 0xE5 || v == 0, "no panic, and a defined byte: {v:#04x}");
     }
 
+    /// The first byte of a sector must reach the guest.
+    ///
+    /// Regression: reading the data port for a sector not yet buffered made the
+    /// controller ask the host for it and answer 0xFF, and the caller then
+    /// filled the buffer — so the byte the guest had asked for was dropped and
+    /// every sector arrived one byte short. A disk boots far enough to look
+    /// like it works and then goes silent.
+    #[test]
+    fn test_the_first_byte_of_a_sector_is_not_lost() {
+        let mut img = image(Geometry::EIGHT_INCH);
+        for (i, b) in img[..SECTOR_LEN].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(1); // distinct, and never 0xFF at [0]
+        }
+        let mut m = BootMachine::new();
+        m.insert(0, img, true).unwrap();
+        m.port_out(0x08, 0);
+        m.port_out(0x09, 0x04);
+        let first = m.port_in(0x0A);
+        assert_eq!(first, 1, "the guest must get byte 0, not a placeholder");
+        assert_eq!(m.port_in(0x0A), 2, "and then byte 1");
+        assert_eq!(m.port_in(0x0A), 3);
+    }
+
+    /// After booting, the drive must report that the head may move.
+    ///
+    /// Regression: the bootstrap reads the data port to fetch the boot sector,
+    /// which opens a transfer. An open transfer holds "safe to move the head"
+    /// low, and the first thing a boot sector does is seek to track 0 — so the
+    /// guest span forever at its first instruction that touched the drive.
+    #[test]
+    fn test_the_head_may_move_once_the_bootstrap_is_done() {
+        let mut img = image(Geometry::EIGHT_INCH);
+        img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
+        let mut m = BootMachine::new();
+        m.insert(0, img, true).unwrap();
+        let mut cpu = Cpu::new_8080();
+        m.boot(&mut cpu, 0).expect("boots");
+        // Status is active low: the move-OK bit reads 0 when it is safe.
+        let status = m.port_in(0x08);
+        assert_eq!(
+            status & 0x02,
+            0,
+            "the head must be free to seek right after boot, got {status:#04x}"
+        );
+    }
+
     /// Booting sets the program counter to the entry point the bootstrap
     /// reports, and leaves the payload where the CPU will find it.
     #[test]

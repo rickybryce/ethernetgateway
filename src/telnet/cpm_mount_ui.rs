@@ -67,6 +67,8 @@ impl TelnetSession {
 
             self.send_line(&format!("  {}  Mount an image", self.cyan("M")))
                 .await?;
+            self.send_line(&format!("  {}  Boot an image (runs its own OS)", self.cyan("B")))
+                .await?;
             if any {
                 self.send_line(&format!("  {}  Unmount a drive", self.cyan("U")))
                     .await?;
@@ -81,11 +83,87 @@ impl TelnetSession {
 
             match self.get_menu_input(false).await? {
                 Some(s) if s == "m" => self.cpmmount_pick_image().await?,
+                Some(s) if s == "b" => self.cpmmount_pick_boot().await?,
                 Some(s) if s == "u" && any => self.cpmmount_pick_unmount().await?,
                 Some(s) if !s.is_empty() => {}
                 _ => return Ok(()),
             }
         }
+    }
+
+    /// Choose an image to boot.
+    ///
+    /// Booting is not mounting, and the screen says so: a booted disk runs its
+    /// own operating system and owns every drive, so it is a different thing
+    /// from putting an image on drive B:.
+    async fn cpmmount_pick_boot(&mut self) -> Result<(), std::io::Error> {
+        let base = self.cpmmount_base();
+        let images = crate::cpm::image::available_images(&base);
+        let bootable: Vec<String> = images
+            .into_iter()
+            .filter(|n| {
+                std::fs::metadata(crate::cpm::image::images_dir(&base).join(n))
+                    .ok()
+                    .and_then(|m| crate::cpm::boot_machine::geometry_for(m.len()))
+                    .is_some()
+            })
+            .collect();
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("BOOT A DISK IMAGE"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        if bootable.is_empty() {
+            self.send_line(&format!("  {}", self.amber("No bootable images found."))).await?;
+            self.send_line("").await?;
+            self.send_line("  Only Altair 88-DCDD floppies can boot:").await?;
+            self.send_line("  337,568 bytes (8-inch) or 76,720 (minidisk).").await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            let _ = self.wait_for_key().await;
+            return Ok(());
+        }
+        self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating system."))).await?;
+        self.send_line(&format!("  {}", self.dim("Drive folders and mounts do not apply."))).await?;
+        self.send_line("").await?;
+        let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+        for (i, n) in bootable.iter().take(Self::TRANSFER_PAGE_SIZE).enumerate() {
+            self.send_line(&format!(
+                "  {}  {}",
+                self.cyan(&(i + 1).to_string()),
+                self.amber(&truncate_to_width(n, width))
+            ))
+            .await?;
+        }
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+        self.send(&format!("{}> ", self.cyan("boot"))).await?;
+        self.flush().await?;
+
+        let Some(input) = self.get_menu_input(false).await? else {
+            return Ok(());
+        };
+        let Ok(n) = input.trim().parse::<usize>() else {
+            return Ok(());
+        };
+        let Some(name) = bootable.get(n.wrapping_sub(1)) else {
+            return Ok(());
+        };
+        let path = crate::cpm::image::images_dir(&base).join(name);
+
+        // Writing is a decision, not a default: a booted guest writes raw
+        // sectors and nothing above it would notice a mistake.
+        self.send_line("").await?;
+        self.send(&format!("  Allow writes to this image? {}: ", self.cyan("y/N")))
+            .await?;
+        self.flush().await?;
+        let ans = self.get_menu_input(false).await?.unwrap_or_default();
+        let writable = ans.starts_with('y');
+
+        self.cpm_boot_session(&path, writable).await
     }
 
     /// Unmount: list what is mounted, take one off.
