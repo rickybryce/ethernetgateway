@@ -38,6 +38,7 @@ use crate::cpm::fs::NUM_DRIVES;
 
 /// One mounted image.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Mount {
     /// Absolute path of the image file.
     pub path: PathBuf,
@@ -97,6 +98,9 @@ macro_rules! lock {
 }
 
 // ---- mount table --------------------------------------------------------
+//
+// `all`, `any_mounted` and `clear_all`, and the `path` / `read_only_reason`
+// fields, are the surface the mount screens read; they land in the next step.
 
 /// The image mounted on a drive, if any.
 pub fn get(drive0: u8) -> Option<Mount> {
@@ -105,11 +109,13 @@ pub fn get(drive0: u8) -> Option<Mount> {
 }
 
 /// Every mount, for the UIs.  Index 0 is A:.
+#[allow(dead_code)]
 pub fn all() -> Vec<Option<Mount>> {
     table().read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// True if any drive has an image mounted.
+#[allow(dead_code)]
 pub fn any_mounted() -> bool {
     all().iter().any(|m| m.is_some())
 }
@@ -138,6 +144,7 @@ pub fn unmount(drive0: u8) -> Option<Mount> {
 }
 
 /// Drop every mount.  Used when the emulator is disabled.
+#[allow(dead_code)]
 pub fn clear_all() {
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     for slot in t.iter_mut() {
@@ -158,7 +165,9 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// True when anything at all is using the drive.
+    /// True when anything at all is using the drive.  Read by the mount screens
+    /// to grey a row out; `describe` supplies the wording.
+    #[allow(dead_code)]
     pub fn busy(&self) -> bool {
         self.sitting > 0 || self.writing > 0
     }
@@ -221,6 +230,16 @@ pub fn check_can_change(drive0: u8) -> Result<(), String> {
     }
 }
 
+/// The registry is process-global, so tests that touch it must not run beside
+/// each other.  Same pattern as the config tests.
+#[cfg(test)]
+pub fn tests_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 // ---- session bookkeeping ------------------------------------------------
 
 /// Register a CP/M session as present, sitting on drive A:.
@@ -255,11 +274,8 @@ pub fn session_done_writing(id: u64, drive0: u8) {
 mod tests {
     use super::*;
 
-    /// The registry is global, so tests that touch it must not run beside each
-    /// other.  Same pattern as the config tests.
     fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        super::tests_lock()
     }
 
     fn reset() {

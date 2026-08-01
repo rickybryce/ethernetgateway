@@ -105,6 +105,9 @@ impl Drop for CpmFs {
     fn drop(&mut self) {
         let mut held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
         held.retain(|_, owner| *owner != self.session);
+        // Stop counting this session against any drive, so an operator is not
+        // told a drive is in use by somebody who has gone.
+        super::image::registry::session_end(self.session);
     }
 }
 
@@ -112,6 +115,8 @@ impl CpmFs {
     /// A filesystem rooted at `base` (the `CPM/` container), current drive
     /// A:, DMA at the default 0x0080.
     pub fn new(base: PathBuf) -> CpmFs {
+        let session = NEXT_CPM_SESSION.fetch_add(1, Ordering::SeqCst);
+        super::image::registry::session_start(session);
         CpmFs {
             base,
             drive: 0,
@@ -120,8 +125,53 @@ impl CpmFs {
             search_pos: 0,
             user: 0,
             ro_drives: 0,
-            session: NEXT_CPM_SESSION.fetch_add(1, Ordering::SeqCst),
+            session,
         }
+    }
+
+    /// The image mounted on a 0-based drive, if any.
+    ///
+    /// Looked up fresh every time rather than cached at session start, because
+    /// mounting is live: an operator can change a disk while people are in the
+    /// emulator and they see it immediately.  That is safe because the lookup
+    /// hands back an `Arc` — a session part-way through an operation keeps the
+    /// filesystem it started with alive until it is done, so nothing is ever
+    /// swapped mid-write.  See `image::registry`.
+    fn mounted(&self, drive0: u8) -> Option<super::image::registry::Mount> {
+        super::image::registry::get(drive0)
+    }
+
+    /// The image mounted on the drive an FCB names, if any.
+    fn mounted_for(&self, fcb: &Fcb) -> Option<super::image::registry::Mount> {
+        self.mounted(self.drive_index_for(fcb.drive)?)
+    }
+
+    /// A [`CPM_WRITERS`] key for a file inside a mounted image.
+    ///
+    /// Not a real host path — nothing opens it — but a unique name for "this
+    /// file, in this image", which is what the claim map needs.  Built from the
+    /// image's own path so two drives holding different images never collide,
+    /// and two drives holding the *same* image correctly do.
+    fn image_file_key(&self, fcb: &Fcb, drive0: u8) -> Option<PathBuf> {
+        let mount = self.mounted(drive0)?;
+        Some(mount.path.join(format_8_3(&fcb.name, &fcb.ext)))
+    }
+
+    /// Run `f` against the image mounted for `fcb`, or return `None` when that
+    /// drive is folder-backed and the caller should take its own path.
+    ///
+    /// Every image-backed operation funnels through here so the lock is taken
+    /// and released in exactly one place — a mounted image is shared by every
+    /// session, so holding its mutex a moment longer than needed is felt by
+    /// everybody else on that drive.
+    fn with_image<T>(
+        &self,
+        fcb: &Fcb,
+        f: impl FnOnce(&mut super::image::fs::ImageFs, u8) -> T,
+    ) -> Option<T> {
+        let mount = self.mounted_for(fcb)?;
+        let mut guard = mount.fs.lock().unwrap_or_else(|e| e.into_inner());
+        Some(f(&mut guard, self.user))
     }
 
     /// Claim `path` for this session, or report who has it.
@@ -153,6 +203,12 @@ impl CpmFs {
     /// BDOS 16 (close): the file is finished with, so let another session have
     /// it without waiting for this one to leave the emulator.
     pub fn release_file(&self, fcb: &Fcb) {
+        if let Some(drive0) = self.mounted_for(fcb).and(self.drive_index_for(fcb.drive)) {
+            if let Some(k) = self.image_file_key(fcb, drive0) {
+                self.release_write(&k);
+            }
+            return;
+        }
         if let Some(path) = self.resolve(fcb) {
             self.release_write(&path);
         }
@@ -212,6 +268,11 @@ impl CpmFs {
     /// rather than faked — storing them would mean dropping sidecar files into
     /// the very folders users drop their own files into.
     pub fn set_file_ro(&self, fcb: &Fcb, ro: bool) -> Option<()> {
+        if let Some(done) = self.with_image(fcb, |img, user| {
+            img.set_read_only(user, &fcb.name, &fcb.ext, ro).unwrap_or(false)
+        }) {
+            return done.then_some(());
+        }
         let path = self.resolve(fcb)?;
         if !path.is_file() {
             return None;
@@ -265,6 +326,7 @@ impl CpmFs {
     /// Select a drive by 0-based index (BDOS 14 convention: E = 0 → A:).
     /// Returns false (and changes nothing) for an out-of-range drive.
     pub fn select(&mut self, drive0: u8) -> bool {
+        super::image::registry::session_select(self.session, drive0);
         if drive0 < NUM_DRIVES {
             self.drive = drive0;
             true
@@ -365,6 +427,21 @@ impl CpmFs {
         Some(path)
     }
 
+    /// Is the file an FCB names marked read-only?
+    ///
+    /// Replaces the old `resolve()` + `host_is_ro()` pairing at the call sites,
+    /// which could only ever work for a folder-backed drive: a file inside a
+    /// mounted image has no host path to ask about, and its R/O bit lives in
+    /// the image's own directory entry.
+    pub fn file_is_ro(&self, fcb: &Fcb) -> bool {
+        if let Some(ro) = self.with_image(fcb, |img, user| {
+            img.matching_read_only(user, fcb) > 0
+        }) {
+            return ro;
+        }
+        self.resolve(fcb).map(|p| Self::host_is_ro(&p)).unwrap_or(false)
+    }
+
     /// True if `path` is lexically within `base` (neither may contain a
     /// `..` that climbs out — our names never do, but check anyway).
     fn is_within(base: &Path, path: &Path) -> bool {
@@ -394,15 +471,29 @@ impl CpmFs {
         None
     }
 
-    /// BDOS "open file" (15): does the FCB name an existing file on its
-    /// drive?  Returns the resolved path when it exists, else `None`.
-    pub fn open_existing(&self, fcb: &Fcb) -> Option<PathBuf> {
-        let path = self.resolve(fcb)?;
-        if path.is_file() {
-            Some(path)
-        } else {
-            None
+    /// BDOS "open file" (15): does the FCB name an existing file on its drive?
+    ///
+    /// Answers for both kinds of drive, which is why it reports a bool rather
+    /// than the host path it used to: a file inside a mounted image has no host
+    /// path, and every caller only ever asked whether the file was there.
+    pub fn open_existing(&self, fcb: &Fcb) -> bool {
+        if let Some(found) = self.with_image(fcb, |img, user| img.exists(user, &fcb.name, &fcb.ext))
+        {
+            return found;
         }
+        self.resolve(fcb).map(|p| p.is_file()).unwrap_or(false)
+    }
+
+    /// The host path of an existing file on a folder-backed drive.
+    ///
+    /// `None` for a mounted image, which has no host path — callers that need
+    /// one are folder-only by nature (loading a `.COM` through the host, say).
+    fn existing_path(&self, fcb: &Fcb) -> Option<PathBuf> {
+        if self.mounted_for(fcb).is_some() {
+            return None;
+        }
+        let path = self.resolve(fcb)?;
+        path.is_file().then_some(path)
     }
 
     /// Read an entire file's bytes for loading a transient program (a
@@ -412,7 +503,12 @@ impl CpmFs {
     /// can't be slurped whole into memory.  (`load_com` further truncates to
     /// the usable TPA, but bounding the read keeps the `Vec` small.)
     pub fn read_whole_file(&self, fcb: &Fcb) -> std::io::Result<Option<Vec<u8>>> {
-        let path = match self.open_existing(fcb) {
+        if let Some(r) = self.with_image(fcb, |img, user| {
+            img.read_whole(user, &fcb.name, &fcb.ext, MAX_CPM_FILE_BYTES)
+        }) {
+            return r;
+        }
+        let path = match self.existing_path(fcb) {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -428,30 +524,56 @@ impl CpmFs {
     /// BDOS "make file" (22): create (truncating any existing file) the
     /// file the FCB names, so subsequent writes land in it.  Returns the
     /// path on success.
-    pub fn make(&self, fcb: &Fcb) -> Option<PathBuf> {
+    pub fn make(&self, fcb: &Fcb) -> bool {
         if self.fcb_drive_is_ro(fcb) {
-            return None;
+            return false;
         }
-        let path = self.resolve(fcb)?;
+        if let Some(drive0) = self.mounted_for(fcb).and(self.drive_index_for(fcb.drive)) {
+            // Creating truncates, so it is a write: refuse if another session
+            // is already writing this file, exactly as on a folder-backed drive.
+            let key = self.image_file_key(fcb, drive0);
+            if let Some(k) = &key {
+                if self.claim_write(k).is_err() {
+                    return false;
+                }
+            }
+            let made = self
+                .with_image(fcb, |img, user| {
+                    // CP/M's "make" truncates an existing file, so an existing
+                    // one is erased first rather than refused.
+                    let _ = img.delete(user, &fcb.name, &fcb.ext);
+                    img.create(user, &fcb.name, &fcb.ext).is_ok()
+                })
+                .unwrap_or(false);
+            if !made {
+                if let Some(k) = &key {
+                    self.release_write(k);
+                }
+            }
+            return made;
+        }
+        let Some(path) = self.resolve(fcb) else {
+            return false;
+        };
         // `File::create` truncates, so an existing R/O file must be refused
         // here.  (The host would refuse it too — unlike unlink, opening for
         // write does check the file's own permission — but failing on our own
         // check keeps the reason explicit and the behaviour identical on
         // Windows.)
         if path.is_file() && Self::host_is_ro(&path) {
-            return None;
+            return false;
         }
         // Creating truncates, so it is a write: refuse if another session is
         // already writing this file.
         if self.claim_write(&path).is_err() {
-            return None;
+            return false;
         }
         match std::fs::File::create(&path) {
-            Ok(_) => Some(path),
+            Ok(_) => true,
             Err(_) => {
                 // Nothing was created, so hold nothing — see write_record.
                 self.release_write(&path);
-                None
+                false
             }
         }
     }
@@ -465,6 +587,12 @@ impl CpmFs {
     pub fn rename(&self, old: &Fcb, new_name: &[u8; 8], new_ext: &[u8; 3]) -> bool {
         if self.fcb_drive_is_ro(old) {
             return false;
+        }
+        if let Some(ok) = self.with_image(old, |img, user| {
+            img.rename(user, &old.name, &old.ext, new_name, new_ext)
+                .unwrap_or(false)
+        }) {
+            return ok;
         }
         let drive0 = match self.drive_index_for(old.drive) {
             Some(d) => d,
@@ -497,6 +625,11 @@ impl CpmFs {
     /// BDOS "compute file size" (35): the number of 128-byte records in the
     /// file the FCB names (its virtual CP/M size), or `None` if unresolved.
     pub fn file_size_records(&self, fcb: &Fcb) -> Option<u32> {
+        if let Some(r) = self.with_image(fcb, |img, user| {
+            img.file_records(user, &fcb.name, &fcb.ext)
+        }) {
+            return r;
+        }
         let path = self.resolve(fcb)?;
         let size = std::fs::metadata(&path).ok()?.len();
         Some(size.div_ceil(128) as u32)
@@ -507,6 +640,11 @@ impl CpmFs {
     /// final record is padded with the CP/M EOF filler (0x1A).
     pub fn read_record(&self, fcb: &Fcb, record: u32) -> std::io::Result<Option<[u8; 128]>> {
         use std::io::{Read, Seek, SeekFrom};
+        if let Some(r) = self.with_image(fcb, |img, user| {
+            img.read_record(user, &fcb.name, &fcb.ext, record)
+        }) {
+            return r;
+        }
         let path = match self.resolve(fcb) {
             Some(p) => p,
             None => {
@@ -600,7 +738,13 @@ impl CpmFs {
         if self.fcb_drive_is_ro(fcb) {
             return None;
         }
-        let path = self.open_existing(fcb)?;
+        if let Some(r) = self.with_image(fcb, |img, user| {
+            img.truncate_to_records(user, &fcb.name, &fcb.ext, records)
+                .unwrap_or(None)
+        }) {
+            return r;
+        }
+        let path = self.existing_path(fcb)?;
         let len = (records as u64) * 128;
         std::fs::OpenOptions::new()
             .write(true)
@@ -622,6 +766,14 @@ impl CpmFs {
     /// per extent, and a listing must still show it once. Host files that are
     /// not legal 8.3 names are omitted, matching what CP/M programs can see.
     pub fn list_matching(&self, fcb: &Fcb) -> Vec<String> {
+        if let Some(names) = self.with_image(fcb, |img, user| {
+            img.matching(user, fcb)
+                .iter()
+                .map(|(n, x)| super::fcb::format_8_3(n, x))
+                .collect::<Vec<String>>()
+        }) {
+            return names;
+        }
         let drive0 = match self.drive_index_for(fcb.drive) {
             Some(d) => d,
             None => return Vec::new(),
@@ -650,7 +802,21 @@ impl CpmFs {
     /// block (as CP/M allocates), summed.  Used to synthesize the allocation
     /// vector for BDOS "get free space" queries (STAT's "bytes remaining").
     /// Only valid 8.3 files count, matching what the directory shows.
-    pub fn current_drive_used_blocks(&self, block_size: u64) -> u64 {
+    pub fn current_drive_used_blocks(&self, block_size: u64, total_blocks: u64) -> u64 {
+        // A mounted image has a real capacity, and it is nothing like the
+        // virtual disk the DPB describes — typically 300 KB against 4 MB.  The
+        // free *count* is the number anyone actually reads (it is what STAT
+        // prints), so report used blocks such that the free figure comes out
+        // right for the real disk, rather than a used figure that would leave
+        // STAT offering megabytes of room on a floppy.
+        if let Some(mount) = self.mounted(self.drive) {
+            let free = mount
+                .fs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .free_bytes();
+            return total_blocks.saturating_sub(free / block_size.max(1));
+        }
         let dir = self.drive_dir(self.drive);
         let mut blocks: u64 = 0;
         if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -703,6 +869,17 @@ impl CpmFs {
     /// without this check a `chmod -w` file was erasable from the guest.
     /// A software write-protected drive (BDOS 28) refuses outright.
     pub fn delete(&self, fcb: &Fcb) -> usize {
+        if let Some(n) = self.with_image(fcb, |img, user| {
+            let mut gone = 0;
+            for (n, x) in img.matching(user, fcb) {
+                if img.delete(user, &n, &x).unwrap_or(0) > 0 {
+                    gone += 1;
+                }
+            }
+            gone
+        }) {
+            return n;
+        }
         if self.fcb_drive_is_ro(fcb) {
             return 0;
         }
@@ -726,6 +903,9 @@ impl CpmFs {
     /// because they are read-only.  Lets a caller tell "nothing matched" from
     /// "matched but protected" so it can report the difference.
     pub fn count_ro_matches(&self, fcb: &Fcb) -> usize {
+        if let Some(n) = self.with_image(fcb, |img, user| img.matching_read_only(user, fcb)) {
+            return n;
+        }
         self.matching_files(fcb)
             .iter()
             .filter(|p| Self::host_is_ro(p))
@@ -736,6 +916,13 @@ impl CpmFs {
     /// by name, one entry per 16 KB extent (so multi-extent files and file
     /// sizes are represented the way `STAT`/`DIR` expect).
     fn build_dir_entries(&self, fcb: &Fcb) -> Vec<DirEntry> {
+        // A mounted image has a real CP/M directory, so its own entries are
+        // returned rather than entries synthesized from file sizes — a program
+        // that reads the allocation map or the extent numbering sees the truth.
+        if let Some(entries) = self.with_image(fcb, |img, user| img.dir_entries_matching(user, fcb))
+        {
+            return entries;
+        }
         let mut out = Vec::new();
         let drive0 = match self.drive_index_for(fcb.drive) {
             Some(d) => d,
@@ -798,6 +985,36 @@ impl CpmFs {
                 std::io::ErrorKind::InvalidInput,
                 "record beyond max CP/M file size",
             ));
+        }
+        if let Some(drive0) = self.mounted_for(fcb).and(self.drive_index_for(fcb.drive)) {
+            // Two sessions must not interleave records into one file, on an
+            // image exactly as on a folder.  The image's mutex makes each
+            // *record* atomic but says nothing about a whole file, so the same
+            // claim the folder path takes is taken here, keyed by the image and
+            // the name inside it.
+            let key = self.image_file_key(fcb, drive0);
+            if let Some(k) = &key {
+                self.claim_write(k)?;
+            }
+            // Mark the drive busy *while* the write is in flight, so a mount
+            // change cannot be offered in the window where it would disrupt a
+            // running program.
+            super::image::registry::session_writing(self.session, drive0);
+            let r = self
+                .with_image(fcb, |img, user| {
+                    img.write_record(user, &fcb.name, &fcb.ext, record, data)
+                })
+                .unwrap_or(Ok(()));
+            super::image::registry::session_done_writing(self.session, drive0);
+            if r.is_err() {
+                // A claim not followed by a write is given back, matching the
+                // folder path — otherwise a guest writing to names that do not
+                // exist accumulates claims for the life of its session.
+                if let Some(k) = &key {
+                    self.release_write(k);
+                }
+            }
+            return r;
         }
         let path = match self.resolve(fcb) {
             Some(p) => p,
@@ -973,7 +1190,7 @@ mod tests {
         // and let the other session write: that only works if the failed claim
         // was released.
         let two = CpmFs::new(base.clone());
-        assert!(two.make(&fcb).is_some(), "a failed write must not hold the name");
+        assert!(two.make(&fcb), "a failed write must not hold the name");
         assert!(
             two.write_record(&fcb, 0, &[b'y'; 128]).is_ok(),
             "the other session must be able to write it"
@@ -1170,10 +1387,10 @@ mod tests {
         let fcb = fcb_named(1, "DATA", "TXT");
 
         // No file yet: open fails.
-        assert!(fs.open_existing(&fcb).is_none());
+        assert!(!fs.open_existing(&fcb));
 
         // Make, then write two records.
-        assert!(fs.make(&fcb).is_some());
+        assert!(fs.make(&fcb));
         let mut rec0 = [0u8; 128];
         rec0[..5].copy_from_slice(b"HELLO");
         let mut rec1 = [0u8; 128];
@@ -1182,7 +1399,7 @@ mod tests {
         fs.write_record(&fcb, 1, &rec1).unwrap();
 
         // Now it opens, and reads back what we wrote.
-        assert!(fs.open_existing(&fcb).is_some());
+        assert!(fs.open_existing(&fcb));
         let got0 = fs.read_record(&fcb, 0).unwrap().unwrap();
         assert_eq!(&got0[..5], b"HELLO");
         let got1 = fs.read_record(&fcb, 1).unwrap().unwrap();
@@ -1202,14 +1419,14 @@ mod tests {
         let fcb = fcb_named(1, "README", "TXT"); // CP/M sees uppercase 8.3
 
         // It resolves to the real lowercase path and opens/reads.
-        assert!(fs.open_existing(&fcb).is_some(), "lowercase host file must be openable");
+        assert!(fs.open_existing(&fcb), "lowercase host file must be openable");
         let rec = fs.read_record(&fcb, 0).unwrap().unwrap();
         assert_eq!(&rec[..11], b"hello there");
 
         // A genuinely-absent file still resolves to the canonical uppercase
         // path (for creation) and does not open.
         let missing = fcb_named(1, "NOPE", "TXT");
-        assert!(fs.open_existing(&missing).is_none());
+        assert!(!fs.open_existing(&missing));
         assert!(fs.resolve(&missing).unwrap().ends_with("A/NOPE.TXT"));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1354,7 +1571,7 @@ mod tests {
         let fcb = fcb_named(1, "ESCAPE", "TXT");
         // The canonicalized target is outside base -> refused.
         assert!(fs.resolve(&fcb).is_none());
-        assert!(fs.open_existing(&fcb).is_none());
+        assert!(!fs.open_existing(&fcb));
         assert!(fs.read_record(&fcb, 0).is_err());
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&base);
@@ -1379,7 +1596,7 @@ mod tests {
         let fcb = fcb_named(2, "PWNED", "TXT"); // drive B:
         // resolve/make must refuse: the drive dir canonicalizes outside base.
         assert!(fs.resolve(&fcb).is_none());
-        assert!(fs.make(&fcb).is_none());
+        assert!(!fs.make(&fcb));
         assert!(!outside.join("PWNED.TXT").exists()); // nothing created outside
         let _ = std::fs::remove_file(&drive_b);
         let _ = std::fs::remove_dir_all(&outside);
@@ -1437,7 +1654,7 @@ mod tests {
         let base = temp_base("sizecap");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "BIG", "DAT");
-        assert!(fs.make(&fcb).is_some());
+        assert!(fs.make(&fcb));
         let data = [0u8; 128];
         // A record just under the cap is fine.
         let last_ok = (MAX_CPM_FILE_BYTES / 128 - 1) as u32;
@@ -1456,7 +1673,7 @@ mod tests {
         let base = temp_base("pad");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "SHORT", "TXT");
-        assert!(fs.make(&fcb).is_some());
+        assert!(fs.make(&fcb));
         // Write a 3-byte file directly (not a full record).
         std::fs::write(base.join("A").join("SHORT.TXT"), b"abc").unwrap();
         let rec = fs.read_record(&fcb, 0).unwrap().unwrap();
@@ -1653,7 +1870,7 @@ mod tests {
 
         // Every mutating path refuses.
         assert!(fs.write_record(&fcb, 0, &[b'x'; 128]).is_err());
-        assert!(fs.make(&fcb_named(1, "NEW", "TXT")).is_none());
+        assert!(!fs.make(&fcb_named(1, "NEW", "TXT")));
         assert_eq!(fs.delete(&fcb), 0);
         let mut nn = [b' '; 8];
         nn[..2].copy_from_slice(b"NX");

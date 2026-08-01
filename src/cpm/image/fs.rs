@@ -28,6 +28,7 @@
 //!   lives — so a zero in an allocation map means "not allocated", not "block
 //!   zero".  That is what makes a sparse file readable at all.
 
+use super::super::fcb::Fcb;
 use super::format::Format;
 use super::media::Media;
 
@@ -255,16 +256,6 @@ impl ImageFs {
         None
     }
 
-    /// The format this image is mounted as.
-    pub fn format(&self) -> &'static Format {
-        self.fmt
-    }
-
-    /// Derived geometry.
-    pub fn params(&self) -> &Params {
-        &self.params
-    }
-
     /// Read one raw record from the data area by logical record number.
     fn read_data_record(
         media: &mut dyn Media,
@@ -302,11 +293,6 @@ impl ImageFs {
             }
         }
         Ok(out)
-    }
-
-    /// Every live directory entry.
-    pub fn entries(&self) -> &[DirSlot] {
-        &self.dir
     }
 
     /// All extents of one file, lowest extent first.
@@ -891,12 +877,156 @@ impl ImageFs {
         self.extents_of(user, name, ext).into_iter().next()
     }
 
+    // ---- what the BDOS layer needs on top of single-file access ----------
+
+    /// Distinct files matching a (possibly wildcarded) FCB, in name order.
+    ///
+    /// Matching goes through [`Fcb::matches`] — the same predicate the
+    /// folder-backed filesystem uses — so `DIR *.COM` and `ERA *.COM` cannot
+    /// disagree about which files a wildcard covers, whichever kind of drive
+    /// they are aimed at.
+    ///
+    /// Deduplicated by name: a file over 16 KB has one directory entry per
+    /// extent, and a listing must still show it once.
+    pub fn matching(&self, user: u8, fcb: &Fcb) -> Vec<([u8; 8], [u8; 3])> {
+        let mut out: Vec<([u8; 8], [u8; 3])> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && fcb.matches(&e.name, &e.ext))
+            .map(|e| (e.name, e.ext))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// True if any file for `user` is R/O and matches the FCB.
+    pub fn matching_read_only(&self, user: u8, fcb: &Fcb) -> usize {
+        let ro: Vec<([u8; 8], [u8; 3])> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && e.read_only && fcb.matches(&e.name, &e.ext))
+            .map(|e| (e.name, e.ext))
+            .collect();
+        let mut uniq = ro;
+        uniq.sort_unstable();
+        uniq.dedup();
+        uniq.len()
+    }
+
+    /// The raw directory entries a BDOS search should return, in name then
+    /// extent order.
+    ///
+    /// These are the disk's **real** entries, not synthesized ones — an image
+    /// has a genuine CP/M directory, so a program that inspects the allocation
+    /// map or the extent numbering sees the truth rather than a plausible
+    /// fiction.  Only the user byte is normalized to 0, because a search
+    /// returns entries for the calling user and CP/M programs expect to see
+    /// their own user number there.
+    pub fn dir_entries_matching(&self, user: u8, fcb: &Fcb) -> Vec<RawEntry> {
+        let mut hits: Vec<&DirSlot> = self
+            .dir
+            .iter()
+            .filter(|e| e.user == user && fcb.matches(&e.name, &e.ext))
+            .collect();
+        hits.sort_by_key(|e| (e.name, e.ext, e.extent));
+        hits.iter()
+            .map(|e| {
+                let mut raw = e.raw;
+                raw[0] = 0;
+                raw
+            })
+            .collect()
+    }
+
+    /// Read a whole file, up to `cap` bytes.  `Ok(None)` if it does not exist.
+    pub fn read_whole(
+        &mut self,
+        user: u8,
+        name: &[u8; 8],
+        ext: &[u8; 3],
+        cap: u64,
+    ) -> std::io::Result<Option<Vec<u8>>> {
+        let Some(records) = self.file_records(user, name, ext) else {
+            return Ok(None);
+        };
+        if records as u64 * 128 > cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file exceeds max CP/M file size",
+            ));
+        }
+        let mut out = Vec::with_capacity(records as usize * 128);
+        for rec in 0..records {
+            match self.read_record(user, name, ext, rec)? {
+                Some(buf) => out.extend_from_slice(&buf),
+                None => break,
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// Shrink a file to `records` records, freeing whatever that releases.
+    ///
+    /// Used by the CCP to consume a `$$$.SUB` a line at a time.  Extents that
+    /// fall entirely past the new end are erased; the one straddling it has its
+    /// record count reduced.  Blocks come back through the ordinary rebuild, so
+    /// there is no separate free path to get wrong.
+    pub fn truncate_to_records(
+        &mut self,
+        user: u8,
+        name: &[u8; 8],
+        ext: &[u8; 3],
+        records: u32,
+    ) -> std::io::Result<Option<u32>> {
+        self.check_writable()?;
+        if self.file_records(user, name, ext).is_none() {
+            return Ok(None);
+        }
+        let targets: Vec<(u16, RawEntry, u32, u32)> = self
+            .extents_of(user, name, ext)
+            .iter()
+            .map(|e| (e.index, e.raw, self.extent_start(e), self.extent_count(e)))
+            .collect();
+        for (index, mut raw, start, count) in targets {
+            if start >= records {
+                raw[0] = E5; // wholly past the new end
+                self.write_dir_entry(index, &raw)?;
+            } else if start + count > records {
+                let keep = records - start;
+                let last_logical = keep.saturating_sub(1) / RECORDS_PER_EXTENT;
+                let base = (raw[12] as u32 + 32 * (raw[14] & 0x3F) as u32) & !self.params.exm;
+                let extent = base + last_logical;
+                raw[12] = (extent % 32) as u8;
+                raw[14] = (extent / 32) as u8;
+                raw[15] = (keep - last_logical * RECORDS_PER_EXTENT) as u8;
+                // Release the allocation slots the truncation gave up, so the
+                // blocks come back on the rebuild below.
+                let slots_kept = keep.div_ceil(self.params.records_per_block) as usize;
+                let mut blocks = decode_blocks(&raw, &self.params);
+                for slot in blocks.iter_mut().skip(slots_kept) {
+                    *slot = 0;
+                }
+                encode_blocks(&mut raw, &blocks, &self.params);
+                self.write_dir_entry(index, &raw)?;
+            }
+        }
+        self.reload()?;
+        Ok(Some(records))
+    }
+
+    /// Bytes still free on this disk.
+    pub fn free_bytes(&self) -> u64 {
+        self.free_blocks() as u64 * self.params.records_per_block as u64 * 128
+    }
+
     /// Free blocks remaining.
     pub fn free_blocks(&self) -> u32 {
         self.used.iter().filter(|u| !**u).count() as u32
     }
 
     /// Blocks currently allocated to files, for a free-space report.
+    #[allow(dead_code)]
     ///
     /// Counts distinct block numbers rather than summing allocation slots: a
     /// cross-linked disk (the same block claimed twice) would otherwise report
@@ -916,6 +1046,35 @@ impl ImageFs {
     }
 }
 
+/// The read-only surface the mount UIs use to describe a mounted disk.
+///
+/// Separated out and scoped rather than left to trip the dead-code lint one
+/// method at a time: these are consumed by the mount screens in the next step,
+/// and a blanket allow over the whole module would go on hiding real dead code
+/// long after that.
+#[allow(dead_code)]
+impl ImageFs {
+    /// The format this image is mounted as.
+    pub fn format(&self) -> &'static Format {
+        self.fmt
+    }
+
+    /// Derived geometry.
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
+    /// Every live directory entry.
+    pub fn entries(&self) -> &[DirSlot] {
+        &self.dir
+    }
+
+    /// Total capacity of the data area in bytes.
+    pub fn capacity_bytes(&self) -> u64 {
+        (self.params.max_block as u64 + 1) * self.params.records_per_block as u64 * 128
+    }
+}
+
 /// Read the 16-byte allocation map out of a directory entry.
 ///
 /// The map is 16 bytes however you divide it: sixteen 8-bit block numbers on a
@@ -925,10 +1084,11 @@ fn decode_blocks(raw: &RawEntry, params: &Params) -> Vec<u16> {
     if params.wide_blocks {
         raw[16..32]
             .chunks_exact(2)
+            .take(params.map_slots)
             .map(|p| u16::from_le_bytes([p[0], p[1]]))
             .collect()
     } else {
-        raw[16..32].iter().map(|&b| b as u16).collect()
+        raw[16..32].iter().take(params.map_slots).map(|&b| b as u16).collect()
     }
 }
 

@@ -825,7 +825,7 @@ pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
             // directory blocks plus the blocks this drive's files occupy — so
             // STAT's free count (zero bits × block size) reflects real usage.
             let total = VD_DSM as u64 + 1; // 2048 blocks
-            let used = (VD_DIR_BLOCKS + fs.current_drive_used_blocks(VD_BLS)).min(total);
+            let used = (VD_DIR_BLOCKS + fs.current_drive_used_blocks(VD_BLS, total)).min(total);
             let nbytes = (VD_DSM as usize / 8) + 1; // 256 bytes = exactly 2048 bits
             let mut vec = vec![0u8; nbytes];
             for b in 0..used as usize {
@@ -903,7 +903,7 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             Some(0)
         }
         15 => Some(with_fcb(cpm, |_cpm, fcb| {
-            if fs.open_existing(fcb).is_some() {
+            if fs.open_existing(fcb) {
                 fcb.ex = 0;
                 fcb.s2 = 0;
                 fcb.cr = 0;
@@ -946,7 +946,7 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             // let another session write it without waiting for this one to
             // leave the emulator (see CPM_WRITERS in fs.rs).
             fs.release_file(fcb);
-            if no_directory_work || fs.open_existing(fcb).is_some() {
+            if no_directory_work || fs.open_existing(fcb) {
                 0x00
             } else {
                 0xFF
@@ -1005,7 +1005,7 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             }
         })),
         22 => Some(with_fcb(cpm, |_cpm, fcb| {
-            if fs.make(fcb).is_some() {
+            if fs.make(fcb) {
                 fcb.ex = 0;
                 fcb.s2 = 0;
                 fcb.cr = 0;
@@ -2011,7 +2011,7 @@ mod tests {
         raw[1..9].copy_from_slice(b"HELLO   ");
         raw[9..12].copy_from_slice(b"COM");
         let fcb = Fcb::from_bytes(&raw);
-        assert!(fs.make(&fcb).is_some());
+        assert!(fs.make(&fcb));
         let mut rec = [0u8; 128];
         rec[..prog.len()].copy_from_slice(&prog);
         fs.write_record(&fcb, 0, &rec).unwrap();

@@ -30,7 +30,10 @@ pub trait Media: Send {
     /// Push any buffered writes to the host.
     fn flush(&mut self) -> std::io::Result<()>;
 
-    /// True when the store holds no bytes at all.
+    /// True when the store holds no bytes at all.  Present because a type with
+    /// `len` and no `is_empty` is a lint, and because "is this image empty?" is
+    /// a question the mount UIs will ask.
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -54,10 +57,12 @@ fn in_range(offset: u64, want: usize, len: u64) -> bool {
 
 /// An image held in memory.  Used by the tests, and by nothing else — a real
 /// mount is always file-backed so two sessions see each other's writes.
+#[cfg(test)]
 pub struct MemMedia {
     bytes: Vec<u8>,
 }
 
+#[cfg(test)]
 impl MemMedia {
     pub fn new(bytes: Vec<u8>) -> MemMedia {
         MemMedia { bytes }
@@ -70,6 +75,7 @@ impl MemMedia {
     }
 }
 
+#[cfg(test)]
 impl Media for MemMedia {
     fn len(&self) -> u64 {
         self.bytes.len() as u64

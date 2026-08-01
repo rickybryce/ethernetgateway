@@ -5,7 +5,7 @@
 //! `transfer_dir/CPM/`.  The folder's files are untouched and come back the
 //! moment the image is unmounted.
 //!
-//! The work splits in two:
+//! The work splits five ways:
 //!
 //! * [`format`] — geometry.  Where the 128-byte CP/M records sit inside the
 //!   file, and the CP/M parameters (block size, directory size, sector skew)
@@ -15,20 +15,463 @@
 //!   bounds-checked against the real length of the file.
 //!
 //! * [`fs`] — the filesystem itself: directory entries, extents and allocation
-//!   blocks.  Read-only so far; allocation and erase come next, after which it
-//!   is presented through the same record-oriented API that the folder-backed
-//!   [`super::fs::CpmFs`] already offers the BDOS layer.
-
-// Staged build: the read path and its tests are complete, but nothing outside
-// this module calls it yet — `CpmFs` gains the per-drive backend switch, and
-// the config/UI layers gain the mount controls, in the steps after this one.
-// CI treats warnings as errors, so the allow keeps the tree green in between.
-// **Remove this once the mount path is wired up**; it would otherwise go on
-// hiding genuinely dead code in here forever.
-#![allow(dead_code)]
+//!   blocks, read and written.
+//!
+//! * [`identify`] — which format a file is, and whether that answer is trusted
+//!   enough to write to it.
+//!
+//! * [`registry`] — the process-wide table of what is mounted where, and which
+//!   drives sessions are using.
+//!
+//! and this file ties them together: [`mount_image`] opens a `.dsk` and
+//! publishes it, [`unmount_drive`] takes it away again, and
+//! [`apply_config_mounts`] brings up whatever `cpm_mounts` asks for at startup.
+//! The BDOS layer never sees any of it — [`super::fs::CpmFs`] dispatches each
+//! operation to the mounted image or to the drive folder, so the emulator's
+//! file calls are written once.
 
 pub mod format;
-pub mod identify;
 pub mod fs;
+pub mod identify;
 pub mod media;
 pub mod registry;
+
+use std::path::{Path, PathBuf};
+
+/// Folder under the `CPM/` container where operators put their `.dsk` files.
+pub const IMAGES_DIR: &str = "images";
+
+/// Is `name` a plausible image filename — a bare name, no path?
+///
+/// The same rule the file-transfer subsystem applies: no separators, no `..`,
+/// nothing hidden.  A mount name arrives from a config file or a web form, so
+/// it is the one input here that an attacker could shape, and joining an
+/// unvalidated one onto the images folder is a path traversal.
+pub fn is_safe_image_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains('\0')
+}
+
+/// The images folder inside a `CPM/` container.
+pub fn images_dir(cpm_base: &Path) -> PathBuf {
+    cpm_base.join(IMAGES_DIR)
+}
+
+/// Open an image and publish it on a drive.
+///
+/// Ties the pieces together: validate the name, identify the format, open the
+/// file, mount the filesystem, and put it in the registry where every session
+/// will find it.  Returns a human-readable note about the mount — chiefly
+/// whether it came up read-only and why — for the UIs to show.
+///
+/// A drive somebody is using is refused; see [`registry::check_can_change`].
+pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
+    if !is_safe_image_name(filename) {
+        return Err(format!("'{filename}' is not a valid image name"));
+    }
+    registry::check_can_change(drive0)?;
+
+    let path = images_dir(cpm_base).join(filename);
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("{filename}: {e}"))?
+        .len();
+
+    // Identification needs to read the first directory record *as each
+    // candidate format would address it*, so the file is opened first and the
+    // closure seeks per candidate.
+    let mut probe = media::FileMedia::open(&path, true).map_err(|e| format!("{filename}: {e}"))?;
+    let ident = identify::identify(filename, size, |fmt| {
+        let off = fmt.data_record_offset(0)?;
+        let mut buf = [0u8; 128];
+        media::Media::read_at(&mut probe, off, &mut buf).ok()?;
+        Some(buf)
+    })
+    .map_err(|e| format!("{filename}: {e}"))?;
+    drop(probe);
+
+    // Three separate things can force read-only, and the operator is told
+    // which: a guessed format, a file the host will not let us write, or a
+    // directory that arrived damaged (decided inside `ImageFs::mount`).
+    let host_ro = std::fs::metadata(&path)
+        .map(|m| m.permissions().readonly())
+        .unwrap_or(false);
+    let want_ro = ident.force_read_only() || host_ro;
+
+    let medium = media::FileMedia::open(&path, want_ro).map_err(|e| format!("{filename}: {e}"))?;
+    let image = fs::ImageFs::mount(Box::new(medium), ident.format, want_ro)
+        .map_err(|e| format!("{filename}: {e}"))?;
+    let read_only = image.is_read_only();
+
+    let reason = if !read_only {
+        String::new()
+    } else if ident.force_read_only() {
+        "the filename does not say which format this is, so it was identified \
+         by inspection — rename it with a format prefix to allow writing"
+            .to_string()
+    } else if host_ro {
+        "the image file is read-only on the host".to_string()
+    } else {
+        "the CP/M directory in this image is damaged".to_string()
+    };
+
+    let mount = registry::Mount {
+        path: path.clone(),
+        filename: filename.to_string(),
+        format: ident.format.token,
+        read_only,
+        read_only_reason: reason.clone(),
+        fs: std::sync::Arc::new(std::sync::Mutex::new(image)),
+    };
+    registry::mount(drive0, mount)?;
+
+    let drive = (b'A' + drive0) as char;
+    crate::glog!(
+        "CP/M: mounted {} on drive {}: as {}{}",
+        filename,
+        drive,
+        ident.format.token,
+        if read_only { " (read-only)" } else { "" }
+    );
+    Ok(if read_only {
+        format!("{drive}: {filename} — read-only: {reason}")
+    } else {
+        format!("{drive}: {filename} ({})", ident.format.label)
+    })
+}
+
+/// Take the image off a drive, so its host folder is visible again.
+// Called by the mount UIs, which land in the next step; the mount side is
+// already reached from `apply_config_mounts`.
+#[allow(dead_code)]
+pub fn unmount_drive(drive0: u8) -> Result<String, String> {
+    registry::check_can_change(drive0)?;
+    let drive = (b'A' + drive0) as char;
+    match registry::unmount(drive0) {
+        Some(m) => {
+            crate::glog!("CP/M: unmounted {} from drive {}:", m.filename, drive);
+            Ok(format!(
+                "{drive}: {} unmounted — the drive folder's files are visible again",
+                m.filename
+            ))
+        }
+        None => Err(format!("drive {drive}: has no image mounted")),
+    }
+}
+
+/// Parse the `cpm_mounts` config value into (drive index, filename) pairs.
+///
+/// Format is `A=name.dsk,C=other.dsk`.  Anything unparseable is dropped rather
+/// than failing the whole line: a config file is hand-edited, and one bad entry
+/// should cost that one mount, not every mount.
+pub fn parse_mounts(value: &str) -> Vec<(u8, String)> {
+    let mut out: Vec<(u8, String)> = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let Some((drive, name)) = item.split_once('=') else {
+            continue;
+        };
+        let drive = drive.trim();
+        let name = name.trim();
+        let mut chars = drive.chars();
+        let (Some(letter), None) = (chars.next(), chars.next()) else {
+            continue;
+        };
+        if !letter.is_ascii_alphabetic() {
+            continue;
+        }
+        let drive0 = letter.to_ascii_uppercase() as u8 - b'A';
+        if drive0 >= crate::cpm::fs::NUM_DRIVES || !is_safe_image_name(name) {
+            continue;
+        }
+        // Last entry wins for a repeated drive, so a hand-edited file cannot
+        // produce two mounts on one drive.
+        out.retain(|(d, _)| *d != drive0);
+        out.push((drive0, name.to_string()));
+    }
+    out.sort_by_key(|(d, _)| *d);
+    out
+}
+
+/// Render mounts back into the `cpm_mounts` config form.
+// Written by the mount UIs when they save; see `unmount_drive`.
+#[allow(dead_code)]
+pub fn format_mounts(mounts: &[(u8, String)]) -> String {
+    mounts
+        .iter()
+        .map(|(d, n)| format!("{}={}", (b'A' + d) as char, n))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Mount everything `cpm_mounts` asks for.
+///
+/// Run when the emulator starts up.  A mount that fails is logged and skipped —
+/// an image that has been deleted or renamed must not stop the other drives, or
+/// the emulator, from coming up.
+pub fn apply_config_mounts(cpm_base: &Path, value: &str) {
+    for (drive0, name) in parse_mounts(value) {
+        // Already mounted from a previous session's startup: leave it be, so
+        // re-entering the emulator does not reopen a disk somebody is using.
+        if registry::get(drive0).is_some_and(|m| m.filename == name) {
+            continue;
+        }
+        if let Err(e) = mount_image(cpm_base, drive0, &name) {
+            crate::glog!("CP/M: could not mount {} on {}: {}", name, (b'A' + drive0) as char, e);
+        }
+    }
+}
+
+/// Every `.dsk` sitting in the images folder, sorted, for the mount pickers.
+// Read by the mount UIs; see `unmount_drive`.
+#[allow(dead_code)]
+pub fn available_images(cpm_base: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(images_dir(cpm_base)) {
+        for e in rd.flatten() {
+            if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if is_safe_image_name(&name) && !name.eq_ignore_ascii_case("readme.txt") {
+                out.push(name);
+            }
+        }
+    }
+    out.sort_by_key(|a| a.to_lowercase());
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the backend switch: a `CpmFs` aimed at a drive with
+    /// an image mounted must read and write the image, and the drive's host
+    /// folder must be untouched and still there when the image is unmounted.
+    #[test]
+    fn test_cpmfs_reads_and_writes_through_a_mounted_image() {
+        use crate::cpm::fcb::Fcb;
+        use crate::cpm::fs::CpmFs;
+
+        let _g = registry::tests_lock();
+        registry::clear_all();
+
+        // A CPM/ container with an images folder and a blank named image.
+        let base = std::env::temp_dir().join("egw_backend_switch");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_test.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        // A file in the *folder* for drive B:, which must be hidden while the
+        // image is mounted and must come back afterwards.
+        std::fs::write(base.join("B").join("FOLDER.TXT"), b"from the folder").unwrap();
+
+        let note = mount_image(&base, 1, "ibm3740_test.dsk").expect("mount");
+        assert!(note.contains("ibm3740"), "{note}");
+        assert!(!note.contains("read-only"), "a named image is writable: {note}");
+
+        let fs = CpmFs::new(base.clone());
+        let fcb = |n: &str, x: &str| {
+            let mut raw = [0u8; 36];
+            raw[0] = 2; // B:
+            for (s, c) in raw[1..9].iter_mut().zip(n.bytes().chain(std::iter::repeat(b' '))) {
+                *s = c;
+            }
+            for (s, c) in raw[9..12].iter_mut().zip(x.bytes().chain(std::iter::repeat(b' '))) {
+                *s = c;
+            }
+            Fcb::from_bytes(&raw)
+        };
+
+        // The folder's file must NOT be visible: the image replaced the drive.
+        assert!(
+            !fs.open_existing(&fcb("FOLDER", "TXT")),
+            "the drive folder must be hidden while an image is mounted"
+        );
+
+        // Create, write and read back through the ordinary CpmFs API.
+        let f = fcb("HELLO", "TXT");
+        assert!(fs.make(&f), "make on an image-backed drive");
+        let mut rec = [0x1Au8; 128];
+        rec[..5].copy_from_slice(b"image");
+        fs.write_record(&f, 0, &rec).unwrap();
+        assert!(fs.open_existing(&f));
+        assert_eq!(fs.file_size_records(&f), Some(1));
+        assert_eq!(fs.read_record(&f, 0).unwrap().unwrap(), rec);
+        assert_eq!(fs.list_matching(&fcb("?????", "???")), vec!["HELLO.TXT"]);
+
+        // It really landed in the image file, not in the folder.
+        drop(fs);
+        assert!(
+            !base.join("B").join("HELLO.TXT").exists(),
+            "the write must have gone into the image, not the drive folder"
+        );
+
+        // Unmount: the folder's own file is back, and the image's is gone.
+        unmount_drive(1).expect("unmount");
+        let fs = CpmFs::new(base.clone());
+        assert!(
+            fs.open_existing(&fcb("FOLDER", "TXT")),
+            "the folder's files must return when the image is unmounted"
+        );
+        assert!(!fs.open_existing(&fcb("HELLO", "TXT")));
+
+        drop(fs);
+        registry::clear_all();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Two sessions must not interleave records into one file inside a mounted
+    /// image, exactly as they cannot on a folder-backed drive.
+    ///
+    /// The image's mutex makes each *record* atomic but says nothing about a
+    /// whole file, so without the write claim two uploads into one name would
+    /// silently produce a file made of both.
+    #[test]
+    fn test_two_sessions_cannot_write_one_file_in_an_image() {
+        use crate::cpm::fcb::Fcb;
+        use crate::cpm::fs::CpmFs;
+
+        let _g = registry::tests_lock();
+        registry::clear_all();
+        let base = std::env::temp_dir().join("egw_image_claim");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_claim.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        mount_image(&base, 0, "ibm3740_claim.dsk").expect("mount");
+
+        let mut raw = [0u8; 36];
+        raw[0] = 1; // A:
+        raw[1..9].copy_from_slice(b"SHARED  ");
+        raw[9..12].copy_from_slice(b"DAT");
+        let fcb = Fcb::from_bytes(&raw);
+
+        let one = CpmFs::new(base.clone());
+        let two = CpmFs::new(base.clone());
+        assert!(one.make(&fcb), "first session creates the file");
+        assert!(one.write_record(&fcb, 0, &[1u8; 128]).is_ok());
+        assert!(
+            two.write_record(&fcb, 0, &[2u8; 128]).is_err(),
+            "a second session must be refused while the first holds the file"
+        );
+
+        // ...and once the first lets go, the second may have it.
+        one.release_file(&fcb);
+        assert!(two.write_record(&fcb, 0, &[2u8; 128]).is_ok());
+
+        drop(one);
+        drop(two);
+        registry::clear_all();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A drive somebody is sitting on must not have its disk changed underneath
+    /// them.
+    #[test]
+    fn test_mount_change_is_refused_on_a_busy_drive() {
+        let _g = registry::tests_lock();
+        registry::clear_all();
+        registry::session_start(4242);
+        registry::session_select(4242, 3);
+
+        let err = mount_image(Path::new("/tmp"), 3, "whatever.dsk").unwrap_err();
+        assert!(err.contains("in use"), "{err}");
+        let err = unmount_drive(3).unwrap_err();
+        assert!(err.contains("in use"), "{err}");
+
+        registry::session_end(4242);
+        registry::clear_all();
+    }
+
+    #[test]
+    fn test_parse_mounts() {
+        assert_eq!(
+            parse_mounts("A=one.dsk,C=two.dsk"),
+            vec![(0, "one.dsk".to_string()), (2, "two.dsk".to_string())]
+        );
+        assert_eq!(parse_mounts(""), vec![]);
+        assert_eq!(
+            parse_mounts(" a = one.dsk "),
+            vec![(0, "one.dsk".to_string())],
+            "whitespace and case are forgiven"
+        );
+    }
+
+    /// One malformed entry must cost that entry, not the whole line — a config
+    /// file is hand-edited and losing every mount to one typo is not a fair
+    /// trade.
+    #[test]
+    fn test_parse_mounts_drops_only_the_bad_entries() {
+        let got = parse_mounts("A=good.dsk,nonsense,ZZ=x.dsk,Q=../escape,B=also.dsk");
+        assert_eq!(
+            got,
+            vec![(0, "good.dsk".to_string()), (1, "also.dsk".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_mounts_refuses_a_drive_past_p() {
+        assert_eq!(parse_mounts("Q=x.dsk"), vec![], "P: is the last drive");
+        assert_eq!(parse_mounts("P=x.dsk").len(), 1);
+    }
+
+    /// Two entries for one drive would otherwise produce two mounts on it.
+    #[test]
+    fn test_parse_mounts_last_wins_for_a_repeated_drive() {
+        assert_eq!(
+            parse_mounts("A=first.dsk,A=second.dsk"),
+            vec![(0, "second.dsk".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_mounts_round_trip_through_the_config_form() {
+        let mounts = vec![(0, "one.dsk".to_string()), (5, "two.dsk".to_string())];
+        let text = format_mounts(&mounts);
+        assert_eq!(text, "A=one.dsk,F=two.dsk");
+        assert_eq!(parse_mounts(&text), mounts);
+    }
+
+    #[test]
+    fn test_safe_image_names() {
+        assert!(is_safe_image_name("altair8_games.dsk"));
+        assert!(is_safe_image_name("DISK01.DSK"));
+        assert!(!is_safe_image_name(""));
+        assert!(!is_safe_image_name(".hidden"));
+        assert!(!is_safe_image_name("../../etc/passwd"));
+        assert!(!is_safe_image_name("sub/dir.dsk"));
+        assert!(!is_safe_image_name("back\\slash.dsk"));
+        assert!(!is_safe_image_name("nul\0byte.dsk"));
+    }
+
+    /// A traversal attempt must be refused before anything touches the disk.
+    #[test]
+    fn test_mount_refuses_a_traversing_name() {
+        let err = mount_image(Path::new("/tmp"), 0, "../../etc/passwd").unwrap_err();
+        assert!(err.contains("not a valid image name"), "{err}");
+    }
+
+    #[test]
+    fn test_unmount_an_empty_drive_says_so() {
+        let err = unmount_drive(9).unwrap_err();
+        assert!(err.contains("no image mounted"), "{err}");
+    }
+}

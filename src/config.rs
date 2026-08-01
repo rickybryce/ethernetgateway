@@ -828,6 +828,13 @@ pub struct Config {
     /// `hbios_2`), or `off`.  Validated against
     /// `crate::cpm::uart::UART_CHOICES`.
     pub cpm_emu_uart: String,
+    /// Disk images mounted on CP/M drives, as `A=name.dsk,C=other.dsk`.
+    ///
+    /// One key rather than sixteen, because the mount UIs render the whole set
+    /// as a unit anyway and sixteen keys would be sixteen chances for the three
+    /// config surfaces to drift apart.  Values are bare filenames inside
+    /// `CPM/images` — never paths; see `cpm::image::is_safe_image_name`.
+    pub cpm_mounts: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
     /// inside the emulator and reloaded when the modem powers up or the guest
     /// issues `ATZ` — the same arrangement the physical ports have under their
@@ -952,6 +959,7 @@ impl Default for Config {
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
+            cpm_mounts: String::new(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1547,6 +1555,7 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .filter(|v| crate::cpm::uart::is_valid_uart_key(v))
             .cloned()
             .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
+        cpm_mounts: map.get("cpm_mounts").cloned().unwrap_or_default(),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2242,6 +2251,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
     content.push_str("\
+# cpm_mounts: disk images mounted on CP/M drives, as A=name.dsk,C=other.dsk.
+#   A mounted drive reads and writes the CP/M filesystem inside the image
+#   instead of its folder under CPM/; the folder's files are untouched and come
+#   back when it is unmounted.  Names are bare filenames in CPM/images.  An
+#   image whose name carries no format prefix (see CPM/images/readme.txt) is
+#   identified by inspection and mounted READ-ONLY, because writing with a
+#   guessed geometry is the one mistake that cannot be detected afterwards.
+");
+    write_kv(&mut content, "cpm_mounts", &cfg.cpm_mounts);
+    content.push_str("\
 # The CP/M virtual modem's saved AT profile, written by AT&W from inside the
 # emulator and reloaded on power-up and on ATZ - exactly as the physical ports
 # save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
@@ -2766,6 +2785,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
+        "cpm_mounts" => cfg.cpm_mounts = value.to_string(),
         "disable_gateway_connections" => {
             cfg.disable_gateway_connections = value.eq_ignore_ascii_case("true")
         }
@@ -3558,6 +3578,7 @@ mod tests {
         let path = dir.join("roundtrip.conf");
 
         let original = Config {
+            cpm_mounts: "A=altair8_games.dsk,C=ibm3740_tools.dsk".to_string(),
             telnet_enabled: false,
             telnet_port: 1234,
             telnet_gateway_negotiate: true,

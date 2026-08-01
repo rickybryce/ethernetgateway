@@ -60,6 +60,7 @@ pub enum Framing {
     /// this shape — uniform 137-byte sectors with the data at offset 3, unlike
     /// [`Framing::AltairSplit`] — and they go in the table as soon as their
     /// CP/M parameters are confirmed against real content.
+    #[allow(dead_code)]
     Framed {
         /// Bytes per physical sector in the file.
         seclen: u16,
@@ -132,6 +133,11 @@ impl Framing {
 #[derive(Debug, Clone, Copy)]
 pub enum Skew {
     /// No translation — logical sector *n* is physical sector *n*.
+    ///
+    /// Unused so far: every format measured to date interleaves.  Kept because
+    /// "this disk has no skew" is a real answer that a hard-disk image is
+    /// likely to give, not a placeholder.
+    #[allow(dead_code)]
     None,
     /// An explicit permutation, one entry per sector in a track.  Recovered
     /// from the BIOS on the disk itself; see the module comment.

@@ -365,6 +365,24 @@ impl TelnetSession {
             tokio::fs::create_dir_all(&p).await?;
         }
         self.cpmemu_place_egt80(&cfg.transfer_dir).await;
+        // The images folder is created alongside the drives so an operator has
+        // somewhere to put a `.dsk` before they ever open a mount screen.
+        let mut images = PathBuf::from(&cfg.transfer_dir);
+        images.push("CPM");
+        images.push(crate::cpm::image::IMAGES_DIR);
+        tokio::fs::create_dir_all(&images).await?;
+        // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
+        // holding the requested image is left alone, so a second session
+        // entering the emulator does not reopen a disk the first one is using.
+        let mut base = PathBuf::from(&cfg.transfer_dir);
+        base.push("CPM");
+        let base = std::fs::canonicalize(&base).unwrap_or(base);
+        let mounts = cfg.cpm_mounts.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::cpm::image::apply_config_mounts(&base, &mounts);
+        })
+        .await
+        .ok();
         Ok(())
     }
 
@@ -813,13 +831,9 @@ impl TelnetSession {
                 fs.current_drive_letter()
             ))
             .await?;
-        } else if fs
-            .resolve(&old)
-            .map(|p| CpmFs::host_is_ro(&p))
-            .unwrap_or(false)
-        {
+        } else if fs.file_is_ro(&old) {
             self.send_line("  File R/O").await?;
-        } else if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)).is_some() {
+        } else if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)) {
             self.send_line("  File exists").await?;
         } else {
             self.send_line("  No file").await?;
@@ -938,7 +952,7 @@ impl TelnetSession {
             }
         };
         let fcb = Self::cpmemu_fcb(&name, &ext);
-        if fs.make(&fcb).is_none() {
+        if !fs.make(&fcb) {
             self.send_line(&format!("  {}", self.red("[cannot create file]"))).await?;
             return Ok(());
         }
