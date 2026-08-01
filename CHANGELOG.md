@@ -18,9 +18,11 @@ follow-up quality/stability pass of our own.
   interface, and `SYSGET`'s `RTCCNT` reports one clock so software that probes
   before asking finds it. Local time where the platform can report it (UTC on
   Windows, which needs an API we do not otherwise link). Setting the clock is
-  refused rather than silently accepted: the time is the host's. Verified by
-  assembling a test program with the emulator's own `ASM` and running it —
-  it printed `260731214256` against a host clock eight seconds later.
+  refused rather than silently accepted: the time is the host's. Verified the
+  way the software would use it: a test program assembled *inside the emulator*
+  by Digital Research's own `ASM`, turned into a `.COM` by `LOAD`, and run — it
+  prints the host's time to the second, in about 23 ms round trip from typing
+  the command to getting the prompt back.
 
 ### Changed
 - **Two sessions can no longer write the same CP/M file at once.** Every
