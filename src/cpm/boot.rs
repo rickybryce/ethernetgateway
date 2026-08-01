@@ -36,15 +36,29 @@ pub const BOOT_DATA_OFFSET: usize = 3;
 /// Bytes the bootstrap transfers per sector.
 pub const BOOT_DATA_LEN: usize = 128;
 
-/// Sectors the bootstrap loads, and the step between them.
+/// Sectors the bootstrap loads.
 ///
-/// One sector is not enough: the loader in sector 0 calls a read routine at
-/// `0092h`, which is past the 128 bytes that sector holds. The step is **2**
-/// because that is the interleave the disk's own loader uses — its inner loop
-/// does `ADI 02` on the sector number and wraps at 33 — so consecutive 128-byte
-/// chunks live in sectors 0, 2, 4, … and sector 1 is genuinely empty.
+/// One is not enough. The CP/M loader in sector 0 calls a read routine at
+/// `0092h`, past the 128 bytes that sector holds; the MITS loader copies `0FCh`
+/// bytes starting at `0013h`, so it needs `010Fh` of them. Four sectors — 512
+/// bytes — covers both with room to spare, and a disk whose loader is shorter
+/// simply stops early.
 pub const BOOT_SECTORS: u8 = 4;
+
 /// Physical sectors between consecutive boot chunks.
+///
+/// Fixed at 2, and measured rather than assumed. It was briefly tempting to
+/// try several steps and keep whichever produced a running machine, on the
+/// theory that the step reflects how fast the loader that wrote the disk could
+/// read. It does not need to be guessed: dumping track 0 of an Altair DOS disk
+/// shows its loader copying 0FCh bytes from 0013h to 2C00h, and the code that
+/// continues it — full of `2Cxx` addresses — sits in physical sectors 2 and 4.
+/// The MITS disks are laid out exactly like the CP/M ones.
+///
+/// Guessing was also actively harmful: run four candidates and take the first
+/// that prints anything, and a *wrong* layout that scribbles a few bytes at a
+/// console beats the right one that is still loading. That is precisely what
+/// happened — step 4 "won" for five disks and produced nothing but noise.
 pub const BOOT_INTERLEAVE: u8 = 2;
 
 /// Why a boot did not happen.
@@ -85,29 +99,25 @@ impl std::fmt::Display for BootError {
 
 // WHERE THIS STANDS, for whoever picks it up next.
 //
-// A real Altair CP/M disk boots, seeks to track 0, and runs its loader.  It
-// does *not* reach a sign-on.  The evidence, gathered by tracing the program
-// counter (set `CPM_BOOT_TRACE` on the boot test) and counting port accesses:
+// Altair CP/M boots to its `A>` prompt, and so do the eight other CP/M images
+// in the sample set.  The MITS operating systems — Altair DOS, Disk BASIC and
+// Time Sharing BASIC — load and run their loaders too.
 //
-//   * Control flow is right up to a point: 0000 -> 0020 (the track-0 test,
-//     which passes) -> 0027 -> 002d -> a CALL to 0048, which loops a few times
-//     around 0048..0062, then goes 004d -> 0050 -> 0072 -> 0074 -> **0092**.
-//     0092 is past the 128-byte payload, in memory that was never loaded, and
-//     from there it wanders through zeros until it stops making sense.
-//   * In a whole run the guest touches **only** port 08h (742 reads) and 09h
-//     (371 writes).  It never reads the sector-position register and never
-//     reads the data port — so it never actually transfers a sector, which is
-//     why nothing is loaded for it to jump to.
-//   * The loader sets `HL = 0DD80h` and `BC = 0100h` before that CALL, so it
-//     intends to load CP/M high; the routine it calls is not doing so.
+// The diagnostics that got it there are still in the boot test and are worth
+// reaching for before theorising: `CPM_BOOT_TRACE` prints the first PCs,
+// `CPM_BOOT_DISASM=addr:count` disassembles what actually landed in memory,
+// `CPM_BOOT_STEP` forces a different sector step, and the test prints a
+// per-port access count.  Every fault found so far was visible in one of them
+// within a minute; none was found by reasoning about what the code ought to do.
 //
-// So the fault is in the read path the loader uses, not in seeking or in the
-// status bits (both verified: status reads 0xA1 — at track 0, head may move).
-// The next step is to disassemble 0048..0074 from the boot sector and work out
-// which register or status bit the read routine is waiting on that we are not
-// providing.  Sector 1 of the disk is all zeros while sector 2 holds code,
-// which hints the loader expects a sector interleave rather than physically
-// sequential reads.
+// Two things that are settled, so they are not re-litigated:
+//
+//   * The sector step is 2 for every Altair disk here, CP/M and MITS alike —
+//     see BOOT_INTERLEAVE.  It is not worth autodetecting.
+//   * A guest that loads and stays silent is usually looking at the wrong
+//     console, not misreading the disk.  MITS software picks its terminal
+//     board from the front-panel sense switches on port FFh; see
+//     DEFAULT_SENSE_SWITCHES in boot_machine.rs.
 
 /// How many position-register reads to allow before giving up.
 ///
@@ -125,6 +135,25 @@ const MAX_POLLS: usize = 512;
 pub fn cold_boot<F, S>(
     dcdd: &mut Dcdd,
     drive: u8,
+    fetch: F,
+    store: S,
+) -> Result<u16, BootError>
+where
+    F: FnMut(u8, u8, u8) -> Result<Vec<u8>, String>,
+    S: FnMut(u16, &[u8]),
+{
+    cold_boot_with_step(dcdd, drive, BOOT_INTERLEAVE, fetch, store)
+}
+
+/// Cold-boot using a specific sector step.
+///
+/// The step is a parameter only so that a disk which will not boot can be tried
+/// another way without editing the code — see [`BOOT_INTERLEAVE`], which is
+/// what every real caller passes.
+pub fn cold_boot_with_step<F, S>(
+    dcdd: &mut Dcdd,
+    drive: u8,
+    step: u8,
     mut fetch: F,
     mut store: S,
 ) -> Result<u16, BootError>
@@ -183,7 +212,7 @@ where
     // a shorter loader is legitimate, and the guest will notice long before we
     // could.
     for i in 1..BOOT_SECTORS {
-        let sec = sector + i * BOOT_INTERLEAVE;
+        let sec = sector + i * step.max(1);
         let Ok(more) = fetch(drive, track, sec) else { break };
         if more.len() < BOOT_DATA_OFFSET + BOOT_DATA_LEN {
             break;

@@ -32,6 +32,29 @@ pub const CONSOLE_STATUS_PORT: u8 = 0x10;
 /// Console data port.
 pub const CONSOLE_DATA_PORT: u8 = 0x11;
 
+/// The front-panel sense switches, read on port FFh.
+pub const SENSE_SWITCH_PORT: u8 = 0xFF;
+
+/// What the sense switches say when nobody has set them.
+///
+/// This is not a neutral choice and it is not zero-by-accident. MITS system
+/// software — Altair DOS, Disk BASIC, Time Sharing BASIC — asks the *front
+/// panel* which console board the machine has, because in 1976 that genuinely
+/// varied from machine to machine. It reads port FFh and picks a terminal
+/// driver from the low four bits: 88-SIO on ports 00h/01h, 88-ACR on 06h/07h,
+/// 4PIO on 20h-23h, or the 88-2SIO on 10h/11h.
+///
+/// The 88-2SIO is the one we emulate, and zero is the setting that selects it.
+/// Leaving the port floating at FFh instead selected the 88-SIO — so Altair DOS
+/// booted perfectly, wrote its sign-on to port 01h, and we dropped every byte
+/// on the floor. The disk was never the problem; the front panel was.
+///
+/// It is a constant rather than a setting because there is nothing yet for an
+/// operator to set it from. When the boot path gets its config key and its
+/// screens, the switches belong there too: they are the one control that
+/// decides what hardware MITS software believes it is talking to.
+pub const DEFAULT_SENSE_SWITCHES: u8 = 0x00;
+
 /// One image in a drive.
 struct Mounted {
     bytes: Vec<u8>,
@@ -54,6 +77,8 @@ pub struct BootMachine {
     /// forever on a *disk* is not, and the two are told apart by this and
     /// `Dcdd::polls_on_sector`.
     idle_status_reads: u64,
+    /// What the front panel reports on port FFh.
+    sense_switches: u8,
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
@@ -68,10 +93,12 @@ impl BootMachine {
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
             idle_status_reads: 0,
+            sense_switches: DEFAULT_SENSE_SWITCHES,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
         }
     }
+
 
     /// Put an image in a drive.
     ///
@@ -105,6 +132,43 @@ impl BootMachine {
             }
         }
         out
+    }
+
+    /// Cold-boot with a specific sector step, for diagnosing a disk whose
+    /// loader is not laid out the way the bootstrap assumes.
+    ///
+    /// Every Altair disk we have — CP/M and MITS alike — uses the 2:1 step
+    /// [`super::boot::BOOT_INTERLEAVE`], so nothing in the product needs this.
+    /// It exists because trying another step is the first thing you would want
+    /// to do with a disk that loads and then runs off into nothing.
+    #[cfg(test)]
+    fn boot_with_step(&mut self, cpu: &mut Cpu, drive: u8, step: u8) -> Result<(), BootError> {
+        let disks = &self.disks;
+        let mut chunks: Vec<(u16, Vec<u8>)> = Vec::new();
+        let entry = super::boot::cold_boot_with_step(
+            &mut self.dcdd,
+            drive,
+            step,
+            |d, t, s| {
+                let m = disks
+                    .get(d as usize)
+                    .and_then(|x| x.as_ref())
+                    .ok_or_else(|| format!("drive {d} is empty"))?;
+                let off = m.geometry.offset(t, s) as usize;
+                m.bytes
+                    .get(off..off + SECTOR_LEN)
+                    .map(|b| b.to_vec())
+                    .ok_or_else(|| format!("track {t} sector {s} is past the end of the image"))
+            },
+            |addr, bytes| chunks.push((addr, bytes.to_vec())),
+        )?;
+        for (addr, bytes) in chunks {
+            let at = addr as usize;
+            let end = (at + bytes.len()).min(self.mem.len());
+            self.mem[at..end].copy_from_slice(&bytes[..end - at]);
+        }
+        cpu.registers().set_pc(entry);
+        Ok(())
     }
 
     /// Cold-boot from a drive, leaving the CPU ready to run.
@@ -207,10 +271,21 @@ impl Default for BootMachine {
 }
 
 /// Which geometry an image of this size has, if any.
+///
+/// A short trailer is allowed. Several of the images in circulation carry a few
+/// bytes past the last sector — 96 bytes on the CP/M 3 and MITS+Tarbell disks,
+/// 80 bytes of `1A` on the minidisks, which is a CP/M end-of-file pad from
+/// whatever copied them. Rejecting those on an exact size match cost us seven
+/// perfectly good disks, including both CP/M 3 images.
+///
+/// The tolerance is deliberately less than one sector: past that, the size no
+/// longer identifies the geometry and accepting it would mean reading a disk we
+/// have not actually recognised.
 pub fn geometry_for(len: u64) -> Option<Geometry> {
-    [Geometry::EIGHT_INCH, Geometry::MINIDISK]
-        .into_iter()
-        .find(|g| g.image_len() == len)
+    [Geometry::EIGHT_INCH, Geometry::MINIDISK].into_iter().find(|g| {
+        let want = g.image_len();
+        len >= want && len - want < SECTOR_LEN as u64
+    })
 }
 
 impl Machine for BootMachine {
@@ -259,6 +334,9 @@ impl Machine for BootMachine {
                 self.idle_status_reads = 0;
                 self.rx.pop_front().unwrap_or(0)
             }
+            // The front panel. Input only on real hardware, and the reason
+            // every MITS operating system can find its console.
+            SENSE_SWITCH_PORT => self.sense_switches,
             // An idle bus, not an echo of whatever was last driven.
             _ => 0xFF,
         }
@@ -302,6 +380,21 @@ mod tests {
         assert_eq!(geometry_for(0), None);
     }
 
+    /// Real images in circulation carry a few bytes past the last sector, and
+    /// refusing them on an exact size match locked out both CP/M 3 disks and
+    /// every minidisk.
+    #[test]
+    fn test_a_short_trailer_does_not_hide_the_geometry() {
+        assert_eq!(geometry_for(337_664), Some(Geometry::EIGHT_INCH), "96-byte trailer");
+        assert_eq!(geometry_for(76_800), Some(Geometry::MINIDISK), "80 bytes of 1A");
+        assert_eq!(
+            geometry_for(337_568 + SECTOR_LEN as u64),
+            None,
+            "a whole extra sector is a different disk, not a trailer"
+        );
+        assert_eq!(geometry_for(337_567), None, "and short is never rounded up");
+    }
+
     #[test]
     fn test_inserting_a_wrong_sized_image_is_refused() {
         let mut m = BootMachine::new();
@@ -336,6 +429,25 @@ mod tests {
         let mut m = BootMachine::new();
         m.port_out(0x40, 0x55);
         assert_eq!(m.port_in(0x40), 0xFF);
+    }
+
+    /// The front panel must answer, and must not answer with the idle bus.
+    ///
+    /// Regression, and an expensive one: port FFh fell through to the
+    /// unknown-port `0xFF`, which is a valid sense-switch reading meaning
+    /// "console on the 88-SIO". Altair DOS, Disk BASIC and Time Sharing BASIC
+    /// all booted correctly and then printed to ports 00h/01h, which we do not
+    /// emulate — so a fully working guest looked like a disk that would not
+    /// boot. The switches must select the 88-2SIO console we actually provide.
+    #[test]
+    fn test_the_sense_switches_select_the_console_we_emulate() {
+        let mut m = BootMachine::new();
+        let sw = m.port_in(SENSE_SWITCH_PORT as u16);
+        assert_eq!(sw, DEFAULT_SENSE_SWITCHES);
+        assert_ne!(
+            sw, 0xFF,
+            "a floating FFh sends MITS software to a console we do not have"
+        );
     }
 
     /// Waiting on the console is normal and must not look like a stuck disk.
@@ -479,6 +591,66 @@ mod tests {
         assert!(matches!(m.boot(&mut cpu, 0), Err(BootError::NoDisk(0))));
     }
 
+    /// Boot every image in a folder and print what each one says.
+    ///
+    /// The survey behind the single-disk test: one run tells you which
+    /// operating systems reach a sign-on and which go quiet, which is the only
+    /// way to see a bring-up move forwards or backwards as a whole. Ignored —
+    /// set `CPM_BOOT_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_boot_every_image_and_report() {
+        let Ok(dir) = std::env::var("CPM_BOOT_DIR") else {
+            eprintln!("set CPM_BOOT_DIR to run this");
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".dsk"))
+            .collect();
+        names.sort();
+        let mut spoke = 0;
+        for name in &names {
+            let bytes = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
+            if geometry_for(bytes.len() as u64).is_none() {
+                println!("  skipped  {name}  ({} bytes — not an 88-DCDD image)", bytes.len());
+                continue;
+            }
+            let mut m = BootMachine::new();
+            m.insert(0, bytes, true).unwrap();
+            let mut cpu = Cpu::new_8080();
+            if let Err(e) = m.boot(&mut cpu, 0) {
+                println!("  refused  {name}: {e}");
+                continue;
+            }
+            let mut out = m.take_output();
+            for _ in 0..20_000_000u64 {
+                cpu.execute_instruction(&mut m);
+                out.extend(m.take_output());
+                if out.len() > 120 {
+                    break;
+                }
+            }
+            let text: String = out
+                .iter()
+                .map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' })
+                .collect();
+            if out.is_empty() {
+                println!(
+                    "  SILENT   {name}  pc={:#06x} stuck_polls={}",
+                    cpu.registers().pc(),
+                    m.stuck_polls()
+                );
+            } else {
+                spoke += 1;
+                println!("  spoke    {name}: {text}");
+            }
+        }
+        assert!(spoke > 0, "no image in {dir} said anything");
+    }
+
     /// The end-to-end check the plan asked for: boot a real disk, run it, and
     /// see whether the guest's own operating system says anything.
     ///
@@ -498,7 +670,30 @@ mod tests {
         let mut m = BootMachine::new();
         m.insert(0, bytes, true).expect("an 88-DCDD image");
         let mut cpu = Cpu::new_8080();
-        m.boot(&mut cpu, 0).expect("boots");
+        match std::env::var("CPM_BOOT_STEP").ok().and_then(|s| s.parse::<u8>().ok()) {
+            Some(step) => {
+                m.boot_with_step(&mut cpu, 0, step).expect("boots");
+                println!("(sector step {step}, forced)");
+            }
+            None => m.boot(&mut cpu, 0).expect("boots"),
+        }
+
+        // What the loader actually is, before watching it run.  Set
+        // `CPM_BOOT_DISASM=addr:count` — the loaded boot code is the only
+        // authority on what hardware it expects, and reading it is how the
+        // three faults in the CP/M path were found.
+        if let Ok(spec) = std::env::var("CPM_BOOT_DISASM") {
+            let (addr, count) = spec.split_once(':').unwrap_or((spec.as_str(), "40"));
+            let addr = u16::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap();
+            let count: usize = count.parse().unwrap();
+            let saved = cpu.registers().pc();
+            cpu.registers().set_pc(addr);
+            for _ in 0..count {
+                let at = cpu.registers().pc();
+                println!("  {at:04x}  {}", cpu.disasm_instruction(&mut m));
+            }
+            cpu.registers().set_pc(saved);
+        }
 
         // A short PC trace first: where a boot goes wrong is a control-flow
         // question, and the answer is always in the first hundred instructions.
