@@ -448,7 +448,11 @@ impl CpmFs {
         }
         match std::fs::File::create(&path) {
             Ok(_) => Some(path),
-            Err(_) => None,
+            Err(_) => {
+                // Nothing was created, so hold nothing — see write_record.
+                self.release_write(&path);
+                None
+            }
         }
     }
 
@@ -822,10 +826,22 @@ impl CpmFs {
         // guest closes it or the session leaves, so the records of two
         // simultaneous writers cannot interleave into one file.
         self.claim_write(&path)?;
-        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
-        f.seek(SeekFrom::Start(offset))?;
-        f.write_all(data)?;
-        Ok(())
+        // A claim that is not followed by a write is released again.  The claim
+        // has to be taken BEFORE the write (that is the whole point — two
+        // sessions must not both get past this line), but keeping one for a
+        // write that never happened would let a guest writing to names that do
+        // not exist accumulate entries in a process-global map for the life of
+        // its session.
+        let result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+            f.seek(SeekFrom::Start(offset))?;
+            f.write_all(data)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.release_write(&path);
+        }
+        result
     }
 }
 
@@ -927,6 +943,41 @@ mod tests {
             raw
         });
         assert!(one.write_record(&other, 0, &data).is_ok(), "other files still writable");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A write that fails must not leave its claim behind.
+    ///
+    /// The claim has to be taken before the write — that is what stops two
+    /// sessions both getting through — but a claim held for a write that never
+    /// happened is a leak: a guest writing to names that do not exist would
+    /// accumulate entries in a process-global map for the life of its session,
+    /// and lock those names against everyone else for no reason.
+    #[test]
+    fn test_a_failed_write_releases_its_claim() {
+        let base = std::env::temp_dir().join(format!("cpm_lockfail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(b"GHOST   ");
+        raw[9..12].copy_from_slice(b"TXT");
+        let fcb = Fcb::from_bytes(&raw);
+
+        let one = CpmFs::new(base.clone());
+        // The file does not exist, so the write fails after the claim is taken.
+        assert!(one.write_record(&fcb, 0, &[b'x'; 128]).is_err());
+
+        // ...and the name must not be locked against anyone else.  Create it
+        // and let the other session write: that only works if the failed claim
+        // was released.
+        let two = CpmFs::new(base.clone());
+        assert!(two.make(&fcb).is_some(), "a failed write must not hold the name");
+        assert!(
+            two.write_record(&fcb, 0, &[b'y'; 128]).is_ok(),
+            "the other session must be able to write it"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

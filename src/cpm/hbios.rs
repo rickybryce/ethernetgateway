@@ -214,6 +214,11 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
             let now = crate::cpm::host_clock_bcd();
             cpm.write_block(buf, &now);
             cpm.hbios_return(OK);
+            // HL is an *entry* parameter here, not a documented return, so it
+            // is scrambled like every other such call: an emulator looser than
+            // the hardware turns a guest's stale-pointer bug into a field
+            // report (see `hbios_scramble_hl`).
+            cpm.hbios_scramble_hl();
             return HbiosOutcome::Answered;
         }
         FN_RTC_SETTIM => {
@@ -221,6 +226,7 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
             // and a guest cannot be allowed to set that — nor should it be told
             // it succeeded and then read back a time it did not set.
             cpm.hbios_return(ERR);
+            cpm.hbios_scramble_hl();
             return HbiosOutcome::Answered;
         }
         _ => {}
@@ -367,6 +373,14 @@ mod tests {
         assert!((1..=31).contains(&dec(buf[2])), "day byte {:#04x}", buf[2]);
         // Nothing was written past the six bytes the buffer is defined to hold.
         assert_eq!(cpm.read_block(0x2006, 1)[0], 0x00, "wrote past the buffer");
+        // HL is an entry parameter, not a documented return, so it must come
+        // back scrambled like every other such call — being looser than the
+        // hardware is what let EGT80's HL bug reach a real machine.
+        assert_eq!(
+            cpm.reg16(iz80::Reg16::HL),
+            0xFFFF,
+            "RTCGETTIM must not promise HL survives; see hbios_scramble_hl"
+        );
     }
 
     /// Setting the clock is refused, not silently accepted.  The time here is

@@ -39,6 +39,17 @@ follow-up quality/stability pass of our own.
 - **The main menu help said the CP/M emulator was "off by default"** (it ships
   on) **and that File Transfer used "the XMODEM protocol"** (it has spoken
   YMODEM, ZMODEM, Kermit and Punter for months). Both corrected.
+- **A refused CP/M write no longer holds the name.** The cross-session claim
+  has to be taken *before* the write — that is what stops two sessions both
+  getting through — but a claim kept for a write that never happened would let
+  a guest writing to names that do not exist accumulate entries in a
+  process-global map, and lock those names against everyone else for nothing.
+  Both the write and create paths release again when the operation fails.
+- **The emulator's HBIOS clock scrambles `HL` like every other such call.**
+  `RTCGETTIM` takes a buffer address in `HL` and documents only `A` as a
+  return, so leaving `HL` intact was looser than real RomWBW — the precise
+  permissiveness that once let an `HL` bug in EGT80's own transfers reach real
+  hardware while passing here.
 - **Two sessions can no longer write the same CP/M file at once.** Every
   session has its own Z80 and its own 64 KB, but they share one set of drive
   folders — and the BDOS here opens the host file per record, so two writers'
