@@ -708,7 +708,7 @@
                     <tr>
                         <td class="key-col">[W]</td>
                         <td class="name-col">Weather</td>
-                        <td class="desc-col">Current conditions and 3-day forecast by US zip code via Open-Meteo.</td>
+                        <td class="desc-col">Current conditions and 3-day forecast for any city or postal code worldwide, via Open-Meteo.</td>
                     </tr>
                     <tr>
                         <td class="key-col">[C]</td>
@@ -922,7 +922,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
                         <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
                         <li><strong>T</strong> &mdash; Telnet Gateway: connect to a remote server via telnet</li>
-                        <li><strong>W</strong> &mdash; Weather: check weather by zip code</li>
+                        <li><strong>W</strong> &mdash; Weather: by city or postal code, worldwide</li>
                         <li><strong>X</strong> &mdash; Exit: disconnect from server</li>
                     </ul>
                 </div>
@@ -1179,7 +1179,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <ul>
                         <li><strong>Telnet protocol (default)</strong> &mdash; the gateway parses IAC framing, unescapes <code>IAC IAC</code> to literal 0xFF data, accepts peer-initiated <code>WILL ECHO</code> cooperatively, and refuses other options with <code>DONT</code>/<code>WONT</code>. Works with any RFC-compliant telnet server.</li>
                         <li><strong>Cooperative</strong> (<code>telnet_gateway_negotiate = true</code>) &mdash; adds proactive offers of <code>WILL TTYPE</code>, <code>WILL NAWS</code>, and <code>DO ECHO</code> at connect, plus mid-session NAWS forwarding when you resize. Makes modern BBSes (Synchronet, Mystic) render at your actual window size.</li>
-                        <li><strong>Raw TCP</strong> (toggled with <strong>T</strong>, persisted to <code>egateway.conf</code>) &mdash; disables the telnet IAC layer entirely. Use this when dialing destinations that aren't really telnet: some MUDs, hand-rolled BBS software, or custom services on port 23. Bytes to your local client are still IAC-escaped so a stray 0xFF doesn't confuse your telnet client.</li>
+                        <li><strong>Raw TCP</strong> (<code>telnet_gateway_raw = true</code>; toggled with <strong>T</strong> and persisted to <code>egateway.conf</code>) &mdash; disables the telnet IAC layer entirely. Use this when dialing destinations that aren't really telnet: some MUDs, hand-rolled BBS software, or custom services on port 23. Bytes to your local client are still IAC-escaped so a stray 0xFF doesn't confuse your telnet client.</li>
                         <li><strong>Terminal size</strong> (<code>gateway_term_width</code> / <code>gateway_term_height</code>, both <code>0</code> = auto) &mdash; what the gateway reports to the remote, as the SSH PTY size and as telnet NAWS. Auto uses your client's NAWS, else 40&times;25 for PETSCII and 80&times;24 for ANSI/ASCII. Pin it when a client can't report its real size: a C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it's detected as ANSI and would be told 80 columns for a 40-column screen &mdash; which misplaces line wrap, backspace and tab completion past the real margin.</li>
                     </ul>
                 </div>
@@ -1434,18 +1434,27 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="weather">
                 <div class="section-title">Weather</div>
-                <p class="intro">Current conditions and 3-day forecast for any US zip code.</p>
+                <p class="intro">Current conditions and 3-day forecast for anywhere in the world &mdash; a city name or a postal code.</p>
 
                 <p class="dim-text">
                     Press <strong>W</strong> from the main menu. Weather data is provided by
-                    the Open-Meteo API (free, no API key required). Your last-used zip code
+                    the Open-Meteo API (free, no API key required). Your last-used location
                     is saved for convenience.
+                </p>
+
+                <p class="dim-text">
+                    <strong>Units follow the place, not the server.</strong> The
+                    <code>weather_units</code> setting defaults to <code>auto</code>, which
+                    infers them from the geocoded country &mdash; Fahrenheit and miles per hour
+                    for a US location, Celsius and km/h everywhere else. Set it to
+                    <code>us</code> or <code>metric</code> to pin one regardless of where you
+                    are asking about.
                 </p>
 
                 <div class="instructions">
                     <h3>Display Includes</h3>
                     <ul>
-                        <li><strong>Current:</strong> Temperature (&deg;F), "feels like", humidity %, wind speed and 16-point compass direction</li>
+                        <li><strong>Current:</strong> Temperature, "feels like", humidity %, wind speed and 16-point compass direction</li>
                         <li><strong>Forecast:</strong> 3-day outlook with daily high/low temperatures and conditions</li>
                     </ul>
                 </div>
@@ -1639,8 +1648,11 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
                     <tr><td>Groq API key</td><td><em>(empty)</em></td><td>API key for AI Chat (free at console.groq.com)</td></tr>
                     <tr><td>Browser homepage</td><td>http://telnetbible.com</td><td>Default URL for the Simple Browser</td></tr>
-                    <tr><td>Weather zip code</td><td><em>(empty)</em></td><td>5-digit US zip code for weather</td></tr>
+                    <tr><td>Weather location</td><td><em>(empty)</em></td><td>City name or postal code, worldwide (<code>weather_location</code>)</td></tr>
+                    <tr><td>Weather units</td><td>auto</td><td><code>auto</code> follows the geocoded country (US &rarr; &deg;F/mph, elsewhere &deg;C/km/h); <code>us</code> or <code>metric</code> pins one (<code>weather_units</code>)</td></tr>
                     <tr><td>Verbose logging</td><td>false</td><td>Enable detailed per-block / per-subpacket protocol diagnostics across XMODEM, YMODEM, ZMODEM, Kermit, and Punter</td></tr>
+                    <tr><td>Gateway debug trace</td><td>false</td><td>Byte-level trace of the SSH/Telnet gateway proxy loops, for diagnosing input corruption or terminal-translation problems. Read fresh by each gateway session, so it takes effect on the next one without a restart; <code>EGATEWAY_GATEWAY_DEBUG</code> forces it on regardless (<code>gateway_debug</code>)</td></tr>
+                    <tr><td>GUI display scale</td><td>auto</td><td><code>auto</code> follows the monitor's scale factor; a number pins pixels-per-point so the console is not magnified on a high-DPI display (<code>gui_zoom</code>)</td></tr>
                     <tr><td>GUI console</td><td>true</td><td>Show the GUI window on startup</td></tr>
                     <tr><td>Log to file</td><td>true</td><td>Also write the log to <code>log_file</code>. Size-bounded: the active file rotates at <code>log_max_size_kb</code> and generations past <code>log_max_files</code> are deleted, so worst-case disk use is 6&nbsp;MB with the defaults. If a write fails (a full disk, a removed drive) logging pauses and reopens the file by itself &mdash; after 30&nbsp;s, backing off to 5&nbsp;min &mdash; and records how many lines were lost while it was away, in the log and in the console pane. Telnet: <strong>Other Settings &gt; L</strong>; GUI/web: the General <strong>More&hellip;</strong> panel</td></tr>
                 </table>

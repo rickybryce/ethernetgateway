@@ -2488,6 +2488,27 @@ fn test_other_help_lines_fit_petscii() {
     }
 }
 
+/// The user manual must not still describe weather as US-only.
+///
+/// It did, in four places, for the three weeks since the feature went
+/// worldwide — the manual is the one surface with no test of any kind, so a
+/// change to a feature simply never reached it. This pins the specific claim
+/// that was wrong; it is not a general docs test, and it is not pretending to
+/// be one.
+#[test]
+fn test_manual_describes_weather_as_worldwide() {
+    let manual = include_str!("../../web/index.html").replace("\r\n", "\n");
+    assert!(
+        !manual.to_lowercase().contains("zip code"),
+        "the manual still describes weather by US zip code; it takes a city \
+         name or postal code anywhere in the world"
+    );
+    assert!(
+        manual.contains("weather_units"),
+        "the manual should document weather_units (auto / us / metric)"
+    );
+}
+
 /// EVERY help screen must fit the narrowest terminal that can be shown it.
 ///
 /// Twelve screens had a width test each and fourteen had none — including the

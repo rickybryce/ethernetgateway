@@ -1088,7 +1088,7 @@
                         <tr><td><code>23</code></td><td>Rename File</td><td></td></tr>
                         <tr><td><code>24</code></td><td>Return Login Vector</td><td>All sixteen bits set &mdash; every drive A:&ndash;P: exists, since its folder is auto-created. Returning 0 here used to confuse drive-enumeration utilities.</td></tr>
                         <tr><td><code>25</code></td><td>Return Current Disk</td><td></td></tr>
-                        <tr><td><code>26</code></td><td>Set DMA Address</td><td></td></tr>
+                        <tr><td><code>26</code></td><td>Set DMA Address</td><td>Reset to <code>0x0080</code> before <em>every</em> program is run, exactly where CP/M's own CCP does it (<code>CCP22.ASM</code> calls <code>SETDMA</code> on the line before it enters the TPA). Without that reset a program inherited the DMA the last one left: <code>PIP</code> moves it to its own buffer, so a following <code>DUMP</code> read the stale command tail instead of the file, silently.</td></tr>
                         <tr><td><code>27</code></td><td>Get Allocation Vector</td><td>A real bitmap &mdash; reserved directory blocks plus the blocks this drive's files occupy &mdash; so STAT's free count reflects actual usage.</td></tr>
                         <tr><td><code>28</code></td><td>Write Protect Disk</td><td>Software write-protects the current drive until the next disk reset. Enforced in all four mutating paths &mdash; write, make, erase and rename all refuse.</td></tr>
                         <tr><td><code>29</code></td><td>Get R/O Vector</td><td>The real bitmap of write-protected drives, so a program can see the protection it just asked <code>28</code> for.</td></tr>
