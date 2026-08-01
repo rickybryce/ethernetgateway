@@ -2502,27 +2502,27 @@ fn test_other_help_lines_fit_petscii() {
 #[test]
 fn test_every_help_screen_fits_its_terminal() {
     // (name, lines, width) — the wide screens at 80, the shared ones at 40.
-    let mut screens: Vec<(&str, &[&str], usize)> = Vec::new();
-
     // No flag: one text for all terminals, so it must fit the narrowest.
-    screens.push(("main", TelnetSession::main_help_lines(), PETSCII_WIDTH));
-    screens.push(("ai_chat", TelnetSession::ai_chat_help_lines(), PETSCII_WIDTH));
-    screens.push(("bookmarks", TelnetSession::bookmarks_help_lines(), PETSCII_WIDTH));
-    screens.push(("form", TelnetSession::form_help_lines(), PETSCII_WIDTH));
-    screens.push(("download", TelnetSession::download_help_lines(), PETSCII_WIDTH));
-    screens.push(("delete", TelnetSession::delete_help_lines(), PETSCII_WIDTH));
-    screens.push((
-        "file_transfer_menu",
-        TelnetSession::file_transfer_menu_help_lines(),
-        PETSCII_WIDTH,
-    ));
-    screens.push(("dialup", TelnetSession::dialup_help_lines(), PETSCII_WIDTH));
-    screens.push(("gateway_shell", TelnetSession::cpm_help_lines(), PETSCII_WIDTH));
-    screens.push((
-        "serial_config",
-        TelnetSession::serial_config_help_lines(),
-        PETSCII_WIDTH,
-    ));
+    let mut screens: Vec<(&str, &[&str], usize)> = vec![
+        ("main", TelnetSession::main_help_lines(), PETSCII_WIDTH),
+        ("ai_chat", TelnetSession::ai_chat_help_lines(), PETSCII_WIDTH),
+        ("bookmarks", TelnetSession::bookmarks_help_lines(), PETSCII_WIDTH),
+        ("form", TelnetSession::form_help_lines(), PETSCII_WIDTH),
+        ("download", TelnetSession::download_help_lines(), PETSCII_WIDTH),
+        ("delete", TelnetSession::delete_help_lines(), PETSCII_WIDTH),
+        (
+            "file_transfer_menu",
+            TelnetSession::file_transfer_menu_help_lines(),
+            PETSCII_WIDTH,
+        ),
+        ("dialup", TelnetSession::dialup_help_lines(), PETSCII_WIDTH),
+        ("gateway_shell", TelnetSession::cpm_help_lines(), PETSCII_WIDTH),
+        (
+            "serial_config",
+            TelnetSession::serial_config_help_lines(),
+            PETSCII_WIDTH,
+        ),
+    ];
 
     // Flagged: a narrow text and a wide one, each held to its own width.
     for (name, narrow, wide) in [
