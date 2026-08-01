@@ -72,7 +72,9 @@ options, and the full AT command set.
 - **CP/M 2.2 emulator** — a separate thing from the shell above: a real Z80
   running real `.COM` software (PIP, STAT, ED, ASM, DDT, WordStar…), with the
   CCP built-ins, `SUBMIT` batch jobs, and drives A:–P: as folders under the
-  transfer directory. Ships **EGT80**, this project's own CP/M terminal in Z80
+  transfer directory — or as mounted **`.dsk` disk images** (Altair 88-DCDD,
+  Altair 88-HDSK, and the 8" single-density format used by Tarbell, Cromemco
+  and IMSAI/z80pack). Ships **EGT80**, this project's own CP/M terminal in Z80
   assembly, and a virtual modem so guest software can dial out. On by default
   and bounded three ways: every file call jailed under `transfer_dir/CPM`, a
   runaway stopped by an instruction ceiling, and a double-`ESC` always returning

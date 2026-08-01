@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.0] - Unreleased
 
+### Added
+
+- **CP/M disk images.** A `.dsk` image can be mounted on any drive A:–P:, and
+  that drive then reads and writes the CP/M filesystem *inside the image*
+  instead of its folder under `CPM/`. Mounting hides a drive folder rather than
+  touching it — the files are exactly where they were and come back on unmount.
+  Three formats, each measured from real images and verified byte for byte
+  against `cpmtools`: `ibm3740` (8" single density — Tarbell, Cromemco,
+  IMSAI/z80pack), `altair8` (Altair 88-DCDD floppy) and `altairhd` (Altair
+  88-HDSK hard disk, the Altair-Duino set).
+- Mount and unmount from all three interfaces: a wizard on the telnet CP/M
+  settings screen (`I`), and a **Mount CP/M Drives** screen in the web and
+  desktop UIs. Changes take effect immediately in every session and are saved
+  to the new `cpm_mounts` key. A drive somebody is using cannot have its disk
+  changed, and the screens show which drives are in use and why.
+- `CPM/images`, created with the drive folders, holding a generated
+  `readme.txt` that explains the naming convention and what to rename an
+  Altair-Duino or IMSAI disk to. Its format table is rendered from the code, so
+  it cannot drift.
+
+### Changed
+
+- The CP/M drive folders are created when the emulator is **enabled** rather
+  than when someone first launches it — the folders are where you put software
+  and images before a first session, not after. Nothing is ever overwritten.
+
+### Fixed
+
+- The user manual said the CP/M emulator ships **disabled**; it has been on by
+  default since 0.8.0. It also gave `cpm_emu_uart`'s default as `off` in the
+  table while its own prose said `rc2014_1b`, which is the truth.
+- Two malformed tags in the user manual — a `<strong>` opened around an
+  `<aside>` and its partner left orphaned — which had swallowed the emphasis
+  from a sentence about per-gateway serial configuration.
+
 ## [0.8.1] - 2026-08-01
 
 Two months of work on top of 0.8.0, in three strands. **CP/M** grew up: real

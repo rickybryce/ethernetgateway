@@ -566,6 +566,7 @@
             <a href="#overview">Overview</a>
             <a href="#config">Config Keys</a>
             <a href="#ccp">CCP Commands</a>
+            <a href="#disks">Disk Images</a>
             <a href="#uart">UART Profiles</a>
             <a href="#egt80">EGT80</a>
             <a href="#machines">Which Driver</a>
@@ -673,6 +674,7 @@
                     <tbody>
                         <tr><td><code>cpm_emu_enabled</code></td><td><code>true</code></td><td>Whether the CP/M System menu item exists at all. Set <code>false</code> to refuse guest code entirely.</td></tr>
                         <tr><td><code>cpm_emu_max_minstr</code></td><td><code>2000</code></td><td>Instruction ceiling in <em>millions</em> before a running program is stopped. The runaway guard.</td></tr>
+                        <tr><td><code>cpm_mounts</code></td><td><em>(empty)</em></td><td>Images mounted on drives, as <code>A=name.dsk,C=other.dsk</code>. Bare filenames inside <code>CPM/images</code>. See <a href="#disks">Disk Images</a>.</td></tr>
                         <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
                         <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
                         <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>
@@ -739,6 +741,104 @@
             <!-- ══════════════════════════════════════════════ -->
             <!-- UART PROFILES                                 -->
             <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="disks">
+                <div class="section-title">Disk Images</div>
+                <p class="intro">A <code>.dsk</code> image can be mounted on any drive A:&ndash;P:. The drive then reads and writes the CP/M filesystem <em>inside the image</em> instead of its folder under <code>CPM/</code>.</p>
+
+                <p>
+                    Mounting hides a drive folder; it does not touch it. The folder's files are
+                    exactly where they were and come back the moment the image is unmounted.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Naming, and why an unnamed image is read-only</h3>
+                <p>
+                    Put images in <code>CPM/images</code> inside the transfer directory. Name one
+                    <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash; the format token, an
+                    underscore, then whatever you like:
+                </p>
+                <pre><code>altair8_wordstar.dsk
+ibm3740_cpm22.dsk
+altairhd_cobol.dsk</code></pre>
+                <p>
+                    An image named this way mounts <strong>read-write</strong>. An image with no
+                    format prefix still mounts, but <strong>read-only</strong>, because the format
+                    then has to be inferred from the file's size and contents.
+                </p>
+                <div class="callout">
+                    <p>
+                        The read-only rule is the last line of defence in this feature, and it is
+                        worth knowing why it is absolute. Every other way a write could go wrong is
+                        caught by a check that can see the problem &mdash; a block past the end of
+                        the disk, a directory entry that did not stick, two files claiming one
+                        block. A <em>misidentified format</em> is the one failure none of them can
+                        catch: every offset is computed from the wrong geometry, so every check
+                        agrees with every other check, and the first write lands in the middle of
+                        somebody's files. Two of the formats below share a size while differing in
+                        layout, so this is not hypothetical. Reading a guessed image is safe;
+                        writing to one is not.
+                    </p>
+                </div>
+                <p>
+                    A mount is also forced read-only when the image file is read-only on the host,
+                    or when its CP/M directory arrives damaged &mdash; an entry naming a block off
+                    the end of the disk, one claiming directory space, or two files sharing a
+                    block. In that last case the gateway deliberately does <em>not</em> repair
+                    anything: guessing which file really owns a shared block is how a backup gets
+                    destroyed. The mount screens say which of the three reasons applies.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Formats</h3>
+                <table class="data-table">
+                    <thead><tr><th>Token</th><th>Format</th><th>Size</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>ibm3740</code></td><td>IBM 3740 8&quot; SSSD &mdash; the closest thing CP/M had to a universal disk. Tarbell, Cromemco SD, IMSAI / z80pack.</td><td>256,256</td></tr>
+                        <tr><td><code>altair8</code></td><td>Altair 88-DCDD 8&quot; floppy. 137-byte sectors, with the data offset moving partway down the disk.</td><td>337,568</td></tr>
+                        <tr><td><code>altairhd</code></td><td>Altair 88-HDSK hard disk (the Altair-Duino set). 256-byte sectors, two CP/M records in each.</td><td>4,988,928</td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    Every entry was measured from a real image and verified against
+                    <code>cpmtools</code> byte for byte, rather than transcribed from a table.
+                    <code>CPM/images/readme.txt</code> carries the same list, generated from the
+                    same source, along with what to rename an Altair-Duino or IMSAI disk to.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Not every <code>.dsk</code> is a CP/M disk</h3>
+                <p>
+                    Altair DOS, Altair Disk BASIC, Time Sharing BASIC and UCSD p-System disks use
+                    their own filesystems. They are common in the same collections, and the
+                    gateway either refuses them outright or mounts them showing no files &mdash;
+                    which is correct, not a fault. Running those needs a disk controller emulation
+                    rather than a CP/M filesystem, which this is not.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Mounting</h3>
+                <table class="data-table">
+                    <thead><tr><th>Where</th><th>How</th></tr></thead>
+                    <tbody>
+                        <tr><td>Telnet / SSH</td><td>Settings &rarr; CP/M Emulator &rarr; <code>I</code>. A short wizard: pick an image, pick a drive, confirm.</td></tr>
+                        <tr><td>Web</td><td>AI, Browser, Weather &amp; CP/M &rarr; More &rarr; <strong>Mount CP/M drives</strong>.</td></tr>
+                        <tr><td>Desktop</td><td>Same group &rarr; More &rarr; <strong>Mount CP/M Drives</strong>.</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Changes take effect immediately, in every session, and are written to
+                    <code>cpm_mounts</code> so they survive a restart. A drive somebody is
+                    currently using cannot have its disk changed; the screens show which drives
+                    are in use and why.
+                </p>
+                <div class="callout">
+                    <p>
+                        Mounting an image on <strong>drive A:</strong> hides EGT80, since EGT80
+                        lives in the A: folder. Moving files in and out of a mounted image is done
+                        with XMODEM from inside EGT80, so mounting over A: costs you the tool you
+                        would use to populate the image. Prefer B: or later.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
             <div class="section" id="uart">
                 <div class="section-title">UART Profiles &mdash; <code>cpm_emu_uart</code></div>
                 <p class="intro">Three ways a guest can reach the virtual modem, all selected by this one key. Software that pokes a UART wants a <strong>port</strong>; software that asks the OS wants <strong>AUX:</strong>; software that asks the firmware wants <strong>HBIOS</strong>.</p>

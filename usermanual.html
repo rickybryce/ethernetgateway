@@ -754,7 +754,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>weather_units</code></td><td>string</td><td><code>auto</code></td><td>Weather units: <code>auto</code>, <code>us</code>, or <code>metric</code>.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. On by default (jailed, bounded, and shipping its own terminal); set <code>false</code> to hide the item and reject the key. configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
-        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>off</code></td><td>How the emulated CP/M reaches the virtual modem. Defaults to <code>rc2014_1b</code> (0x82/0x83), the port the bundled EGT80 terminal expects, so the two work together untouched; every UI offers a one-click &ldquo;Default port&rdquo; to come back to it. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>How the emulated CP/M reaches the virtual modem. Defaults to <code>rc2014_1b</code> (0x82/0x83), the port the bundled EGT80 terminal expects, so the two work together untouched; every UI offers a one-click &ldquo;Default port&rdquo; to come back to it. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_mounts</code></td><td>string</td><td><em>(empty)</em></td><td>Disk images mounted on CP/M drives, as <code>A=name.dsk,C=other.dsk</code>. Values are bare filenames inside <code>CPM/images</code>, never paths. A mounted drive uses the CP/M filesystem inside the image instead of its folder; the folder&rsquo;s files are untouched and return on unmount. An image whose name carries no format prefix is identified by inspection and mounts <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>log_to_file</code></td><td>bool</td><td><code>true</code></td><td>Mirror the log to <code>log_file</code> as well as stderr and the console buffer. On by default. Configured in the General &ldquo;More&hellip;&rdquo; panel of the GUI and web UI (telnet: Other Settings &rarr; <code>L</code>). Takes effect on the next restart.</td></tr>
         <tr><td><code>log_file</code></td><td>string</td><td><code>ethernetgateway.log</code></td><td>Active log file, relative to the working dir unless absolute. Owner-only (0600 on Unix); reopened in append mode so a restart extends it. Empty disables file logging.</td></tr>
@@ -2386,14 +2387,20 @@ confuse them.
 </p>
 
 <aside class="note">
-<span class="label">Off by default &mdash; runs arbitrary Z80 code</span>
-Because a <code>.COM</code> is arbitrary machine code, the emulator is gated
-behind the <code>cpm_emu_enabled</code> key and ships <strong>disabled</strong>;
-while off, the main-menu item is hidden and the key is rejected. Enable it in
-the GUI or web UI under the <strong>&ldquo;AI, Browser &amp; Weather &mdash;
-More&rdquo;</strong> panel, or over telnet/SSH in
-<strong>Configuration&nbsp;&rarr;&nbsp;Other&nbsp;Settings&nbsp;&rarr;&nbsp;<span class="kbd">E</span></strong>
-(a small CP/M submenu). Treat it as a trusted-LAN feature.
+<span class="label">On by default &mdash; runs arbitrary Z80 code</span>
+Because a <code>.COM</code> is arbitrary machine code, the emulator is bounded
+on three axes rather than switched off: every file call is jailed under
+<code>CPM/</code>, a runaway program is stopped by
+<code>cpm_emu_max_minstr</code>, and a double-<span class="kbd">ESC</span>
+always returns you to <code>A&gt;</code>. It services BDOS and BIOS calls only
+&mdash; there is no path from guest code to a host command. An operator who
+wants the door shut sets <code>cpm_emu_uart&nbsp;=&nbsp;off</code> (no sockets
+from guest code) or <code>cpm_emu_enabled&nbsp;=&nbsp;false</code> (no guest
+code at all); while off, the main-menu item is hidden and the key is rejected.
+Both live in the GUI and web UI under the <strong>&ldquo;AI, Browser, Weather
+&amp; CP/M &mdash; More&rdquo;</strong> panel, or over telnet/SSH in
+<strong>Configuration&nbsp;&rarr;&nbsp;Other&nbsp;Settings&nbsp;&rarr;&nbsp;<span class="kbd">E</span></strong>.
+Treat it as a trusted-LAN feature.
 </aside>
 
 <h3>Launching</h3>
@@ -2413,7 +2420,8 @@ to the gateway. The prompt tracks the current drive
 The emulator has sixteen drives, <strong>A:&ndash;P:</strong> (the maximum
 CP/M&nbsp;2.2 allows), each mapped to a folder under a dedicated
 <code>CPM/</code> container inside <code>transfer_dir</code>
-(<code>CPM/A</code>&hellip;<code>CPM/P</code>, all created on launch). Each is
+(<code>CPM/A</code>&hellip;<code>CPM/P</code>, created as soon as the emulator
+is enabled, together with <code>CPM/images</code> for disk images). Each is
 ready to use the moment it exists&mdash;an empty folder is a formatted, empty
 drive, so there is nothing to format or <code>CLRDIR</code>. This is a
 <em>separate</em> sandbox from the Gateway Shell&rsquo;s drive&nbsp;A: (which
@@ -2427,6 +2435,58 @@ is the whole transfer directory). To run a program:
         <code>COPY&nbsp;CPM/A/&nbsp;PROG.COM</code> it into a CP/M drive.</li>
     <li>Enter the emulator (<span class="kbd">K</span>) and type its name.</li>
 </ol>
+
+<h3>Mounting a disk image</h3>
+
+<p>
+A drive can use a <strong>CP/M disk image</strong> instead of its folder. Put
+<code>.dsk</code> files in <code>CPM/images</code> (the
+<code>readme.txt</code> written there explains the naming), then mount one from
+<strong>Configuration&nbsp;&rarr;&nbsp;CP/M&nbsp;Emulator&nbsp;&rarr;&nbsp;<span class="kbd">I</span></strong>
+over telnet/SSH, or from <strong>Mount CP/M Drives</strong> in the web and
+desktop interfaces. Mounting <em>hides</em> the drive folder; it does not touch
+it, and the folder&rsquo;s files return the moment you unmount.
+</p>
+
+<p>
+Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
+<code>altair8_wordstar.dsk</code>, <code>ibm3740_cpm22.dsk</code>,
+<code>altairhd_cobol.dsk</code>. Three formats are supported, all measured from
+real images and verified against <code>cpmtools</code>: <code>ibm3740</code>
+(the 256,256-byte 8&Prime; single-density disk used by Tarbell, Cromemco and the
+IMSAI/z80pack library), <code>altair8</code> (the 337,568-byte Altair 88-DCDD
+floppy) and <code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk
+from the Altair-Duino set).
+</p>
+
+<aside class="note">
+<span class="label">An image with no format prefix mounts read-only</span>
+Without a prefix the format has to be guessed from the file&rsquo;s size and
+contents, and a wrong guess is the one mistake that cannot be caught
+afterwards: every offset would be computed from the wrong geometry, so every
+internal check would agree with every other one right up until a write landed
+in the middle of another file. Reading a guessed image is safe and is allowed;
+writing to one is not. Rename it with the right prefix to make it writable. A
+mount is also read-only when the file is read-only on the host, or when its
+CP/M directory arrives damaged &mdash; the mount screen says which.
+</aside>
+
+<p>
+Mount changes take effect immediately in every session and are saved to
+<code>cpm_mounts</code>, so they survive a restart. A drive somebody is
+currently using cannot have its disk changed; the screens show which drives are
+in use. Note that mounting on <strong>drive A:</strong> hides EGT80, which lives
+in the A: folder &mdash; and since files move in and out of a mounted image with
+XMODEM from inside EGT80, you usually want B: or later.
+</p>
+
+<p>
+Not every <code>.dsk</code> holds a CP/M filesystem. Altair DOS, Altair Disk
+BASIC, Time Sharing BASIC and UCSD p-System disks are common in the same
+collections and use their own formats; the gateway either refuses them or
+mounts them showing no files, which is correct rather than a fault. Running
+those would need a disk-controller emulation, which this is not.
+</p>
 
 <p>
 Typing a name that isn&rsquo;t a built-in loads <code>&lt;name&gt;.COM</code>
@@ -3733,8 +3793,7 @@ sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
         "&rarr; master" (not selectable locally).</li>
 </ul>
 
-<p>
-<strong><aside class="note">
+<aside class="note">
 <span class="label">Re-registering after a change</span>
 A registration is a standing claim — the master holds an idle channel and rings
 it later — so one made under settings that have since changed is worse than
@@ -3747,7 +3806,7 @@ timeout — deliberately does <em>not</em> disturb a live registration.
 </aside>
 
 <p>
-Each gateway's serial ports are configured on the gateway they are
+<strong>Each gateway's serial ports are configured on the gateway they are
 physically attached to.</strong>  A slave's ports use the <em>slave's</em> own
 <code>serial_a_*</code> / <code>serial_b_*</code> settings (device path, baud,
 mode, flow control, <code>drive_carrier</code>, S-registers, <code>AT&amp;W</code>);
