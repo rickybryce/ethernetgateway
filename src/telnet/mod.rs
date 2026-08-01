@@ -58,6 +58,7 @@ mod aichat_ui;
 mod weather;
 mod kernel;
 mod cpm_emu;
+mod cpm_mount_ui;
 mod cpm_modem;
 mod cpm_term;
 // The emulator's readiness probe and idle-pacing rule, referenced only from tests.

@@ -193,6 +193,14 @@ pub struct Format {
     /// `reserved_records` instead, so a format whose boot track is a different
     /// size than its data tracks (Cromemco) still fits.
     pub sectrk: u16,
+    /// 128-byte records inside one *physical* sector.
+    ///
+    /// One on a 128-byte-sector disk, which is most of them.  A hard disk with
+    /// 256-byte sectors holds two, and the distinction matters because **skew
+    /// translates whole sectors, not records** — the drive can only start
+    /// reading at a sector boundary, so a 256-byte sector's two records always
+    /// travel together.  Getting this wrong scatters every second record.
+    pub records_per_sector: u16,
     /// Records before the data area — the boot/system tracks.  The directory
     /// begins here.
     pub reserved_records: u32,
@@ -224,11 +232,18 @@ impl Format {
     /// of the disk.
     pub fn data_record_offset(&self, rec: u32) -> Option<u64> {
         let track = rec / self.sectrk as u32;
-        let logical = (rec % self.sectrk as u32) as u16;
-        let physical = self.skew.physical(logical);
+        let within = (rec % self.sectrk as u32) as u16;
+        // Skew moves whole sectors.  On a disk whose sectors hold more than one
+        // record, the records inside a sector keep their order and travel with
+        // it — see `records_per_sector`.
+        let rps = self.records_per_sector.max(1);
+        let logical_sector = within / rps;
+        let sub = within % rps;
+        let physical_sector = self.skew.physical(logical_sector);
         let abs = self.reserved_records as u64
             + track as u64 * self.sectrk as u64
-            + physical as u64;
+            + physical_sector as u64 * rps as u64
+            + sub as u64;
         if abs >= self.total_records as u64 {
             return None;
         }
@@ -263,6 +278,7 @@ pub const FORMATS: &[Format] = &[
         label: "IBM 3740 8\" SSSD, 241K (Tarbell, Cromemco SD)",
         total_records: 2002, // 77 tracks x 26 sectors
         sectrk: 26,
+        records_per_sector: 1,
         reserved_records: 52, // 2 boot tracks
         blocksize: 1024,
         maxdir: 64,
@@ -277,6 +293,7 @@ pub const FORMATS: &[Format] = &[
         label: "Altair 88-DCDD 8\" floppy, 308K",
         total_records: 2464, // 77 tracks x 32 sectors
         sectrk: 32,
+        records_per_sector: 1,
         reserved_records: 64, // 2 boot tracks
         blocksize: 2048,
         maxdir: 128,
@@ -290,6 +307,30 @@ pub const FORMATS: &[Format] = &[
         skew: Skew::Table(ALTAIR_SKEW),
         exact_size: Some(337_568),
     },
+    // ---- Altair 88-HDSK hard disk (the Altair-Duino disk set) --------------
+    // 256-byte sectors, so two CP/M records ride in each and skew moves them
+    // as a pair.  The 24-entry translation is a three-way interleave.
+    Format {
+        token: "altairhd",
+        label: "Altair 88-HDSK hard disk, 4.8M (Altair-Duino)",
+        total_records: 38_976, // 812 tracks x 24 sectors x 2 records
+        sectrk: 48,            // 128-byte records per track
+        records_per_sector: 2, // 256-byte physical sectors
+        reserved_records: 96,  // 2 boot tracks
+        blocksize: 4096,
+        maxdir: 192,
+        framing: Framing::Raw,
+        skew: Skew::Table(ALTAIR_HDSK_SKEW),
+        exact_size: Some(4_988_928),
+    },
+];
+
+/// The Altair 88-HDSK sector translation — 24 physical sectors per track, a
+/// three-way interleave.  Confirmed against the geometry of the Altair-Duino
+/// disk set, whose images this reads.
+pub const ALTAIR_HDSK_SKEW: &[u16] = &[
+    0, 7, 14, 21, 4, 11, 18, 1, 8, 15, 22, 5,
+    12, 19, 2, 9, 16, 23, 6, 13, 20, 3, 10, 17,
 ];
 
 /// Look a format up by its filename token, case-insensitively.
@@ -427,6 +468,56 @@ mod tests {
         // (ALTAIR_SKEW[1] == 8), still inside the boot-offset region.
         let want = (64 + 8) * 137 + 3;
         assert_eq!(alt.data_record_offset(1), Some(want));
+    }
+
+    /// A disk whose sectors hold two records must keep those two together
+    /// when skew moves the sector.  Splitting them scatters every second
+    /// record — invisible in a directory listing, fatal to file contents.
+    #[test]
+    fn test_skew_moves_whole_sectors_on_a_two_record_sector_disk() {
+        let hd = by_token("altairhd").unwrap();
+        assert_eq!(hd.records_per_sector, 2);
+        // Logical records 0 and 1 share logical sector 0, which the table maps
+        // to physical sector 0 — so they stay adjacent.
+        let r0 = hd.data_record_offset(0).unwrap();
+        let r1 = hd.data_record_offset(1).unwrap();
+        assert_eq!(r1, r0 + 128, "the pair inside one sector stays together");
+        // Records 2 and 3 are logical sector 1, which maps to physical 7.
+        let r2 = hd.data_record_offset(2).unwrap();
+        assert_eq!(
+            r2,
+            r0 + 7 * 2 * 128,
+            "the next sector lands where the skew table says"
+        );
+        assert_eq!(hd.data_record_offset(3).unwrap(), r2 + 128);
+    }
+
+    #[test]
+    fn test_hard_disk_skew_is_a_permutation() {
+        assert_eq!(ALTAIR_HDSK_SKEW.len(), 24);
+        let mut seen: Vec<u16> = ALTAIR_HDSK_SKEW.to_vec();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..24).collect::<Vec<u16>>());
+    }
+
+    /// A skew table must have exactly one entry per sector in a track, or the
+    /// out-of-range fallback silently turns into an identity mapping for the
+    /// tail of every track.
+    #[test]
+    fn test_skew_tables_match_their_sector_count() {
+        for f in FORMATS {
+            if let Skew::Table(t) = f.skew {
+                let sectors = f.sectrk / f.records_per_sector.max(1);
+                assert_eq!(
+                    t.len(),
+                    sectors as usize,
+                    "{}: {} sectors per track but {} skew entries",
+                    f.token,
+                    sectors,
+                    t.len()
+                );
+            }
+        }
     }
 
     #[test]

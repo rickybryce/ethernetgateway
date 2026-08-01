@@ -502,7 +502,22 @@ mod live_tests {
         for (i, name) in images.iter().enumerate() {
             let drive = (i % 16) as u8;
             match mount_image(&base, drive, name) {
-                Ok(note) => println!("  MOUNTED  {note}"),
+                Ok(note) => {
+                    println!("  MOUNTED  {note}");
+                    if let Some(m) = registry::get(drive) {
+                        let guard = m.fs.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut names: Vec<String> = guard
+                            .entries()
+                            .iter()
+                            .map(|e| {
+                                crate::cpm::fcb::format_8_3(&e.name, &e.ext)
+                            })
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        println!("  FILES    {}|{}", name, names.join(" "));
+                    }
+                }
                 Err(e) => println!("  refused  {e}"),
             }
             let _ = unmount_drive(drive);

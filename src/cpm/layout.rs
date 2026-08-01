@@ -113,6 +113,40 @@ FORMATS
     }
     s.push_str(
         "\
+WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO
+-----------------------------------------------
+
+The gateway ships no disk images.  Two well-known collections work well;
+download them yourself and rename copies as below.
+
+ALTAIR-DUINO / ALTAIR 8800 SIMULATOR disks come named after the emulated
+controller they belonged to, which says nothing about their layout.  Map
+them by their SIZE:
+
+  DISKnn.DSK    337,568 bytes  ->  altair8_<what-it-holds>.dsk
+  CDISK01.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
+  HDSKnn.DSK  4,988,928 bytes  ->  altairhd_<what-it-holds>.dsk
+  TDISKnn.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
+
+  So DISK07.DSK holding WordStar becomes  altair8_wordstar.dsk .
+
+  Not every one of these is a CP/M disk.  The Altair DOS, Altair Disk
+  BASIC, Time Sharing BASIC and mini-disk images use their own
+  filesystems; they will mount but show no files, because there is no
+  CP/M directory in them to read.  That is expected.
+
+IMSAI 8080esp / z80pack images are 256,256-byte 8\" single-density disks
+and are all the IBM 3740 layout:
+
+  anything.dsk  256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
+
+  The UCSD p-System disks in that collection are not CP/M either, and
+  behave the same way as the Altair ones above.
+
+Sizes are the reliable guide, and the mount screen tells you if a name
+does not match the file.
+
+
 NOTES
 -----
 
@@ -147,6 +181,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Lay the tree out in a real transfer directory, for setting up a machine
+    /// by hand.  Ignored: set `CPM_LAYOUT_DIR` to a transfer directory.
+    #[test]
+    #[ignore]
+    fn write_cpm_tree_into() {
+        let Ok(dir) = std::env::var("CPM_LAYOUT_DIR") else {
+            eprintln!("set CPM_LAYOUT_DIR to run this");
+            return;
+        };
+        ensure_cpm_tree(&dir).unwrap();
+        println!("laid out {dir}/CPM");
     }
 
     #[test]

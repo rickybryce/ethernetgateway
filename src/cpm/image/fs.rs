@@ -2099,6 +2099,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work);
     }
 
+    /// The same byte-for-byte comparison against the Altair-Duino hard disk.
+    ///
+    /// Worth its own test because this is the only format here whose physical
+    /// sectors hold *two* CP/M records, so skew moves them in pairs.  Get that
+    /// wrong and every second record lands in the wrong place — which a
+    /// directory listing would not show, but this does.
+    ///
+    /// Ignored: needs `cpmtools` and `CPM_HDSK_IMAGE` pointing at an image.
+    #[test]
+    #[ignore]
+    fn test_hard_disk_matches_cpmtools() {
+        let Ok(img) = std::env::var("CPM_HDSK_IMAGE") else {
+            eprintln!("set CPM_HDSK_IMAGE to run this test");
+            return;
+        };
+        let img = std::path::PathBuf::from(img);
+        let work = std::env::temp_dir().join("egw_hdsk_interop");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(
+            work.join("diskdefs"),
+            "diskdef t\n seclen 256\n tracks 812\n sectrk 24\n blocksize 4096\n \
+             maxdir 192\n skewtab 00,07,14,21,04,11,18,01,08,15,22,05,12,19,02,09,16,23,\
+06,13,20,03,10,17\n boottrk 2\n os 2.2\nend\n",
+        )
+        .unwrap();
+        let out = work.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let status = std::process::Command::new("cpmcp")
+            .current_dir(&work)
+            .arg("-f")
+            .arg("t")
+            .arg(&img)
+            .arg("0:*.*")
+            .arg(&out)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => panic!("cpmcp failed: {s}"),
+            Err(e) => {
+                eprintln!("cpmtools not installed ({e}) — skipping");
+                return;
+            }
+        }
+
+        let fmt = by_token("altairhd").unwrap();
+        let mut fs = mount(std::fs::read(&img).unwrap(), fmt);
+        let mut compared = 0;
+        for entry in std::fs::read_dir(&out).unwrap().flatten() {
+            let theirs = std::fs::read(entry.path()).unwrap();
+            let fname = entry.file_name().to_string_lossy().to_uppercase();
+            let (n, e) = name_of(&fname);
+            let Some(total) = fs.file_records(0, &n, &e) else {
+                panic!("{fname}: cpmtools found it, we did not");
+            };
+            let mut ours = Vec::new();
+            for rec in 0..total {
+                match fs.read_record(0, &n, &e, rec).unwrap() {
+                    Some(buf) => ours.extend_from_slice(&buf),
+                    None => break,
+                }
+            }
+            let common = ours.len().min(theirs.len());
+            assert_eq!(
+                &ours[..common],
+                &theirs[..common],
+                "{fname}: our bytes differ from cpmtools"
+            );
+            compared += 1;
+        }
+        assert!(compared > 20, "expected a full hard disk, compared {compared}");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
     /// CP/M 3 label and timestamp records sit in the directory with a user
     /// byte of 0x20/0x21.  They are not files and must not be listed.
     #[test]

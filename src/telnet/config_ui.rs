@@ -177,6 +177,9 @@ impl TelnetSession {
                     );
                     self.show_help_page("CONFIGURATION HELP", lines).await?;
                 }
+                "i" => {
+                    self.cpm_mount_wizard().await?;
+                }
                 "q" => return Ok(()),
                 _ => {
                     self.show_error("Press E, F, G, M, O, R, S, H, or Q.").await?;
@@ -586,6 +589,23 @@ impl TelnetSession {
                 ))
             ))
             .await?;
+            let mounted = crate::cpm::image::registry::all()
+                .iter()
+                .filter(|m| m.is_some())
+                .count();
+            self.send_line(&format!(
+                "  Images:    {}",
+                if mounted == 0 {
+                    self.dim("none mounted")
+                } else {
+                    self.amber(&format!(
+                        "{} drive{} mounted",
+                        mounted,
+                        if mounted == 1 { "" } else { "s" }
+                    ))
+                }
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -606,6 +626,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Default modem port (pairs with EGT80)",
                 self.cyan("D")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Mount/unmount disk images",
+                self.cyan("I")
             ))
             .await?;
             self.send_line("").await?;
