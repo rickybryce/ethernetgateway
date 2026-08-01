@@ -201,12 +201,9 @@ impl Default for BootMachine {
 
 /// Which geometry an image of this size has, if any.
 pub fn geometry_for(len: u64) -> Option<Geometry> {
-    for g in [Geometry::EIGHT_INCH, Geometry::MINIDISK] {
-        if g.image_len() == len {
-            return Some(g);
-        }
-    }
-    None
+    [Geometry::EIGHT_INCH, Geometry::MINIDISK]
+        .into_iter()
+        .find(|g| g.image_len() == len)
 }
 
 impl Machine for BootMachine {
@@ -221,7 +218,7 @@ impl Machine for BootMachine {
     fn port_in(&mut self, address: u16) -> u8 {
         let port = address as u8;
         match port {
-            0x08 | 0x09 | 0x0A => {
+            0x08..=0x0A => {
                 let (v, req) = self.dcdd.port_in(port);
                 let was_fill = matches!(req, Request::Read { .. });
                 self.service(req);
@@ -259,7 +256,7 @@ impl Machine for BootMachine {
     fn port_out(&mut self, address: u16, value: u8) {
         let port = address as u8;
         match port {
-            0x08 | 0x09 | 0x0A => {
+            0x08..=0x0A => {
                 let req = self.dcdd.port_out(port, value);
                 self.service(req);
                 self.idle_status_reads = 0;
