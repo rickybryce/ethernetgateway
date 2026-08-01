@@ -32,6 +32,7 @@
 mod fcb;
 mod fs;
 pub mod hbios;
+pub mod dcdd;
 pub mod image;
 pub mod layout;
 mod machine;
