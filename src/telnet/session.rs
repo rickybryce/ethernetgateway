@@ -707,7 +707,8 @@ impl TelnetSession {
         ))
         .await?;
         // CP/M emulator — gated behind `cpm_emu_enabled`
-        // (default-off, runs arbitrary Z80 code).  Hidden when disabled;
+        // (on by default, bounded three ways — see the key's doc comment in
+        // config.rs — but it does run arbitrary Z80 code).  Hidden when disabled;
         // the `k` handler and the error hint are gated the same way.
         if config::get_config().cpm_emu_enabled {
             self.send_line(&format!(

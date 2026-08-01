@@ -997,7 +997,8 @@ impl App {
                 });
         });
         // The CP/M emulator lives here rather than on the main screen
-        // (no room left there): its default-off enable + the runaway ceiling.
+        // (no room left there): its enable toggle (on by default; see
+        // config::DEFAULT_CPM_EMU_ENABLED) + the runaway ceiling.
         ui.separator();
         ui.checkbox(
             &mut self.cfg.cpm_emu_enabled,

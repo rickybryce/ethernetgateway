@@ -539,7 +539,7 @@ impl TelnetSession {
     // ─── CP/M EMULATOR SETTINGS ──────────────────────────────
 
     /// CP/M-emulator submenu, reached from Other Settings → `E`.
-    /// Holds the default-off enable toggle and the runaway instruction
+    /// Holds the enable toggle (on by default) and the runaway instruction
     /// ceiling (millions of Z80 instructions per program run).  Its own
     /// screen so both fit comfortably inside the 22-row PETSCII budget.
     pub(in crate::telnet) async fn cpm_settings(&mut self) -> Result<(), std::io::Error> {
