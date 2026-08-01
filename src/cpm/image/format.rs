@@ -335,6 +335,22 @@ pub const FORMATS: &[Format] = &[
     //   * The skew being inverted.  Using the inverse permutation is also worse
     //     (70%), so the table is being applied in the right direction.
     //
+    // Confirmed from the Altair 8800 simulator's `drive.cpp`, which is a fair
+    // source for this because it describes the *hardware*, not a filesystem:
+    // a sector lives at `track * sectors_per_track * 137 + sector * 137`,
+    // sectors are 0-based and stored in physical rotation order, and the guest
+    // is handed all 137 bytes. So where the 128 data bytes sit inside a sector
+    // is the guest BIOS's business, which is why no emulator needs to know it.
+    //
+    // Also tried and rejected: the scan for a permutation found *two* valid
+    // candidates, at 0x1cb7 and 0x1cb8, and the other one is worse (the table
+    // in use scores 81% of listing addresses ascending; the alternative is
+    // lower). Deriving the order empirically from the listing addresses on
+    // track 67 produces a sequence that matches the BIOS table as a multiset
+    // and differs from it only by local transpositions — but several of those
+    // records share an address, so the derivation cannot resolve their order
+    // and is not trustworthy enough to replace the table with.
+    //
     // What is left is that the translation is nearly right but not exactly:
     // the file's records come back in an order that is mostly correct and
     // locally wrong.  The next thing to try is deriving the permutation from

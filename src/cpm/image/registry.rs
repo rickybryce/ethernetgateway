@@ -38,7 +38,6 @@ use crate::cpm::fs::NUM_DRIVES;
 
 /// One mounted image.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Mount {
     /// Absolute path of the image file.
     pub path: PathBuf,
@@ -109,15 +108,8 @@ pub fn get(drive0: u8) -> Option<Mount> {
 }
 
 /// Every mount, for the UIs.  Index 0 is A:.
-#[allow(dead_code)]
 pub fn all() -> Vec<Option<Mount>> {
     table().read().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-/// True if any drive has an image mounted.
-#[allow(dead_code)]
-pub fn any_mounted() -> bool {
-    all().iter().any(|m| m.is_some())
 }
 
 /// Put a mount on a drive, replacing whatever was there.
@@ -369,19 +361,19 @@ mod tests {
     fn test_mount_and_unmount_a_drive() {
         let _g = registry_lock();
         reset();
-        assert!(!any_mounted());
+        assert!(all().iter().all(|m| m.is_none()));
         assert!(get(1).is_none());
         assert!(
             mount(NUM_DRIVES, dummy_mount()).is_err(),
             "P: is the last drive"
         );
         mount(1, dummy_mount()).unwrap();
-        assert!(any_mounted());
+        assert!(all().iter().any(|m| m.is_some()));
         assert_eq!(get(1).unwrap().filename, "test.dsk");
         let gone = unmount(1).expect("clear returns what was there");
         assert_eq!(gone.filename, "test.dsk");
         assert!(get(1).is_none());
-        assert!(!any_mounted());
+        assert!(all().iter().all(|m| m.is_none()));
         reset();
     }
 
@@ -392,7 +384,7 @@ mod tests {
         mount(0, dummy_mount()).unwrap();
         mount(5, dummy_mount()).unwrap();
         clear_all();
-        assert!(!any_mounted());
+        assert!(all().iter().all(|m| m.is_none()));
         reset();
     }
 

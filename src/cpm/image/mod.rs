@@ -147,7 +147,6 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
 /// Take the image off a drive, so its host folder is visible again.
 // Called by the mount UIs, which land in the next step; the mount side is
 // already reached from `apply_config_mounts`.
-#[allow(dead_code)]
 pub fn unmount_drive(drive0: u8) -> Result<String, String> {
     registry::check_can_change(drive0)?;
     let drive = (b'A' + drive0) as char;
@@ -202,7 +201,6 @@ pub fn parse_mounts(value: &str) -> Vec<(u8, String)> {
 
 /// Render mounts back into the `cpm_mounts` config form.
 // Written by the mount UIs when they save; see `unmount_drive`.
-#[allow(dead_code)]
 pub fn format_mounts(mounts: &[(u8, String)]) -> String {
     mounts
         .iter()
@@ -315,7 +313,6 @@ fn looks_like_an_image_name(name: &str) -> bool {
 
 /// Every `.dsk` sitting in the images folder, sorted, for the mount pickers.
 // Read by the mount UIs; see `unmount_drive`.
-#[allow(dead_code)]
 pub fn available_images(cpm_base: &Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(images_dir(cpm_base)) {

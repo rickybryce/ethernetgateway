@@ -1020,17 +1020,12 @@ impl ImageFs {
         self.free_blocks() as u64 * self.params.records_per_block as u64 * 128
     }
 
-    /// Free blocks remaining.
-    pub fn free_blocks(&self) -> u32 {
-        self.used.iter().filter(|u| !**u).count() as u32
-    }
-
-    /// Blocks currently allocated to files, for a free-space report.
-    #[allow(dead_code)]
+    /// Blocks allocated to files, counted as *distinct* block numbers.
     ///
-    /// Counts distinct block numbers rather than summing allocation slots: a
-    /// cross-linked disk (the same block claimed twice) would otherwise report
-    /// more space in use than the disk has.
+    /// Not a sum of allocation slots: a cross-linked disk (the same block
+    /// claimed twice) would otherwise report more space in use than the disk
+    /// has.  Used by the consistency tests.
+    #[allow(dead_code)]
     pub fn used_blocks(&self) -> u32 {
         let mut seen = vec![false; self.params.max_block as usize + 2];
         for e in &self.dir {
@@ -1044,6 +1039,12 @@ impl ImageFs {
         }
         seen.iter().filter(|s| **s).count() as u32
     }
+
+    /// Free blocks remaining.
+    pub fn free_blocks(&self) -> u32 {
+        self.used.iter().filter(|u| !**u).count() as u32
+    }
+
 }
 
 /// The read-only surface the mount UIs use to describe a mounted disk.
@@ -1052,27 +1053,14 @@ impl ImageFs {
 /// method at a time: these are consumed by the mount screens in the next step,
 /// and a blanket allow over the whole module would go on hiding real dead code
 /// long after that.
-#[allow(dead_code)]
 impl ImageFs {
-    /// The format this image is mounted as.
-    pub fn format(&self) -> &'static Format {
-        self.fmt
-    }
-
-    /// Derived geometry.
-    pub fn params(&self) -> &Params {
-        &self.params
-    }
-
-    /// Every live directory entry.
+    /// Every live directory entry.  Read by the mount screens and the
+    /// image-inspection tests.
+    #[allow(dead_code)]
     pub fn entries(&self) -> &[DirSlot] {
         &self.dir
     }
 
-    /// Total capacity of the data area in bytes.
-    pub fn capacity_bytes(&self) -> u64 {
-        (self.params.max_block as u64 + 1) * self.params.records_per_block as u64 * 128
-    }
 }
 
 /// Read the 16-byte allocation map out of a directory entry.

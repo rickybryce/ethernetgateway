@@ -30,9 +30,8 @@ pub trait Media: Send {
     /// Push any buffered writes to the host.
     fn flush(&mut self) -> std::io::Result<()>;
 
-    /// True when the store holds no bytes at all.  Present because a type with
-    /// `len` and no `is_empty` is a lint, and because "is this image empty?" is
-    /// a question the mount UIs will ask.
+    /// True when the store holds no bytes at all.  Present only because a type
+    /// with `len` and no `is_empty` is a lint; nothing calls it.
     #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.len() == 0
