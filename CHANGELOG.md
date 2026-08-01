@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - Unreleased
+
 ## [0.8.1] - 2026-08-01
 
 Two months of work on top of 0.8.0, in three strands. **CP/M** grew up: real
@@ -3854,6 +3856,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - S-register persistence via `AT&W`.
 
 [Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.1...HEAD
+[0.9.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.1...HEAD
 [0.8.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.1
 [0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
