@@ -22,11 +22,6 @@
 //!   last driven, so a guest probing for hardware we do not have sees nothing
 //!   instead of an echo of itself.
 
-// Staged build: the machine and its tests are complete, but the telnet driver
-// that owns a session — the run loop, the double-ESC exit, the instruction
-// ceiling — is the next step.  **Remove when that lands.**
-#![allow(dead_code)]
-
 use super::boot::{cold_boot, BootError};
 use super::dcdd::{Dcdd, Disk, Geometry, Request, SECTOR_LEN};
 use super::uart::UartFamily;
@@ -115,7 +110,10 @@ impl BootMachine {
     /// Cold-boot from a drive, leaving the CPU ready to run.
     pub fn boot(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
         let disks = &self.disks;
-        let mut payload: Option<Vec<u8>> = None;
+        // Every chunk with the address it belongs at.  The bootstrap stores
+        // more than one, and keeping only the last — or ignoring the address —
+        // silently loads a partial loader that runs off its own end.
+        let mut chunks: Vec<(u16, Vec<u8>)> = Vec::new();
         let entry = cold_boot(
             &mut self.dcdd,
             drive,
@@ -130,10 +128,12 @@ impl BootMachine {
                     .map(|b| b.to_vec())
                     .ok_or_else(|| format!("track {t} sector {s} is past the end of the image"))
             },
-            |addr, bytes| payload = Some((addr, bytes.to_vec()).1),
+            |addr, bytes| chunks.push((addr, bytes.to_vec())),
         )?;
-        if let Some(p) = payload {
-            self.mem[entry as usize..entry as usize + p.len()].copy_from_slice(&p);
+        for (addr, bytes) in chunks {
+            let at = addr as usize;
+            let end = (at + bytes.len()).min(self.mem.len());
+            self.mem[at..end].copy_from_slice(&bytes[..end - at]);
         }
         cpu.registers().set_pc(entry);
         Ok(())
@@ -149,7 +149,9 @@ impl BootMachine {
         std::mem::take(&mut self.tx)
     }
 
-    /// Console status reads since anything last happened.
+    /// Console status reads since anything last happened.  Used by the tests
+    /// to show that waiting on a key is never mistaken for a stalled disk.
+    #[cfg(test)]
     pub fn idle_status_reads(&self) -> u64 {
         self.idle_status_reads
     }
@@ -533,14 +535,15 @@ mod tests {
             m.stuck_polls(),
             m.idle_status_reads()
         );
-        // Not yet an assertion.  The guest boots, seeks, loads sectors and runs
-        // the code it loaded — the program counter ends up well inside the
-        // loaded image rather than in the boot sector — but it has not reached
-        // its sign-on yet.  What is missing is most likely another status or
-        // timing detail the BIOS waits on.  When it prints, turn this into the
-        // assertion the plan asked for: require the sign-on text.
-        if out.is_empty() {
-            println!("(no console output yet — see the note in this test)");
-        }
+        // The oracle the plan asked for: the guest's own operating system must
+        // say who it is.  This cannot be satisfied by a plausible wrong answer
+        // the way a "does this look like text" check can — the controller, the
+        // bootstrap, the CPU and the console all have to work for a sign-on to
+        // appear at all.
+        let want = std::env::var("CPM_BOOT_EXPECT").unwrap_or_else(|_| "CP/M".into());
+        assert!(
+            text.contains(&want),
+            "the guest never said {want:?}; it printed: {text:?}"
+        );
     }
 }

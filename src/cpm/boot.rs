@@ -25,11 +25,6 @@
 //! its jumps line up — and independently by the fact that this is where the
 //! CP/M directory is found on these disks.
 
-// Staged build, same as `dcdd`: the bootstrap and its tests are complete, but
-// the session driver that calls it — the CPU handover and the console wiring —
-// is the next step.  **Remove when that lands.**
-#![allow(dead_code)]
-
 use super::dcdd::{Dcdd, Request, SECTOR_LEN};
 
 /// Where the bootstrap puts the boot sector, and enters it.
@@ -38,8 +33,19 @@ pub const BOOT_LOAD_ADDR: u16 = 0x0000;
 /// Offset of the 128 data bytes inside a boot-region sector.
 pub const BOOT_DATA_OFFSET: usize = 3;
 
-/// Bytes the bootstrap transfers.
+/// Bytes the bootstrap transfers per sector.
 pub const BOOT_DATA_LEN: usize = 128;
+
+/// Sectors the bootstrap loads, and the step between them.
+///
+/// One sector is not enough: the loader in sector 0 calls a read routine at
+/// `0092h`, which is past the 128 bytes that sector holds. The step is **2**
+/// because that is the interleave the disk's own loader uses — its inner loop
+/// does `ADI 02` on the sector number and wraps at 33 — so consecutive 128-byte
+/// chunks live in sectors 0, 2, 4, … and sector 1 is genuinely empty.
+pub const BOOT_SECTORS: u8 = 4;
+/// Physical sectors between consecutive boot chunks.
+pub const BOOT_INTERLEAVE: u8 = 2;
 
 /// Why a boot did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +177,21 @@ where
     let payload = &raw[BOOT_DATA_OFFSET..BOOT_DATA_OFFSET + BOOT_DATA_LEN];
     if !looks_bootable(payload) {
         return Err(BootError::NotBootable);
+    }
+    // The rest of the loader, from the interleaved sectors that follow.  A
+    // sector that cannot be read stops the copy rather than failing the boot:
+    // a shorter loader is legitimate, and the guest will notice long before we
+    // could.
+    for i in 1..BOOT_SECTORS {
+        let sec = sector + i * BOOT_INTERLEAVE;
+        let Ok(more) = fetch(drive, track, sec) else { break };
+        if more.len() < BOOT_DATA_OFFSET + BOOT_DATA_LEN {
+            break;
+        }
+        store(
+            BOOT_LOAD_ADDR + i as u16 * BOOT_DATA_LEN as u16,
+            &more[BOOT_DATA_OFFSET..BOOT_DATA_OFFSET + BOOT_DATA_LEN],
+        );
     }
     // Close the transfer the bootstrap opened.  Leaving it open holds the
     // "safe to move the head" status bit low, and the first thing a boot
@@ -393,6 +414,15 @@ mod tests {
             |_, _| {},
         )
         .unwrap();
-        assert_eq!(asked, vec![(0, 0, 0)], "track 0, sector 0, drive 0");
+        // Sector 0 first, then the interleaved sectors that hold the rest of
+        // the loader.
+        assert_eq!(asked[0], (0, 0, 0), "the boot sector comes first");
+        assert_eq!(
+            asked,
+            (0..BOOT_SECTORS)
+                .map(|i| (0u8, 0u8, i * BOOT_INTERLEAVE))
+                .collect::<Vec<_>>(),
+            "the loader is read with the disk's own 2:1 interleave"
+        );
     }
 }

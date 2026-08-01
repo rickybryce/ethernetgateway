@@ -47,14 +47,6 @@
 //! than true. MBASIC saving a file under CP/M is the known example, and a
 //! controller that only ever reports "positioned" leaves it spinning forever.
 
-// Staged build: the controller and its tests are complete, but the boot driver
-// that drives it — cold start, the CPU handover, the console wiring — is the
-// next step, so nothing outside this module calls it yet. CI treats warnings as
-// errors, hence the allow. **Remove it when the driver lands**; a blanket allow
-// left behind goes on hiding real dead code, which is exactly what happened to
-// the image module before its UIs arrived.
-#![allow(dead_code)]
-
 /// Bytes in one physical sector on the wire, header and trailer included.
 pub const SECTOR_LEN: usize = 137;
 
@@ -226,21 +218,9 @@ impl Dcdd {
         }
     }
 
-    /// Take a disk out.
-    pub fn eject(&mut self, drive: u8) {
-        if let Some(d) = self.drives.get_mut(drive as usize) {
-            *d = Drive::default();
-        }
-    }
-
     /// Is a disk loaded in this drive?
     pub fn has_disk(&self, drive: u8) -> bool {
         self.drives.get(drive as usize).is_some_and(|d| d.disk.is_some())
-    }
-
-    /// The currently selected drive, if any.
-    pub fn selected(&self) -> Option<u8> {
-        self.selected
     }
 
     /// How many times the position register has been read without the sector
@@ -255,11 +235,6 @@ impl Dcdd {
 
     fn cur(&self) -> Option<&Drive> {
         self.selected.and_then(|s| self.drives.get(s as usize))
-    }
-
-    fn cur_mut(&mut self) -> Option<&mut Drive> {
-        let s = self.selected?;
-        self.drives.get_mut(s as usize)
     }
 
     /// Read a port. `0x08`, `0x09` or `0x0A`.
@@ -295,9 +270,13 @@ impl Dcdd {
                 }
                 if d.head_loaded {
                     s |= status::HEAD_LOADED;
-                    // With the head down a byte is available whenever a
-                    // transfer is under way.
-                    if d.byte.is_some() && !d.writing {
+                    // A byte is available whenever the head is down and a
+                    // sector is under it.  This must **not** wait for the guest
+                    // to read the data port first: real software polls NRDA and
+                    // only reads once it is asserted, so making the transfer
+                    // start on the first read is a deadlock — the guest waits
+                    // for a byte that will not exist until it asks for one.
+                    if !d.writing && d.disk.is_some() {
                         s |= status::NRDA;
                     }
                     if d.writing {
@@ -307,10 +286,14 @@ impl Dcdd {
                 if d.interrupts {
                     s |= status::INT_ENABLED;
                 }
-                // The head may move whenever it is not mid-transfer.
-                if d.byte.is_none() {
-                    s |= status::MOVE_OK;
-                }
+                // On real hardware this bit reports that the head-load delay
+                // has elapsed and the head may be stepped — it is about
+                // mechanical timing, not about whether a transfer is open.
+                // Tying it to transfer state deadlocks: NRDA keeps a sector
+                // under the head, so the transfer never "ends", so the guest
+                // can never step and never finishes its load.  We have no
+                // mechanical delay to wait out, so the head is always free.
+                s |= status::MOVE_OK;
             }
         }
         !s
