@@ -31,3 +31,4 @@ pub mod format;
 pub mod identify;
 pub mod fs;
 pub mod media;
+pub mod registry;
