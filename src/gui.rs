@@ -540,6 +540,16 @@ struct App {
     /// settings; the frame's own three toggles are re-shown there so the popup
     /// reads as the whole General group rather than a fragment of it.
     general_popup_open: bool,
+    /// Whether the "Mount CP/M Drives" window is open.  A second popup off the
+    /// CP/M group rather than more rows in it: sixteen drives do not fit
+    /// beside the other settings, and mounting is an occasional operation.
+    cpm_mount_popup_open: bool,
+    /// Draft selection, one entry per drive: the image filename, or empty for
+    /// "use the drive folder".  Edited in the window and applied on Save, so a
+    /// half-made choice never reaches a live drive.
+    cpm_mount_draft: Vec<String>,
+    /// What the last apply reported, shown under the rows.
+    cpm_mount_notice: String,
     /// Whether the "AI, Browser & Weather — More..." popup is open.  Holds the
     /// weather location + units (and re-shows the API key / homepage) so the
     /// main frame stays at three rows.
@@ -686,6 +696,9 @@ impl App {
             file_transfer_popup_open: false,
             general_popup_open: false,
             ai_browser_popup_open: false,
+            cpm_mount_popup_open: false,
+            cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
+            cpm_mount_notice: String::new(),
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
@@ -960,6 +973,159 @@ impl App {
     /// Contents of the "AI, Browser & Weather — More" popup: every option in
     /// the group.  The main frame shows only the API key + homepage (three-row
     /// budget); the weather location + units live here.
+    /// Seed the draft from the live mount table.
+    ///
+    /// Run when the window opens rather than held from last time, so it always
+    /// reflects what is actually mounted — including changes made from the web
+    /// or a telnet session while the desktop window sat closed.
+    fn cpm_mount_reload_draft(&mut self) {
+        let mounts = crate::cpm::image::registry::all();
+        self.cpm_mount_draft = (0..crate::cpm::NUM_DRIVES as usize)
+            .map(|i| {
+                mounts
+                    .get(i)
+                    .and_then(|m| m.as_ref())
+                    .map(|m| m.filename.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        self.cpm_mount_notice.clear();
+    }
+
+    /// Contents of the "Mount CP/M Drives" window: a row per drive.
+    fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let images = crate::cpm::image::available_images(&base);
+        let mounts = crate::cpm::image::registry::all();
+        let usage = crate::cpm::image::registry::usage();
+
+        // These strings are single-line on purpose: a Rust line continuation
+        // inside them is easy to lose in editing, and what is left behind is a
+        // literal run of spaces that renders as a ragged gap mid-sentence.
+        let intro = if images.is_empty() {
+            format!(
+                "No images found. Put .dsk files in {}/images — readme.txt there explains the naming.",
+                base.display()
+            )
+        } else {
+            "A mounted drive uses the files inside the image instead of the files in its folder. The folder's files are not touched and return when you unmount.".to_string()
+        };
+        ui.add(egui::Label::new(intro).wrap());
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .show(ui, |ui| {
+                egui::Grid::new("cpm_mount_grid")
+                    .num_columns(3)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                for drive0 in 0..crate::cpm::NUM_DRIVES {
+                    let idx = drive0 as usize;
+                    let letter = (b'A' + drive0) as char;
+                    let busy = usage.get(idx).and_then(|u| u.describe());
+                    let mounted = mounts.get(idx).and_then(|m| m.as_ref());
+                    {
+                        ui.label(format!("{letter}:"));
+                        // A drive in use cannot be changed — the control is
+                        // disabled and says why, rather than accepting a choice
+                        // that would then be refused on Save.
+                        ui.add_enabled_ui(busy.is_none(), |ui| {
+                            let current = self
+                                .cpm_mount_draft
+                                .get(idx)
+                                .cloned()
+                                .unwrap_or_default();
+                            let shown = if current.is_empty() {
+                                "(drive folder)".to_string()
+                            } else {
+                                current.clone()
+                            };
+                            egui::ComboBox::from_id_salt(format!("cpm_mount_{drive0}"))
+                                .width(260.0)
+                                .selected_text(shown)
+                                .show_ui(ui, |ui| {
+                                    if let Some(slot) = self.cpm_mount_draft.get_mut(idx) {
+                                        ui.selectable_value(
+                                            slot,
+                                            String::new(),
+                                            "(drive folder)",
+                                        );
+                                        for name in &images {
+                                            ui.selectable_value(
+                                                slot,
+                                                name.clone(),
+                                                name,
+                                            );
+                                        }
+                                    }
+                                });
+                        });
+                        if let Some(m) = mounted {
+                            if m.read_only {
+                                ui.label(
+                                    egui::RichText::new("read-only")
+                                        .color(AMBER_BRIGHT),
+                                )
+                                .on_hover_text(&m.read_only_reason);
+                            }
+                        }
+                        if let Some(b) = &busy {
+                            ui.label(egui::RichText::new(b).color(AMBER_BRIGHT));
+                        }
+                        if drive0 == 0 {
+                            ui.label("(A: hides EGT80 while mounted)");
+                        }
+                        ui.end_row();
+                    }
+                }
+                    });
+            });
+
+        if !self.cpm_mount_notice.is_empty() {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(self.cpm_mount_notice.clone());
+        }
+    }
+
+    /// Apply the draft, then write the resulting table to `cpm_mounts`.
+    ///
+    /// The *resulting* table, not the request: a drive that refused keeps its
+    /// old image in the config too, so a restart cannot quietly apply a change
+    /// the operator was told had failed.  Same rule as the web screen.
+    fn cpm_mount_apply(&mut self) {
+        let desired: Vec<(u8, String)> = self
+            .cpm_mount_draft
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.is_empty())
+            .map(|(i, n)| (i as u8, n.clone()))
+            .collect();
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let (notes, errors) = crate::cpm::image::apply_mount_selection(&base, &desired);
+        let mut msg = notes.join("\n");
+        if !errors.is_empty() {
+            if !msg.is_empty() {
+                msg.push('\n');
+            }
+            msg.push_str(&errors.join("\n"));
+        }
+        self.cpm_mount_notice = msg;
+        self.cfg.cpm_mounts = crate::cpm::image::current_mounts_value();
+        self.save_config_now();
+        // Re-seed from what actually happened, so a refused row snaps back to
+        // the truth instead of showing a choice that did not take.
+        let mounts = crate::cpm::image::registry::all();
+        for (i, slot) in self.cpm_mount_draft.iter_mut().enumerate() {
+            *slot = mounts
+                .get(i)
+                .and_then(|m| m.as_ref())
+                .map(|m| m.filename.clone())
+                .unwrap_or_default();
+        }
+    }
+
     fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("API Key:");
@@ -1011,6 +1177,28 @@ impl App {
                 &mut self.cpm_emu_max_minstr_buf,
                 70.0,
             );
+        });
+        // Disk images get their own window: sixteen drives will not fit here,
+        // and mounting is an occasional operation rather than a setting.
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Mount CP/M Drives…").color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                self.cpm_mount_reload_draft();
+                self.cpm_mount_popup_open = true;
+            }
+            let n = crate::cpm::image::registry::all()
+                .iter()
+                .filter(|m| m.is_some())
+                .count();
+            ui.label(if n == 0 {
+                "no images mounted".to_string()
+            } else {
+                format!("{n} mounted")
+            });
         });
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
@@ -2978,6 +3166,53 @@ impl eframe::App for App {
         });
         self.ai_browser_popup_open = ai_browser_open;
 
+        // Mount CP/M Drives — a row per drive A:–P:.  Its own window rather
+        // than more rows in the CP/M group: sixteen drives do not fit there,
+        // and mounting is an occasional operation, not a setting.
+        let mut cpm_mount_open = self.cpm_mount_popup_open;
+        egui::Window::new(
+            egui::RichText::new("Mount CP/M Drives")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut cpm_mount_open)
+        .resizable(true)
+        .collapsible(false)
+        .default_width(560.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            self.draw_cpm_mounts(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Apply")
+                            .strong()
+                            .size(16.0)
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    self.cpm_mount_apply();
+                }
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Refresh").color(AMBER_BRIGHT),
+                    ))
+                    .on_hover_text(
+                        "Re-read the images folder and the live mount table — use after adding a .dsk, or if a mount changed from the web or a telnet session.",
+                    )
+                    .clicked()
+                {
+                    self.cpm_mount_reload_draft();
+                }
+            });
+        });
+        self.cpm_mount_popup_open = cpm_mount_open;
+
         // One independent popup per port — each shows that port's
         // mode selector, framing/flow row, AT/S-register state, stored
         // numbers, and a Save button.  Both can be open simultaneously
@@ -3592,7 +3827,34 @@ mod tests {
         assert!(!app.general_popup_open, "General");
         assert!(!app.file_transfer_popup_open, "File Transfer");
         assert!(!app.ai_browser_popup_open, "AI/Browser");
+        assert!(!app.cpm_mount_popup_open, "CP/M mounts");
         assert!(!app.serial_popup_open[0] && !app.serial_popup_open[1], "Serial A/B");
+    }
+
+    /// The draft must hold one slot per drive, or indexing a later drive
+    /// would be out of bounds.
+    #[test]
+    fn test_cpm_mount_draft_has_one_slot_per_drive() {
+        let app = test_app();
+        assert_eq!(
+            app.cpm_mount_draft.len(),
+            crate::cpm::NUM_DRIVES as usize,
+            "one draft slot per drive A:-P:"
+        );
+        assert!(
+            app.cpm_mount_draft.iter().all(|s| s.is_empty()),
+            "nothing is mounted until an image is chosen"
+        );
+    }
+
+    /// Re-seeding runs from a button, so it can be called at any moment —
+    /// including on a draft that is the wrong length.
+    #[test]
+    fn test_cpm_mount_reload_is_safe_on_a_short_draft() {
+        let mut app = test_app();
+        app.cpm_mount_draft.clear();
+        app.cpm_mount_reload_draft();
+        assert_eq!(app.cpm_mount_draft.len(), crate::cpm::NUM_DRIVES as usize);
     }
 
     /// `App::new` seeds the log buffers, same as every other numeric field.

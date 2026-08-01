@@ -1763,7 +1763,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         )
     } else {
         String::from(
-            "<div class=\"row\"><span class=\"sub\">A mounted drive uses the files inside              the image instead of the files in its folder. The folder's files are not              touched and return when you unmount.</span></div>",
+            "<div class=\"row\"><span class=\"sub\">A mounted drive uses the files inside the image instead of the files in its folder. The folder's files are not touched and return when you unmount.</span></div>",
         )
     };
 
