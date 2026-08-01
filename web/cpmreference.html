@@ -624,6 +624,25 @@
                     <code>transfer_dir/CPM/A</code> &hellip; <code>P</code> are created on first launch, and the
                     bundled <a href="#egt80">EGT80</a> terminal is placed on drive A: at the same time.
                 </p>
+                <p>
+                    <strong>Getting your own files onto a drive:</strong> the drives are ordinary folders, so
+                    in the gateway's <strong>File Transfer</strong> menu change directory to <code>CPM/A</code>
+                    and upload there &mdash; the file is on drive A: the moment it lands, no import step. EGT80
+                    can also fetch one over the virtual modem from inside the emulator. The emulator's
+                    <code>HELP</code> says both.
+                </p>
+                <p>
+                    <strong>The drives are shared between sessions.</strong> Each session gets its own Z80 and
+                    its own 64&nbsp;KB, but one set of folders serves all of them, so two people in the emulator
+                    see the same files. A session entering while another is already inside is told so. Writing is
+                    protected: a file one session is writing is <em>claimed</em> until it closes the file or
+                    leaves, and another session's write, erase or rename of that file is refused rather than
+                    interleaved &mdash; which is what would otherwise happen, since the BDOS here opens the host
+                    file per record. The refusal reaches the guest as an ordinary CP/M failure, so expect a
+                    program to report something like <code>DISK OR DIRECTORY FULL</code>: that is the only code
+                    CP/M's create call has. Reads are deliberately not locked, so two people can share a library
+                    of <code>.COM</code> files freely.
+                </p>
 
                 <div class="callout callout-info">
                     <p>
@@ -1000,8 +1019,10 @@
                         <tr><td><code>0x05</code></td><td>CIOQUERY</td><td>Reports the stored line characteristics in <code>DE</code>, with no terminal type.</td></tr>
                         <tr><td><code>0x06</code></td><td>CIODEVICE</td><td>Describes the unit: RS-232 attribute, this unit number, no device type / mode / base.</td></tr>
                         <tr><td><code>0xF1</code></td><td>SYSVER</td><td>Firmware version, returned in <code>DE</code> with the platform id in <code>L</code>.</td></tr>
-                        <tr><td><code>0xF8</code></td><td>SYSGET</td><td>Sub-function in <code>C</code>. Only <code>CIOCNT</code> (<code>0x00</code>, the serial-unit count) is answered.</td></tr>
-                        <tr><td colspan="3" class="dim-text">Every other serial function, and every other HBIOS group &mdash; disk, RTC, video, sound, DSKY, bank management &mdash; returns a failure result (<code>0xFF</code>).</td></tr>
+                        <tr><td><code>0xF8</code></td><td>SYSGET</td><td>Sub-function in <code>C</code>. <code>CIOCNT</code> (<code>0x00</code>) reports the serial-unit count and <code>RTCCNT</code> (<code>0x20</code>) reports one clock; the disk, video, sound and DSKY counts are refused rather than answered with zero, which a caller would read as a successful &ldquo;none&rdquo;.</td></tr>
+                        <tr><td><code>0x20</code></td><td>RTCGETTIM<br><span class="dim-text">read the clock</span></td><td>Fills the six-byte buffer at <code>HL</code> with year, month, day, hour, minute, second &mdash; <strong>each BCD encoded</strong>, as the published interface specifies. The time is the <em>host's</em>, in local time where the platform can report it (UTC on Windows). This is the only clock an emulated program can have: CP/M&nbsp;2.2 has none of its own.</td></tr>
+                        <tr><td><code>0x21</code></td><td>RTCSETTIM</td><td><strong>Refused.</strong> The clock is the host's and a guest cannot set it &mdash; and answering &ldquo;done&rdquo; before reading back a time it never set would be worse than saying no.</td></tr>
+                        <tr><td colspan="3" class="dim-text">Every other serial function, the RTC NVRAM calls, and every other HBIOS group &mdash; disk, video, sound, DSKY, bank management &mdash; returns a failure result (<code>0xFF</code>). The clock is only there under an <code>hbios_*</code> profile: on a port profile the machine is a plain CP/M 2.2 one, and that has no clock either.</td></tr>
                     </tbody>
                 </table>
 

@@ -10,7 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Acting on an external quality review of the tree at `6c2ed36`, then a
 follow-up quality/stability pass of our own.
 
+### Added
+- **The CP/M emulator now has a clock.** CP/M 2.2 has none of its own, so
+  RomWBW software asks the firmware — and our HBIOS answered only the serial
+  group. `RTCGETTIM` (function `0x20`) now fills the six-byte buffer at `HL`
+  with the host's date and time, each byte BCD encoded per the published
+  interface, and `SYSGET`'s `RTCCNT` reports one clock so software that probes
+  before asking finds it. Local time where the platform can report it (UTC on
+  Windows, which needs an API we do not otherwise link). Setting the clock is
+  refused rather than silently accepted: the time is the host's. Verified by
+  assembling a test program with the emulator's own `ASM` and running it —
+  it printed `260731214256` against a host clock eight seconds later.
+
 ### Changed
+- **Two sessions can no longer write the same CP/M file at once.** Every
+  session has its own Z80 and its own 64 KB, but they share one set of drive
+  folders — and the BDOS here opens the host file per record, so two writers'
+  records interleaved into one file and the loser's data vanished with no error
+  reported to either. A session now claims a file on its first write (or when
+  it creates, erases or renames it) and holds the claim until it closes the
+  file or leaves the emulator; another session's write is refused, which
+  reaches the guest as an ordinary CP/M failure. Reads are deliberately not
+  locked, so sharing a library of `.COM` files stays free. A session entering
+  while another is already inside is now told the drives are shared.
+- **The emulator's `HELP` says how to get files onto a drive.** It was always
+  possible — the drives are folders, so changing directory to `CPM/A` in the
+  File Transfer menu and uploading puts the file on drive A: directly — but
+  nothing said so, and the alternative guess (upload, then hunt for a way to
+  import) has no answer.
 - **EGT80's terminal-mode menu no longer offers Settings.** It did, and it did
   not work: the settings screen drew, but keystrokes were still going to the
   remote, so nothing could be selected and the way out was not obvious. The menu

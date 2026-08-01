@@ -64,7 +64,7 @@ use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Instructions per [`Cpm::run`] batch before the driver regains control to
 /// yield to the async runtime.
@@ -157,6 +157,36 @@ const CPM_LAST_DRIVE: u8 = b'P';
 /// file and the terminal is simply *there* when someone first opens the
 /// emulator, rather than being something they have to find and upload.
 const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
+/// How many sessions are inside the CP/M emulator right now.
+///
+/// Every session runs its own Z80 and its own 64 KB, but they all share one set
+/// of drive folders under `transfer_dir/CPM` — so "who else is in here" is a
+/// fact an arriving user needs.  Simultaneous writes to one file are refused
+/// outright (see `CPM_WRITERS` in `cpm/fs.rs`); this only supplies the notice,
+/// because a refusal that arrives with no explanation reads as a bug.
+static CPM_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts a session in for as long as it is in the emulator.
+///
+/// RAII rather than a decrement at the end of the REPL: the session can leave
+/// through `EXIT`, a dropped connection, or an error return, and only `Drop`
+/// covers all three.
+struct CpmSessionCount;
+
+impl CpmSessionCount {
+    /// Join, reporting how many sessions were already inside.
+    fn enter() -> (CpmSessionCount, usize) {
+        let before = CPM_SESSIONS.fetch_add(1, Ordering::SeqCst);
+        (CpmSessionCount, before)
+    }
+}
+
+impl Drop for CpmSessionCount {
+    fn drop(&mut self) {
+        CPM_SESSIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Filename EGT80 is placed under.  It is also the name EGT80 looks for when
 /// saving its settings (CP/M never tells a program its own name, so the name
@@ -286,6 +316,24 @@ impl TelnetSession {
             self.amber("Press ESC twice to stop a program.")
         ))
         .await?;
+        // Counted in for the whole visit; the guard releases on every exit
+        // path.  Held until `cpmemu_repl` returns, so it must outlive it.
+        let (_session_count, already_inside) = CpmSessionCount::enter();
+        if already_inside > 0 {
+            self.send_line(&format!(
+                "  {}",
+                self.amber(&format!(
+                    "{} other session(s) are in CP/M: the drives are shared.",
+                    already_inside
+                ))
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}",
+                self.dim("A file being written by one session is refused to the others.")
+            ))
+            .await?;
+        }
         self.send_line("").await?;
 
         // The filesystem state (current drive, DMA) persists across the
@@ -961,6 +1009,13 @@ impl TelnetSession {
             "  name       run name.COM from the drive",
             "  HELP / ?   this help",
             "  EXIT/BYE/QUIT  leave CP/M",
+            "",
+            "  Getting files onto a drive:",
+            "  The drives are folders under the transfer directory,",
+            "  CPM/A .. CPM/P.  In the gateway's File Transfer menu,",
+            "  change directory to CPM/A and upload there - the file",
+            "  is then on drive A: as soon as it lands.  EGT80 can",
+            "  also fetch one over the virtual modem from in here.",
         ] {
             self.send_line(line).await?;
         }

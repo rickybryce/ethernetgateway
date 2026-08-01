@@ -59,6 +59,89 @@ const IOBYTE_ADDR: u16 = 0x0003;
 /// open its data, and hangs).
 const CDISK_ADDR: u16 = 0x0004;
 /// Transient Program Area base — where a `.COM` is loaded and starts.
+/// The host clock as RomWBW's six-byte date/time buffer: year, month, day,
+/// hour, minute, second — **each BCD encoded**, per the published HBIOS
+/// interface (`RomWBW/Source/Doc/SystemGuide.md`, "Each byte is BCD encoded").
+///
+/// CP/M 2.2 has no clock of its own, so this is the only time an emulated
+/// program can get, and it is read-only: [`hbios`] refuses RTCSETTIM rather
+/// than pretend a guest can set the host's clock.
+///
+/// **Local time where the platform can tell us** (Unix, via `localtime_r`),
+/// because an RTC in a CP/M machine shows wall-clock time and a user comparing
+/// it against the clock on the wall is the whole point. Elsewhere — Windows,
+/// which needs an API we do not otherwise link — it falls back to UTC rather
+/// than adding a dependency for one call; the difference is documented, and
+/// the gateway's own deployments are Unix.
+pub fn host_clock_bcd() -> [u8; 6] {
+    #[cfg(unix)]
+    {
+        // SAFETY: `time` with a null argument returns the value rather than
+        // storing it, and `localtime_r` writes into a `tm` we own — the
+        // reentrant form precisely so no shared buffer is involved.
+        let secs = unsafe { libc::time(std::ptr::null_mut()) };
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+            return clock_bcd_from_parts(
+                tm.tm_year as i64 + 1900,
+                tm.tm_mon as i64 + 1,
+                tm.tm_mday as i64,
+                tm.tm_hour as i64,
+                tm.tm_min as i64,
+                tm.tm_sec as i64,
+            );
+        }
+    }
+    // UTC fallback: the epoch second split into a civil date and a time.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    clock_bcd_from_parts(y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+/// Pack a date and time into the six BCD bytes the buffer wants.
+///
+/// Every field is clamped to what its BCD byte can hold: a leap second arrives
+/// as `tm_sec == 60`, and the year is the last two digits, which is all the
+/// format has room for (a 2100 machine reads as `00`, exactly as period
+/// hardware did).
+fn clock_bcd_from_parts(year: i64, mon: i64, day: i64, hour: i64, min: i64, sec: i64) -> [u8; 6] {
+    [
+        to_bcd(year.rem_euclid(100) as u8),
+        to_bcd(mon.clamp(1, 12) as u8),
+        to_bcd(day.clamp(1, 31) as u8),
+        to_bcd(hour.clamp(0, 23) as u8),
+        to_bcd(min.clamp(0, 59) as u8),
+        to_bcd(sec.clamp(0, 59) as u8),
+    ]
+}
+
+/// One byte of BCD: 42 -> 0x42.  Values above 99 cannot be represented, and
+/// every caller clamps before reaching here.
+fn to_bcd(n: u8) -> u8 {
+    ((n / 10) << 4) | (n % 10)
+}
+
+/// Civil date from a day count since 1970-01-01, by Howard Hinnant's
+/// `civil_from_days`.  Used only on the non-Unix fallback path, where there is
+/// no `localtime_r` to do it for us.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 pub const TPA_BASE: u16 = 0x0100;
 /// Top of the usable TPA in our layout; the stack starts here and grows
 /// down, leaving the region above for the (pretend, for now) BDOS/BIOS.
@@ -858,6 +941,10 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             // without consulting the directory at all, and `||` keeps that
             // literal — `open_existing` is not called when either holds.
             let no_directory_work = fs.fcb_drive_is_ro(fcb) || fcb.s2 & 0x80 != 0;
+            // Whatever the return code, the guest is finished with this file:
+            // let another session write it without waiting for this one to
+            // leave the emulator (see CPM_WRITERS in fs.rs).
+            fs.release_file(fcb);
             if no_directory_work || fs.open_existing(fcb).is_some() {
                 0x00
             } else {
@@ -1073,6 +1160,67 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
 
 #[cfg(test)]
 mod tests {
+    /// The RTC buffer is BCD, per the published HBIOS interface — a plain
+    /// binary byte would read as a different (and often impossible) number on
+    /// the guest side: 0x1F is 31 in binary but not a valid BCD date at all.
+    #[test]
+    fn test_clock_bcd_packing() {
+        assert_eq!(to_bcd(0), 0x00);
+        assert_eq!(to_bcd(9), 0x09);
+        assert_eq!(to_bcd(10), 0x10);
+        assert_eq!(to_bcd(42), 0x42);
+        assert_eq!(to_bcd(99), 0x99);
+
+        // 2026-07-31 22:05:09 -> the six bytes RomWBW's buffer expects.
+        assert_eq!(
+            clock_bcd_from_parts(2026, 7, 31, 22, 5, 9),
+            [0x26, 0x07, 0x31, 0x22, 0x05, 0x09]
+        );
+        // A leap second (tm_sec == 60) has no BCD-legal home; clamp it.
+        assert_eq!(clock_bcd_from_parts(2016, 12, 31, 23, 59, 60)[5], 0x59);
+        // Only the last two digits of the year fit, as on period hardware.
+        assert_eq!(clock_bcd_from_parts(2100, 1, 1, 0, 0, 0)[0], 0x00);
+    }
+
+    /// The civil-date conversion behind the non-Unix fallback, on the dates
+    /// that break naive implementations: the epoch, both kinds of century
+    /// boundary, and a leap day.
+    #[test]
+    fn test_civil_from_days_landmarks() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        // Day numbers cross-checked against a reference calendar rather than
+        // worked out by hand — the first draft of this test had them a day out
+        // and would have "confirmed" a broken conversion.
+        assert_eq!(civil_from_days(11016), (2000, 2, 29)); // 2000 IS a leap year
+        assert_eq!(civil_from_days(11017), (2000, 3, 1));
+        assert_eq!(civil_from_days(19723), (2024, 1, 1));
+        assert_eq!(civil_from_days(20513), (2026, 3, 1));
+        // ...and 2100 is NOT a leap year, the case the /100 and /400 terms
+        // exist for: the day after 28 February is 1 March.
+        assert_eq!(civil_from_days(47540), (2100, 2, 28));
+        assert_eq!(civil_from_days(47541), (2100, 3, 1));
+    }
+
+    /// The live clock must produce a buffer a guest can actually read: every
+    /// byte legal BCD, and the fields inside their calendar ranges.
+    #[test]
+    fn test_host_clock_is_legal_bcd() {
+        let t = host_clock_bcd();
+        for (i, b) in t.iter().enumerate() {
+            assert!(
+                (b >> 4) <= 9 && (b & 0x0F) <= 9,
+                "byte {i} = {b:#04x} is not valid BCD"
+            );
+        }
+        let dec = |b: u8| (b >> 4) * 10 + (b & 0x0F);
+        assert!((1..=12).contains(&dec(t[1])), "month {}", dec(t[1]));
+        assert!((1..=31).contains(&dec(t[2])), "day {}", dec(t[2]));
+        assert!(dec(t[3]) <= 23, "hour {}", dec(t[3]));
+        assert!(dec(t[4]) <= 59, "minute {}", dec(t[4]));
+        assert!(dec(t[5]) <= 59, "second {}", dec(t[5]));
+    }
+
     use super::*;
 
 

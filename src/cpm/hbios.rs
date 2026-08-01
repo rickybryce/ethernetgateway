@@ -16,8 +16,12 @@
 //! entirely our own dispatch over the modem rings in
 //! [`crate::cpm::machine`].
 //!
+//! It also answers the **RTC group's** read call, because CP/M 2.2 has no clock
+//! of its own and RomWBW software asks the firmware for one; the time comes
+//! from the host, and setting it is refused (see `FN_RTC_SETTIM`).
+//!
 //! Deliberately **not** implemented: bank switching / memory management, disk,
-//! RTC, video, sound, and the DSKY.  Those are RomWBW *hardware* services with
+//! video, sound, and the DSKY.  Those are RomWBW *hardware* services with
 //! no counterpart here, and pretending otherwise would strand a program deeper
 //! in its run than an honest refusal does.  Every function outside the
 //! supported set returns [`ERR`], which the API defines as a failure (any
@@ -57,6 +61,12 @@ const FN_VER: u8 = 0xF1;
 const FN_GET: u8 = 0xF8;
 /// `GET` sub-function: count of serial units.
 const GET_CIOCNT: u8 = 0x00;
+/// `GET` sub-function: count of real-time-clock units.
+const GET_RTCCNT: u8 = 0x20;
+/// RTC: read the clock into the six-byte buffer at `HL`.
+const FN_RTC_GETTIM: u8 = 0x20;
+/// RTC: set the clock from the six-byte buffer at `HL`.
+const FN_RTC_SETTIM: u8 = 0x21;
 
 /// Our result code for anything we do not implement.  The API treats a
 /// non-zero (negative) result as a failure; `0xFF` is the plainest such value
@@ -181,10 +191,36 @@ pub fn service(cpm: &mut Cpm, func: u8) -> HbiosOutcome {
                 // ours answers.
                 let count = our_unit.map(|u| u.saturating_add(1)).unwrap_or(0);
                 cpm.hbios_return_e(OK, count);
+            } else if unit == GET_RTCCNT {
+                // One clock, so software that probes before asking the time
+                // finds it.  Answered rather than refused precisely because we
+                // do implement RTCGETTIM below.
+                cpm.hbios_return_e(OK, 1);
             } else {
                 cpm.hbios_return(ERR);
             }
             cpm.hbios_scramble_hl();
+            return HbiosOutcome::Answered;
+        }
+        _ => {}
+    }
+
+    // The RTC group is not a character device: RTCGETTIM takes a buffer
+    // address in HL and no unit in C, so it is answered here, above the
+    // character-unit check that would otherwise reject it.
+    match func {
+        FN_RTC_GETTIM => {
+            let buf = cpm.reg16(iz80::Reg16::HL);
+            let now = crate::cpm::host_clock_bcd();
+            cpm.write_block(buf, &now);
+            cpm.hbios_return(OK);
+            return HbiosOutcome::Answered;
+        }
+        FN_RTC_SETTIM => {
+            // Refused, not silently accepted.  The clock here is the host's,
+            // and a guest cannot be allowed to set that — nor should it be told
+            // it succeeded and then read back a time it did not set.
+            cpm.hbios_return(ERR);
             return HbiosOutcome::Answered;
         }
         _ => {}
@@ -300,6 +336,89 @@ mod tests {
         // LD B,func / LD C,unit / RST 8 / JP 0
         cpm.load_com(&[0x06, func, 0x0E, unit, 0xCF, 0xC3, 0x00, 0x00]);
         (cpm, AtomicBool::new(false))
+    }
+
+    /// The clock: RTCGETTIM fills the six-byte buffer HL points at, with the
+    /// BCD the published interface specifies, and reports success.
+    ///
+    /// CP/M 2.2 has no clock, so this is the only way an emulated program can
+    /// learn the date — and it is what makes `hbios_*` more than a serial port.
+    #[test]
+    fn test_rtc_get_time_fills_the_buffer_in_bcd() {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("hbios_1"));
+        // LD B,0x20 / LD HL,0x2000 / RST 8 / JP 0
+        cpm.load_com(&[0x06, FN_RTC_GETTIM, 0x21, 0x00, 0x20, 0xCF, 0xC3, 0x00, 0x00]);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_RTC_GETTIM));
+        assert_eq!(service(&mut cpm, FN_RTC_GETTIM), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK, "RTCGETTIM must report success");
+
+        let buf = cpm.read_block(0x2000, 6);
+        for (i, b) in buf.iter().enumerate() {
+            assert!(
+                (b >> 4) <= 9 && (b & 0x0F) <= 9,
+                "buffer byte {i} = {b:#04x} is not BCD; the interface says every \
+                 byte is BCD encoded"
+            );
+        }
+        let dec = |b: u8| (b >> 4) * 10 + (b & 0x0F);
+        assert!((1..=12).contains(&dec(buf[1])), "month byte {:#04x}", buf[1]);
+        assert!((1..=31).contains(&dec(buf[2])), "day byte {:#04x}", buf[2]);
+        // Nothing was written past the six bytes the buffer is defined to hold.
+        assert_eq!(cpm.read_block(0x2006, 1)[0], 0x00, "wrote past the buffer");
+    }
+
+    /// Setting the clock is refused, not silently accepted.  The time here is
+    /// the host's; answering OK and then reading back a different time is worse
+    /// than saying no.
+    #[test]
+    fn test_rtc_set_time_is_refused() {
+        let (mut cpm, abort) = machine_with_call(FN_RTC_SETTIM, 0, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_RTC_SETTIM));
+        assert_eq!(service(&mut cpm, FN_RTC_SETTIM), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "RTCSETTIM must fail, not lie");
+    }
+
+    /// A program that probes for a clock before asking the time must find one —
+    /// and must still not find a disk or a video unit.
+    #[test]
+    fn test_sysget_reports_one_rtc_but_no_disk() {
+        let (mut cpm, abort) = machine_with_call(FN_GET, GET_RTCCNT, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_GET));
+        assert_eq!(service(&mut cpm, FN_GET), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), OK);
+        assert_eq!(cpm.reg8(iz80::Reg8::E), 1, "one RTC");
+
+        // 0x10 is the disk-unit count: still refused, because there is no disk.
+        let (mut cpm, abort) = machine_with_call(FN_GET, 0x10, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_GET));
+        assert_eq!(service(&mut cpm, FN_GET), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "we have no disk units to report");
+    }
+
+    /// With no HBIOS profile selected the machine is a plain CP/M 2.2 one, and
+    /// that has no clock either — the RTC group must not become a back door
+    /// past the profile gate.
+    ///
+    /// Reached by CALLing the trap directly, the way
+    /// `test_no_hbios_profile_refuses_even_the_management_group` does: on a
+    /// port profile the page-zero `RST 8` vector is not installed at all, so an
+    /// `RST 8` never arrives here — it wanders off into unused memory until the
+    /// instruction ceiling stops it, which is what a bare CP/M machine does.
+    #[test]
+    fn test_rtc_refused_without_an_hbios_profile() {
+        let mut cpm = Cpm::new();
+        cpm.set_modem_access(resolve_access("rc2014_1b")); // a PORT profile
+        // LD B,RTCGETTIM / LD HL,2000h / CALL <trap> / JP 0
+        cpm.load_com(&[
+            0x06, FN_RTC_GETTIM, 0x21, 0x00, 0x20, 0xCD, 0xF0, 0xFF, 0xC3, 0x00, 0x00,
+        ]);
+        let abort = AtomicBool::new(false);
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_RTC_GETTIM), "trap fires");
+        assert_eq!(service(&mut cpm, FN_RTC_GETTIM), HbiosOutcome::Answered);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR, "no RomWBW here, so no clock");
+        assert_eq!(cpm.read_block(0x2000, 6), vec![0u8; 6], "and wrote nothing");
     }
 
     #[test]

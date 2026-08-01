@@ -10,7 +10,10 @@
 //! same jail guarantee the transfer subsystem relies on.
 
 use super::fcb::{format_8_3, split_8_3, Fcb, FCB_SIZE};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Number of emulated drives.  CP/M 2.2's FCB drive field is 4 bits, so the
 /// architectural maximum is 16 (A: through P:); we expose all of them, each a
@@ -27,6 +30,34 @@ pub const DEFAULT_DMA: u16 = 0x0080;
 /// multi-gigabyte sparse file to exhaust the host disk.  This is also the
 /// real CP/M 2.2 per-file ceiling, so it doesn't constrain legitimate use.
 pub const MAX_CPM_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Files a CP/M session is currently writing, and which session owns each.
+///
+/// Every session gets its own `CpmFs`, but they all share one set of drive
+/// folders under `transfer_dir/CPM` — so without this, two people in the
+/// emulator at the same time could write the same file at the same time.
+/// Nothing in CP/M prevents that: our BDOS opens and closes the host file per
+/// record, so the two sets of records simply interleave and the loser's data is
+/// gone with no error on either side.
+///
+/// A session claims a file on its first write (or when it creates, deletes or
+/// renames it) and holds the claim until it closes the file or leaves the
+/// emulator.  A second session's write is then refused rather than silently
+/// interleaved: it surfaces as a CP/M write error, which is a thing every
+/// program already knows how to report.
+///
+/// Reads are deliberately NOT covered.  A read racing a write can see a torn
+/// record, but locking reads would stop two people using the same drive at all
+/// — which is the ordinary case (a shared library of `.COM` files) and the one
+/// worth keeping cheap.
+static CPM_WRITERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+fn cpm_writers() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    CPM_WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Hands out a distinct id to each `CpmFs`, so a claim can name its owner.
+static NEXT_CPM_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// A synthetic 32-byte CP/M directory entry (one extent of one file).
 pub type DirEntry = [u8; 32];
@@ -60,6 +91,21 @@ pub struct CpmFs {
     /// persisting it to the host would be wrong (and would need the sidecar
     /// metadata we specifically avoid — see `set_file_ro`).
     ro_drives: u16,
+    /// This session's id, used to own entries in [`CPM_WRITERS`].
+    session: u64,
+}
+
+impl Drop for CpmFs {
+    /// Release every file this session was writing.
+    ///
+    /// The important half of the design: a program that never closes its file
+    /// (or a session that ends mid-transfer) must not leave a file claimed for
+    /// the life of the gateway.  Leaving the emulator drops the `CpmFs`, and
+    /// that is what guarantees the claim is temporary.
+    fn drop(&mut self) {
+        let mut held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|_, owner| *owner != self.session);
+    }
 }
 
 impl CpmFs {
@@ -74,8 +120,44 @@ impl CpmFs {
             search_pos: 0,
             user: 0,
             ro_drives: 0,
+            session: NEXT_CPM_SESSION.fetch_add(1, Ordering::SeqCst),
         }
     }
+
+    /// Claim `path` for this session, or report who has it.
+    ///
+    /// Idempotent for the owner: a session writing record after record to the
+    /// same file claims it once and keeps it.
+    fn claim_write(&self, path: &Path) -> Result<(), std::io::Error> {
+        let mut held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
+        match held.get(path) {
+            Some(owner) if *owner != self.session => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "another CP/M session is writing this file",
+            )),
+            _ => {
+                held.insert(path.to_path_buf(), self.session);
+                Ok(())
+            }
+        }
+    }
+
+    /// Give up a claim, if this session holds it.
+    fn release_write(&self, path: &Path) {
+        let mut held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
+        if held.get(path) == Some(&self.session) {
+            held.remove(path);
+        }
+    }
+
+    /// BDOS 16 (close): the file is finished with, so let another session have
+    /// it without waiting for this one to leave the emulator.
+    pub fn release_file(&self, fcb: &Fcb) {
+        if let Some(path) = self.resolve(fcb) {
+            self.release_write(&path);
+        }
+    }
+
 
     /// BDOS 28: software write-protect the current drive until the next disk
     /// reset.
@@ -359,6 +441,11 @@ impl CpmFs {
         if path.is_file() && Self::host_is_ro(&path) {
             return None;
         }
+        // Creating truncates, so it is a write: refuse if another session is
+        // already writing this file.
+        if self.claim_write(&path).is_err() {
+            return None;
+        }
         match std::fs::File::create(&path) {
             Ok(_) => Some(path),
             Err(_) => None,
@@ -390,7 +477,17 @@ impl CpmFs {
         if !old_path.is_file() || new_path.exists() || Self::host_is_ro(&old_path) {
             return false;
         }
-        std::fs::rename(old_path, new_path).is_ok()
+        // Renaming moves a file out from under anyone writing it, so both names
+        // are claimed for the duration and released afterwards — the file keeps
+        // no claim under either name once the rename is done.
+        if self.claim_write(&old_path).is_err() || self.claim_write(&new_path).is_err() {
+            self.release_write(&old_path);
+            return false;
+        }
+        let ok = std::fs::rename(&old_path, &new_path).is_ok();
+        self.release_write(&old_path);
+        self.release_write(&new_path);
+        ok
     }
 
     /// BDOS "compute file size" (35): the number of 128-byte records in the
@@ -607,9 +704,16 @@ impl CpmFs {
         }
         let mut count = 0;
         for path in self.matching_files(fcb) {
+            // Erasing a file another session is writing is the same clobber as
+            // writing it, so it takes the same claim.  Released either way: the
+            // file is gone, or it was not ours to touch.
+            if self.claim_write(&path).is_err() {
+                continue;
+            }
             if !Self::host_is_ro(&path) && std::fs::remove_file(&path).is_ok() {
                 count += 1;
             }
+            self.release_write(&path);
         }
         count
     }
@@ -714,6 +818,10 @@ impl CpmFs {
                 "file is read-only (CP/M t1')",
             ));
         }
+        // Claim the file for this session (see CPM_WRITERS).  Held until the
+        // guest closes it or the session leaves, so the records of two
+        // simultaneous writers cannot interleave into one file.
+        self.claim_write(&path)?;
         let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(data)?;
@@ -770,6 +878,117 @@ fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> V
 
 #[cfg(test)]
 mod tests {
+    /// Two sessions must not write the same file at once.
+    ///
+    /// Every session has its own `CpmFs` but they share one set of drive
+    /// folders, and our BDOS opens the host file per record — so without a
+    /// claim, two writers' records interleave into one file and the loser's
+    /// data is gone with no error reported to either. The second writer is
+    /// refused instead, which reaches the guest as an ordinary CP/M write
+    /// error.
+    #[test]
+    fn test_two_sessions_cannot_write_the_same_file() {
+        let base = std::env::temp_dir().join(format!("cpm_lock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::write(base.join("A").join("SHARED.TXT"), vec![0u8; 128]).unwrap();
+
+        let one = CpmFs::new(base.clone());
+        let two = CpmFs::new(base.clone());
+        let fcb = Fcb::from_bytes(&{
+            let mut raw = [0u8; FCB_SIZE];
+            raw[1..9].copy_from_slice(b"SHARED  ");
+            raw[9..12].copy_from_slice(b"TXT");
+            raw
+        });
+        let data = [b'x'; 128];
+
+        assert!(one.write_record(&fcb, 0, &data).is_ok(), "first writer proceeds");
+        assert!(
+            two.write_record(&fcb, 1, &data).is_err(),
+            "a second session must be refused, not interleaved"
+        );
+        // The owner keeps writing: the claim is per session, not per call.
+        assert!(one.write_record(&fcb, 2, &data).is_ok(), "owner still writes");
+
+        // Closing hands it over.
+        one.release_file(&fcb);
+        assert!(
+            two.write_record(&fcb, 1, &data).is_ok(),
+            "after close, the other session may write"
+        );
+
+        // A DIFFERENT file is unaffected — sharing a drive has to stay usable.
+        std::fs::write(base.join("A").join("OTHER.TXT"), vec![0u8; 128]).unwrap();
+        let other = Fcb::from_bytes(&{
+            let mut raw = [0u8; FCB_SIZE];
+            raw[1..9].copy_from_slice(b"OTHER   ");
+            raw[9..12].copy_from_slice(b"TXT");
+            raw
+        });
+        assert!(one.write_record(&other, 0, &data).is_ok(), "other files still writable");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Leaving the emulator releases everything, even if the guest never closed
+    /// its file — otherwise a program that crashes mid-write would lock that
+    /// file for the life of the gateway.
+    #[test]
+    fn test_dropping_a_session_releases_its_claims() {
+        let base = std::env::temp_dir().join(format!("cpm_lockdrop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::write(base.join("A").join("ABANDON.TXT"), vec![0u8; 128]).unwrap();
+
+        let fcb = Fcb::from_bytes(&{
+            let mut raw = [0u8; FCB_SIZE];
+            raw[1..9].copy_from_slice(b"ABANDON ");
+            raw[9..12].copy_from_slice(b"TXT");
+            raw
+        });
+        let data = [b'y'; 128];
+
+        let survivor = CpmFs::new(base.clone());
+        {
+            let gone = CpmFs::new(base.clone());
+            assert!(gone.write_record(&fcb, 0, &data).is_ok());
+            assert!(
+                survivor.write_record(&fcb, 0, &data).is_err(),
+                "held while the other session is alive"
+            );
+        } // `gone` drops here without ever closing the file
+        assert!(
+            survivor.write_record(&fcb, 0, &data).is_ok(),
+            "the claim must not outlive the session that made it"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Erasing a file another session is writing is the same clobber as writing
+    /// it, and is refused the same way.
+    #[test]
+    fn test_a_second_session_cannot_erase_a_file_being_written() {
+        let base = std::env::temp_dir().join(format!("cpm_lockera_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::write(base.join("A").join("BUSY.TXT"), vec![0u8; 128]).unwrap();
+
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(b"BUSY    ");
+        raw[9..12].copy_from_slice(b"TXT");
+        let fcb = Fcb::from_bytes(&raw);
+
+        let writer = CpmFs::new(base.clone());
+        let eraser = CpmFs::new(base.clone());
+        assert!(writer.write_record(&fcb, 0, &[b'z'; 128]).is_ok());
+        assert_eq!(eraser.delete(&fcb), 0, "must not erase a file in use");
+        assert!(base.join("A").join("BUSY.TXT").is_file(), "and the file survives");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::super::fcb::Fcb;
     use super::*;
 
