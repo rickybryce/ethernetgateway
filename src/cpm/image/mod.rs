@@ -516,6 +516,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A disk with no room must report no room.
+    ///
+    /// Reported free space is what STAT prints and what a program checks before
+    /// writing, so an optimistic figure invites a write that then fails.  The
+    /// bitmap was already right — this pins the conversion into the virtual
+    /// disk's units, which is where the error was.
+    #[test]
+    fn test_a_full_image_reports_no_free_space() {
+        use crate::cpm::fs::CpmFs;
+
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_fullspace");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_full.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        mount_image(&base, 15, "ibm3740_full.dsk").expect("mount");
+
+        // Fill it.
+        {
+            let m = registry::get(15).unwrap();
+            let mut img = m.fs.lock().unwrap();
+            let mut n = [b' '; 8];
+            n[..4].copy_from_slice(b"HOG1");
+            let e = *b"DAT";
+            img.create(0, &n, &e).unwrap();
+            let mut rec = 0u32;
+            while img.write_record(0, &n, &e, rec, &[0xEE; 128]).is_ok() {
+                rec += 1;
+                assert!(rec < 100_000, "never filled");
+            }
+            assert_eq!(img.free_blocks(), 0, "the disk really is full");
+        }
+
+        const VD_BLS: u64 = 4096;
+        const TOTAL: u64 = 2048;
+        const DIR: u64 = 8;
+        let mut fs = CpmFs::new(base.clone());
+        fs.select(15);
+        let used = (DIR + fs.current_drive_used_blocks(VD_BLS, TOTAL, DIR)).min(TOTAL);
+        let free_bytes = (TOTAL - used) * VD_BLS;
+        assert_eq!(free_bytes, 0, "a full disk must report zero free");
+
+        drop(fs);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A drive somebody is sitting on must not have its disk changed underneath
     /// them.
     #[test]

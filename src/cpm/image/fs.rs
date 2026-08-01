@@ -1228,6 +1228,31 @@ mod tests {
         ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap()
     }
 
+    /// The interop tests must exist.
+    ///
+    /// They are `#[ignore]`, so they do not run in CI and a deleted one does
+    /// not fail anything — it simply stops existing, and the suite still says
+    /// "ok".  One of them *was* deleted by a careless scripted edit and the
+    /// loss went unnoticed for two commits, because a missing test is invisible
+    /// in a passing run.  This counts them, so removing one is a decision
+    /// somebody has to make on purpose.
+    #[test]
+    fn test_the_interop_tests_still_exist() {
+        let src = include_str!("fs.rs");
+        for name in [
+            "fn test_our_writes_are_readable_by_cpmtools",
+            "fn test_our_hard_disk_writes_are_readable_by_cpmtools",
+            "fn test_real_image_matches_cpmtools",
+            "fn test_hard_disk_matches_cpmtools",
+        ] {
+            assert!(
+                src.contains(name),
+                "{name} is gone — cpmtools interop is the only independent check \
+                 this module has; restore it rather than deleting this assertion"
+            );
+        }
+    }
+
     #[test]
     fn test_params_for_the_measured_formats() {
         let ibm = Params::derive(by_token("ibm3740").unwrap());
@@ -1778,6 +1803,135 @@ mod tests {
     // The byte-for-byte comparisons against cpmtools below cover the same
     // images properly.  Prefer an oracle that knows the right answer over one
     // that only knows what a wrong answer tends to look like.
+
+    /// The corruption test that matters: write a disk with our code, then hand
+    /// it to `cpmtools` and require *it* to agree — about the file list, about
+    /// every byte of every file, and about the disk being consistent.
+    ///
+    /// Reading a disk correctly only proves we understand the format.  Writing
+    /// one that a wholly separate implementation still reads is what proves we
+    /// have not quietly corrupted it, and it is the check that would catch an
+    /// allocation map written in the wrong width, an extent numbered wrongly,
+    /// or a directory entry landing one slot out.
+    ///
+    /// Ignored: needs `cpmtools` installed.
+    #[test]
+    #[ignore]
+    fn test_our_writes_are_readable_by_cpmtools() {
+        let work = std::env::temp_dir().join("egw_cpm_write_interop");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(
+            work.join("diskdefs"),
+            "diskdef t\n seclen 128\n tracks 77\n sectrk 26\n blocksize 1024\n \
+             maxdir 64\n skew 6\n boottrk 2\n os 2.2\nend\n",
+        )
+        .unwrap();
+
+        run_write_interop(&work, "ibm3740");
+    }
+
+    /// The same check against the hard disk.
+    ///
+    /// It needs its own run because `altairhd` is the format with **16-bit
+    /// block numbers** and two records per physical sector — the allocation map
+    /// is encoded differently and skew moves records in pairs, neither of which
+    /// the 8-bit floppy exercises.  Read interop already covered it; writes did
+    /// not, and this pass is where that was noticed.
+    #[test]
+    #[ignore]
+    fn test_our_hard_disk_writes_are_readable_by_cpmtools() {
+        let work = std::env::temp_dir().join("egw_cpm_write_interop_hd");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(
+            work.join("diskdefs"),
+            "diskdef t\n seclen 256\n tracks 812\n sectrk 24\n blocksize 4096\n \
+             maxdir 192\n skewtab 00,07,14,21,04,11,18,01,08,15,22,05,12,19,02,09,\
+16,23,06,13,20,03,10,17\n boottrk 2\n os 2.2\nend\n",
+        )
+        .unwrap();
+        run_write_interop(&work, "altairhd");
+    }
+
+    /// Write a disk with our code, then require `cpmtools` to agree about every
+    /// byte.  `work` must already hold a `diskdefs` describing the format as
+    /// `t`.
+    fn run_write_interop(work: &std::path::Path, token: &'static str) {
+        let fmt = by_token(token).unwrap();
+        let img_path = work.join("out.dsk");
+        std::fs::write(&img_path, blank(fmt)).unwrap();
+
+        // Contents chosen to exercise the awkward cases: a file that spills
+        // past one extent, one that is exactly a block, and one holding every
+        // byte value.
+        let payloads: Vec<(String, Vec<u8>)> = vec![
+            ("SMALL.TXT".into(), b"hello from the gateway".to_vec()),
+            ("BLOCK.BIN".into(), vec![0x42; 1024]),
+            ("BIG.DAT".into(), (0..200 * 128).map(|i| (i % 251) as u8).collect()),
+            ("ALLBYTE.BIN".into(), (0..=255u8).cycle().take(4096).collect()),
+        ];
+
+        {
+            let media = super::super::media::FileMedia::open(&img_path, false).unwrap();
+            let mut fs = ImageFs::mount(Box::new(media), fmt, false).unwrap();
+            assert!(!fs.is_read_only(), "a blank disk must mount writable");
+            for (fname, data) in &payloads {
+                let (n, e) = name_of(fname);
+                fs.create(0, &n, &e).unwrap();
+                for (rec, chunk) in data.chunks(128).enumerate() {
+                    let mut buf = [0x1Au8; 128];
+                    buf[..chunk.len()].copy_from_slice(chunk);
+                    fs.write_record(0, &n, &e, rec as u32, &buf).unwrap();
+                }
+            }
+            assert!(fs.inconsistency().is_none(), "our own writes made it inconsistent");
+        }
+
+        // Now let cpmtools have it.
+        let out = work.join("extracted");
+        std::fs::create_dir_all(&out).unwrap();
+        let status = std::process::Command::new("cpmcp")
+            .current_dir(work)
+            .arg("-f")
+            .arg("t")
+            .arg(&img_path)
+            .arg("0:*.*")
+            .arg(&out)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => panic!("{token}: cpmcp could not read a disk we wrote: {s}"),
+            Err(e) => {
+                eprintln!("cpmtools not installed ({e}) — skipping");
+                return;
+            }
+        }
+
+        let mut compared = 0usize;
+        for (fname, data) in &payloads {
+            let path = out.join(fname.to_lowercase());
+            let theirs = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("cpmtools did not produce {fname}: {e}"));
+            // CP/M records are 128 bytes and the tail is ^Z-padded, so compare
+            // the payload we actually wrote.
+            assert!(
+                theirs.len() >= data.len(),
+                "{fname}: cpmtools read {} bytes, we wrote {}",
+                theirs.len(),
+                data.len()
+            );
+            assert_eq!(
+                &theirs[..data.len()],
+                &data[..],
+                "{token}/{fname}: cpmtools disagrees with what we wrote"
+            );
+            compared += 1;
+        }
+
+        assert_eq!(compared, payloads.len(), "{token}: not every file came back");
+        let _ = std::fs::remove_dir_all(work);
+    }
 
     /// Ground-truth interop: read every file off a real image with our code and
     /// with `cpmtools`, and require the bytes to be identical.
