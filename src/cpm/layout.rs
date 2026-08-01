@@ -78,6 +78,25 @@ instead of its folder under CPM/.  The folder's own files are not touched
 while an image is mounted, and they come straight back when you unmount it.
 
 
+MOUNTING IS NOT BOOTING
+-----------------------
+
+An Altair 88-DCDD floppy can also be BOOTED, which is a different thing.
+Mounting gives you one drive of sixteen with the gateway's CP/M underneath.
+Booting hands the disk the whole machine, and its OWN operating system runs
+— so booting reaches the disks that are not CP/M at all: Altair DOS, Altair
+Disk Extended BASIC, Time Sharing BASIC, and CP/M 3.0.
+
+Inside a booted disk there is no jail, no A> from us, no EGT80 and no
+drives A:-P: of ours.  Press ESC twice to get back to the gateway.  A
+booted image is opened READ-ONLY and held by one session at a time.
+
+Set what the CP/M menu item runs with cpm_boot_image (the 'CP/M runs'
+setting in every UI), or boot one for a single visit from the telnet boot
+picker.  Only 88-DCDD floppies boot: 337,568 bytes (8-inch) or 76,720
+(minidisk), plus any short trailer.
+
+
 NAMING: PUT THE FORMAT IN THE FILENAME
 --------------------------------------
 

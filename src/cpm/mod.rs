@@ -38,6 +38,7 @@ pub mod dcdd;
 pub mod image;
 pub mod layout;
 mod machine;
+pub mod modem_port;
 pub mod uart;
 
 pub use fcb::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE};

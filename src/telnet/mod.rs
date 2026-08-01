@@ -33,7 +33,8 @@ use crate::logger::glog;
 
 // ─── Submodules (split out of the original monolithic telnet.rs) ───
 mod colors;
-pub(crate) use colors::{swap_case_for_petscii, petscii_to_ascii_byte, to_latin1_bytes};
+pub(crate) use colors::{swap_case_for_petscii, petscii_to_ascii_byte, ascii_to_petscii_byte,
+    to_latin1_bytes};
 mod gateway;
 pub(in crate::telnet) use gateway::{gw_debug_enabled, gateway_terminal_name, gateway_window,
     gateway_window_source};

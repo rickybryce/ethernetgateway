@@ -981,7 +981,7 @@ fn collect_form_updates(
         "punter_block_size", "punter_negotiation_timeout",
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
-        "cpm_emu_max_minstr", "cpm_emu_uart",
+        "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -1917,6 +1917,36 @@ fn render_more_popups(cfg: &Config) -> String {
     // primary frame so it stays at three rows, mirroring the GUI).  The API
     // key + homepage remain on the main frame, so they are NOT repeated here
     // (a duplicate name= in this single form would clobber the value).
+    // What the CP/M menu item runs: our emulator, or one of the images on
+    // hand.  Built from the same `boot_choices` the telnet and desktop screens
+    // use, so the three cannot offer different lists.
+    let cpm_boot_options: String = {
+        let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
+        let mut choices = crate::cpm::boot::boot_choices(&base);
+        // A setting naming an image that is no longer in the folder would
+        // otherwise vanish from the list and silently reset itself on the next
+        // save.  Show it, so the operator can see what is set and why it is not
+        // running.
+        if !cfg.cpm_boot_image.is_empty()
+            && !choices.iter().any(|(v, _)| *v == cfg.cpm_boot_image)
+        {
+            choices.push((
+                cfg.cpm_boot_image.clone(),
+                format!("{} (missing)", crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image)),
+            ));
+        }
+        choices
+            .iter()
+            .map(|(value, label)| {
+                format!(
+                    "<option value=\"{}\"{}>{}</option>",
+                    html_escape(value),
+                    if *value == cfg.cpm_boot_image { " selected" } else { "" },
+                    html_escape(label),
+                )
+            })
+            .collect()
+    };
     let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
         .iter()
         .map(|c| {
@@ -1948,6 +1978,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{cpmx}{cpmdcd}</div>\
          <div class=\"row\">{cpmsregs}</div>\
          <div class=\"row\">{cpmuart}</div>\
+         <div class=\"row\">{cpmboot}</div>\
          <div class=\"row\">{cpmdisks}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
@@ -1985,6 +2016,10 @@ fn render_more_popups(cfg: &Config) -> String {
             "<span class=\"label\">CP/M virtual modem port:</span>\
              <select name=\"cpm_emu_uart\">{cpm_uart_options}</select> {reset}",
             reset = save_button("cpm_port_default", "Default port", "secondary"),
+        ),
+        cpmboot = format_args!(
+            "<span class=\"label\">CP/M runs:</span>\
+             <select name=\"cpm_boot_image\">{cpm_boot_options}</select>",
         ),
         cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
 

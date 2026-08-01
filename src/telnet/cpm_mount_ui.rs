@@ -16,7 +16,7 @@ use crate::cpm::image;
 
 impl TelnetSession {
     /// The `CPM/` container this gateway is configured for.
-    fn cpmmount_base(&self) -> std::path::PathBuf {
+    pub(in crate::telnet) fn cpmmount_base(&self) -> std::path::PathBuf {
         let cfg = config::get_config();
         crate::cpm::layout::cpm_dir(&cfg.transfer_dir)
     }

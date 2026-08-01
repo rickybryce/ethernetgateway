@@ -1200,6 +1200,44 @@ impl App {
                 format!("{n} mounted")
             });
         });
+        // What the CP/M menu item runs: our emulator, or a disk image booted
+        // on emulated Altair hardware.  The same `boot_choices` list the telnet
+        // and web screens build, so the three cannot drift apart.
+        ui.horizontal(|ui| {
+            ui.label("CP/M runs:");
+            let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+            let mut choices = crate::cpm::boot::boot_choices(&base);
+            // An image named in the config but no longer in the folder still
+            // has to appear, or selecting anything else would silently discard
+            // a setting the operator cannot see.
+            if !self.cfg.cpm_boot_image.is_empty()
+                && !choices.iter().any(|(v, _)| *v == self.cfg.cpm_boot_image)
+            {
+                choices.push((
+                    self.cfg.cpm_boot_image.clone(),
+                    format!(
+                        "{} (missing)",
+                        crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image)
+                    ),
+                ));
+            }
+            egui::ComboBox::from_id_salt("cpm_boot_image_combo")
+                .width(320.0)
+                .selected_text(crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image))
+                .show_ui(ui, |ui| {
+                    for (value, label) in &choices {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_boot_image,
+                            value.clone(),
+                            label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT80 and the CP/M prompt do not                  apply inside it.  The image is opened read-only.",
+        );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
         ui.horizontal(|ui| {

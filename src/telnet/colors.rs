@@ -24,6 +24,21 @@ pub(crate) fn petscii_to_ascii_byte(byte: u8) -> u8 {
     }
 }
 
+/// One ASCII byte on its way to a Commodore screen.
+///
+/// The byte-at-a-time twin of [`swap_case_for_petscii`], for output that is
+/// never a `&str` — a booted disk image's console stream, which arrives as raw
+/// bytes from an emulated UART and has to keep every non-letter untouched.
+/// Deliberately the same two ranges as that function: if the mapping is ever
+/// wrong it should be wrong in one place and fixed in one place.
+pub(crate) fn ascii_to_petscii_byte(byte: u8) -> u8 {
+    match byte {
+        b'A'..=b'Z' => byte + 32,
+        b'a'..=b'z' => byte - 32,
+        _ => byte,
+    }
+}
+
 pub(crate) fn to_latin1_bytes(text: &str) -> Vec<u8> {
     text.chars()
         .map(|c| if (c as u32) <= 0xFF { c as u8 } else { b'?' })

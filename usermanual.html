@@ -755,6 +755,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. On by default (jailed, bounded, and shipping its own terminal); set <code>false</code> to hide the item and reject the key. configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>How the emulated CP/M reaches the virtual modem. Defaults to <code>rc2014_1b</code> (0x82/0x83), the port the bundled EGT80 terminal expects, so the two work together untouched; every UI offers a one-click &ldquo;Default port&rdquo; to come back to it. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>What the CP/M menu item runs. Empty = the CP/M emulator (our BDOS, drives A:&ndash;P:, EGT80, the virtual modem). A bare filename in <code>CPM/images</code> instead cold-boots that disk on an emulated MITS 88-DCDD controller, and the disk&rsquo;s own operating system takes the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80. The image is opened <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>cpm_mounts</code></td><td>string</td><td><em>(empty)</em></td><td>Disk images mounted on CP/M drives, as <code>A=name.dsk,C=other.dsk</code>. Values are bare filenames inside <code>CPM/images</code>, never paths. A mounted drive uses the CP/M filesystem inside the image instead of its folder; the folder&rsquo;s files are untouched and return on unmount. An image whose name carries no format prefix is identified by inspection and mounts <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>log_to_file</code></td><td>bool</td><td><code>true</code></td><td>Mirror the log to <code>log_file</code> as well as stderr and the console buffer. On by default. Configured in the General &ldquo;More&hellip;&rdquo; panel of the GUI and web UI (telnet: Other Settings &rarr; <code>L</code>). Takes effect on the next restart.</td></tr>
@@ -2485,9 +2486,63 @@ XMODEM from inside EGT80, you usually want B: or later.
 <p>
 Not every <code>.dsk</code> holds a CP/M filesystem. Altair DOS, Altair Disk
 BASIC, Time Sharing BASIC and UCSD p-System disks are common in the same
-collections and use their own formats; the gateway either refuses them or
-mounts them showing no files, which is correct rather than a fault. Running
-those would need a disk-controller emulation, which this is not.
+collections and use their own formats; <em>mounting</em> them either fails or
+shows no files, which is correct rather than a fault. Those disks are for
+<strong>booting</strong> instead.
+</p>
+
+<h3>Booting a disk image</h3>
+
+<p>
+Mounting gives you one drive with the gateway&rsquo;s BDOS underneath.
+<strong>Booting</strong> hands the whole machine to the disk: 64&nbsp;KB of
+memory, a MITS 88-DCDD floppy controller, an 88-2SIO console and the
+front-panel sense switches. The disk&rsquo;s own operating system then runs and
+does its own filesystem work &mdash; which is exactly why booting reaches the
+disks mounting cannot, and why it needs no knowledge of their layout.
+</p>
+
+<p>
+Twenty of the twenty-six 88-DCDD images in the widely-circulated Altair sample
+set reach a sign-on: Altair CP/M 2.2, <strong>CP/M 3.0</strong>, CP/M 2.2AT,
+<strong>Altair DOS</strong>, <strong>Altair Disk Extended BASIC</strong> and
+<strong>Time Sharing BASIC</strong> V1.1 and V2. The rest are
+<em>programs</em> disks &mdash; data rather than system disks &mdash; and are
+refused with a message saying so.
+</p>
+
+<p>
+Choose what the CP/M menu item runs with <code>cpm_boot_image</code>: empty (the
+default) runs the CP/M emulator, and a bare filename in <code>CPM/images</code>
+boots that disk. It is a cycling selector on the telnet CP/M settings screen
+(<code>B</code>) and a <strong>CP/M runs</strong> dropdown in the web and
+desktop UIs. To boot something for one visit only, use the boot picker in the
+telnet mount wizard &mdash; that is also where you can allow writes.
+</p>
+
+<aside>
+<strong>Booting is not mounting.</strong> Inside a booted disk there is no jail,
+no <code>A&gt;</code> from us, no <code>EXIT</code>, no EGT80 and no drives
+A:&ndash;P: of ours &mdash; the guest owns the machine and talks to hardware.
+Press <strong>ESC twice</strong> to return to the gateway. The image is opened
+<strong>read-only</strong> and held by <strong>one session</strong> at a time: a
+booted guest writes raw sectors and nothing above it understands the format well
+enough to catch a mistake, so writing is a decision rather than a default. There
+is no instruction ceiling either &mdash; an operating system sitting at its own
+prompt is meant to run indefinitely, so an abandoned session is closed by the
+ordinary idle timeout instead.
+</aside>
+
+<p>
+The virtual modem comes along, as long as <code>cpm_emu_uart</code> names a pair
+of <em>ports</em>. A real Altair put its modem on the second port of its
+88-2SIO, so <code>altair_2sio2</code> (0x12/0x13) is the natural choice: comms
+software under a booted Altair CP/M then finds a UART where it expects one and
+dials out through the gateway. <code>aux</code> and <code>hbios_1</code>/
+<code>hbios_2</code> cannot &mdash; they are the gateway&rsquo;s own BDOS device
+and RomWBW firmware, and a booted disk brings its own of both &mdash; and
+neither can <code>altair_2sio1</code>, because 0x10/0x11 <em>is</em> the console
+on this machine. In each case the boot banner says so.
 </p>
 
 <p>
@@ -4733,6 +4788,7 @@ numeric values fall back to the default.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/P</code> under <code>transfer_dir</code>. <strong>On by default</strong>: the guest is jailed to those folders, bounded by <code>cpm_emu_max_minstr</code>, always escapable with a double-<code>ESC</code>, and has no path to a host command. Set <code>false</code> to hide the item and reject the key. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
+        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>empty, or a filename in <code>CPM/images</code></td><td>What the CP/M menu item runs. Empty = the CP/M emulator. A bare filename cold-boots that disk on an emulated MITS 88-DCDD controller and gives the disk&rsquo;s own operating system the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80, no <code>EXIT</code>; press ESC twice to leave. Opened <strong>read-only</strong> and held by one session. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. Default <code>rc2014_1b</code> &mdash; the port the bundled EGT80 expects. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
         <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from this network&rsquo;s router (the default route&rsquo;s next hop, queried from the OS &mdash; see &sect;7.6; falls back to <code>*.*.*.1</code> if the query fails) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>

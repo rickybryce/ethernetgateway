@@ -27,6 +27,46 @@
 
 use super::dcdd::{Dcdd, Request, SECTOR_LEN};
 
+/// What `cpm_boot_image` holds when CP/M means our own emulator.
+///
+/// Empty rather than a word like `emulator`, so that an existing config file
+/// with no such key means exactly what it always meant.
+pub const BOOT_EMULATOR: &str = "";
+
+/// What the emulator is called wherever a user has to choose it.
+pub const BOOT_EMULATOR_LABEL: &str = "CP/M Emulator";
+
+/// The choices for `cpm_boot_image`: our emulator, then every image on hand.
+///
+/// One function for all three configuration screens, the way
+/// [`super::uart::UART_CHOICES`] serves the virtual-modem port. The list is
+/// built from the images folder rather than written down, so telnet, web and
+/// desktop cannot drift apart and none of them can offer a disk that is not
+/// there.
+///
+/// Each entry is `(value, label)` — the value is what goes in the config file,
+/// the label is what a person reads.
+pub fn boot_choices(cpm_base: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = vec![(BOOT_EMULATOR.to_string(), BOOT_EMULATOR_LABEL.to_string())];
+    for name in super::image::available_images(cpm_base) {
+        out.push((name.clone(), format!("Boot {name}")));
+    }
+    out
+}
+
+/// What to show for the current setting, whether or not the image still exists.
+///
+/// A disk named in the config and since deleted must still say what it is: the
+/// screens are also where an operator finds out *why* their gateway is running
+/// the emulator when they asked for a disk.
+pub fn boot_choice_label(value: &str) -> String {
+    if value.is_empty() {
+        BOOT_EMULATOR_LABEL.to_string()
+    } else {
+        format!("Boot {value}")
+    }
+}
+
 /// Where the bootstrap puts the boot sector, and enters it.
 pub const BOOT_LOAD_ADDR: u16 = 0x0000;
 

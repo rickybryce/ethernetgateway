@@ -606,6 +606,17 @@ impl TelnetSession {
                 }
             ))
             .await?;
+            // What the CP/M menu item actually runs.  Shown next to the other
+            // CP/M settings because that is the question an operator is really
+            // asking here — our emulator, or somebody's disk.
+            self.send_line(&format!(
+                "  Runs:      {}",
+                self.amber(&truncate_to_width(
+                    &crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image),
+                    modem_w
+                ))
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -631,6 +642,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Mount/unmount disk images",
                 self.cyan("I")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Cycle what CP/M runs (emulator or a disk)",
+                self.cyan("B")
             ))
             .await?;
             self.send_line("").await?;
@@ -694,12 +710,38 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "b" => {
+                    // Cycle to the next thing CP/M can run: our emulator, then
+                    // each image in turn.  A cycling key rather than a picker
+                    // because that is how every other choice on this screen
+                    // works, and because the list is usually two or three long.
+                    let base = self.cpmmount_base();
+                    let choices = crate::cpm::boot::boot_choices(&base);
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == cfg.cpm_boot_image)
+                        // A setting naming an image that is no longer there is
+                        // not in the list.  Land on the emulator next, which is
+                        // both the safe answer and the one that clears it.
+                        .unwrap_or(choices.len() - 1);
+                    let next = choices[(idx + 1) % choices.len()].0.clone();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_image", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "i" => {
+                    // Displayed on this screen since the mount feature shipped,
+                    // but only ever handled on the parent menu — so pressing it
+                    // here answered "Press E, C, D, U, or Q."
+                    self.cpm_mount_wizard().await?;
+                }
                 "q" => return Ok(()),
                 _ => {
-                    // D is a displayed menu item and is handled above, so it
-                    // belongs in the hint — it was the one key this list had
-                    // drifted away from.
-                    self.show_error("Press E, C, D, U, or Q.").await?;
+                    // Every displayed key belongs in this hint; I and B were
+                    // each missing from it once.
+                    self.show_error("Press E, C, D, U, I, B, or Q.").await?;
                 }
             }
         }

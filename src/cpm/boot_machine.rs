@@ -1,9 +1,11 @@
 //! The machine a booted disk runs on.
 //!
 //! This is the other half of the boot path: 64 KB of memory, the 88-DCDD on
-//! ports 08h–0Ah, an 88-2SIO console on 10h/11h, and nothing else. No BDOS, no
-//! page-zero vectors, no CCP — the disk's own operating system supplies all of
-//! that. Our part is to be plausible hardware and get out of the way.
+//! ports 08h–0Ah, an 88-2SIO console on 10h/11h, the front-panel sense switches
+//! on FFh, and — when the operator has selected a port profile that fits — the
+//! virtual modem. No BDOS, no page-zero vectors, no CCP: the disk's own
+//! operating system supplies all of that. Our part is to be plausible hardware
+//! and get out of the way.
 //!
 //! # How this differs from the CP/M emulator next door
 //!
@@ -24,7 +26,8 @@
 
 use super::boot::{cold_boot, BootError};
 use super::dcdd::{Dcdd, Disk, Geometry, Request, SECTOR_LEN};
-use super::uart::UartFamily;
+use super::modem_port::ModemPort;
+use super::uart::{ModemAccess, UartFamily};
 use iz80::{Cpu, Machine};
 
 /// Console status port on an 88-2SIO.
@@ -55,6 +58,23 @@ pub const SENSE_SWITCH_PORT: u8 = 0xFF;
 /// decides what hardware MITS software believes it is talking to.
 pub const DEFAULT_SENSE_SWITCHES: u8 = 0x00;
 
+/// Ports this machine's own hardware answers, which a virtual modem may not
+/// take over: the 88-DCDD controller, the console, and the front panel.
+const RESERVED_PORTS: &[u8] = &[0x08, 0x09, 0x0A, CONSOLE_STATUS_PORT, CONSOLE_DATA_PORT, SENSE_SWITCH_PORT];
+
+/// What happened when the configured virtual modem was offered to a booted
+/// machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModemAttach {
+    /// The operator has no virtual modem selected.
+    Off,
+    /// Wired up at these status and data ports.
+    Ports(u8, u8),
+    /// Selected, but it cannot exist in a booted machine — with the reason,
+    /// which is shown to whoever is booting rather than logged and forgotten.
+    Unavailable(String),
+}
+
 /// One image in a drive.
 struct Mounted {
     bytes: Vec<u8>,
@@ -79,6 +99,17 @@ pub struct BootMachine {
     idle_status_reads: u64,
     /// What the front panel reports on port FFh.
     sense_switches: u8,
+    /// The virtual modem, if the operator selected a port profile that can
+    /// exist here.  Shared with the CP/M emulator's machine, so the rings and
+    /// the status bits behave identically in both.
+    modem: ModemPort,
+    /// Accesses to the disk controller's ports, ever.
+    ///
+    /// The driver's "is this guest doing anything?" signal for the one piece of
+    /// work it cannot otherwise see. Console bytes and modem bytes pass through
+    /// its own hands; a disk load does not, and pacing a guest that is busy
+    /// reading a track would make every `DIR` crawl.
+    disk_accesses: u64,
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
@@ -94,9 +125,63 @@ impl BootMachine {
             rx: std::collections::VecDeque::new(),
             idle_status_reads: 0,
             sense_switches: DEFAULT_SENSE_SWITCHES,
+            modem: ModemPort::new(),
+            disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Offer the configured virtual modem to this machine.
+    ///
+    /// A booted disk *can* have our modem, and on a real Altair it is obvious
+    /// where: the 88-2SIO is a two-port board, the console is port A, and the
+    /// modem goes on port B — which is exactly the `altair_2sio2` profile at
+    /// 12h/13h. Software running under a booted Altair CP/M then finds a UART
+    /// where it expects one and dials out through us.
+    ///
+    /// Two kinds of profile cannot come along, and saying so plainly beats a
+    /// modem that silently is not there:
+    ///
+    /// * `AUX:` and HBIOS are not hardware. They are our own BDOS device and
+    ///   RomWBW's firmware call, and a booted disk brings its own of both — so
+    ///   there is nothing for us to answer.
+    /// * A profile whose ports land on the disk controller, the console or the
+    ///   front panel would fight this machine's own hardware. `altair_2sio1` is
+    ///   the one that catches people out: it is 10h/11h, which *is* the
+    ///   console, because on a real Altair the console is 2SIO port A.
+    pub fn attach_modem(&mut self, access: ModemAccess) -> ModemAttach {
+        match access {
+            ModemAccess::Off => ModemAttach::Off,
+            ModemAccess::Aux => ModemAttach::Unavailable(
+                "the AUX: device belongs to our BDOS, and a booted disk brings its own".into(),
+            ),
+            ModemAccess::Hbios { .. } => ModemAttach::Unavailable(
+                "HBIOS is RomWBW firmware, which a booted Altair disk does not have".into(),
+            ),
+            ModemAccess::Ports(u) => {
+                if let Some(&clash) = RESERVED_PORTS
+                    .iter()
+                    .find(|&&p| p == u.status_port || p == u.data_port)
+                {
+                    let what = match clash {
+                        CONSOLE_STATUS_PORT | CONSOLE_DATA_PORT => "the console",
+                        SENSE_SWITCH_PORT => "the front panel",
+                        _ => "the disk controller",
+                    };
+                    return ModemAttach::Unavailable(format!(
+                        "port {clash:#04x} is {what} on this machine — try altair_2sio2"
+                    ));
+                }
+                self.modem.set_access(access);
+                ModemAttach::Ports(u.status_port, u.data_port)
+            }
+        }
+    }
+
+    /// The virtual modem's rings, for the driver to pump between CPU batches.
+    pub fn modem(&mut self) -> &mut ModemPort {
+        &mut self.modem
     }
 
 
@@ -213,11 +298,21 @@ impl BootMachine {
         std::mem::take(&mut self.tx)
     }
 
-    /// Console status reads since anything last happened.  Used by the tests
-    /// to show that waiting on a key is never mistaken for a stalled disk.
+    /// Console status reads since anything last happened.
+    ///
+    /// A guest waiting forever on a key is normal; a guest waiting forever on a
+    /// *disk* is a fault, and this tells the two apart with
+    /// [`BootMachine::stuck_polls`] reporting the other side.  The driver paces
+    /// on observed activity instead (see `cpm_boot_ui`), so this is the test's
+    /// way of proving the two are not confused.
     #[cfg(test)]
     pub fn idle_status_reads(&self) -> u64 {
         self.idle_status_reads
+    }
+
+    /// Accesses to the disk controller's ports since the machine was made.
+    pub fn disk_accesses(&self) -> u64 {
+        self.disk_accesses
     }
 
     /// Position-register reads without the disk moving on.
@@ -305,6 +400,7 @@ impl Machine for BootMachine {
         }
         match port {
             0x08..=0x0A => {
+                self.disk_accesses = self.disk_accesses.saturating_add(1);
                 let (v, req) = self.dcdd.port_in(port);
                 let was_fill = matches!(req, Request::Read { .. });
                 self.service(req);
@@ -337,8 +433,15 @@ impl Machine for BootMachine {
             // The front panel. Input only on real hardware, and the reason
             // every MITS operating system can find its console.
             SENSE_SWITCH_PORT => self.sense_switches,
-            // An idle bus, not an echo of whatever was last driven.
-            _ => 0xFF,
+            // The virtual modem, if the operator gave this machine one. Asked
+            // after the fixed hardware above, though `attach_modem` has already
+            // refused any profile that could overlap it.
+            //
+            // Deliberately no idle bookkeeping here. A comms program polling
+            // its UART is not console activity, and whether it is *idle* is a
+            // question only the driver can answer — it is the one that knows
+            // whether the pump actually moved a byte this batch.
+            other => self.modem.port_in(other).unwrap_or(0xFF),
         }
     }
 
@@ -350,6 +453,7 @@ impl Machine for BootMachine {
         }
         match port {
             0x08..=0x0A => {
+                self.disk_accesses = self.disk_accesses.saturating_add(1);
                 let req = self.dcdd.port_out(port, value);
                 self.service(req);
                 self.idle_status_reads = 0;
@@ -358,8 +462,11 @@ impl Machine for BootMachine {
                 self.tx.push(value & 0x7F);
                 self.idle_status_reads = 0;
             }
-            // The control register and anything else: accepted and discarded.
-            _ => {}
+            // The control register and anything else: offered to the modem,
+            // then accepted and discarded.
+            other => {
+                self.modem.port_out(other, value);
+            }
         }
     }
 }

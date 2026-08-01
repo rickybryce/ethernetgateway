@@ -835,6 +835,20 @@ pub struct Config {
     /// config surfaces to drift apart.  Values are bare filenames inside
     /// `CPM/images` — never paths; see `cpm::image::is_safe_image_name`.
     pub cpm_mounts: String,
+    /// What the CP/M menu item runs: our emulator, or a disk image booted on
+    /// emulated Altair hardware.
+    ///
+    /// Empty — the default — means the CP/M emulator, so a config file written
+    /// before this key existed keeps behaving exactly as it did.  Otherwise a
+    /// bare filename inside `CPM/images`, which is cold-booted on an emulated
+    /// 88-DCDD controller and given the whole machine.
+    ///
+    /// **Booting is not mounting.**  A mounted image is one drive among sixteen
+    /// with our BDOS underneath; a booted one runs its own operating system and
+    /// owns every drive, so the jail, the CCP-lite prompt, EGT80 and
+    /// `cpm_emu_uart` do not apply inside it.  That is why this is a separate
+    /// key from `cpm_mounts` and not another entry in it.
+    pub cpm_boot_image: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
     /// inside the emulator and reloaded when the modem powers up or the guest
     /// issues `ATZ` — the same arrangement the physical ports have under their
@@ -960,6 +974,7 @@ impl Default for Config {
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
             cpm_mounts: String::new(),
+            cpm_boot_image: String::new(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1556,6 +1571,7 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .cloned()
             .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
         cpm_mounts: map.get("cpm_mounts").cloned().unwrap_or_default(),
+        cpm_boot_image: map.get("cpm_boot_image").cloned().unwrap_or_default(),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2279,6 +2295,18 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_mounts", &cfg.cpm_mounts);
     content.push_str("\
+# cpm_boot_image: what the CP/M menu item runs.  Empty (default) = the CP/M
+#   emulator: our BDOS, drives A:-P: under CPM/, EGT80 and the virtual modem.
+#   A bare filename in CPM/images instead COLD-BOOTS that disk on an emulated
+#   MITS 88-DCDD controller, and the disk's own operating system takes the whole
+#   machine - Altair CP/M 2.2 and 3.0, Altair DOS, Disk Extended BASIC and Time
+#   Sharing BASIC all boot this way.  Booting is not mounting: inside a booted
+#   disk there is no jail, no A> from us, no EGT80 and no cpm_emu_uart, because
+#   the guest is talking to hardware rather than to our BDOS.  The image is
+#   opened READ-ONLY.
+");
+    write_kv(&mut content, "cpm_boot_image", &cfg.cpm_boot_image);
+    content.push_str("\
 # The CP/M virtual modem's saved AT profile, written by AT&W from inside the
 # emulator and reloaded on power-up and on ATZ - exactly as the physical ports
 # save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
@@ -2818,6 +2846,16 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_mounts" => cfg.cpm_mounts = value.to_string(),
+        "cpm_boot_image" => {
+            // Validated here as well as at the point of use.  The value can
+            // arrive from a web form, so it is shaped by whoever posted it, and
+            // a name that could never be opened has no business being written
+            // into the config file at all.  Empty is always allowed: that is
+            // "run the emulator".
+            if value.is_empty() || crate::cpm::image::is_safe_image_name(value) {
+                cfg.cpm_boot_image = value.to_string();
+            }
+        }
         "disable_gateway_connections" => {
             cfg.disable_gateway_connections = value.eq_ignore_ascii_case("true")
         }
@@ -3611,6 +3649,7 @@ mod tests {
 
         let original = Config {
             cpm_mounts: "A=altair8_games.dsk,C=ibm3740_tools.dsk".to_string(),
+            cpm_boot_image: "altair8_cpm.dsk".to_string(),
             telnet_enabled: false,
             telnet_port: 1234,
             telnet_gateway_negotiate: true,

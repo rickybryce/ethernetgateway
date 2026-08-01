@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Boot a disk image.** A `.dsk` can now be cold-booted on an emulated MITS
+  88-DCDD controller, and the disk's own operating system takes the whole
+  machine — 64 KB, the controller, an 88-2SIO console and the front-panel sense
+  switches. Twenty of the twenty-six 88-DCDD images in the Altair-Duino sample
+  set reach a sign-on: CP/M 2.2, **CP/M 3.0**, CP/M 2.2AT, **Altair DOS**,
+  **Altair Disk Extended BASIC** and **Time Sharing BASIC** V1.1 and V2. The
+  three that stay quiet are programs disks — data, not system disks.
+
+  **Booting is not mounting**, and the difference is worth stating: a mounted
+  image is one drive among sixteen with our BDOS underneath, while a booted one
+  owns every drive and talks to hardware. Inside a booted disk there is no
+  jail, no `A>` from us, no EGT80 and no `EXIT`. Two things do carry over: the
+  image is opened **read-only** unless you say otherwise, and a **double-`ESC`**
+  always gets you back to the gateway.
+
+  Reached two ways. The new `cpm_boot_image` key decides what the CP/M menu
+  item runs — empty (the default) is the emulator, a filename in `CPM/images`
+  boots that disk — and it is a cycling selector on the telnet CP/M settings
+  screen (`B`), a **CP/M runs** dropdown on the web page, and the same dropdown
+  in the desktop UI. Or pick a disk for one visit from the telnet boot picker,
+  which is also where you can allow writes.
+- **The virtual modem works inside a booted disk.** A real Altair put its modem
+  on the second port of its 88-2SIO, which is exactly the `altair_2sio2`
+  profile at `0x12`/`0x13` — so comms software running under a booted Altair
+  CP/M finds a UART where it expects one and dials out through the gateway, and
+  an inbound `CPM@<ip>` call reaches it. The `aux` and `hbios_*` profiles
+  cannot come along, because they are our own BDOS device and RomWBW's
+  firmware and a booted disk brings its own of both; nor can a profile whose
+  ports would sit on the console or the disk controller. In each case the boot
+  banner says so rather than leaving a modem silently missing.
 - **CP/M disk images.** A `.dsk` image can be mounted on any drive A:–P:, and
   that drive then reads and writes the CP/M filesystem *inside the image*
   instead of its folder under `CPM/`. Mounting hides a drive folder rather than
@@ -39,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `I` — *Mount/unmount disk images* — was listed on the telnet CP/M settings
+  screen but only ever handled on the parent menu, so pressing it there
+  answered "Press E, C, D, U, or Q." The screen's own error hint had also
+  drifted away from the keys it displays.
 - The user manual said the CP/M emulator ships **disabled**; it has been on by
   default since 0.8.0. It also gave `cpm_emu_uart`'s default as `off` in the
   table while its own prose said `rc2014_1b`, which is the truth.

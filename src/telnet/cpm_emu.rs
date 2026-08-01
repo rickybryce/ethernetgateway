@@ -218,7 +218,7 @@ enum LineRead {
 /// (dropping any unclaimed call) on every exit path.  On a slave gateway it
 /// also owns the crossbar announcer task (registering `CPM` with the master),
 /// which it stops + aborts on drop.
-struct CpmPeerReg {
+pub(in crate::telnet) struct CpmPeerReg {
     /// `Some` while this session owns the single crossbar announcer.
     announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
 }
@@ -231,6 +231,43 @@ impl Drop for CpmPeerReg {
             crate::serial::cpm_announce_release();
         }
     }
+}
+
+/// Join the inbound `CPM@<ip>` call pool for as long as the guard lives.
+///
+/// `CPM@<ip>` is a single dialable address, but every modem-enabled CP/M
+/// session joins the pool and any idle member answers the next inbound call (a
+/// hunt group), so two concurrent CP/M users can both receive calls.  On a
+/// slave with peer-dial + a master, exactly one pool member (the announce-owner)
+/// announces `CPM` to the master so a remote `CPM@<this-slave-ip>` dial reaches
+/// the gateway via the crossbar; if that member exits while others remain,
+/// remote reachability pauses until a new session re-announces (local answering
+/// is unaffected).
+///
+/// Shared by the emulator and the booted-disk driver: a guest with a virtual
+/// modem is dialable whichever of the two it is running under, and having one
+/// copy of this is what keeps that true.
+pub(in crate::telnet) fn cpm_peer_register(modem_enabled: bool) -> Option<CpmPeerReg> {
+    if !modem_enabled {
+        return None;
+    }
+    crate::serial::cpm_peer_listen_enter();
+    let cfg = config::get_config();
+    // Announcing to our own master is not gated on `allow_peer_dial` (see
+    // serial::cpm_slave_announce): that setting governs dialing arbitrary
+    // peers, and without the announcement the master cannot reach this slave's
+    // CP/M endpoint at all.
+    let announce = if cfg.gateway_role == "slave"
+        && !cfg.slave_master_host.is_empty()
+        && crate::serial::cpm_announce_claim()
+    {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone()));
+        Some((stop, jh))
+    } else {
+        None
+    };
+    Some(CpmPeerReg { announce })
 }
 
 /// Outcome of the between-batch out-of-band input drain.
@@ -275,6 +312,20 @@ impl TelnetSession {
     /// `EXIT`/`BYE`/`QUIT` (or disconnects).
     pub(in crate::telnet) async fn cpmemu_shell(&mut self) -> Result<(), std::io::Error> {
         self.cpmemu_ensure_drives().await?;
+
+        // The operator may have pointed CP/M at a disk instead of at us.  Done
+        // before the emulator's banner rather than inside it, because the two
+        // are different machines and pretending otherwise is what makes booting
+        // confusing: nothing below this line — the drives, EGT80, the `A>`
+        // prompt — exists inside a booted disk.
+        if let Some(path) = self.cpmemu_boot_target().await {
+            // Read-only.  The per-session picker asks whether to allow writes,
+            // because there a person is choosing one disk for one visit; a
+            // standing setting that quietly let every visitor write to the same
+            // image is a different proposition, and the safe answer is the one
+            // that cannot lose a disk.
+            return self.cpm_boot_session(&path, false).await;
+        }
 
         self.clear_screen().await?;
         let sep = self.separator();
@@ -346,6 +397,32 @@ impl TelnetSession {
         let mut fs = CpmFs::new(base);
 
         self.cpmemu_repl(&mut fs).await
+    }
+
+    /// The disk `cpm_boot_image` names, if it names one that is really there.
+    ///
+    /// A missing or malformed name falls back to the emulator and says so in
+    /// the log rather than refusing to open CP/M at all: the setting is a
+    /// preference about which machine to run, and an operator who deletes an
+    /// image should lose the boot, not the whole feature.
+    async fn cpmemu_boot_target(&mut self) -> Option<PathBuf> {
+        let cfg = config::get_config();
+        let name = cfg.cpm_boot_image.trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        if !crate::cpm::image::is_safe_image_name(&name) {
+            glog!("CP/M: cpm_boot_image '{}' is not a valid image name — running the emulator", name);
+            return None;
+        }
+        let mut base = PathBuf::from(&cfg.transfer_dir);
+        base.push("CPM");
+        let path = crate::cpm::image::images_dir(&base).join(&name);
+        if tokio::fs::metadata(&path).await.is_err() {
+            glog!("CP/M: cpm_boot_image '{}' is not in CPM/images — running the emulator", name);
+            return None;
+        }
+        Some(path)
     }
 
     /// Ensure `CPM/` and each drive folder `CPM/A`..`CPM/P` exist under
@@ -464,27 +541,7 @@ impl TelnetSession {
         // crossbar; if that member exits while others remain, remote
         // reachability pauses until a new session re-announces (local
         // answering is unaffected).
-        let _peer_reg = if modem.enabled() {
-            crate::serial::cpm_peer_listen_enter();
-            let cfg = config::get_config();
-            // Announcing to our own master is not gated on `allow_peer_dial`
-            // (see serial::cpm_slave_announce): that setting governs dialing
-            // arbitrary peers, and without the announcement the master cannot
-            // reach this slave's CP/M endpoint at all.
-            let announce = if cfg.gateway_role == "slave"
-                && !cfg.slave_master_host.is_empty()
-                && crate::serial::cpm_announce_claim()
-            {
-                let stop = std::sync::Arc::new(AtomicBool::new(false));
-                let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone()));
-                Some((stop, jh))
-            } else {
-                None
-            };
-            Some(CpmPeerReg { announce })
-        } else {
-            None
-        };
+        let _peer_reg = cpm_peer_register(modem.enabled());
         // The CCP-lite's own default drive (real CP/M's `CDISK`).  A transient
         // may SELECT another drive (BDOS 14) while it runs — STAT does exactly
         // this for `STAT B:`, to read B:'s free space — but the real CCP
