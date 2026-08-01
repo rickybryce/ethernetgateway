@@ -1542,6 +1542,38 @@ mod tests {
         );
     }
 
+    /// A web page cannot drive the reader's terminal.
+    ///
+    /// Page text is third-party data printed onto a real terminal — often a
+    /// C64 — so an `ESC` reaching it is a cursor move, a screen clear, or on
+    /// some terminals worse. We are protected today by html2text, which drops
+    /// C0 controls while rendering, so the escape arrives as visible text.
+    ///
+    /// That is a dependency's behaviour, not ours, which is exactly why it is
+    /// pinned here: it holds for 0.14.x, and the notes on this crate already
+    /// record one other behaviour that has to be re-checked when it is bumped
+    /// (`Node::Drop` staying iterative). If a future html2text passes controls
+    /// through, this fails and the answer is our own filter —
+    /// `aichat::sanitize_for_terminal` is the one the AI-chat and weather
+    /// paths use.
+    #[test]
+    fn test_page_text_cannot_carry_escapes_to_the_terminal() {
+        let html = b"<html><body><p>hello \x1b[2J\x1b[31mred\x1b]0;title\x07 \x7f done</p></body></html>";
+        let page = render_html_body(html, "http://example.invalid/".into(), 80)
+            .expect("a small page must render");
+        let text = page.lines.join("\n");
+        for (name, ch) in [("ESC", '\u{1b}'), ("BEL", '\u{7}'), ("DEL", '\u{7f}')] {
+            assert!(
+                !text.contains(ch),
+                "{name} survived into rendered page text: {text:?}"
+            );
+        }
+        // The readable remains of the sequence are still there — this is a
+        // filter somewhere upstream, not a rejection of the page.
+        assert!(text.contains("hello"), "page body lost: {text:?}");
+        assert!(text.contains("red"), "page body lost: {text:?}");
+    }
+
     #[test]
     fn test_deeply_nested_html_rejected_without_stack_overflow() {
         // ~20k nested <div>s parses into a tree far deeper than MAX_DOM_DEPTH
@@ -2678,3 +2710,4 @@ mod tests {
         );
     }
 }
+

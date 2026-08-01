@@ -101,6 +101,16 @@ follow-up quality/stability pass of our own.
   the new defaults.
 
 ### Fixed
+- **A place name from the weather API could carry escape sequences to your
+  terminal.** The geocoder's `name` / `region` / `country` / `timezone` strings
+  are third-party data printed straight onto the screen, and JSON encodes a
+  control character perfectly well as a `\u` escape — so a hostile or
+  compromised response could have moved the cursor or cleared a C64's screen
+  instead of naming a city. They are now sanitised on the way in, so any future
+  display of a geocoded name is covered by construction. The AI-chat path
+  already did this to its own API's text; the browser turns out to be covered
+  incidentally (html2text drops C0 controls while rendering — verified, and now
+  pinned by a test, because that is a dependency's behaviour rather than ours).
 - **EGT80 could build a filename out of the previous prompt's text.** BDOS 10
   reports how many characters were typed but leaves the rest of the buffer
   holding the last line, and the filename parser read one byte past the count:

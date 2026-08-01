@@ -237,7 +237,19 @@ pub(crate) fn parse_geo_results(v: &serde_json::Value) -> Vec<GeoResult> {
         .filter_map(|r| {
             let lat = r.get("latitude").and_then(|v| v.as_f64())?;
             let lon = r.get("longitude").and_then(|v| v.as_f64())?;
-            let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Sanitised on the way IN, not at each place it is printed: these
+            // strings come from a third-party API and end up on the user's
+            // terminal, and a place name carrying an ESC would be a cursor
+            // move or a screen clear rather than text.  The AI chat path
+            // already does this to its API's text; doing it here means any
+            // future display of a geocoded name is covered by construction.
+            // (JSON can carry a control character as `\u001b`, which serde
+            // decodes to the real thing, so "it is JSON" is not a defence.)
+            let s = |k: &str| {
+                crate::aichat::sanitize_for_terminal(
+                    r.get(k).and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            };
             Some(GeoResult {
                 name: s("name"),
                 admin1: s("admin1"),

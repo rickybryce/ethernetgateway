@@ -6557,6 +6557,42 @@ fn test_parse_geo_results_and_pick() {
 }
 
 #[test]
+/// Text from the geocoding API is sanitised before it can reach a terminal.
+///
+/// A place name is third-party data printed straight onto the user's screen,
+/// and JSON carries a control character perfectly well as `\u001b` — so an ESC
+/// in a name would be a cursor move or a screen clear, not text. The AI chat
+/// path already sanitises its API's text; this closes the same hole on the
+/// weather path. (The browser is covered incidentally: html2text drops ESC and
+/// BEL before the text is ever rendered — verified, not assumed.)
+fn test_geocoder_text_cannot_carry_escapes_to_the_terminal() {
+    let json: serde_json::Value = serde_json::from_str(
+        r#"{"results":[{"latitude":1.0,"longitude":2.0,
+             "name":"Ci\u001b[2Jty","admin1":"Re\u0007gion",
+             "country":"Coun\u007ftry","country_code":"US",
+             "timezone":"America/Chi\u001bcago"}]}"#,
+    )
+    .expect("fixture json");
+    let results = parse_geo_results(&json);
+    assert_eq!(results.len(), 1, "the entry must still parse, just cleaned");
+    let g = &results[0];
+    for (field, value) in [
+        ("name", &g.name),
+        ("admin1", &g.admin1),
+        ("country", &g.country),
+        ("timezone", &g.timezone),
+    ] {
+        assert!(
+            !value.chars().any(|c| c.is_control() || c == '\u{7f}'),
+            "{field} still carries a control character: {value:?}"
+        );
+    }
+    // Readable text survives — this is a filter, not a rejection.
+    assert_eq!(g.name, "Ci[2Jty");
+    assert_eq!(g.country, "Country");
+}
+
+#[test]
 fn test_resolve_weather_units() {
     // Auto: US -> imperial, everywhere else -> metric.
     assert_eq!(resolve_weather_units("auto", "US"), WeatherUnits::Imperial);
