@@ -33,6 +33,7 @@ mod fcb;
 mod fs;
 pub mod hbios;
 pub mod boot;
+pub mod boot_machine;
 pub mod dcdd;
 pub mod image;
 pub mod layout;

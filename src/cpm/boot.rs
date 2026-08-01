@@ -146,6 +146,11 @@ where
     if !looks_bootable(payload) {
         return Err(BootError::NotBootable);
     }
+    // Close the transfer the bootstrap opened.  Leaving it open holds the
+    // "safe to move the head" status bit low, and the first thing a boot
+    // sector does is seek to track 0 — so the guest would spin at its very
+    // first instruction that touches the drive.
+    dcdd.end_transfer(drive);
     store(BOOT_LOAD_ADDR, payload);
     Ok(BOOT_LOAD_ADDR)
 }

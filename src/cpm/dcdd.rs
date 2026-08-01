@@ -401,6 +401,20 @@ impl Dcdd {
         }
     }
 
+    /// End any transfer in progress on a drive.
+    ///
+    /// The mechanism reports "safe to move the head" only when it is not
+    /// mid-transfer, so a transfer left open pins that bit low and a guest
+    /// waiting to seek spins forever.  Real hardware finishes the sector; the
+    /// bootstrap has to say so explicitly because it stops reading part way
+    /// through, having taken what it needs straight from the buffer.
+    pub fn end_transfer(&mut self, drive: u8) {
+        if let Some(d) = self.drives.get_mut(drive as usize) {
+            d.byte = None;
+            d.writing = false;
+        }
+    }
+
     /// The sector buffer, for a write the controller has asked to commit.
     pub fn sector_buffer(&self, drive: u8) -> Option<&[u8; SECTOR_LEN]> {
         self.drives.get(drive as usize).map(|d| &d.buffer)
