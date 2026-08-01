@@ -440,10 +440,10 @@ mod tests {
             vec![0xE5u8; fmt.min_bytes() as usize],
         )
         .unwrap();
-        mount_image(&base, 0, "ibm3740_claim.dsk").expect("mount");
+        mount_image(&base, 15, "ibm3740_claim.dsk").expect("mount");
 
         let mut raw = [0u8; 36];
-        raw[0] = 1; // A:
+        raw[0] = 16; // P:
         raw[1..9].copy_from_slice(b"SHARED  ");
         raw[9..12].copy_from_slice(b"DAT");
         let fcb = Fcb::from_bytes(&raw);
@@ -491,14 +491,17 @@ mod tests {
             vec![0xE5u8; fmt.min_bytes() as usize],
         )
         .unwrap();
-        mount_image(&base, 0, "ibm3740_free.dsk").expect("mount");
+        // P:, not A: — every default `CpmFs` sits on A:, so mounting there
+        // races any other test module that has one alive.
+        mount_image(&base, 15, "ibm3740_free.dsk").expect("mount");
 
         // The same numbers the BDOS allocation-vector call uses.
         const VD_BLS: u64 = 4096;
         const TOTAL: u64 = 2048;
         const DIR: u64 = 8;
 
-        let fs = CpmFs::new(base.clone());
+        let mut fs = CpmFs::new(base.clone());
+        fs.select(15);
         let used = (DIR + fs.current_drive_used_blocks(VD_BLS, TOTAL, DIR)).min(TOTAL);
         let free_bytes = (TOTAL - used) * VD_BLS;
 

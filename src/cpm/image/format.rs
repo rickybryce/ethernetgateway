@@ -301,6 +301,28 @@ pub const FORMATS: &[Format] = &[
     // framing is confirmed (the directory and block 0 depend on it) and the
     // skew table came out of the disk's own BIOS.  What is unresolved is how
     // blocks after the first are addressed.
+    //
+    // The disk states its own parameters, and they are worth writing down
+    // because finding them again is the expensive part.  A CP/M Disk Parameter
+    // Block sits in the BIOS on the boot tracks at offset 0x1ca9 of the
+    // de-framed image — 14 bytes before the sector-translation table, which is
+    // the usual BIOS arrangement (DPB then XLT).  It reads:
+    //
+    //     SPT 32   BSH 4   BLM 15   EXM 0
+    //     DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2
+    //
+    // So: 2 KB blocks, 150 of them, 64 directory entries, two reserved tracks,
+    // two blocks reserved for the directory.  Two of those contradict what was
+    // assumed here — DRM 63 means **64** directory entries rather than 128, and
+    // **EXM 0** rather than the 1 that the usual "2 KB blocks on a small disk"
+    // derivation gives.  EXM 0 means one directory entry covers a single 16 KB
+    // extent and uses only eight of its sixteen allocation slots.
+    //
+    // Setting the directory size correctly does not by itself fix the content,
+    // so at least one thing more is wrong; the deriving of EXM is the obvious
+    // next suspect, since it changes which allocation slot a record maps to.
+    // The oracle to test against is DEMO.PRN on DISK01.DSK, an assembler
+    // listing whose addresses must ascend across its block boundary at 2048.
 
     // ---- Altair 88-HDSK hard disk (the Altair-Duino disk set) --------------
     // 256-byte sectors, so two CP/M records ride in each and skew moves them
