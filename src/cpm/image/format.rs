@@ -54,6 +54,12 @@ pub enum Framing {
 
     /// Fixed-size physical sectors, each carrying its 128 data bytes at a
     /// constant offset, with the rest being controller header and trailer.
+    ///
+    /// Not used by anything in [`FORMATS`] yet.  It is here because the
+    /// 1,113,536-byte Altair images measured alongside the ones below *are*
+    /// this shape — uniform 137-byte sectors with the data at offset 3, unlike
+    /// [`Framing::AltairSplit`] — and they go in the table as soon as their
+    /// CP/M parameters are confirmed against real content.
     Framed {
         /// Bytes per physical sector in the file.
         seclen: u16,

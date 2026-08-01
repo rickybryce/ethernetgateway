@@ -609,7 +609,8 @@ impl ImageFs {
         };
         let raw = Self::new_raw_entry(user, name, ext, 0);
         self.write_dir_entry(index, &raw)?;
-        self.reload()
+        self.apply_entry(index, &raw);
+        Ok(())
     }
 
     /// Write record `rec` of a file, allocating blocks and extents as needed.
@@ -715,7 +716,8 @@ impl ImageFs {
             raw[15] = (used_now - last_logical * RECORDS_PER_EXTENT) as u8;
         }
         self.write_dir_entry(index, &raw)?;
-        self.reload()
+        self.apply_entry(index, &raw);
+        Ok(())
     }
 
     /// Erase a file — every extent of it.  Returns how many entries went.
@@ -820,12 +822,64 @@ impl ImageFs {
         Ok(true)
     }
 
+    /// Fold one just-written directory entry into the in-memory picture.
+    ///
+    /// Used instead of a full [`ImageFs::reload`] on the paths that run in a
+    /// loop — writing a file record by record — because a reload re-reads the
+    /// whole directory, and doing that per record costs
+    /// `records x directory-records`.  On the small formats that is merely
+    /// wasteful; on a large one (a hard disk with a 512-entry directory) it is
+    /// minutes rather than seconds to write a file.
+    ///
+    /// This is not a weaker guarantee than reloading.  The bytes folded in here
+    /// are the bytes [`ImageFs::write_dir_entry`] just wrote *and read back and
+    /// compared*, so the in-memory picture still cannot drift from the disk —
+    /// which is the property that stops the next allocation overwriting a live
+    /// file.  The paths that touch several entries at once (erase, rename)
+    /// still reload, because they are rare and the simpler code is worth more
+    /// there than the microseconds.
+    fn apply_entry(&mut self, index: u16, raw: &RawEntry) {
+        let parsed = parse_entry(index, raw, &self.params);
+        match self.dir.iter().position(|e| e.index == index) {
+            Some(pos) => match parsed {
+                Some(slot) => self.dir[pos] = slot,
+                None => {
+                    self.dir.remove(pos);
+                }
+            },
+            None => {
+                if let Some(slot) = parsed {
+                    // Keep the list in directory order, the order a fresh read
+                    // would produce.
+                    let at = self
+                        .dir
+                        .iter()
+                        .position(|e| e.index > index)
+                        .unwrap_or(self.dir.len());
+                    self.dir.insert(at, slot);
+                }
+            }
+        }
+        // Blocks only ever become used here — an entry that gave one up is an
+        // erase, and those reload in full.
+        if let Some(slot) = self.dir.iter().find(|e| e.index == index) {
+            let blocks = slot.blocks.clone();
+            for b in blocks {
+                if b != 0 {
+                    if let Some(u) = self.used.get_mut(b as usize) {
+                        *u = true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Re-read the directory and rebuild the allocation bitmap.
     ///
-    /// Run after every mutation.  It costs a directory read, and it buys the
-    /// guarantee that the in-memory picture can never drift from the disk —
-    /// drift being the thing that makes the *next* allocation overwrite a live
-    /// file.
+    /// Run after the mutations that touch several entries at once.  It costs a
+    /// directory read, and it buys the guarantee that the in-memory picture
+    /// cannot drift from the disk — drift being the thing that makes the *next*
+    /// allocation overwrite a live file.
     fn reload(&mut self) -> std::io::Result<()> {
         self.dir = Self::read_directory(&mut *self.media, self.fmt, &self.params)?;
         self.rebuild_bitmap();
@@ -890,9 +944,12 @@ fn encode_blocks(raw: &mut RawEntry, blocks: &[u16], params: &Params) {
         }
     } else {
         for (slot, &b) in raw[16..32].iter_mut().zip(blocks) {
-            // A block number too large for the map would be silently truncated
-            // into a *different, valid* block number — so clamp to zero
-            // (unallocated) instead, which reads as end-of-file.
+            // Unreachable: a narrow map means the disk has at most 256 blocks,
+            // so the allocator cannot produce a number that does not fit.  If
+            // it ever did, truncating would silently point the file at a
+            // *different, valid* block — somebody else's data — so write zero
+            // (unallocated) instead, which merely reads as end-of-file.
+            debug_assert!(b <= 0xFF, "block {b} does not fit a narrow allocation map");
             *slot = if b <= 0xFF { b as u8 } else { 0 };
         }
     }
@@ -1612,6 +1669,43 @@ mod tests {
             }
             assert!(checked > 0, "{file}: no text files found to verify");
         }
+    }
+
+    /// The incremental directory update must leave exactly the state a full
+    /// re-read would.  It is a shortcut taken for speed on the hot path, and a
+    /// shortcut that drifts from the thing it stands in for is how the *next*
+    /// allocation comes to overwrite a live file.
+    #[test]
+    fn test_incremental_update_matches_a_full_reload() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let files = ["ONE.DAT", "TWO.DAT", "THREE.DAT"];
+        for f in files {
+            let (n, e) = name_of(f);
+            fs.create(0, &n, &e).unwrap();
+        }
+        // Enough records to span extents and allocate a spread of blocks.
+        for (i, f) in files.iter().enumerate() {
+            let (n, e) = name_of(f);
+            for rec in 0..(40 + i as u32 * 50) {
+                let mut buf = [0u8; 128];
+                buf[0] = i as u8;
+                buf[1..5].copy_from_slice(&rec.to_le_bytes());
+                fs.write_record(0, &n, &e, rec, &buf).unwrap();
+            }
+        }
+
+        let incremental_dir = fs.dir.clone();
+        let incremental_used = fs.used.clone();
+        fs.reload().unwrap();
+        assert_eq!(
+            incremental_dir, fs.dir,
+            "the incremental directory drifted from the on-disk one"
+        );
+        assert_eq!(
+            incremental_used, fs.used,
+            "the incremental allocation bitmap drifted from the on-disk one"
+        );
     }
 
     /// A medium that accepts every write and keeps none of them — a full disk,

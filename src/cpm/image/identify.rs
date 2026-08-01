@@ -112,8 +112,8 @@ impl std::fmt::Display for Unknown {
 /// under every skew table seen, which makes the first record the one place the
 /// directory is reliably findable before the format is known.
 ///
-/// `read_record` is a closure so this can be tested without a file, and so the
-/// caller keeps ownership of the medium.
+/// Takes the record itself rather than reading it, so the caller keeps
+/// ownership of the medium and this stays testable without a file.
 pub fn looks_like_directory(record: &[u8; 128]) -> bool {
     let mut live = 0;
     for i in 0..4 {
@@ -143,10 +143,11 @@ pub fn looks_like_directory(record: &[u8; 128]) -> bool {
 
 /// Identify the format of an image.
 ///
-/// `filename` is the bare name in the images folder, `size` its length in
-/// bytes, and `first_record` reads logical record `n` of the data area for a
-/// candidate format — the caller supplies it because only the caller has the
-/// file open.
+/// `filename` is the bare name in the images folder and `size` its length in
+/// bytes.  `first_record` reads logical record 0 of the data area — the first
+/// directory record — for a candidate format; the caller supplies it because
+/// only the caller has the file open, and because where that record *is*
+/// depends on which format is being considered.
 pub fn identify<F>(
     filename: &str,
     size: u64,

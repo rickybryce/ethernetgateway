@@ -118,7 +118,7 @@ pub fn any_mounted() -> bool {
 ///
 /// The caller has already opened and identified the image; this only publishes
 /// it.  Refuses a drive letter past P:.
-pub fn set(drive0: u8, mount: Mount) -> Result<(), String> {
+pub fn mount(drive0: u8, mount: Mount) -> Result<(), String> {
     if drive0 >= NUM_DRIVES {
         return Err(format!("no such drive ({drive0})"));
     }
@@ -132,7 +132,7 @@ pub fn set(drive0: u8, mount: Mount) -> Result<(), String> {
 /// The drive's host folder becomes visible again — its files were never
 /// touched while the image was mounted.  Any session still using the image
 /// keeps a working handle to it until it lets go; see the module comment.
-pub fn clear(drive0: u8) -> Option<Mount> {
+pub fn unmount(drive0: u8) -> Option<Mount> {
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     t.get_mut(drive0 as usize).and_then(|slot| slot.take())
 }
@@ -346,19 +346,19 @@ mod tests {
     }
 
     #[test]
-    fn test_set_and_clear_a_drive() {
+    fn test_mount_and_unmount_a_drive() {
         let _g = registry_lock();
         reset();
         assert!(!any_mounted());
         assert!(get(1).is_none());
         assert!(
-            set(NUM_DRIVES, dummy_mount()).is_err(),
+            mount(NUM_DRIVES, dummy_mount()).is_err(),
             "P: is the last drive"
         );
-        set(1, dummy_mount()).unwrap();
+        mount(1, dummy_mount()).unwrap();
         assert!(any_mounted());
         assert_eq!(get(1).unwrap().filename, "test.dsk");
-        let gone = clear(1).expect("clear returns what was there");
+        let gone = unmount(1).expect("clear returns what was there");
         assert_eq!(gone.filename, "test.dsk");
         assert!(get(1).is_none());
         assert!(!any_mounted());
@@ -369,8 +369,8 @@ mod tests {
     fn test_clear_all_empties_every_drive() {
         let _g = registry_lock();
         reset();
-        set(0, dummy_mount()).unwrap();
-        set(5, dummy_mount()).unwrap();
+        mount(0, dummy_mount()).unwrap();
+        mount(5, dummy_mount()).unwrap();
         clear_all();
         assert!(!any_mounted());
         reset();
@@ -378,13 +378,13 @@ mod tests {
 
     /// Mounting on top of a drive replaces the old mount rather than stacking.
     #[test]
-    fn test_set_replaces() {
+    fn test_mounting_replaces_rather_than_stacking() {
         let _g = registry_lock();
         reset();
-        set(0, dummy_mount()).unwrap();
+        mount(0, dummy_mount()).unwrap();
         let mut second = dummy_mount();
         second.filename = "other.dsk".into();
-        set(0, second).unwrap();
+        mount(0, second).unwrap();
         assert_eq!(get(0).unwrap().filename, "other.dsk");
         assert_eq!(all().iter().filter(|m| m.is_some()).count(), 1);
         reset();
