@@ -4071,7 +4071,6 @@ mod tests {
     /// the frame — and the Server grid's `1fr` button column collapsed to zero
     /// whenever its `max-content` columns overflowed a narrow frame, doing the
     /// same thing there.
-    #[test]
     /// The mount screen must offer a row for every drive, and its button must
     /// exist to open it — a modal nothing opens is invisible.
     #[test]
@@ -4112,6 +4111,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_more_buttons_cannot_leave_their_frame() {
         let html = render_main_page(&Config::default(), None);
 
