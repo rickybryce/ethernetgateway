@@ -318,11 +318,30 @@ pub const FORMATS: &[Format] = &[
     // derivation gives.  EXM 0 means one directory entry covers a single 16 KB
     // extent and uses only eight of its sixteen allocation slots.
     //
-    // Setting the directory size correctly does not by itself fix the content,
-    // so at least one thing more is wrong; the deriving of EXM is the obvious
-    // next suspect, since it changes which allocation slot a record maps to.
     // The oracle to test against is DEMO.PRN on DISK01.DSK, an assembler
     // listing whose addresses must ascend across its block boundary at 2048.
+    //
+    // Ruled out so far, so nobody spends the time twice:
+    //
+    //   * EXM.  It cannot be the cause for this file.  DEMO.PRN's directory
+    //     entry is EX=0 RC=30 with allocation map [130, 131] — a *single*
+    //     extent — so the start and length arithmetic is identical whether EXM
+    //     is 0 or 1.  The allocation map is being read correctly too: block 130
+    //     really does hold the start of the file and 131 the rest.
+    //   * The directory size.  Setting maxdir to the DRM the disk states (64)
+    //     changes nothing about file content.
+    //   * The skew being absent.  An identity translation scores far worse
+    //     (59% of listing addresses ascending, against 81% for the BIOS table).
+    //   * The skew being inverted.  Using the inverse permutation is also worse
+    //     (70%), so the table is being applied in the right direction.
+    //
+    // What is left is that the translation is nearly right but not exactly:
+    // the file's records come back in an order that is mostly correct and
+    // locally wrong.  The next thing to try is deriving the permutation from
+    // the data itself rather than from the BIOS — the whole of DEMO.PRN lives
+    // in one track (absolute track 67), so ordering that track's 32 sectors by
+    // the listing's ascending addresses yields the true logical-to-physical map
+    // directly, which can then be compared against the table at 0x1cb8.
 
     // ---- Altair 88-HDSK hard disk (the Altair-Duino disk set) --------------
     // 256-byte sectors, so two CP/M records ride in each and skew moves them
