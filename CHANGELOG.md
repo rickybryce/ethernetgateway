@@ -7,10 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Acting on an external quality review of the tree at `6c2ed36`, then a
-follow-up quality/stability pass of our own.
+## [0.8.1] - 2026-08-01
+
+Two months of work on top of 0.8.0, in three strands. **CP/M** grew up: real
+`SUBMIT` batch jobs, a `DIR` that honours its operand, the last two BDOS return
+values, a clock, and a lock so two sessions cannot write one file at once —
+plus the DMA leak between programs that made `PIP` followed by `DUMP` print the
+wrong thing. **EGT80** gained transfers from inside a session, sane defaults for
+a plain terminal, and lost a filename bug that could open a file the user never
+named. And a long **quality pass** across the rest: a log that survives a full
+disk instead of stopping silently, a config page that works on a phone, the
+real cause of the C64 long-line corruption, and a batch of doc claims that had
+quietly stopped being true.
+
+It also started as a response to an external quality review of the tree at
+`6c2ed36`, and a follow-up stability pass of our own.
 
 ### Added
+
 - **The CP/M emulator now has a clock.** CP/M 2.2 has none of its own, so
   RomWBW software asks the firmware — and our HBIOS answered only the serial
   group. `RTCGETTIM` (function `0x20`) now fills the six-byte buffer at `HL`
@@ -24,7 +38,312 @@ follow-up quality/stability pass of our own.
   prints the host's time to the second, in about 23 ms round trip from typing
   the command to getting the prompt back.
 
+- **BDOS 16 (Close File) reported success for a file that was not there.** It
+  returned a flat `0`. Writes in this emulator are write-through and there is no
+  directory to rewrite, so close genuinely has no work to do — but the *return
+  code* still has to be right, and CP/M 2.2's `BDOS22.ASM` has an explicit exit
+  for it: "ERROR EXIT: RETURN PARAMETER SET TO 0FFH / MEANING THAT FILE CANNOT BE
+  CLOSED", matching the documented contract of 255 when the name is not in the
+  directory. Closing an FCB whose file had been deleted, or was never created,
+  now reports `0FFH`.
+
+  Two cases return success *without* looking for the file, taken from the same
+  listing rather than assumed — `CLOSEF` does `CALL GETRO / RNZ` and
+  `CALL FCB14 / ANI 80H / RNZ` with the return parameter still zero: a software
+  write-protected drive (a R/O drive is not a close error, there is simply
+  nothing to write back), and an FCB whose byte 14 carries CP/M's
+  "no directory update needed" flag. Nothing in the existing suite depended on
+  close always succeeding.
+- **BDOS 13 now returns the temporary-file flag it is supposed to.** Reset Disk
+  System always returned `0` in A. Real CP/M 2.2 returns `0FFH` when the drive it
+  logs in holds a temporary file, and that value is load-bearing rather than
+  decorative: `CCP22.ASM` calls function 13 and stores A straight into its submit
+  flag, which is how a command processor discovers a `SUBMIT` batch is already in
+  progress. Returning a flat `0` was only *accidentally* harmless because our own
+  command processor checks for `A:$$$.SUB` directly.
+
+  Taken from `BDOS22.ASM`'s drive-login scan rather than from memory, which
+  changed the rule: the real BDOS compares only the **first filename byte**
+  (`SUI '$'`, commented "some sort of TEMPORARY FILE OF THE $$$.EXT VARIETY"), so
+  `$WORK.TMP` sets the flag just as `$$$.SUB` does. Checking for `$$$.SUB`
+  specifically would have been a plausible-looking deviation. The flag describes
+  the drive the reset logs in — A: — not whichever drive was current when the
+  call was made.
+- **The CP/M emulator runs `SUBMIT` batch jobs.** While `A:$$$.SUB` exists, the
+  command processor takes each command from it instead of the keyboard, echoes
+  it as it runs, consumes it a record at a time, and erases the file when the
+  batch finishes. `SUBMIT.COM` itself is a transient the operator supplies — it
+  ships with CP/M 2.2 distributions and with RomWBW — so nothing is bundled.
+
+  Both the file format and the behaviour were established from primary sources
+  rather than memory, which mattered because the format is peculiar. DRI's real
+  `SUBMIT.COM` was run inside this emulator and the file it wrote was dumped:
+  128-byte records, byte 0 a character count, and **the records are in reverse
+  order** — so the *last* record is the *next* command. Everything after the
+  counted text is uninitialised buffer residue (the dump showed `$ *.COM\r\n`
+  leftovers after the NUL), so the count byte is the only safe delimiter and a
+  count that cannot fit the record is rejected rather than executed. CP/M 2.2's
+  own `CCP22.ASM` confirms both points: it reads record `RC-1` and comments
+  "Yes $$$.SUB files are backwards".
+
+  Three inherited behaviours are deliberate, not shortcuts:
+  - **An unrecognised command ends the batch** and returns to the keyboard —
+    `CCP22.ASM`: "if an error is encountered, the $$$.SUB file is erased".
+  - **Batches only work from drive A:.** The processor reads `$$$.SUB` from A:
+    whatever drive is current, while `SUBMIT.COM` writes it to the *current*
+    drive — verified by running the real binary from B:, which produced
+    `B:$$$.SUB` that nothing reads. That mismatch is the origin of the
+    historical "SUBMIT only works from A:" rule, and it is reproduced rather
+    than papered over.
+  - **Leaving the emulator abandons a running batch** instead of resuming it in
+    a later session.
+
+  CP/M 3's richer SUBMIT (conditionals, `$1`–`$9` parameters, `PROFILE.SUB`) is
+  not CP/M 2.2 and is not emulated; feeding keystrokes to a running *program*
+  needed 2.2's separate `XSUB.COM`, also not supported. Documented in the
+  manual and `cpmreference.html`.
+- **The terminal size reported to a gateway's remote host is now configurable,
+  and the SSH gateway no longer ignores what the client told us.** Two new keys,
+  `gateway_term_width` and `gateway_term_height`, both `0` for automatic. They
+  set what the SSH Gateway sends in its PTY request and what the Telnet Gateway
+  sends as NAWS. Automatic means the size the local client negotiated over
+  NAWS, falling back to the terminal-type default — 40x25 for PETSCII, 80x24
+  for ANSI/ASCII — so nothing changes for anyone who doesn't set them.
+
+  Two problems prompted this. The first is a plain inconsistency: the Telnet
+  Gateway already honoured the client's NAWS, while the **SSH gateway
+  hardcoded** its geometry from the terminal *type* alone and never looked at
+  it. The second is that terminal type does not imply terminal width, and the
+  gap lands squarely on the retro hardware this gateway exists for. A C64
+  running CCGMS in ASCII mode sends `0x08` for backspace, so it is detected as
+  ANSI and was told it had **80 columns for a physically 40-column screen**;
+  CCGMS's soft 80-column mode is the same mistake in reverse under PETSCII. A
+  WiFi modem or `tcpser` never sends NAWS on the C64's behalf, so nothing but
+  an operator setting can carry the truth. When the remote has the wrong width,
+  readline computes every redraw past the real margin for a screen that isn't
+  there: wrap in the wrong column, backspace deleting the wrong character on
+  screen, leftovers after a history recall or a Tab. Nothing is lost on the
+  wire — but correcting what you *see* can then run a command you didn't mean.
+
+  Each dimension resolves independently, so pinning a C64's 40 columns leaves
+  the row count automatic. An override deliberately beats client NAWS: the
+  whole point is to correct a client that cannot report itself. `0` is
+  load-bearing on both — it is the only way back to automatic — so neither is
+  floored to 1 in any surface. Set from the telnet Gateway Configuration menu
+  (`W` / `R`), or Server → More in the GUI and web UI; applies to the next
+  gateway connection with no restart. Documented in the manual's new §16.14,
+  which is cross-linked with §16.9 both ways because the two share a symptom
+  and have different fixes — a bit-banged C64 corrupts the *bytes*, a width
+  mismatch leaves them perfectly correct and misplaces only the drawing.
+
+  One resolver (`gateway_window`) answers for both gateways and for the
+  `[gw-diag]` line, which now reports the resolved geometry **and which input
+  won** (`onward geometry: 40x25 (from config override)`) — previously that
+  diagnostic restated "80x24" as a hardcoded string of its own, and would have
+  gone on saying it. The web and GUI hint likewise comes from a single
+  `Config::gateway_term_hint`.
+- **The log file now begins at the beginning.** The log path comes from the
+  config, so nothing could be written to disk until the config had been read —
+  which meant the version banner and every `load_or_create_config` diagnostic
+  (including the FATAL "exists but could not be read" refusal, and "Created
+  default configuration") were emitted to stderr only. The file always began
+  mid-story, missing exactly the startup diagnostics an operator reading a log
+  after the fact wants most. Those lines are now held in a bounded pre-arm
+  backlog and written into the file, in order, as soon as one is armed.
+  Collection stops at the first `configure_file_logging` call — that is what
+  "pre-arm" means, and it is also when we learn whether a file was wanted at all,
+  so a process running with file logging off does not accumulate lines nothing
+  will read. The window closes for good, so a restart cycle cannot replay the
+  startup block; verified with three consecutive `SIGHUP` reloads, after which
+  the banner appears exactly once and each cycle's arming line re-anchors the
+  version. The drain and the bound are both tested against owned state rather
+  than the process globals, so neither test depends on suite ordering.
+- **A master that cannot accept relays now says so wherever it is configured.**
+  The SSH relay listens on the SSH server's port, so `master_accept_relays` is
+  inert while `ssh_enabled` is false. That was warned about at startup and by a
+  popup at the moment the role was switched to Master — but neither covers the
+  case that actually stranded people: a master set up earlier whose SSH server
+  was turned off since, which fires no role-change event and whose startup
+  warning has long scrolled away. All three config surfaces now show it
+  persistently: telnet renders `Accept relays: ENABLED (SSH off!)` (the qualifier
+  rides the existing status row because that screen is at 21 of its 22 PETSCII
+  rows, and its help now names both requirements without adding a line), and the
+  GUI and web show a warning beside the checkbox. As with the popup, nothing
+  switches SSH on for you. The four-part condition is one method,
+  `Config::relays_blocked_by_ssh_off`, rather than a copy per surface — the
+  lesson from the log keys, where three copies of an "is it on?" rule did drift
+  apart. It includes the `relay_transport` check the startup warning already had,
+  which the UI copies would have omitted.
+- **A size-bounded log file that deletes its old generations.** The gateway
+  wrote no log file at all: `logger::log` did `eprintln!` plus two capped
+  in-memory rings, so nothing survived a restart and there were no log-related
+  config keys. Four new keys, **on by default**: `log_to_file` (`true`),
+  `log_file` (`ethernetgateway.log`), `log_max_size_kb` (`1024`) and
+  `log_max_files` (`5`). The active file rotates once a write would take it past
+  the size cap, `.1` becomes `.2`, and anything past `log_max_files` is
+  **deleted** — so worst-case disk use is `log_max_size_kb × (log_max_files + 1)`,
+  6 MB with the defaults. `logger::max_disk_kb` states that bound in one place,
+  which the three config UIs and the startup line all read rather than each
+  multiplying it out. Setting either limit to `0` has a documented meaning (no
+  size rotation / keep no history), so neither field is floored to 1 the way the
+  other numeric fields are. The file is owner-only (0600 on Unix) because log
+  lines name hosts, ports and usernames, and is reopened in *append* mode so a
+  restart extends the log instead of discarding the previous run.
+
+  **Deliberately not rate-limited.** A limiter was built and then removed:
+  `verbose` logs per protocol block, which legitimately exceeds any sane
+  lines-per-second ceiling during a fast transfer, so it would have discarded
+  exactly the lines an operator turned verbose on to see. Bounding growth by
+  rotation loses *old* data instead of current data. The reasoning is recorded in
+  `logger.rs` so it isn't re-litigated. Note this duplicates journald's own
+  rotation under systemd; set `log_to_file = false` to rely on the journal alone.
+
+  All four keys are in **all three config surfaces**, per the standing rule:
+  telnet Other Settings → `L` (a submenu, because that screen is at its 22-row
+  PETSCII budget — the `U` weather-units help entry was folded onto one line to
+  pay for the new `L` entry without spilling the help onto a second page), and
+  a new **General → More…** panel in both the GUI and the web UI. Each shows the
+  computed worst-case disk figure rather than leaving the operator to multiply
+  it out, and says so plainly when `log_max_size_kb = 0` makes the file
+  unbounded. Documented in `usermanual.html` (both key tables) and
+  `web/index.html`.
+
+  The General frame had no More button before this; its button is right-justified
+  on the frame's **third line**, sharing the row with the Gateway-debug and
+  Show-GUI toggles rather than taking a fourth line — a fourth line makes the
+  frame taller than the one beside it and the two stop lining up (measured: the
+  General and Serial Port A frames are both 109 px again). It is positioned by an
+  auto margin in a wrapping flex row (web) and egui's `right_to_left` layout
+  (GUI), neither of which can push the button past its container — deliberately
+  *not* the CSS-Grid mechanism whose `1fr` column collapsed to zero and put the
+  Server frame's button outside its frame. Re-measured in headless Chrome: all
+  six More buttons stay inside their frames across 15 viewport widths from
+  1600 px down to 400 px (90 checks, 0 problems).
+- **`EGT80.COM` is pinned by hash.** It is compiled into every release with
+  `include_bytes!` but no CI runner can rebuild it, so the committed binary —
+  not `EGT80.Z80` — is what users actually run. The existing tests check the
+  artifact's shape and its version string, which by their own admission
+  "cannot catch a code change made without touching the version".
+  `test_bundled_egt80_matches_pinned_hash` closes that: the bytes cannot change
+  unless the same commit updates the hash. `EGT80/README.md` documents the
+  refresh step.
+- **Tests for the five Kermit client commands that had none.**
+  `kermit_client_delete`, `_rename`, `_type`, `_mkdir` and `_rmdir` had no
+  caller *and* no test while compiling into every binary — the
+  `#[allow(dead_code)]` note claiming "the unit tests below exercise it
+  end-to-end" was true of their nine siblings but not of them. All five now
+  round-trip against our own server, including the server-refusal paths
+  (missing file, non-empty directory) and the local argument guards.
+- **Tests for the CP/M emulator driver's own logic.** `src/telnet/cpm_emu.rs`
+  had the tree's thinnest coverage, and its existing tests all validated the
+  bundled EGT80 artifact rather than the module. Added coverage of the CCP-lite
+  built-ins — `DIR` (empty drive and 8.3 columns), `ERA` (silent success,
+  no-match, no-operand), `REN` (both `new=old` and `new old` forms, refusing to
+  clobber, missing source), `TYPE` (stops at `^Z`, refuses binary) — plus
+  `pending_csi_arrow`, whose split-sequence case matters because it runs on
+  buffered input where the rest of an arrow may not have arrived yet.
+  `cpmemu_run_program` and `cpmemu_oob_drain` remain uncovered; both need a
+  running guest.
+- **The CP/M emulator honours read-only files, and BDOS 28 / 29 / 30 / 37.**
+  Previously the three functions fell through to the unknown-function arm and
+  returned a fake success, and a read-only file was not protected at all: a Unix
+  `unlink` is governed by the *directory's* write bit rather than the file's, so
+  `ERA` deleted a `chmod -w` file the host user had deliberately locked. Now a
+  host read-only file reports CP/M's `t1'` attribute (so `STAT` shows `R/O`) and
+  is refused by erase, rename and truncating open. `28` (Write Protect Disk)
+  software-write-protects the current drive until the next disk reset, enforced
+  in all four mutating paths; `29` (Get R/O Vector) reports the real bitmap
+  rather than a hardcoded zero, so a program can see the protection it just
+  requested; `30` (Set File Attributes) maps `t1'` onto the host permission, and
+  accepts-and-ignores System and Archive rather than faking them, because a host
+  directory has nowhere to keep them and a sidecar file would litter the folders
+  users drop their own files into; `37` (Reset Drive) releases the write-protect
+  for the drives in its `DE` bitmap — its "log the drive out" half is a genuine
+  no-op, not a stub, since the directory is synthesised live on every search.
+  `ERA` and `REN` now report `File R/O` and `Bdos Err On d: R/O` instead of a
+  misleading `No file`.
+- **An advisory CI job runs the 25 `#[ignore]`d interop tests.** They spawn real
+  lrzsz and C-Kermit peers, and are the only send-path cover for XMODEM/YMODEM
+  and the only check that our wire format satisfies somebody else's reader — the
+  checked-in replay fixtures lock the receive path, but a fixture can only
+  confirm what we recorded, so a send-side regression was invisible to CI.
+  Advisory on purpose: the peers come from the Ubuntu archive and can be
+  upgraded under us, so a distro bump surfaces as a red X to triage rather than
+  a blocked merge. The job records the peer versions, because "did we regress or
+  did the peer change?" is unanswerable after the fact without them, and splits
+  the two peers into separate steps so one failing still reports the other.
+
+- **Serial-port pickers now name the hardware behind a device path.** A bare
+  `/dev/ttyUSB0` or `COM3` says nothing about *which* adapter it is, and the
+  moment a machine has two, picking the wrong one produces a port that is simply
+  silent with nothing on screen to distinguish them.
+  - **Telnet** summarises inline, fitted to the terminal:
+    `/dev/ttyUSB0 -- FTDI`. The path is never sacrificed to make room — the
+    description is trimmed first, dropped entirely rather than shown as a stub,
+    and only a path that overflows on its own is truncated (unchanged
+    behaviour). Widths still respected: 30 columns PETSCII, 50 ANSI/ASCII.
+  - **Web and GUI** put the short label in the visible row and the full
+    description on hover, and hovering the *closed* selector lists every
+    detected port with its hardware — the answer to "which ttyUSB is my
+    adapter?" without opening the list and reading it item by item.
+  - In every UI the value that gets **saved is still the bare device path**; the
+    descriptions are display-only.
+  - One implementation for all three surfaces: new `serial::DetectedPort` plus
+    `list_serial_ports_detailed()`, which `gui::detect_serial_ports` (the web
+    server's source too) delegates to. The paths-only `list_serial_ports` is
+    gone, having lost its last caller. The list is sorted by path so it cannot
+    reshuffle under the cursor between scans — the OS promises no order.
+  - The manufacturer leads the short label because that is the word an operator
+    recognises ("FTDI", "Prolific"); product strings often repeat across a whole
+    family. Full detail reads
+    `FT232R USB UART — FTDI (SN A5XK3RJT) [USB 0403:6001]`.
+  - An unlabelled built-in UART (a Pi's `ttyAMA0`, an ISA 16550) reports no
+    summary on purpose, so its row stays the bare path instead of being labelled
+    "Unknown".
+  - The `/serial-ports` refresh JSON carries the descriptions now, because
+    otherwise clicking refresh silently stripped the names off a page that had
+    rendered with them. USB descriptor strings are whatever the device claims,
+    so they are JSON-escaped on the wire and HTML-escaped into attributes.
+  - `describe_port_type` is pure and unit-tested across the cases a developer's
+    desk will not reproduce on demand: manufacturer-only, product-only, neither,
+    a maker that merely repeats the product, an unlabelled port, PCI and
+    Bluetooth.
+  - The GUI's *closed* selector names the hardware too, not just its open list —
+    matching the web UI's selected option, since the one state an operator looks
+    at most was the one saying the least. Falls back to the bare path for an
+    undescribed port, or a saved port that isn't currently plugged in.
+- **A slave's Kermit-server-mode port is served by the master.** Previously such
+  a port ran a Kermit server on the slave, so a user at the attached machine saw
+  and wrote the *slave's* transfer directory — the one place files were never
+  supposed to land in master/slave mode, and there was no relay involvement at
+  all. The slave now pipes the wire to the master and the **master** runs its
+  Kermit server on that channel (new `serial-relay <port> kermit` verb,
+  `relay::run_master_relay_kermit`), so a user at the device is talking to the
+  master's server: `remote dir` lists the master's transfer directory, an upload
+  lands there, and a download is read from there. The slave serves nothing itself
+  and keeps no copy, which makes "files always land on the master" true by
+  construction rather than by synchronising two directories — no file protocol
+  over the relay was needed, because `kermit_server_with_outcome` is generic over
+  the stream and the directory belongs to whichever machine runs it.
+  - The channel opens as soon as the link allows, since a Kermit server is only
+    useful if it is already there when the device starts a transfer, and it
+    reconnects with the usual backoff. While the master is unreachable the port
+    serves **nothing**: a local fallback would let a transfer appear to succeed
+    with the file on the wrong machine, which is the surprise this removes.
+  - New master-side key **`allow_relay_kermit`**, off by default and wired into
+    all three config UIs. Kermit's server mode has no authentication of its own
+    — the same reason `allow_atdt_kermit` and `kermit_server_enabled` are opt-in
+    — so serving it to a remote wire is the operator's decision, even though this
+    path already requires a slave that authenticated over SSH with
+    `master_accept_relays` on.
+  - Tested end to end in-process: our Kermit client stands in for the device
+    against `run_master_relay_kermit`, proving an upload lands in the master's
+    directory and that `remote dir` and a download resolve there — against files
+    that exist *only* on the master, so nothing else could have supplied them.
+    Plus a grammar round-trip and a refusal test for the gate.
+
 ### Changed
+
 - **EGT80 quotes Romans 6:23 on the way out.** Printed after the sign-off,
   before CP/M takes the screen back — wrapped to forty columns rather than the
   eighty the program's other text assumes, because the C64s that reach it
@@ -100,7 +419,27 @@ follow-up quality/stability pass of our own.
   overwritten, because it holds your saved settings. Delete `EGT80.COM` to get
   the new defaults.
 
+- **Release builds now keep integer overflow checks on**
+  (`[profile.release] overflow-checks = true`). The whole suite runs in the dev
+  profile, where an overflow panics, so every test validated semantics the
+  shipped binary did not have — and the load-bearing code here is five
+  hand-rolled wire parsers doing offset and length arithmetic on bytes from an
+  untrusted peer, exactly where a silent wrap becomes a wrong length instead of
+  a loud failure. Validated by running the full suite under `--release`: 1599
+  passed, 0 failed, no path overflows.
+- **CI's deep-fuzz step now covers all 20 property tests, not 3.** The step
+  filtered on `qmethod_proptest`, which reached only the telnet
+  option-negotiation state machine, leaving every hand-rolled wire parser at
+  proptest's default case count. Broadening the filter alone would not have
+  worked: `ProptestConfig { cases: N, ..default() }` *overrides*
+  `PROPTEST_CASES`, because the env var is only read inside `default()` and a
+  struct-literal field wins. The explicit `cases:` is gone where it merely
+  restated proptest's own default of 256, and the two deliberately-lower 128s
+  (Kermit and ZMODEM, which build a tokio runtime per case) now yield to the
+  env var when it is set.
+
 ### Fixed
+
 - **A place name from the weather API could carry escape sequences to your
   terminal.** The geocoder's `name` / `region` / `country` / `timezone` strings
   are third-party data printed straight onto the screen, and JSON encodes a
@@ -618,346 +957,6 @@ follow-up quality/stability pass of our own.
   passes against the old code — and `DIR` now has end-to-end coverage of all
   five operand paths, which it had none of.
 
-### Changed
-- **Release builds now keep integer overflow checks on**
-  (`[profile.release] overflow-checks = true`). The whole suite runs in the dev
-  profile, where an overflow panics, so every test validated semantics the
-  shipped binary did not have — and the load-bearing code here is five
-  hand-rolled wire parsers doing offset and length arithmetic on bytes from an
-  untrusted peer, exactly where a silent wrap becomes a wrong length instead of
-  a loud failure. Validated by running the full suite under `--release`: 1599
-  passed, 0 failed, no path overflows.
-- **CI's deep-fuzz step now covers all 20 property tests, not 3.** The step
-  filtered on `qmethod_proptest`, which reached only the telnet
-  option-negotiation state machine, leaving every hand-rolled wire parser at
-  proptest's default case count. Broadening the filter alone would not have
-  worked: `ProptestConfig { cases: N, ..default() }` *overrides*
-  `PROPTEST_CASES`, because the env var is only read inside `default()` and a
-  struct-literal field wins. The explicit `cases:` is gone where it merely
-  restated proptest's own default of 256, and the two deliberately-lower 128s
-  (Kermit and ZMODEM, which build a tokio runtime per case) now yield to the
-  env var when it is set.
-
-### Added
-- **BDOS 16 (Close File) reported success for a file that was not there.** It
-  returned a flat `0`. Writes in this emulator are write-through and there is no
-  directory to rewrite, so close genuinely has no work to do — but the *return
-  code* still has to be right, and CP/M 2.2's `BDOS22.ASM` has an explicit exit
-  for it: "ERROR EXIT: RETURN PARAMETER SET TO 0FFH / MEANING THAT FILE CANNOT BE
-  CLOSED", matching the documented contract of 255 when the name is not in the
-  directory. Closing an FCB whose file had been deleted, or was never created,
-  now reports `0FFH`.
-
-  Two cases return success *without* looking for the file, taken from the same
-  listing rather than assumed — `CLOSEF` does `CALL GETRO / RNZ` and
-  `CALL FCB14 / ANI 80H / RNZ` with the return parameter still zero: a software
-  write-protected drive (a R/O drive is not a close error, there is simply
-  nothing to write back), and an FCB whose byte 14 carries CP/M's
-  "no directory update needed" flag. Nothing in the existing suite depended on
-  close always succeeding.
-- **BDOS 13 now returns the temporary-file flag it is supposed to.** Reset Disk
-  System always returned `0` in A. Real CP/M 2.2 returns `0FFH` when the drive it
-  logs in holds a temporary file, and that value is load-bearing rather than
-  decorative: `CCP22.ASM` calls function 13 and stores A straight into its submit
-  flag, which is how a command processor discovers a `SUBMIT` batch is already in
-  progress. Returning a flat `0` was only *accidentally* harmless because our own
-  command processor checks for `A:$$$.SUB` directly.
-
-  Taken from `BDOS22.ASM`'s drive-login scan rather than from memory, which
-  changed the rule: the real BDOS compares only the **first filename byte**
-  (`SUI '$'`, commented "some sort of TEMPORARY FILE OF THE $$$.EXT VARIETY"), so
-  `$WORK.TMP` sets the flag just as `$$$.SUB` does. Checking for `$$$.SUB`
-  specifically would have been a plausible-looking deviation. The flag describes
-  the drive the reset logs in — A: — not whichever drive was current when the
-  call was made.
-- **The CP/M emulator runs `SUBMIT` batch jobs.** While `A:$$$.SUB` exists, the
-  command processor takes each command from it instead of the keyboard, echoes
-  it as it runs, consumes it a record at a time, and erases the file when the
-  batch finishes. `SUBMIT.COM` itself is a transient the operator supplies — it
-  ships with CP/M 2.2 distributions and with RomWBW — so nothing is bundled.
-
-  Both the file format and the behaviour were established from primary sources
-  rather than memory, which mattered because the format is peculiar. DRI's real
-  `SUBMIT.COM` was run inside this emulator and the file it wrote was dumped:
-  128-byte records, byte 0 a character count, and **the records are in reverse
-  order** — so the *last* record is the *next* command. Everything after the
-  counted text is uninitialised buffer residue (the dump showed `$ *.COM\r\n`
-  leftovers after the NUL), so the count byte is the only safe delimiter and a
-  count that cannot fit the record is rejected rather than executed. CP/M 2.2's
-  own `CCP22.ASM` confirms both points: it reads record `RC-1` and comments
-  "Yes $$$.SUB files are backwards".
-
-  Three inherited behaviours are deliberate, not shortcuts:
-  - **An unrecognised command ends the batch** and returns to the keyboard —
-    `CCP22.ASM`: "if an error is encountered, the $$$.SUB file is erased".
-  - **Batches only work from drive A:.** The processor reads `$$$.SUB` from A:
-    whatever drive is current, while `SUBMIT.COM` writes it to the *current*
-    drive — verified by running the real binary from B:, which produced
-    `B:$$$.SUB` that nothing reads. That mismatch is the origin of the
-    historical "SUBMIT only works from A:" rule, and it is reproduced rather
-    than papered over.
-  - **Leaving the emulator abandons a running batch** instead of resuming it in
-    a later session.
-
-  CP/M 3's richer SUBMIT (conditionals, `$1`–`$9` parameters, `PROFILE.SUB`) is
-  not CP/M 2.2 and is not emulated; feeding keystrokes to a running *program*
-  needed 2.2's separate `XSUB.COM`, also not supported. Documented in the
-  manual and `cpmreference.html`.
-- **The terminal size reported to a gateway's remote host is now configurable,
-  and the SSH gateway no longer ignores what the client told us.** Two new keys,
-  `gateway_term_width` and `gateway_term_height`, both `0` for automatic. They
-  set what the SSH Gateway sends in its PTY request and what the Telnet Gateway
-  sends as NAWS. Automatic means the size the local client negotiated over
-  NAWS, falling back to the terminal-type default — 40x25 for PETSCII, 80x24
-  for ANSI/ASCII — so nothing changes for anyone who doesn't set them.
-
-  Two problems prompted this. The first is a plain inconsistency: the Telnet
-  Gateway already honoured the client's NAWS, while the **SSH gateway
-  hardcoded** its geometry from the terminal *type* alone and never looked at
-  it. The second is that terminal type does not imply terminal width, and the
-  gap lands squarely on the retro hardware this gateway exists for. A C64
-  running CCGMS in ASCII mode sends `0x08` for backspace, so it is detected as
-  ANSI and was told it had **80 columns for a physically 40-column screen**;
-  CCGMS's soft 80-column mode is the same mistake in reverse under PETSCII. A
-  WiFi modem or `tcpser` never sends NAWS on the C64's behalf, so nothing but
-  an operator setting can carry the truth. When the remote has the wrong width,
-  readline computes every redraw past the real margin for a screen that isn't
-  there: wrap in the wrong column, backspace deleting the wrong character on
-  screen, leftovers after a history recall or a Tab. Nothing is lost on the
-  wire — but correcting what you *see* can then run a command you didn't mean.
-
-  Each dimension resolves independently, so pinning a C64's 40 columns leaves
-  the row count automatic. An override deliberately beats client NAWS: the
-  whole point is to correct a client that cannot report itself. `0` is
-  load-bearing on both — it is the only way back to automatic — so neither is
-  floored to 1 in any surface. Set from the telnet Gateway Configuration menu
-  (`W` / `R`), or Server → More in the GUI and web UI; applies to the next
-  gateway connection with no restart. Documented in the manual's new §16.14,
-  which is cross-linked with §16.9 both ways because the two share a symptom
-  and have different fixes — a bit-banged C64 corrupts the *bytes*, a width
-  mismatch leaves them perfectly correct and misplaces only the drawing.
-
-  One resolver (`gateway_window`) answers for both gateways and for the
-  `[gw-diag]` line, which now reports the resolved geometry **and which input
-  won** (`onward geometry: 40x25 (from config override)`) — previously that
-  diagnostic restated "80x24" as a hardcoded string of its own, and would have
-  gone on saying it. The web and GUI hint likewise comes from a single
-  `Config::gateway_term_hint`.
-- **The log file now begins at the beginning.** The log path comes from the
-  config, so nothing could be written to disk until the config had been read —
-  which meant the version banner and every `load_or_create_config` diagnostic
-  (including the FATAL "exists but could not be read" refusal, and "Created
-  default configuration") were emitted to stderr only. The file always began
-  mid-story, missing exactly the startup diagnostics an operator reading a log
-  after the fact wants most. Those lines are now held in a bounded pre-arm
-  backlog and written into the file, in order, as soon as one is armed.
-  Collection stops at the first `configure_file_logging` call — that is what
-  "pre-arm" means, and it is also when we learn whether a file was wanted at all,
-  so a process running with file logging off does not accumulate lines nothing
-  will read. The window closes for good, so a restart cycle cannot replay the
-  startup block; verified with three consecutive `SIGHUP` reloads, after which
-  the banner appears exactly once and each cycle's arming line re-anchors the
-  version. The drain and the bound are both tested against owned state rather
-  than the process globals, so neither test depends on suite ordering.
-- **A master that cannot accept relays now says so wherever it is configured.**
-  The SSH relay listens on the SSH server's port, so `master_accept_relays` is
-  inert while `ssh_enabled` is false. That was warned about at startup and by a
-  popup at the moment the role was switched to Master — but neither covers the
-  case that actually stranded people: a master set up earlier whose SSH server
-  was turned off since, which fires no role-change event and whose startup
-  warning has long scrolled away. All three config surfaces now show it
-  persistently: telnet renders `Accept relays: ENABLED (SSH off!)` (the qualifier
-  rides the existing status row because that screen is at 21 of its 22 PETSCII
-  rows, and its help now names both requirements without adding a line), and the
-  GUI and web show a warning beside the checkbox. As with the popup, nothing
-  switches SSH on for you. The four-part condition is one method,
-  `Config::relays_blocked_by_ssh_off`, rather than a copy per surface — the
-  lesson from the log keys, where three copies of an "is it on?" rule did drift
-  apart. It includes the `relay_transport` check the startup warning already had,
-  which the UI copies would have omitted.
-- **A size-bounded log file that deletes its old generations.** The gateway
-  wrote no log file at all: `logger::log` did `eprintln!` plus two capped
-  in-memory rings, so nothing survived a restart and there were no log-related
-  config keys. Four new keys, **on by default**: `log_to_file` (`true`),
-  `log_file` (`ethernetgateway.log`), `log_max_size_kb` (`1024`) and
-  `log_max_files` (`5`). The active file rotates once a write would take it past
-  the size cap, `.1` becomes `.2`, and anything past `log_max_files` is
-  **deleted** — so worst-case disk use is `log_max_size_kb × (log_max_files + 1)`,
-  6 MB with the defaults. `logger::max_disk_kb` states that bound in one place,
-  which the three config UIs and the startup line all read rather than each
-  multiplying it out. Setting either limit to `0` has a documented meaning (no
-  size rotation / keep no history), so neither field is floored to 1 the way the
-  other numeric fields are. The file is owner-only (0600 on Unix) because log
-  lines name hosts, ports and usernames, and is reopened in *append* mode so a
-  restart extends the log instead of discarding the previous run.
-
-  **Deliberately not rate-limited.** A limiter was built and then removed:
-  `verbose` logs per protocol block, which legitimately exceeds any sane
-  lines-per-second ceiling during a fast transfer, so it would have discarded
-  exactly the lines an operator turned verbose on to see. Bounding growth by
-  rotation loses *old* data instead of current data. The reasoning is recorded in
-  `logger.rs` so it isn't re-litigated. Note this duplicates journald's own
-  rotation under systemd; set `log_to_file = false` to rely on the journal alone.
-
-  All four keys are in **all three config surfaces**, per the standing rule:
-  telnet Other Settings → `L` (a submenu, because that screen is at its 22-row
-  PETSCII budget — the `U` weather-units help entry was folded onto one line to
-  pay for the new `L` entry without spilling the help onto a second page), and
-  a new **General → More…** panel in both the GUI and the web UI. Each shows the
-  computed worst-case disk figure rather than leaving the operator to multiply
-  it out, and says so plainly when `log_max_size_kb = 0` makes the file
-  unbounded. Documented in `usermanual.html` (both key tables) and
-  `web/index.html`.
-
-  The General frame had no More button before this; its button is right-justified
-  on the frame's **third line**, sharing the row with the Gateway-debug and
-  Show-GUI toggles rather than taking a fourth line — a fourth line makes the
-  frame taller than the one beside it and the two stop lining up (measured: the
-  General and Serial Port A frames are both 109 px again). It is positioned by an
-  auto margin in a wrapping flex row (web) and egui's `right_to_left` layout
-  (GUI), neither of which can push the button past its container — deliberately
-  *not* the CSS-Grid mechanism whose `1fr` column collapsed to zero and put the
-  Server frame's button outside its frame. Re-measured in headless Chrome: all
-  six More buttons stay inside their frames across 15 viewport widths from
-  1600 px down to 400 px (90 checks, 0 problems).
-- **`EGT80.COM` is pinned by hash.** It is compiled into every release with
-  `include_bytes!` but no CI runner can rebuild it, so the committed binary —
-  not `EGT80.Z80` — is what users actually run. The existing tests check the
-  artifact's shape and its version string, which by their own admission
-  "cannot catch a code change made without touching the version".
-  `test_bundled_egt80_matches_pinned_hash` closes that: the bytes cannot change
-  unless the same commit updates the hash. `EGT80/README.md` documents the
-  refresh step.
-- **Tests for the five Kermit client commands that had none.**
-  `kermit_client_delete`, `_rename`, `_type`, `_mkdir` and `_rmdir` had no
-  caller *and* no test while compiling into every binary — the
-  `#[allow(dead_code)]` note claiming "the unit tests below exercise it
-  end-to-end" was true of their nine siblings but not of them. All five now
-  round-trip against our own server, including the server-refusal paths
-  (missing file, non-empty directory) and the local argument guards.
-- **Tests for the CP/M emulator driver's own logic.** `src/telnet/cpm_emu.rs`
-  had the tree's thinnest coverage, and its existing tests all validated the
-  bundled EGT80 artifact rather than the module. Added coverage of the CCP-lite
-  built-ins — `DIR` (empty drive and 8.3 columns), `ERA` (silent success,
-  no-match, no-operand), `REN` (both `new=old` and `new old` forms, refusing to
-  clobber, missing source), `TYPE` (stops at `^Z`, refuses binary) — plus
-  `pending_csi_arrow`, whose split-sequence case matters because it runs on
-  buffered input where the rest of an arrow may not have arrived yet.
-  `cpmemu_run_program` and `cpmemu_oob_drain` remain uncovered; both need a
-  running guest.
-- **The CP/M emulator honours read-only files, and BDOS 28 / 29 / 30 / 37.**
-  Previously the three functions fell through to the unknown-function arm and
-  returned a fake success, and a read-only file was not protected at all: a Unix
-  `unlink` is governed by the *directory's* write bit rather than the file's, so
-  `ERA` deleted a `chmod -w` file the host user had deliberately locked. Now a
-  host read-only file reports CP/M's `t1'` attribute (so `STAT` shows `R/O`) and
-  is refused by erase, rename and truncating open. `28` (Write Protect Disk)
-  software-write-protects the current drive until the next disk reset, enforced
-  in all four mutating paths; `29` (Get R/O Vector) reports the real bitmap
-  rather than a hardcoded zero, so a program can see the protection it just
-  requested; `30` (Set File Attributes) maps `t1'` onto the host permission, and
-  accepts-and-ignores System and Archive rather than faking them, because a host
-  directory has nowhere to keep them and a sidecar file would litter the folders
-  users drop their own files into; `37` (Reset Drive) releases the write-protect
-  for the drives in its `DE` bitmap — its "log the drive out" half is a genuine
-  no-op, not a stub, since the directory is synthesised live on every search.
-  `ERA` and `REN` now report `File R/O` and `Bdos Err On d: R/O` instead of a
-  misleading `No file`.
-- **An advisory CI job runs the 25 `#[ignore]`d interop tests.** They spawn real
-  lrzsz and C-Kermit peers, and are the only send-path cover for XMODEM/YMODEM
-  and the only check that our wire format satisfies somebody else's reader — the
-  checked-in replay fixtures lock the receive path, but a fixture can only
-  confirm what we recorded, so a send-side regression was invisible to CI.
-  Advisory on purpose: the peers come from the Ubuntu archive and can be
-  upgraded under us, so a distro bump surfaces as a red X to triage rather than
-  a blocked merge. The job records the peer versions, because "did we regress or
-  did the peer change?" is unanswerable after the fact without them, and splits
-  the two peers into separate steps so one failing still reports the other.
-
-## [0.8.1] - 2026-07-28
-
-### Added
-- **Serial-port pickers now name the hardware behind a device path.** A bare
-  `/dev/ttyUSB0` or `COM3` says nothing about *which* adapter it is, and the
-  moment a machine has two, picking the wrong one produces a port that is simply
-  silent with nothing on screen to distinguish them.
-  - **Telnet** summarises inline, fitted to the terminal:
-    `/dev/ttyUSB0 -- FTDI`. The path is never sacrificed to make room — the
-    description is trimmed first, dropped entirely rather than shown as a stub,
-    and only a path that overflows on its own is truncated (unchanged
-    behaviour). Widths still respected: 30 columns PETSCII, 50 ANSI/ASCII.
-  - **Web and GUI** put the short label in the visible row and the full
-    description on hover, and hovering the *closed* selector lists every
-    detected port with its hardware — the answer to "which ttyUSB is my
-    adapter?" without opening the list and reading it item by item.
-  - In every UI the value that gets **saved is still the bare device path**; the
-    descriptions are display-only.
-  - One implementation for all three surfaces: new `serial::DetectedPort` plus
-    `list_serial_ports_detailed()`, which `gui::detect_serial_ports` (the web
-    server's source too) delegates to. The paths-only `list_serial_ports` is
-    gone, having lost its last caller. The list is sorted by path so it cannot
-    reshuffle under the cursor between scans — the OS promises no order.
-  - The manufacturer leads the short label because that is the word an operator
-    recognises ("FTDI", "Prolific"); product strings often repeat across a whole
-    family. Full detail reads
-    `FT232R USB UART — FTDI (SN A5XK3RJT) [USB 0403:6001]`.
-  - An unlabelled built-in UART (a Pi's `ttyAMA0`, an ISA 16550) reports no
-    summary on purpose, so its row stays the bare path instead of being labelled
-    "Unknown".
-  - The `/serial-ports` refresh JSON carries the descriptions now, because
-    otherwise clicking refresh silently stripped the names off a page that had
-    rendered with them. USB descriptor strings are whatever the device claims,
-    so they are JSON-escaped on the wire and HTML-escaped into attributes.
-  - `describe_port_type` is pure and unit-tested across the cases a developer's
-    desk will not reproduce on demand: manufacturer-only, product-only, neither,
-    a maker that merely repeats the product, an unlabelled port, PCI and
-    Bluetooth.
-  - The GUI's *closed* selector names the hardware too, not just its open list —
-    matching the web UI's selected option, since the one state an operator looks
-    at most was the one saying the least. Falls back to the bare path for an
-    undescribed port, or a saved port that isn't currently plugged in.
-- **A slave's Kermit-server-mode port is served by the master.** Previously such
-  a port ran a Kermit server on the slave, so a user at the attached machine saw
-  and wrote the *slave's* transfer directory — the one place files were never
-  supposed to land in master/slave mode, and there was no relay involvement at
-  all. The slave now pipes the wire to the master and the **master** runs its
-  Kermit server on that channel (new `serial-relay <port> kermit` verb,
-  `relay::run_master_relay_kermit`), so a user at the device is talking to the
-  master's server: `remote dir` lists the master's transfer directory, an upload
-  lands there, and a download is read from there. The slave serves nothing itself
-  and keeps no copy, which makes "files always land on the master" true by
-  construction rather than by synchronising two directories — no file protocol
-  over the relay was needed, because `kermit_server_with_outcome` is generic over
-  the stream and the directory belongs to whichever machine runs it.
-  - The channel opens as soon as the link allows, since a Kermit server is only
-    useful if it is already there when the device starts a transfer, and it
-    reconnects with the usual backoff. While the master is unreachable the port
-    serves **nothing**: a local fallback would let a transfer appear to succeed
-    with the file on the wrong machine, which is the surprise this removes.
-  - New master-side key **`allow_relay_kermit`**, off by default and wired into
-    all three config UIs. Kermit's server mode has no authentication of its own
-    — the same reason `allow_atdt_kermit` and `kermit_server_enabled` are opt-in
-    — so serving it to a remote wire is the operator's decision, even though this
-    path already requires a slave that authenticated over SSH with
-    `master_accept_relays` on.
-  - Tested end to end in-process: our Kermit client stands in for the device
-    against `run_master_relay_kermit`, proving an upload lands in the master's
-    directory and that `remote dir` and a download resolve there — against files
-    that exist *only* on the master, so nothing else could have supplied them.
-    Plus a grammar round-trip and a refusal test for the gate.
-
-### Documentation
-- **New `web/cpmreference.html`** — a CP/M emulator reference so this material
-  doesn't have to be rediscovered from the source each time: the `cpm_emu_*`
-  config keys, the CCP built-in commands, every `cpm_emu_uart` profile with its
-  port addresses, the bundled EGT80 terminal (menu, and the keystrokes that
-  select each profile), which driver to pick for which machine, the RomWBW HBIOS
-  calls we service and the two return-convention details that bit us, BDOS/BIOS
-  coverage including what is deliberately absent, and the virtual modem's AT
-  commands and dial targets. Linked from the user manual and added to the
-  References grid on every sibling reference page.
-
-### Fixed
 - **A macOS-only CI failure: two `bindwatch` tests raced each other.** Caught by
   checking CI before tagging rather than trusting the local suite &mdash; exactly the
   case the release checklist warns about, since ubuntu and Windows passed on
@@ -1037,6 +1036,18 @@ follow-up quality/stability pass of our own.
     cost (~1.1 s and ~60 ms for the respective call counts) rather than to
     jitter, so a timer creeping back onto either path fails loudly without the
     test being flaky.
+
+### Documentation
+
+- **New `web/cpmreference.html`** — a CP/M emulator reference so this material
+  doesn't have to be rediscovered from the source each time: the `cpm_emu_*`
+  config keys, the CCP built-in commands, every `cpm_emu_uart` profile with its
+  port addresses, the bundled EGT80 terminal (menu, and the keystrokes that
+  select each profile), which driver to pick for which machine, the RomWBW HBIOS
+  calls we service and the two return-convention details that bit us, BDOS/BIOS
+  coverage including what is deliberately absent, and the virtual modem's AT
+  commands and dial targets. Linked from the user manual and added to the
+  References grid on every sibling reference page.
 
 ## [0.8.0] - 2026-07-26
 
