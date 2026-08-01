@@ -36,6 +36,30 @@ follow-up quality/stability pass of our own.
   the new defaults.
 
 ### Fixed
+- **EGT80 could build a filename out of the previous prompt's text.** BDOS 10
+  reports how many characters were typed but leaves the rest of the buffer
+  holding the last line, and the filename parser read one byte past the count:
+  a name longer than eight characters ending in a dot consumed its dot early
+  and then tested that stale byte as the separator, wrapping its counter from
+  0 to 255 and filling the type field from whatever was typed before.
+  Demonstrated live — typing `ABCDEFGHIJKLM.TXT` and then `LONGFILENAME.`
+  opened `LONGFILE.TXT`, a file the user never named. Bounded (three bytes
+  into a three-byte FCB field, so nothing was corrupted), but on a download it
+  would have offered to overwrite the wrong file.
+- **EGT80's upload spent one junk-byte budget for a whole transfer.** The
+  receive side refreshes its tolerance for stray bytes on every block; the send
+  side set it once, before the handshake. A line that dribbled the odd byte
+  between blocks could therefore fail an upload on its 255th one with every
+  block acknowledged. Both sides now refresh per block.
+- **EGT80's damaged-block fallback is a table, not a register dance.** It
+  restored the defaults with a run of loads that shared one accumulator between
+  fields, so the value left in A for one field silently became the default for
+  the next — and both settings changed earlier in this release hit it: the
+  ASCII display mode and the ADM-3A clear were each about to be undone by an
+  `XOR A` meant for a different field. It is now one table copied over the
+  block, with a CI test pinning it against the shipped defaults field by field
+  so the two cannot drift again. Verified by running a deliberately corrupted
+  copy: every restored default is correct on screen.
 - **The CP/M emulator leaked the DMA address from one program to the next.**
   CP/M's own CCP resets the DMA to 0080H immediately before running a transient
   (`CCP22.ASM`'s `TRANS7` calls `SETDMA` on the line before `CALL TPA`); we did

@@ -2279,7 +2279,7 @@ mod egt80_tests {
         use sha2::{Digest, Sha256};
 
         const PINNED: &str =
-            "ff8304bd27b070e6abe6977b0227301fdae823762c8bfe58bdda8e40bbf0731c";
+            "b5103c8eabb76e794dfec76f401f353d79baa608a57a54c7775f2f3e51ec5525";
 
         let actual = format!("{:x}", Sha256::digest(EGT80_COM));
         assert_eq!(
@@ -2447,6 +2447,96 @@ mod egt80_tests {
                 crate::cpm::uart::DEFAULT_UART, p.status_port
             ),
             other => panic!("the default UART profile should be a port profile, got {other:?}"),
+        }
+    }
+
+    /// The shipped settings block and the damaged-block fallback must not
+    /// drift apart.
+    ///
+    /// EGT80 carries its defaults twice: once as the settings block inside the
+    /// `.COM` (what a fresh copy starts with) and once as `DEFBLK`, the table
+    /// `CFGBAD` copies over that block when a saved one fails validation. They
+    /// have to agree in every field but `PKIND` — a block we just rejected is
+    /// no reason to believe any particular port is present.
+    ///
+    /// This is checked because they *did* drift, twice in one evening: the
+    /// fallback used to be a run of loads that shared one accumulator between
+    /// fields, so changing the shipped display mode to ASCII and the shipped
+    /// clear to the ADM-3A `^Z` each left the fallback quietly restoring the
+    /// old value. The table replaced the register dance; this keeps the table
+    /// honest. Source-level, so it runs in CI, which cannot rebuild EGT80.
+    #[test]
+    fn test_egt80_fallback_defaults_match_the_shipped_block() {
+        // Normalised to LF: a Windows checkout has CRLF endings and every line
+        // here would otherwise carry a trailing \r into the parsed value.
+        let src = include_str!("../../EGT80/EGT80.Z80").replace("\r\n", "\n");
+
+        /// `LABEL: DB value ; comment` -> (label, value), resolving the two
+        /// port-kind equates the table uses by name.
+        fn field(line: &str) -> Option<(String, u8)> {
+            let code = line.split(';').next()?.trim();
+            let (label, rest) = match code.split_once(':') {
+                Some((l, r)) => (l.trim().to_string(), r),
+                None => (String::new(), code),
+            };
+            let val = rest.trim().strip_prefix("DB")?.trim();
+            let n = match val {
+                "PKNONE" => 0,
+                "PKSIO" => 1,
+                v if v.ends_with('H') => u8::from_str_radix(v.trim_end_matches('H'), 16).ok()?,
+                v => v.parse().ok()?,
+            };
+            Some((label, n))
+        }
+
+        // The shipped block: every DB between the signature and CFGADR.
+        let block_start = src.find("CFGSIG: DB").expect("settings block signature not found");
+        let block_end = src[block_start..].find("CFGADR").expect("end of settings block not found");
+        let shipped: Vec<(String, u8)> = src[block_start..block_start + block_end]
+            .lines()
+            .filter_map(field)
+            // The 8-byte signature is a quoted string, so `field` already
+            // rejects it; naming it here as well means a future signature
+            // written as numeric bytes cannot slip in as a setting.
+            .filter(|(name, _)| name != "CFGSIG")
+            .collect();
+
+        // The fallback table: every DB between DEFBLK and DEFLEN.
+        let tbl_start = src.find("DEFBLK: DB").expect("DEFBLK not found");
+        let tbl_end = src[tbl_start..].find("DEFLEN").expect("DEFLEN not found");
+        let fallback: Vec<(String, u8)> = src[tbl_start..tbl_start + tbl_end]
+            .lines()
+            .filter_map(field)
+            .collect();
+
+        assert!(
+            shipped.len() >= 10,
+            "only parsed {} shipped fields — this scan has stopped matching",
+            shipped.len()
+        );
+        assert_eq!(
+            shipped.len(),
+            fallback.len(),
+            "the fallback table has {} entries for {} settings — a field was added \
+             to the block without adding it here (or the reverse)",
+            fallback.len(),
+            shipped.len()
+        );
+
+        for (i, ((name, want), (_, got))) in shipped.iter().zip(fallback.iter()).enumerate() {
+            if name == "PKIND" {
+                assert_eq!(
+                    *got, 0,
+                    "the fallback must select NO port: a rejected block is no reason to \
+                     believe one is there"
+                );
+                continue;
+            }
+            assert_eq!(
+                got, want,
+                "field {i} ({name}): the shipped default is {want} but a damaged block \
+                 would be restored to {got}"
+            );
         }
     }
 

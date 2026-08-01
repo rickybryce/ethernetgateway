@@ -159,9 +159,11 @@ START:  JP      BEGIN
 ; SETTINGS  (record 1 of the file: address 0180H, offset 80H)
 ;
 ; Defaults are the values that suit the most machines: an RC2014/RomWBW
-; second SIO/2 channel, and ANSI pass-through, which is what the gateway
-; offers a terminal that asks for colour.  CFGCHK validates all of this at
-; startup and falls back to these defaults if a saved block is damaged.
+; second SIO/2 channel, ASCII output, and the ADM-3A clear - the pair that
+; reads correctly on every terminal, with ANSI and colour one keystroke away
+; for those that want them.  CFGCHK validates all of this at startup and
+; falls back to DEFBLK (which mirrors these, minus the port) if a saved
+; block is damaged.
 ;=======================================================================
         ORG     0180H
 CFGSIG: DB      'EGT80CFG'      ; must match CFGREF or the block is ignored
@@ -1302,9 +1304,15 @@ TSEND2: LD      A,LF
 ;-----------------------------------------------------------------------
 ; TESC - the escape key was pressed in terminal mode.
 ;
-; One keystroke decides: leave, get help, or send the escape character
-; itself (pressing it twice), so the key is never trapped away from the
-; remote end.
+; One keystroke decides: leave, get help, move a file, or send the escape
+; character itself (pressing it twice), so the key is never trapped away from
+; the remote end.
+;
+; Settings is deliberately absent.  It was here, and it did not work: the
+; screen drew, but the keyboard was still feeding the session, so nothing
+; could be selected.  Transfers belong here - the point of this menu is to
+; fetch a file without dropping the call - while settings are a sit-down job
+; that `E` reaches properly, and leaving terminal mode does not hang up.
 ;-----------------------------------------------------------------------
 TESC:   CALL    CRLF
         LD      HL,MESCMN       ; name the key rather than say "twice"
@@ -1596,6 +1604,13 @@ XSLOOP: CALL    XCHKAB          ; a keypress can stop this
         JR      NZ,XSDONE       ; no more records: end of file
         LD      A,XRETRY
         LD      (XCNT),A
+        LD      A,XNOISE        ; ...and a fresh junk budget, which the
+        LD      (XNCNT),A       ; receive side already does on progress (see
+                                ; XRRSET).  Without it the budget was spent
+                                ; once for the whole transfer, so a line that
+                                ; dribbled the odd stray byte between blocks
+                                ; could fail an upload on its 255th one with
+                                ; every block acknowledged.
 XSBLK:  CALL    XBLKSN          ; put the block on the wire
 XSWAIT: LD      A,XLONG
         LD      (XTMO),A
@@ -2181,6 +2196,19 @@ XUSER:  CALL    XCANC
 ; Accepts an optional drive letter (B:PROG.COM), folds to upper case, and
 ; pads the name and type with spaces the way CP/M expects.  Carry set if
 ; the user typed nothing, so RETURN always means "never mind".
+;
+; XFN4 checks B before reading, and that check is load-bearing.  BDOS 10
+; reports how many characters were typed but leaves the rest of the buffer
+; holding the PREVIOUS line, so reading one byte past the count reads the
+; last prompt's text.  A name longer than eight characters that ends in a
+; dot ("LONGFILENAME.") consumed its dot in the skip-to-the-dot loop and
+; arrived here with B at zero; the stale byte was then tested as the
+; separator, and if it happened to be a dot, B went 0 -> 0FFH and the type
+; field was filled from whatever the user typed last.  Demonstrated: typing
+; "ABCDEFGHIJKLM.TXT" and then "LONGFILENAME." opened LONGFILE.TXT - a file
+; the user never named.  Bounded (three bytes into an FCB field that is
+; three bytes long, so nothing was corrupted) but wrong, and on a download
+; it would have offered to overwrite the wrong file.
 ;-----------------------------------------------------------------------
 XFNAME: LD      A,20            ; room for drive + 8.3 + slack
         LD      (XLINE),A
@@ -2262,7 +2290,10 @@ XFN3A:  LD      A,B             ; name full: skip to the dot
         DEC     B
         CP      '.'
         JR      NZ,XFN3A
-XFN4:   LD      A,(HL)          ; step over the dot itself
+XFN4:   LD      A,B             ; nothing typed past the name?  Then the
+        OR      A               ; type is empty and there is no dot to step
+        JR      Z,XFNOK         ; over - see below
+        LD      A,(HL)          ; step over the dot itself
         CP      '.'
         JR      NZ,XFN5
         INC     HL
@@ -2446,33 +2477,49 @@ CFGCH1: LD      A,(DE)
         CALL    ESCOK           ; would trap that key for ever - and a letter
         JR      C,CFGBAD        ; would swallow ordinary typing
         RET
-CFGBAD: LD      A,PKNONE        ; safe defaults: nothing selected, ASCII
-        LD      (PKIND),A
-        LD      A,1             ; FLTMOD 1 = ASCII, matching the shipped
-        LD      (FLTMOD),A      ; default above (the XOR below would undo it)
-        XOR     A
-        LD      (PABASE),A
-        LD      (PCHAN),A
-        LD      (ECHOFL),A
-        LD      (CRLFFL),A
-        LD      (LPAR),A        ; 9600 8N1, and programming switched off -
-        LD      (LSAPP),A       ; the values are only a starting point while
-        LD      A,5             ; LSAPP is 0, but they must still be legal
-        LD      (LBAUD),A       ; because the screen displays them
-        LD      A,8
-        LD      (LBITS),A
-        LD      A,1
-        LD      (LSTOP),A
-        LD      (LADIV),A
-        XOR     A               ; 0 = the ADM-3A ^Z clear, the shipped default
-        LD      (CLSMOD),A      ; (A was 1 here for LSTOP/LADIV)
-        LD      A,19H           ; ^Y
-        LD      (ESCCH),A
+CFGBAD: LD      HL,DEFBLK       ; one table, copied over the whole block
+        LD      DE,PKIND
+        LD      BC,DEFLEN
+        LDIR
         CALL    CRLF
         LD      HL,MCFGBAD
         CALL    PSTR
         JP      TWAIT           ; the menu clears the screen: make sure this
                                 ; is read before it goes
+
+;-----------------------------------------------------------------------
+; DEFBLK - the fallback settings, in the block's own field order.
+;
+; A table rather than a run of loads, because the run of loads shared one
+; accumulator between fields and that is a trap: the value left in A for one
+; field silently became the default for the next.  Both settings changed on
+; 2026-07-31 hit it - the ASCII display mode and the ADM-3A clear were each
+; about to be undone by an XOR A meant for a different field, and each needed
+; its own patch to survive a damaged block.  Copying a table cannot go wrong
+; that way, and a new setting added to the block above shows up here as a
+; missing byte rather than as a field that quietly keeps the wrong value.
+;
+; It matches the shipped defaults above in every field but one: PKIND is
+; PKNONE, because a block we have just rejected is no reason to believe any
+; particular port is present.  DEFLEN is computed, so the two cannot
+; disagree about length.
+;-----------------------------------------------------------------------
+DEFBLK: DB      PKNONE          ; PKIND  - nothing selected (see above)
+        DB      82H             ; PBASE  - SIO/2 board 1 channel B
+        DB      0               ; PCHAN  - ASCI channel 0
+        DB      0               ; PABASE - unmoved Z180 I/O base
+        DB      1               ; FLTMOD - ASCII (colour is opt-in)
+        DB      0               ; ECHOFL - the remote echoes
+        DB      0               ; CRLFFL - no LF added to a typed CR
+        DB      19H             ; ESCCH  - ^Y
+        DB      5               ; LBAUD  - 9600
+        DB      8               ; LBITS
+        DB      0               ; LPAR   - none
+        DB      1               ; LSTOP
+        DB      1               ; LADIV  - /16
+        DB      0               ; LSAPP  - never program the port
+        DB      0               ; CLSMOD - the ADM-3A ^Z clear
+DEFLEN  EQU     $-DEFBLK
 
 ;-----------------------------------------------------------------------
 ; ESCOK - is A a usable menu key?  Carry clear if it is.

@@ -6,3 +6,10 @@
 # tests with a CRLF-in-left / LF-in-right assertion mismatch.
 tests/fixtures/*.bin       binary
 tests/fixtures/*.payload   binary
+
+# EGT80.COM is a compiled CP/M binary that is committed and then compiled
+# into the gateway with include_bytes!.  Git's content detection already
+# treats it as binary (it is full of NULs), but say so explicitly: the exact
+# bytes are the product here, and the only thing standing between a checkout
+# that normalized them and a shipped-broken terminal is one hash-pin test.
+EGT80/EGT80.COM            binary
