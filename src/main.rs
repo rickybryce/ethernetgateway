@@ -139,6 +139,22 @@ fn main() {
                 // and a gateway must still come up for its other services.
                 glog!("Warning: could not create the CP/M folders: {}", e);
             }
+            // And bring `cpm_mounts` up, here, at startup.
+            //
+            // This used to happen only when somebody first entered the
+            // emulator, which left the mount table *empty* on a gateway nobody
+            // had used yet — and an empty table is indistinguishable from "the
+            // operator unmounted everything".  Every configuration screen
+            // persists the live table, so one Save from the web page on a
+            // freshly started gateway rewrote `cpm_mounts` as empty and the
+            // operator's drives were gone for good.  No boot, no race and no
+            // concurrency needed: restart, press Save.
+            //
+            // Doing it here also makes the documented behaviour true — the
+            // module comment has always said `apply_config_mounts` brings
+            // mounts up at startup.
+            let base = cpm::layout::cpm_dir(&cfg.transfer_dir);
+            cpm::image::apply_config_mounts(&base, &cfg.cpm_mounts);
         }
 
         // Start tokio runtime on a worker thread so the main thread is free for the GUI.

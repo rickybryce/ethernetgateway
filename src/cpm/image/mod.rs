@@ -496,6 +496,16 @@ pub fn apply_mount_selection(
 
 /// The live mount table in `cpm_mounts` form, for writing back to the config.
 pub fn current_mounts_value() -> String {
+    // With the emulator disabled the mount table is deliberately cleared and
+    // nothing brings it back, so the live table is not authoritative — and
+    // persisting it would rewrite `cpm_mounts` as empty and lose the operator's
+    // drives the moment they turned CP/M off and saved anything. Report what
+    // the configuration says instead. One place, because all three screens
+    // persist through here.
+    let cfg = crate::config::get_config();
+    if !cfg.cpm_emu_enabled {
+        return cfg.cpm_mounts.clone();
+    }
     let mut mounts: Vec<(u8, String)> = registry::all()
         .iter()
         .enumerate()
@@ -507,6 +517,10 @@ pub fn current_mounts_value() -> String {
     // configuration would come back short after a restart.
     mounts.extend(registry::boot_loans());
     mounts.sort_by_key(|(d, _)| *d);
+    // A drive is briefly in both tables while a booted session hands it back —
+    // the restore publishes the mount before the loan ends, deliberately, so
+    // the drive is never in neither. Emit it once.
+    mounts.dedup_by_key(|(d, _)| *d);
     format_mounts(&mounts)
 }
 

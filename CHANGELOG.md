@@ -111,6 +111,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without complaint; what appears is up to the guest, and nothing here patches
   somebody else's BIOS to change it.
 
+  **Your mounts are lent to the boot, not copied.** A mounted image is a live
+  object with its directory cached in memory, and a booted guest rewrites the
+  whole file when it leaves — so a drive the boot takes goes out of service for
+  the duration and is opened again, fresh, when the session ends, however it
+  ends. While it is lent it still counts as yours: it keeps its place in
+  `cpm_mounts`, it is shown as held in all three screens, and nothing can change
+  it underneath the guest. One session per image is enforced in every direction
+  now — a booted image cannot also be mounted, and one image cannot be on two
+  drives.
+
   The boot disk is always unit 0, because although the bootstrap can load a
   system from any unit — measured — the system it loads comes up as its own A:
   and reads unit 0 from then on. Anything mounted on A: sits behind it and the

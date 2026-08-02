@@ -4250,6 +4250,65 @@ mod tests {
         );
     }
 
+    /// A save must never rewrite `cpm_mounts` as empty just because nothing
+    /// has been brought up yet.
+    ///
+    /// This lost real configuration: mounts were applied only when somebody
+    /// first entered the emulator, so on a freshly started gateway the table
+    /// was empty — indistinguishable from "the operator unmounted everything"
+    /// — and one Save from the web page wrote `cpm_mounts =` and the drives
+    /// were gone. No boot, no race, no concurrency: restart, press Save.
+    ///
+    /// The fix is that `apply_config_mounts` now runs at startup, so an empty
+    /// table really does mean nothing is mounted. What this pins is the
+    /// consequence: with mounts live, a save that touches only another setting
+    /// leaves them exactly as they were.
+    #[test]
+    fn test_a_save_does_not_wipe_mounts_that_are_live() {
+        use crate::cpm::image::{self, registry};
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_web_save_keeps_mounts");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = image::images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let blank = crate::cpm::image::format::by_token("altair8").unwrap().blank_image().unwrap();
+        std::fs::write(images.join("altair8_one.dsk"), &blank).unwrap();
+        std::fs::write(images.join("altair8_two.dsk"), &blank).unwrap();
+
+        // What startup now does.
+        image::apply_config_mounts(&base, "B=altair8_one.dsk,C=altair8_two.dsk");
+        assert_eq!(
+            image::current_mounts_value(),
+            "B=altair8_one.dsk,C=altair8_two.dsk",
+            "startup must bring the configured mounts up"
+        );
+
+        // A save whose selects were rendered from the live table, unchanged.
+        let mut fields = HashMap::new();
+        for d in 0..crate::cpm::NUM_DRIVES {
+            let key = format!("cpm_mount_{}", (b'a' + d) as char);
+            let val = match d {
+                1 => "altair8_one.dsk",
+                2 => "altair8_two.dsk",
+                _ => "",
+            };
+            fields.insert(key, val.to_string());
+        }
+        let cfg = Config {
+            transfer_dir: base.parent().unwrap().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let (_notice, value) = apply_cpm_mount_form(&fields, &cfg);
+        assert_eq!(
+            value, "B=altair8_one.dsk,C=altair8_two.dsk",
+            "a save must not drop the operator's drives"
+        );
+
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// An empty name box must not create anything.  Every ordinary Save on this
     /// screen submits the create fields too, so a blank one has to read as "no"
     /// — otherwise changing a mount also tries to make a disk and reports a

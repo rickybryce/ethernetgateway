@@ -309,16 +309,21 @@ struct RemountOnDrop {
 impl Drop for RemountOnDrop {
     fn drop(&mut self) {
         for (drive, name) in std::mem::take(&mut self.taken) {
-            // End the loan first: a lent drive refuses a mount change, and this
-            // session is the one holding it.
+            // Restore *first*, end the loan second.
+            //
             // Restoring is not a mount *change*, so it is not something another
-            // session may veto.  `mount_image` refuses a drive that reads as in
-            // use, and a lent drive reads as empty — so anyone who parked on it
-            // meanwhile could otherwise block the restore, and the drive would
-            // end up neither mounted nor lent, which drops it from
-            // `cpm_mounts` on the next save from any screen.
+            // session may veto — `restore_mount` skips the in-use check, and
+            // therefore does not need the loan gone to succeed.  Ending the
+            // loan first left the drive in *neither* table for the length of a
+            // file open, a format identify and a directory read, and in that
+            // window a save from any screen writes `cpm_mounts` without the
+            // drive while `drive_holding` reports the image as free for a
+            // second session to mount elsewhere.  Being briefly in *both*
+            // tables is harmless by comparison: reads consult the image before
+            // the folder, and `current_mounts_value` de-duplicates by drive.
+            let restored = crate::cpm::image::restore_mount(&self.base, drive, &name);
             crate::cpm::image::registry::end_boot_loan(drive);
-            if let Err(e) = crate::cpm::image::restore_mount(&self.base, drive, &name) {
+            if let Err(e) = restored {
                 glog!("CP/M boot: could not restore {} on drive {}: {}", name, drive, e);
             }
         }
@@ -362,7 +367,13 @@ async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io:
         Err(_) => None,
     };
     let tmp = saving_path(path);
-    tokio::fs::write(&tmp, bytes).await?;
+    if let Err(e) = tokio::fs::write(&tmp, bytes).await {
+        // Otherwise a teardown that runs out of space leaves up to sixteen
+        // part-written `.saving` files, invisible to every picker and with no
+        // reclaim — the same debris the `.creating` path is careful about.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     if let Some(p) = perms {
         let _ = tokio::fs::set_permissions(&tmp, p).await;
     }
@@ -525,13 +536,17 @@ impl TelnetSession {
         // Booting a disk parked anywhere else therefore loads fine and then
         // runs against whatever happens to be in unit 0, which looks like a
         // hang rather than a mistake.
+        //
         // Declaration order is load-bearing, because drop order is its reverse.
-        // `remounts` first so it drops last: the mounts go back only after the
-        // drives are released *and* after `disks` has dropped every `BootClaim`
-        // — a claim still held while the mount is being published would let
-        // another session start booting the image the restore is reading.
-        let mut remounts = RemountOnDrop { base: self.cpmmount_base(), taken: Vec::new() };
+        // `disks` first so it drops *last*: it owns every `BootClaim`, and a
+        // claim released before the mounts go back would let another session
+        // start booting the image while `restore_mount` — which skips every
+        // guard by design — publishes a live `ImageFs` over it.  The order out
+        // is `busy`, then `remounts` (restore, then end the loan), then the
+        // claims: the image is claimed or mounted at every instant, and the
+        // drive is in a table at every instant.
         let mut disks: Vec<Option<BootDisk>> = (0..MAX_BOOT_UNITS).map(|_| None).collect();
+        let mut remounts = RemountOnDrop { base: self.cpmmount_base(), taken: Vec::new() };
         if let Err(e) = machine.insert(0, bytes, !writable) {
             self.send_line(&format!("  {}", self.red(&e))).await?;
             return Ok(());
