@@ -1329,9 +1329,12 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
 
                 <div class="callout callout-info">
                     <p>
-                        <strong>Status: the interface is written down and the
-                        machine is ready for a second controller; the 88-HDSK
-                        board itself is not built.</strong> This section exists so
+                        <strong>Status: the controller is built and unit-tested
+                        against the manual; the bootstrap is not written yet.</strong>
+                        An <code>HDSK*.DSK</code> is now recognised, accepted
+                        into a drive and served by the 88-HDSK board, but
+                        booting one still reports that nothing here knows the
+                        sequence its PROM would run. This section exists so
                         the reading does not have to be done twice. Nothing in
                         the gateway speaks this protocol yet; `HDSK*.DSK` images
                         still <a href="#others">mount</a> as <code>altairhd</code>
@@ -1561,6 +1564,55 @@ in   161                            ; clears ready, returns the error byte
                         <tr><td>7</td><td>Write protect</td></tr>
                     </tbody>
                 </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The disk documents its own boot loader</h3>
+                <p>
+                    The best find of the exercise, and worth looking for on any
+                    disk before reverse-engineering anything: <strong>HDSK03
+                    carries the assembler source of its own boot loader</strong>,
+                    in plain ASCII at cylinder 1, head 1, sectors 8&ndash;12. It
+                    is ground truth from the people who wrote the hardware's
+                    software, and it settles several things the manual leaves
+                    ambiguous.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>From the source</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>CSEEK equ 00h</code>, <code>CRDSEC equ 30h</code></td><td>Confirms the command nibbles: seek is <code>0000</code>, read sector is <code>0011</code>.</td></tr>
+                        <tr><td><code>CSIDE equ 020h</code>, <code>CFPLTR equ 0C0h</code>, <code>CUNIT equ 00Ch</code></td><td>Bit 5 is side, bits 6&ndash;7 are platter, and the unit mask sits in the high byte.</td></tr>
+                        <tr><td><code>STRTSEC equ 2</code></td><td>CP/M starts at sector 2; sector 0 is the volume label and sector 1 is spare.</td></tr>
+                        <tr><td><code>SECTCNT equ (CPMLEN/256)-1</code></td><td>How many sectors the system occupies, derived rather than fixed.</td></tr>
+                        <tr><td><code>HD0SKEW equ 1</code>, <code>HD1SKEW equ 13</code></td><td><strong>There is a sector skew</strong>, and it differs by platter &mdash; 1 on the removable, 13 on the fixed.</td></tr>
+                        <tr><td>&ldquo;the CP/M image fits entirely in cylinder zero&rdquo;</td><td>No seeking during the load.</td></tr>
+                        <tr><td>&ldquo;the hard disk bootloader ROM (HDBL) loads this program into memory at address zero&rdquo;</td><td>Two stages: the PROM loads a boot program to <code>0000</code>, and <em>that</em> loads CP/M.</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The apparent contradiction was not one.</strong>
+                        The source looks at first like it disagrees with the
+                        manual about the command bits &mdash; the manual says
+                        head is bits 5&ndash;7, the source names a side bit and a
+                        platter field. They are the same thing: a head number
+                        0&ndash;7 <em>is</em> platter&times;2 + side, which is why
+                        the fixed platter is heads 2 and 3 and the removable is
+                        0 and 1. The masks settle it, and no code needed
+                        changing.
+                    </p>
+                </div>
+                <p>
+                    Sector 7 of the image is that first-stage program, and
+                    disassembling its opening bytes confirms the arithmetic:
+                    <code>31 00 D7</code> &rarr; <code>LXI SP,0D700h</code>, so
+                    <strong>CCPBASE is D700h</strong> on this 63 K system, then
+                    <code>F3</code> <code>DI</code>, and shortly after
+                    <code>DB FF</code> &mdash; <strong><code>IN 0FFh</code>, the
+                    front-panel sense switches</strong>. Its own comments say
+                    why: <em>&ldquo;If A11 is down, boot is from the removable
+                    platter. If A11 is up, boot is from the fixed platter.&rdquo;</em>
+                    The switches decide which platter the machine boots, exactly
+                    the class of thing that cost a day on the floppy.
+                </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>

@@ -106,6 +106,15 @@ struct Mounted {
 /// Memory, ports and drives for a booted disk.
 pub struct BootMachine {
     mem: Vec<u8>,
+    /// Which controller took the disk in each drive.
+    ///
+    /// Recorded at insert time because a drive number alone is ambiguous once
+    /// there is more than one board: drive 0 of the floppy controller and
+    /// drive 0 of the hard disk are different drives. Without this, booting a
+    /// hard disk asked the *floppy* to cold-start and got told its drive was
+    /// empty — true, and completely misleading.
+    disk_controller: Vec<Option<usize>>,
+
     /// The controllers this machine carries, each claiming its own ports.
     ///
     /// A list rather than a field per board: adding the 88-HDSK should be
@@ -144,7 +153,13 @@ impl BootMachine {
     pub fn new() -> BootMachine {
         BootMachine {
             mem: vec![0; 0x10000],
-            controllers: vec![Box::new(Dcdd::new())],
+            // Both boards, always.  A real Altair either had the hard disk
+            // controller plugged in or it did not, but there is nothing to be
+            // gained here by making an operator say so: each claims its own
+            // ports and its own media size, and a machine with no hard disk in
+            // a drive is simply a controller nobody talks to.
+            controllers: vec![Box::new(Dcdd::new()), Box::new(super::hdsk::Hdsk::new())],
+            disk_controller: (0..16).map(|_| None).collect(),
             disks: (0..16).map(|_| None).collect(),
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
@@ -239,13 +254,14 @@ impl BootMachine {
         // boards took different media, and before anything is running the file
         // length is all there is to go on.
         let len = bytes.len() as u64;
-        let taken = self
-            .controllers
-            .iter_mut()
-            .find(|c| c.accepts(len).is_some())
-            .map(|c| c.insert(drive, len, read_only));
+        let which = self.controllers.iter().position(|c| c.accepts(len).is_some());
+        let taken = which.map(|i| self.controllers[i].insert(drive, len, read_only));
         match taken {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                if let Some(slot) = self.disk_controller.get_mut(drive as usize) {
+                    *slot = which;
+                }
+            }
             Some(Err(e)) => return Err(e),
             None => {
                 // Name the hardware rather than just refusing: with more than
@@ -291,13 +307,14 @@ impl BootMachine {
     /// to do with a disk that loads and then runs off into nothing.
     #[cfg(test)]
     fn boot_with_step(&mut self, cpu: &mut Cpu, drive: u8, step: u8) -> Result<(), BootError> {
-        let BootMachine { disks, controllers, mem, .. } = self;
+        let BootMachine { disks, controllers, mem, disk_controller, .. } = self;
         let disks = &*disks;
-        // Only the floppy controller has a bootstrap; see `Controller::as_dcdd`.
-        let dcdd = controllers
-            .iter_mut()
-            .find_map(|c| c.as_dcdd())
+        let which = disk_controller
+            .get(drive as usize)
+            .copied()
+            .flatten()
             .ok_or(BootError::NoDisk(drive))?;
+        let dcdd = controllers[which].as_dcdd().ok_or(BootError::NoBootstrap)?;
         let mut chunks: Vec<(u16, Vec<u8>)> = Vec::new();
         let entry = super::boot::cold_boot_with_step(
             dcdd,
@@ -332,15 +349,19 @@ impl BootMachine {
 
     /// Cold-boot from a drive, leaving the CPU ready to run.
     pub fn boot(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
-        let BootMachine { disks, controllers, mem, .. } = self;
+        let BootMachine { disks, controllers, mem, disk_controller, .. } = self;
         let disks = &*disks;
-        // Only the floppy controller has a bootstrap; see `Controller::as_dcdd`.
-        // A machine carrying only a board that cannot cold-start reports the
-        // drive as unbootable rather than pretending to try.
-        let dcdd = controllers
-            .iter_mut()
-            .find_map(|c| c.as_dcdd())
+        // The controller holding *this* drive, not just any controller: drive 0
+        // of the floppy board and drive 0 of the hard disk are different
+        // drives, and asking the wrong one produced a true but useless "that
+        // drive is empty".
+        let which = disk_controller
+            .get(drive as usize)
+            .copied()
+            .flatten()
             .ok_or(BootError::NoDisk(drive))?;
+        // Only the floppy has a bootstrap; see `Controller::as_dcdd`.
+        let dcdd = controllers[which].as_dcdd().ok_or(BootError::NoBootstrap)?;
         // Every chunk with the address it belongs at.  The bootstrap stores
         // more than one, and keeping only the last — or ignoring the address —
         // silently loads a partial loader that runs off its own end.
@@ -414,6 +435,19 @@ impl BootMachine {
     /// Position-register reads without the disk moving on.
     pub fn stuck_polls(&self) -> u32 {
         self.controllers.iter().map(|c| c.stuck_polls()).max().unwrap_or(0)
+    }
+
+    /// What medium an image of this size is, if any controller here takes it.
+    ///
+    /// The one place that answers "can this file be booted", so the boot
+    /// picker, the survey and the generated readme cannot disagree about it —
+    /// and so a new controller becomes bootable everywhere by existing, rather
+    /// than by being added to three lists.
+    pub fn medium_for(image_len: u64) -> Option<&'static str> {
+        BootMachine::new()
+            .controllers
+            .iter()
+            .find_map(|c| c.accepts(image_len))
     }
 
     /// Which controller answers at this port, if any.
@@ -609,7 +643,10 @@ mod tests {
             "test board"
         }
         fn owns_port(&self, port: u8) -> bool {
-            (0xA0..=0xA7).contains(&port)
+            // Ports no real board here claims: 0xA0-0xA7 belong to the 88-HDSK
+            // now, and a collision would prove nothing except that the first
+            // controller to claim a port wins.
+            (0xB0..=0xB7).contains(&port)
         }
         fn port_in(&mut self, _port: u8) -> (u8, HostRequest) {
             // Ask for the second 128 bytes of the image, to prove the offset
@@ -657,16 +694,16 @@ mod tests {
         m.insert(1, img, true).expect("the second controller takes it");
 
         // Its ports reach it...
-        m.port_out(0xA3, 0x80);
-        assert_eq!(*seen.lock().unwrap(), Some((0xA3, 0x80)));
-        let v = m.port_in(0xA5);
+        m.port_out(0xB3, 0x80);
+        assert_eq!(*seen.lock().unwrap(), Some((0xB3, 0x80)));
+        let v = m.port_in(0xB5);
         assert_eq!(v, 0x5A, "the second controller answered its own port");
         // ...and the floppy's ports still reach the floppy, untouched.
         m.port_in(0x08);
 
         // The byte-range request was served from the right image at the right
         // offset — the arithmetic the controller did, not the machine.
-        let fake = m.controllers[1].buffer(1).expect("buffered").to_vec();
+        let fake = m.controllers.last().unwrap().buffer(1).expect("buffered").to_vec();
         assert_eq!(fake.len(), 128);
         assert!(fake.iter().all(|&b| b == 0xC3), "wrong bytes or wrong offset");
     }
@@ -1651,10 +1688,11 @@ mod tests {
         let mut spoke = 0;
         for name in &names {
             let bytes = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
-            if geometry_for(bytes.len() as u64).is_none() {
-                println!("  skipped  {name}  ({} bytes — not an 88-DCDD image)", bytes.len());
+            let Some(medium) = BootMachine::medium_for(bytes.len() as u64) else {
+                println!("  skipped  {name}  ({} bytes — no controller takes it)", bytes.len());
                 continue;
-            }
+            };
+            let _ = medium;
             let mut m = BootMachine::new();
             m.insert(0, bytes, true).unwrap();
             let mut cpu = BootMachine::new_cpu();

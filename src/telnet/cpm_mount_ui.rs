@@ -209,7 +209,9 @@ impl TelnetSession {
             .filter(|n| {
                 std::fs::metadata(crate::cpm::image::images_dir(&base).join(n))
                     .ok()
-                    .and_then(|m| crate::cpm::dcdd::geometry_for(m.len()))
+                    .and_then(|m| {
+                        crate::cpm::boot_machine::BootMachine::medium_for(m.len())
+                    })
                     .is_some()
             })
             .collect();

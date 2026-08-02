@@ -32,6 +32,7 @@
 mod fcb;
 mod fs;
 pub mod hbios;
+pub mod hdsk;
 pub mod boot;
 pub mod boot_machine;
 pub mod controller;

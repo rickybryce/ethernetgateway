@@ -124,6 +124,12 @@ pub enum BootError {
     NeverPositioned,
     /// The sector holds nothing that could be code.
     NotBootable,
+    /// The disk is on a controller that cannot cold-start one yet.
+    ///
+    /// Distinct from an empty drive, which is what this used to report and is
+    /// a different thing entirely — the disk is there and the controller can
+    /// read it, but nothing here knows the sequence its boot PROM would run.
+    NoBootstrap,
 }
 
 impl std::fmt::Display for BootError {
@@ -139,6 +145,10 @@ impl std::fmt::Display for BootError {
             BootError::NotBootable => write!(
                 f,
                 "this image has no boot sector — it is data, not a system disk"
+            ),
+            BootError::NoBootstrap => write!(
+                f,
+                "this disk is on a controller that cannot cold-start one yet"
             ),
         }
     }
