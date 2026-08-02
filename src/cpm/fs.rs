@@ -1177,6 +1177,11 @@ mod tests {
     /// error.
     #[test]
     fn test_two_sessions_cannot_write_the_same_file() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join(format!("cpm_lock_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("A")).unwrap();
@@ -1229,6 +1234,11 @@ mod tests {
     /// and lock those names against everyone else for no reason.
     #[test]
     fn test_a_failed_write_releases_its_claim() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join(format!("cpm_lockfail_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("A")).unwrap();
@@ -1260,6 +1270,11 @@ mod tests {
     /// file for the life of the gateway.
     #[test]
     fn test_dropping_a_session_releases_its_claims() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join(format!("cpm_lockdrop_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("A")).unwrap();
@@ -1294,6 +1309,11 @@ mod tests {
     /// it, and is refused the same way.
     #[test]
     fn test_a_second_session_cannot_erase_a_file_being_written() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join(format!("cpm_lockera_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("A")).unwrap();
@@ -1332,6 +1352,11 @@ mod tests {
 
     #[test]
     fn test_select_and_letter() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut fs = CpmFs::new(PathBuf::from("/tmp/cpm"));
         assert_eq!(fs.current_drive_letter(), 'A');
         assert!(fs.select(1));
@@ -1344,6 +1369,11 @@ mod tests {
 
     #[test]
     fn test_drive_index_for() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let fs = CpmFs::new(PathBuf::from("/tmp/cpm"));
         assert_eq!(fs.drive_index_for(0), Some(0)); // default = current (A)
         assert_eq!(fs.drive_index_for(1), Some(0)); // A:
@@ -1354,6 +1384,11 @@ mod tests {
 
     #[test]
     fn test_resolve_jailed_path() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = PathBuf::from("/tmp/xmodem_cpm_base");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "PIP", "COM"); // A:PIP.COM
@@ -1363,6 +1398,11 @@ mod tests {
 
     #[test]
     fn test_resolve_default_drive_follows_current() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = PathBuf::from("/tmp/xmodem_cpm_base");
         let mut fs = CpmFs::new(base.clone());
         fs.select(2); // C:
@@ -1373,6 +1413,11 @@ mod tests {
 
     #[test]
     fn test_resolve_rejects_bad_drive_and_wildcards() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let fs = CpmFs::new(PathBuf::from("/tmp/cpm"));
         // Drive beyond P:.
         assert!(fs.resolve(&fcb_named(17, "A", "TXT")).is_none());
@@ -1404,6 +1449,11 @@ mod tests {
     /// tempting to check for.
     #[test]
     fn test_has_temp_dollar_file() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("dollar");
         let mut fs = CpmFs::new(base.clone());
         assert!(!fs.has_temp_dollar_file(), "a clean drive sets no flag");
@@ -1438,6 +1488,11 @@ mod tests {
 
     #[test]
     fn test_make_write_read_roundtrip() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("rw");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "DATA", "TXT");
@@ -1468,6 +1523,11 @@ mod tests {
 
     #[test]
     fn test_resolve_is_case_insensitive_for_existing_files() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ci");
         // A lowercase host file (operator-placed / externally copied).
         std::fs::write(base.join("A").join("readme.txt"), b"hello there").unwrap();
@@ -1499,6 +1559,11 @@ mod tests {
 
     #[test]
     fn test_search_enumerates_matching() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("search");
         std::fs::write(base.join("A").join("ALPHA.TXT"), b"a").unwrap();
         std::fs::write(base.join("A").join("BETA.TXT"), b"b").unwrap();
@@ -1536,6 +1601,11 @@ mod tests {
 
     #[test]
     fn test_search_multi_extent_file() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("multiext");
         // 20000 bytes > 16 KB -> two extents.
         std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 20000]).unwrap();
@@ -1558,6 +1628,11 @@ mod tests {
     /// express — the gap that let `DIR *.COM` list every file.
     #[test]
     fn test_list_matching() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("list");
         std::fs::write(base.join("A").join("B.TXT"), b"b").unwrap();
         std::fs::write(base.join("A").join("A.COM"), b"a").unwrap();
@@ -1595,6 +1670,11 @@ mod tests {
 
     #[test]
     fn test_delete_matching() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("delete");
         std::fs::write(base.join("A").join("ONE.TXT"), b"1").unwrap();
         std::fs::write(base.join("A").join("TWO.TXT"), b"2").unwrap();
@@ -1613,6 +1693,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_resolve_rejects_symlink_escape() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("symlink");
         // A file outside the jail.
         let outside = base
@@ -1636,6 +1721,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_resolve_rejects_symlinked_drive_dir_on_create() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         // A drive *directory* that is a symlink pointing outside the jail
         // must not let a create (make) escape, even though the target file
         // doesn't exist yet (so the target itself can't be canonicalized).
@@ -1661,6 +1751,11 @@ mod tests {
 
     #[test]
     fn test_rename() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("rename");
         std::fs::write(base.join("A").join("OLD.TXT"), b"data").unwrap();
         let fs = CpmFs::new(base.clone());
@@ -1680,6 +1775,11 @@ mod tests {
 
     #[test]
     fn test_file_size_records() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("size");
         std::fs::write(base.join("A").join("A.DAT"), vec![0u8; 200]).unwrap(); // 2 records
         std::fs::write(base.join("A").join("B.DAT"), vec![0u8; 128]).unwrap(); // 1 record
@@ -1693,6 +1793,11 @@ mod tests {
 
     #[test]
     fn test_read_whole_file() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("wholefile");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "PROG", "COM");
@@ -1707,6 +1812,11 @@ mod tests {
 
     #[test]
     fn test_write_record_rejects_beyond_size_cap() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("sizecap");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "BIG", "DAT");
@@ -1726,6 +1836,11 @@ mod tests {
 
     #[test]
     fn test_read_short_final_record_padded_with_ctrl_z() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("pad");
         let fs = CpmFs::new(base.clone());
         let fcb = fcb_named(1, "SHORT", "TXT");
@@ -1753,6 +1868,11 @@ mod tests {
     /// happily erasable from the guest.  `delete` must skip it.
     #[test]
     fn test_readonly_file_survives_delete() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_del");
         let fs = CpmFs::new(base.clone());
         let path = base.join("A").join("KEEP.TXT");
@@ -1774,6 +1894,11 @@ mod tests {
     /// Same blind spot for rename — also directory-governed on Unix.
     #[test]
     fn test_readonly_file_cannot_be_renamed() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_ren");
         let fs = CpmFs::new(base.clone());
         let path = base.join("A").join("LOCKED.TXT");
@@ -1795,6 +1920,11 @@ mod tests {
     /// A wildcard erase deletes what it may and leaves the protected file.
     #[test]
     fn test_wildcard_delete_spares_only_readonly() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_wild");
         let fs = CpmFs::new(base.clone());
         for n in ["ONE.TXT", "TWO.TXT", "THREE.TXT"] {
@@ -1814,6 +1944,11 @@ mod tests {
     /// and `DIR` show `R/O` rather than claiming it is writable.
     #[test]
     fn test_readonly_shows_as_t1_prime_in_dir_entry() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_attr");
         let mut fs = CpmFs::new(base.clone());
         let path = base.join("A").join("PROT.TXT");
@@ -1835,6 +1970,11 @@ mod tests {
     /// BDOS 30's R/O half, through the filesystem seam.
     #[test]
     fn test_set_file_ro_round_trip() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_set");
         let fs = CpmFs::new(base.clone());
         let path = base.join("A").join("ATTR.TXT");
@@ -1857,6 +1997,11 @@ mod tests {
     /// not allowed to erase or rename.
     #[test]
     fn test_readonly_file_refuses_write_record() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_write");
         let fs = CpmFs::new(base.clone());
         let path = base.join("A").join("LOCK.DAT");
@@ -1913,6 +2058,11 @@ mod tests {
     /// reads still work, and BDOS 13/37 release it.
     #[test]
     fn test_drive_write_protect_blocks_mutations() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_drive");
         let mut fs = CpmFs::new(base.clone());
         std::fs::write(base.join("A").join("DATA.TXT"), b"hello").unwrap();
@@ -1950,6 +2100,11 @@ mod tests {
     /// The write-protect is per drive, and BDOS 13 clears all of them.
     #[test]
     fn test_write_protect_is_per_drive() {
+        // `CpmFs::new` registers a session in the process-global image
+        // registry and `select` moves it between drives, so a test that
+        // builds one makes drives look busy to every other test.  That is
+        // what made a mount test fail about once in twenty runs.
+        let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("ro_perdrive");
         std::fs::create_dir_all(base.join("C")).unwrap();
         let mut fs = CpmFs::new(base.clone());

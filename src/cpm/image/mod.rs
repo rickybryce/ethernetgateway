@@ -146,6 +146,24 @@ pub fn create_blank_image(
     let mut tmp = path.clone().into_os_string();
     tmp.push(".creating");
     let tmp = PathBuf::from(tmp);
+    // A `.creating` file that is not being written any more is debris from a
+    // kill or a crash, and it must not block the name for good: it is
+    // deliberately not an image extension, so it shows up in none of the three
+    // pickers and an operator has no way to see or clear it.  Anything older
+    // than this is reclaimed.  The window is generous next to the write it
+    // guards — 4.99 MB, milliseconds — and narrow next to a human retrying.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+    if let Ok(md) = std::fs::metadata(&tmp) {
+        let stale = md
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_AFTER);
+        if stale {
+            crate::glog!("CP/M: clearing an abandoned {}", tmp.display());
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
     let staged = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -202,6 +220,14 @@ pub fn drive_held_note(drive0: u8) -> Option<String> {
 ///
 /// A drive somebody is using is refused; see [`registry::check_can_change`].
 pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
+    // The name is validated *first*, before anything looks at a drive or a
+    // file.  A traversing name is not a "sorry, that drive is busy" situation,
+    // and answering it with one both hides the real problem and makes the
+    // refusal depend on unrelated state.  Moving the check inside the shared
+    // helper had quietly reordered this.
+    if !is_safe_image_name(filename) {
+        return Err(format!("'{filename}' is not a valid image name"));
+    }
     registry::check_can_change(drive0)?;
     // An image somebody is running cannot also be mounted.  A booted session
     // holds the whole disk in memory and writes it back over the file when it
@@ -215,7 +241,12 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
     // header states that an image is opened once and shared; this is what makes
     // that true.  The boot path has enforced its half of the rule since the
     // claim moved into the registry; this is the mount-against-mount half.
-    if let Some(other) = registry::drive_holding(filename) {
+    // ...on *another* drive.  Re-mounting an image onto the drive it is
+    // already on is a re-read, which is what the telnet screen does when an
+    // operator picks the disk that drive already shows — and answering that
+    // with "unmount it from B: first" while they are mounting onto B: is
+    // nonsense.  Only a second, different drive is the two-views hazard.
+    if let Some(other) = registry::drive_holding(filename).filter(|d| *d != drive0) {
         return Err(format!(
             "{filename} is already mounted on drive {}: — unmount it there first",
             (b'A' + other) as char
@@ -912,11 +943,22 @@ mod tests {
     fn test_only_measured_formats_can_be_created() {
         let offered = creatable_formats();
         assert!(!offered.is_empty(), "something must be creatable");
+        // Asserting `blank_image().is_some()` here would have been circular —
+        // `creatable_formats` filters on `can_make_blank` and `blank_image`
+        // opens with the same check, so the loop could not fail for any input.
+        // What is worth pinning is that every offered format really does
+        // produce a whole, correctly-sized disk.
         for (token, _) in &offered {
-            assert!(
-                format::by_token(token).unwrap().blank_image().is_some(),
-                "{token} is offered but has no blank layout"
+            let fmt = format::by_token(token).unwrap();
+            let blank = fmt.blank_image().unwrap_or_else(|| panic!("{token} makes no blank"));
+            assert_eq!(
+                blank.len() as u64,
+                fmt.min_bytes(),
+                "{token}: the blank is not the size its own geometry needs"
             );
+            if let Some(size) = fmt.exact_size {
+                assert_eq!(blank.len() as u64, size, "{token}");
+            }
         }
         assert!(create_blank_image(Path::new("/tmp"), "nosuchformat", "x")
             .unwrap_err()
@@ -1146,9 +1188,18 @@ mod tests {
         assert_eq!(std::fs::metadata(&made).unwrap().len(), 337_568, "a whole disk");
         // No staging file survives a success.
         assert!(!images_dir(&base).join("altair8_whole.dsk.creating").exists());
-        // And what landed really is a mountable blank, not a part of one.
-        let fmt = format::by_token("altair8").unwrap();
-        assert_eq!(std::fs::read(&made).unwrap(), fmt.blank_image().unwrap());
+        // And what landed really is a formatted disk, checked against the
+        // layout rather than against the generator that produced it — comparing
+        // to `blank_image()` again would only prove the file was written.
+        let img = std::fs::read(&made).unwrap();
+        assert_eq!(&img[..3], &[0x80, 0x00, 0x01], "track 0 sector header");
+        assert_eq!(img[131], 0xFF, "boot-track stop byte");
+        assert_eq!(img[132], 0x80, "boot-track checksum of 128 x 0xE5");
+        let data = 6 * 32 * 137; // first sector of track 6
+        assert_eq!(img[data + 1], 0, "first data-track sector states its own id");
+        assert_eq!(img[data + 4], 0x30, "data-track checksum");
+        assert_eq!(img[data + 135], 0xFF, "data-track stop byte");
+        assert!(img[data + 7..data + 135].iter().all(|&b| b == 0xE5), "empty");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1190,8 +1241,15 @@ mod tests {
         mount_image(&base, 1, "altair8_one.dsk").expect("B: mounts");
         let err = mount_image(&base, 2, "altair8_one.dsk").unwrap_err();
         assert!(err.contains("already mounted on drive B:"), "{err}");
-        // A different image is fine, and so is the same drive again.
+        // A different image is fine...
         mount_image(&base, 2, "altair8_two.dsk").expect("C: takes another image");
+        // ...and so is the same image on the drive it is already on.  That is a
+        // re-read, not a second view, and the telnet screen does exactly it
+        // when an operator picks the disk their drive already shows.  The
+        // comment used to claim this and the assertion below it tested
+        // something else entirely.
+        mount_image(&base, 1, "altair8_one.dsk").expect("B: re-reads its own image");
+        assert_eq!(registry::get(1).map(|m| m.filename), Some("altair8_one.dsk".to_string()));
         let _ = unmount_drive(1);
         mount_image(&base, 3, "altair8_one.dsk").expect("free once unmounted");
 
@@ -1202,6 +1260,79 @@ mod tests {
 
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Debris from a killed creation must not block that disk name for good.
+    ///
+    /// The staging file is the lock, and it is deliberately not an image
+    /// extension so a half-written disk is never offered by a picker — which
+    /// also means an operator cannot see it or clear it without shell access.
+    /// A stale one is reclaimed instead.
+    #[test]
+    fn test_an_abandoned_creation_does_not_block_the_name_forever() {
+        let base = std::env::temp_dir().join("egw_stale_creating");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let debris = images.join("altair8_ghost.dsk.creating");
+        std::fs::write(&debris, b"half a disk").unwrap();
+
+        // Fresh debris is treated as a live creation and refused, so two
+        // sessions racing still cannot both write the same file.
+        let err = create_blank_image(&base, "altair8", "ghost").unwrap_err();
+        assert!(err.contains("another session may be creating"), "{err}");
+
+        // Aged past the limit, it is reclaimed and the name works again.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        filetime_set(&debris, old);
+        create_blank_image(&base, "altair8", "ghost").expect("the name is usable again");
+        assert_eq!(
+            std::fs::metadata(images.join("altair8_ghost.dsk")).unwrap().len(),
+            337_568
+        );
+        assert!(!debris.exists(), "and the debris is gone");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Backdate a file's mtime without pulling in a dependency.
+    #[cfg(unix)]
+    fn filetime_set(path: &Path, when: std::time::SystemTime) {
+        use std::os::unix::ffi::OsStrExt;
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let times = [
+            libc_timespec { tv_sec: secs, tv_nsec: 0 },
+            libc_timespec { tv_sec: secs, tv_nsec: 0 },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            utimensat_shim(c.as_ptr(), times.as_ptr());
+        }
+    }
+
+    #[cfg(unix)]
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    struct libc_timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "utimensat"]
+        fn utimensat_raw(dirfd: i32, path: *const i8, times: *const libc_timespec, flags: i32)
+            -> i32;
+    }
+
+    #[cfg(unix)]
+    unsafe fn utimensat_shim(path: *const i8, times: *const libc_timespec) {
+        const AT_FDCWD: i32 = -100;
+        unsafe {
+            utimensat_raw(AT_FDCWD, path, times, 0);
+        }
     }
 
     /// A traversal attempt must be refused before anything touches the disk.

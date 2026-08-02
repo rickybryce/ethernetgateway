@@ -494,15 +494,17 @@ impl TelnetSession {
         let Some(claim) = BootClaim::take(image) else {
             self.send_line(&format!(
                 "  {}",
-                self.red("That image is already running in another session.")
+                self.red("That image is already running in")
             ))
             .await?;
+            self.send_line(&format!("  {}", self.red("another session."))).await?;
             self.send_line(&format!(
                 "  {}",
-                self.dim("A booted disk owns its drives, so only one session")
+                self.dim("A booted disk owns its drives, so")
             ))
             .await?;
-            self.send_line(&format!("  {}", self.dim("can have it at a time."))).await?;
+            self.send_line(&format!("  {}", self.dim("only one session can have it at"))).await?;
+            self.send_line(&format!("  {}", self.dim("a time."))).await?;
             self.send_line("").await?;
             return Ok(());
         };
@@ -523,9 +525,11 @@ impl TelnetSession {
         // Booting a disk parked anywhere else therefore loads fine and then
         // runs against whatever happens to be in unit 0, which looks like a
         // hang rather than a mistake.
-        // Declared before anything can take a mount, and before `busy`, so it
-        // drops *after* the drives are released — remounting a drive this
-        // session still holds busy is refused.
+        // Declaration order is load-bearing, because drop order is its reverse.
+        // `remounts` first so it drops last: the mounts go back only after the
+        // drives are released *and* after `disks` has dropped every `BootClaim`
+        // — a claim still held while the mount is being published would let
+        // another session start booting the image the restore is reading.
         let mut remounts = RemountOnDrop { base: self.cpmmount_base(), taken: Vec::new() };
         let mut disks: Vec<Option<BootDisk>> = (0..MAX_BOOT_UNITS).map(|_| None).collect();
         if let Err(e) = machine.insert(0, bytes, !writable) {
@@ -623,6 +627,9 @@ impl TelnetSession {
             ModemAttach::Ports(status, data) => {
                 self.send_line(&format!(
                     "  {}",
+                    // 27 columns at its widest ("Modem on ports 0x12/0x13."), so
+                    // it fits 40 -- checked by hand because a runtime `format!`
+                    // cannot be measured by the source scan.
                     self.dim(&format!("Modem on ports {status:#04x}/{data:#04x}."))
                 ))
                 .await?;
@@ -856,9 +863,10 @@ impl TelnetSession {
                     self.send_line("").await?;
                     self.send_line(&format!(
                         "  {}",
-                        self.red("Stopped: the guest is waiting for a sector that never arrives.")
+                        self.red("Stopped: the guest is waiting for a")
                     ))
                     .await?;
+                    self.send_line(&format!("  {}", self.red("sector that never arrives."))).await?;
                     glog!("CP/M boot: controller stalled — the disk is not advancing");
                     return Ok(());
                 }
@@ -1395,12 +1403,14 @@ mod tests {
             assert!(usage[0].describe().is_none(), "A: is nobody's business");
             assert!(usage[1].describe().is_none());
         }
-        // And holding nothing must register nothing at all.
+        // And holding nothing must register nothing at all — including not
+        // parking a phantom session on A:, which is what registering an empty
+        // hold used to do.
         {
             let _none = BootDrivesBusy::hold(&[]);
             assert!(
-                crate::cpm::image::registry::usage().iter().all(|u| u.describe().is_none()),
-                "a boot that took no mounts must not mark a drive busy"
+                crate::cpm::image::registry::usage_of(0).describe().is_none(),
+                "a boot that took no mounts must not mark drive A: busy"
             );
         }
         // RAII: a boot that ends any way at all must release them.

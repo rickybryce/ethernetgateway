@@ -2019,6 +2019,10 @@ mod repl_tests {
     /// record `RC-1` and says "Yes $$$.SUB files are backwards".
     #[test]
     fn test_submit_lines_come_out_in_file_order_then_the_file_is_erased() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("sub");
         write_sub_file(&base.join("A"), &["VER", "DIR *.COM", "HELLO"]);
         let path = base.join("A").join("$$$.SUB");
@@ -2062,6 +2066,10 @@ mod repl_tests {
     /// B: in this emulator.
     #[test]
     fn test_submit_is_read_from_drive_a_only() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("subdrive");
         std::fs::create_dir_all(base.join("B")).unwrap();
         write_sub_file(&base.join("B"), &["VER"]);
@@ -2095,6 +2103,10 @@ mod repl_tests {
     /// command line.
     #[test]
     fn test_submit_rejects_a_corrupt_length_byte() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("subbad");
         let mut rec = [b'X'; 128];
         rec[0] = 200; // impossible: a record holds at most 127 text bytes
@@ -2127,8 +2139,18 @@ mod repl_tests {
     /// of 0080H (the command tail) instead of the file, with no error. Any
     /// program that reads a record without setting its own DMA first was
     /// exposed, which is most of them.
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_each_program_starts_with_the_default_dma() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("dma");
         let (mut sess, _peer) = make_test_session_with_peer(TerminalType::Ascii);
         let mut cpm = Cpm::new();
@@ -2161,8 +2183,18 @@ mod repl_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_dir_reports_empty_drive_and_lists_files() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, fs) = scratch_fs("dir");
         let (mut sess, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
 
@@ -2194,8 +2226,18 @@ mod repl_tests {
         );
     }
 
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_era_deletes_and_reports_no_match() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("era");
         let victim = base.join("A").join("GONE.TXT");
         std::fs::write(&victim, b"bye").unwrap();
@@ -2230,8 +2272,18 @@ mod repl_tests {
     /// A read-only file must survive `ERA` and be *reported* as protected.
     /// Saying "No file" about a file the user can plainly see in `DIR` reads
     /// as an emulator bug, so the two refusals have to be distinguishable.
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_era_refuses_readonly_file() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("era_ro");
         let keep = base.join("A").join("KEEP.TXT");
         std::fs::write(&keep, b"precious").unwrap();
@@ -2256,8 +2308,18 @@ mod repl_tests {
 
     /// `ERA` on a drive write-protected by BDOS 28 reports CP/M's R/O error
     /// rather than pretending nothing matched.
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_era_reports_write_protected_drive() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("era_wp");
         let f = base.join("A").join("DATA.TXT");
         std::fs::write(&f, b"kept").unwrap();
@@ -2280,8 +2342,18 @@ mod repl_tests {
 
     /// `REN new=old` is the authentic CP/M form and `REN new old` the
     /// convenience one; both must land, and neither may clobber silently.
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_ren_accepts_both_forms_and_refuses_to_clobber() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("ren");
         let a = base.join("A");
         std::fs::write(a.join("OLD.TXT"), b"payload").unwrap();
@@ -2317,8 +2389,18 @@ mod repl_tests {
         assert!(usage.contains("REN new=old"), "got {:?}", usage);
     }
 
+    // The registry lock is a test-serialisation mutex, and these tests run
+    // on a current-thread runtime that spawns nothing else wanting it, so
+    // holding it across an await cannot deadlock here.  The shape is still
+    // worth flagging in general, hence the narrow allow rather than a
+    // blanket one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_cpmemu_type_streams_text_stops_at_ctrl_z_and_refuses_binary() {
+        // A CP/M filesystem registers a session in the process-global image
+        // registry and moves it between drives, which makes a drive look busy
+        // to every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("type");
         let a = base.join("A");
         // ^Z is CP/M's EOF filler: everything after it is padding, not text.

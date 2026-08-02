@@ -23,8 +23,21 @@ pub const CPM_DIR: &str = "CPM";
 const LAST_DRIVE: u8 = b'A' + super::fs::NUM_DRIVES - 1;
 
 /// The `CPM/` container inside a transfer directory.
+///
+/// **Canonicalised when it can be**, and that is not cosmetic:
+/// `CpmFs::image_file_key` uses a mount's path verbatim as the key for the
+/// cross-session per-file write claim, so a drive mounted through a surface
+/// that resolved the path and one mounted through a surface that did not would
+/// not collide there — and two sessions could interleave records into one file.
+/// The shipped `transfer_dir` is relative, so the two spellings really do
+/// differ.  One function, because this had already been applied to one surface
+/// of three.
+///
+/// Falls back to the unresolved path before the tree exists, which is the only
+/// time it can fail and is exactly when nothing is mounted yet.
 pub fn cpm_dir(transfer_dir: &str) -> PathBuf {
-    Path::new(transfer_dir).join(CPM_DIR)
+    let base = Path::new(transfer_dir).join(CPM_DIR);
+    std::fs::canonicalize(&base).unwrap_or(base)
 }
 
 /// Create the container, the sixteen drive folders and the images folder,

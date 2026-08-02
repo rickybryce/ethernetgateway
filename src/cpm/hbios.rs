@@ -351,6 +351,10 @@ mod tests {
     /// learn the date — and it is what makes `hbios_*` more than a serial port.
     #[test]
     fn test_rtc_get_time_fills_the_buffer_in_bcd() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.set_modem_access(resolve_access("hbios_1"));
         // LD B,0x20 / LD HL,0x2000 / RST 8 / JP 0
@@ -422,6 +426,10 @@ mod tests {
     /// instruction ceiling stops it, which is what a bare CP/M machine does.
     #[test]
     fn test_rtc_refused_without_an_hbios_profile() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.set_modem_access(resolve_access("rc2014_1b")); // a PORT profile
         // LD B,RTCGETTIM / LD HL,2000h / CALL <trap> / JP 0
@@ -437,6 +445,10 @@ mod tests {
 
     #[test]
     fn test_rst8_vector_installed_only_for_hbios_profiles() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.set_modem_access(resolve_access("rc2014_1b"));
         cpm.load_com(&[0xC9]);
@@ -491,6 +503,10 @@ mod tests {
 
     #[test]
     fn test_out_sends_e_toward_the_peer() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.set_modem_access(resolve_access("hbios_2"));
         // LD B,OUT / LD C,2 / LD E,'Z' / RST 8 / JP 0
@@ -530,6 +546,10 @@ mod tests {
 
     #[test]
     fn test_initdev_accepts_and_query_reports_back() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.set_modem_access(resolve_access("hbios_1"));
         // LD B,INITDEV / LD C,1 / LD DE,-1 / RST 8 / JP 0  (the "keep current
@@ -575,6 +595,10 @@ mod tests {
 
     #[test]
     fn test_no_hbios_profile_refuses_even_the_management_group() {
+        // Constructing a CP/M machine registers a session in the
+        // process-global image registry, which makes drives look busy to
+        // every other test.  Serialise with the registry tests.
+        let _g = crate::cpm::image::registry::tests_lock();
         // The trap address is always live, so a guest can reach it without the
         // page-zero vector (a CALL straight at it, or a stray jump).  On a port
         // profile there is no RomWBW system, and answering VER would tell a

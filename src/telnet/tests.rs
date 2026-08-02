@@ -1759,18 +1759,30 @@ fn test_cpm_disk_screen_literals_fit_petscii() {
     ];
     /// The literal inside `self.dim("…")` and friends, and the indent of the
     /// `format!` that prints it.
+    ///
+    /// Whitespace between `&format!(` and the format string is skipped, because
+    /// the first version of this matched only the contiguous `send_line(&format!("`
+    /// and so never saw the sixteen call sites written across several lines —
+    /// including two that were over budget. It still passed its own
+    /// `checked > 20` floor on the single-line sites, which is the worst way for
+    /// a test like this to be wrong: confidently green about text it never read.
     fn scan(src: &str) -> Vec<(usize, String)> {
         let src = src.replace('\r', "");
         let mut out = Vec::new();
-        // send_line(&format!("<indent>{}", self.colour("literal")
-        for (i, _) in src.match_indices("send_line(&format!(\"") {
-            let rest = &src[i + "send_line(&format!(\"".len()..];
-            let Some(brace) = rest.find("{}\"") else { continue };
-            let indent = &rest[..brace];
+        for (i, _) in src.match_indices("send_line(&format!(") {
+            let rest = &src[i + "send_line(&format!(".len()..];
+            // Skip a newline and indentation before the format string.
+            let Some(open) = rest.find('"') else { continue };
+            if !rest[..open].chars().all(char::is_whitespace) {
+                continue;
+            }
+            let after_open = &rest[open + 1..];
+            let Some(brace) = after_open.find("{}\"") else { continue };
+            let indent = &after_open[..brace];
             if !indent.chars().all(|c| c == ' ') {
                 continue;
             }
-            let after = &rest[brace..];
+            let after = &after_open[brace..];
             let Some(q) = after.find("(\"") else { continue };
             if after[..q].contains(';') {
                 continue; // not this call any more
@@ -1801,7 +1813,13 @@ fn test_cpm_disk_screen_literals_fit_petscii() {
             );
         }
     }
-    assert!(checked > 20, "the scan found only {checked} literals — it stopped matching");
+    // The floor is above the 84 the single-line-only version matched, so a
+    // regression to that matching would fail here rather than pass quietly.
+    assert!(
+        checked > 90,
+        "the scan found only {checked} literals — it has stopped seeing the \
+         multi-line `format!` call sites again"
+    );
 }
 
 
