@@ -466,7 +466,15 @@ impl Format {
                 // rather than indexed out of range, which keeps "an unmeasured
                 // format is not offered" a property of the code and not of a
                 // test that could be deleted.
-                if (seclen, first_off, rest_off) != (137, 3, 7) {
+                // `sectrk` is in the check because `ALTAIR_SECTOR_ORDER` has
+                // exactly 32 entries and is indexed by the position in a track;
+                // a wider track would run off the end of it.
+                if (seclen, sectrk, first_off, rest_off) != (137, 32, 3, 7) {
+                    return None;
+                }
+                // And a disk deeper than 255 tracks cannot state its own track
+                // number in a byte, so there is no correct header to write.
+                if total / sectrk as u64 > u8::MAX as u64 + 1 {
                     return None;
                 }
                 let mut out = vec![0u8; (total * seclen as u64) as usize];
@@ -810,6 +818,34 @@ mod tests {
             "a950b6638d426ecb0266e63767945d928962599f13c2af5ddb86916bf00a1132",
             "our blank Altair image is not what FORMAT.COM produces"
         );
+    }
+
+    /// `blank_image` writes fixed byte positions and indexes a 32-entry sector
+    /// table, so it must refuse any split geometry it was not measured on
+    /// rather than run off the end of a sector or of that table.  A test that
+    /// keeps such a format out of `FORMATS` is not enough — this has to hold in
+    /// the code, because the code is what a future format would call.
+    #[test]
+    fn test_blank_refuses_a_split_geometry_it_was_not_measured_on() {
+        let alt = by_token("altair8").unwrap();
+        let with = |framing| Format { framing, ..alt.clone() };
+        // The measured one works.
+        assert!(alt.blank_image().is_some());
+        // Everything else is refused, not guessed at.
+        for bad in [
+            Framing::AltairSplit { seclen: 128, sectrk: 32, split_track: 6, first_off: 3, rest_off: 7 },
+            Framing::AltairSplit { seclen: 137, sectrk: 26, split_track: 6, first_off: 3, rest_off: 7 },
+            Framing::AltairSplit { seclen: 137, sectrk: 64, split_track: 6, first_off: 3, rest_off: 7 },
+            Framing::AltairSplit { seclen: 137, sectrk: 32, split_track: 6, first_off: 0, rest_off: 7 },
+            Framing::AltairSplit { seclen: 137, sectrk: 32, split_track: 6, first_off: 3, rest_off: 9 },
+        ] {
+            assert!(with(bad).blank_image().is_none(), "{bad:?} must be refused");
+        }
+        // And a disk too deep to state its own track number in a byte.
+        let deep = Format { total_records: 300 * 32, ..alt.clone() };
+        assert!(deep.blank_image().is_none(), "past 256 tracks there is no header to write");
+        // `Framed` has never been measured at all.
+        assert!(with(Framing::Framed { seclen: 137, data_off: 3 }).blank_image().is_none());
     }
 
     /// Spot-check the same blank in a form a human can read against a hex dump,

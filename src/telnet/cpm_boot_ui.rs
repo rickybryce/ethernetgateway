@@ -246,6 +246,37 @@ impl Drop for BootDrivesBusy {
     }
 }
 
+/// Puts back the mounts a booted session borrowed, however the session ends.
+///
+/// A mount is taken out of the registry while the guest holds it, and that has
+/// to be undone on *every* path out — not just the tidy one. Between the take
+/// and the run loop there is a boot that can fail and a dozen writes to a
+/// socket that can drop, and an early return through any of them used to leave
+/// an operator's configured drives silently empty until they restarted.
+///
+/// So it is RAII, for the same reason [`BootClaim`] is. The remount is the
+/// synchronous `mount_image` because `Drop` cannot await; it opens one file and
+/// reads a directory, at session teardown, which is a fair price for a
+/// guarantee that holds when the connection has already gone.
+struct RemountOnDrop {
+    base: std::path::PathBuf,
+    /// `(drive, bare filename)` for each mount taken.
+    taken: Vec<(u8, String)>,
+}
+
+impl Drop for RemountOnDrop {
+    fn drop(&mut self) {
+        for (drive, name) in std::mem::take(&mut self.taken) {
+            // End the loan first: a lent drive refuses a mount change, and this
+            // session is the one holding it.
+            crate::cpm::image::registry::end_boot_loan(drive);
+            if let Err(e) = crate::cpm::image::mount_image(&self.base, drive, &name) {
+                glog!("CP/M boot: could not remount {} on drive {}: {}", name, drive, e);
+            }
+        }
+    }
+}
+
 /// Write an image out so a failure cannot leave a damaged one behind.
 ///
 /// Into a temporary beside the target, then renamed over it.  `rename` within a
@@ -253,9 +284,40 @@ impl Drop for BootDrivesBusy {
 /// the old image or the new one — never a truncated file with no directory.
 /// The plain write this replaced was tolerable when one disk was at stake; it
 /// is not when a booted session can be holding sixteen of an operator's.
+/// Where an image is staged while it is being written.
+///
+/// The suffix is *appended*, never substituted.  `with_extension` replaces the
+/// extension, and `games.img` and `games.dsk` are both mountable — so that
+/// spelling gave the two of them one temporary between them, and two concurrent
+/// saves could land one disk's bytes in the other.  A separate function so the
+/// rule can be asserted on its own; the collision it prevents needs two boot
+/// sessions racing and cannot be shown by saving one file after another.
+fn saving_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".saving");
+    std::path::PathBuf::from(tmp)
+}
+
 async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("dsk.saving");
+    // `rename` needs write permission on the *directory*, not on the file — so
+    // unlike the plain write this replaced, it would happily replace an image
+    // the operator had chmod'd read-only, and leave the new file writable into
+    // the bargain.  Check first, and carry the old file's mode across.
+    let perms = match tokio::fs::metadata(path).await {
+        Ok(m) if m.permissions().readonly() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the image file is read-only on the host",
+            ));
+        }
+        Ok(m) => Some(m.permissions()),
+        Err(_) => None,
+    };
+    let tmp = saving_path(path);
     tokio::fs::write(&tmp, bytes).await?;
+    if let Some(p) = perms {
+        let _ = tokio::fs::set_permissions(&tmp, p).await;
+    }
     match tokio::fs::rename(&tmp, path).await {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -283,6 +345,7 @@ impl TelnetSession {
         machine: &mut BootMachine,
         disks: &mut [Option<BootDisk>],
         writable: bool,
+        remounts: &mut RemountOnDrop,
         boot_image: &std::path::Path,
     ) -> Vec<String> {
         use crate::cpm::image::registry;
@@ -334,8 +397,11 @@ impl TelnetSession {
             // directory entry over live data.  There is no reload that fixes
             // this after the fact, so the mount goes away for the duration and
             // is opened again, fresh, at the end.
-            let remount = match registry::unmount(step.unit) {
-                Some(_) => Some(step.unit),
+            let remount = match registry::lend_for_boot(step.unit) {
+                Some(m) => {
+                    remounts.taken.push((step.unit, m.filename.clone()));
+                    Some(step.unit)
+                }
                 None => None,
             };
             disks[step.unit as usize] = Some(BootDisk {
@@ -393,6 +459,10 @@ impl TelnetSession {
         // Booting a disk parked anywhere else therefore loads fine and then
         // runs against whatever happens to be in unit 0, which looks like a
         // hang rather than a mistake.
+        // Declared before anything can take a mount, and before `busy`, so it
+        // drops *after* the drives are released — remounting a drive this
+        // session still holds busy is refused.
+        let mut remounts = RemountOnDrop { base: self.cpmmount_base(), taken: Vec::new() };
         let mut disks: Vec<Option<BootDisk>> = (0..MAX_BOOT_UNITS).map(|_| None).collect();
         if let Err(e) = machine.insert(0, bytes, !writable) {
             self.send_line(&format!("  {}", self.red(&e))).await?;
@@ -411,7 +481,8 @@ impl TelnetSession {
         // about and refuses the rest, which for stock Altair CP/M means A: to
         // D:.  We present the hardware and let the disk decide, exactly as with
         // everything else on this path.
-        let notes = self.cpm_boot_attach_mounts(&mut machine, &mut disks, writable, image);
+        let notes =
+            self.cpm_boot_attach_mounts(&mut machine, &mut disks, writable, &mut remounts, image);
         // Hold every drive we took for as long as the guest runs.  Without
         // this a mount screen elsewhere would happily swap a disk out from
         // under a running Altair, and the change would be invisible to it —
@@ -530,34 +601,12 @@ impl TelnetSession {
             }
         }
 
-        // Release the drives *before* putting the mounts back.  `mount_image`
-        // refuses a drive that is in use, and this session is the one holding
-        // them — so remounting while still marked busy fails every time, with
-        // the drives an operator configured quietly staying empty.  Found by
-        // running it.
+        // Release the drives before the mounts go back: `mount_image` refuses a
+        // drive that is in use, and this session is the one holding them.  The
+        // remount itself happens when `remounts` drops, a few lines later, so
+        // that it also covers the paths that never reach here.
         drop(busy);
 
-        // Put back every mount that was taken out for the guest, so the drives
-        // an operator configured are there again — and opened fresh, over
-        // whatever the guest left behind.
-        for disk in disks.iter().flatten() {
-            let Some(drive) = disk.remount else { continue };
-            let name = disk
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let base = self.cpmmount_base();
-            let n2 = name.clone();
-            let re = tokio::task::spawn_blocking(move || {
-                crate::cpm::image::mount_image(&base, drive, &n2)
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("{e}")));
-            if let Err(e) = re {
-                glog!("CP/M boot: could not remount {} on drive {}: {}", name, drive, e);
-            }
-        }
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("Returned to the gateway."))).await?;
         self.send_line("").await?;
@@ -1009,6 +1058,139 @@ mod tests {
 
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The drives must come back even when the session never reaches its tidy
+    /// exit.  Between taking a mount and starting the guest there is a boot
+    /// that can fail and a dozen writes to a socket that can drop; an early
+    /// return through any of them used to leave an operator's configured drives
+    /// silently empty until they restarted the gateway.
+    #[test]
+    fn test_taken_mounts_come_back_even_on_an_early_exit() {
+        use crate::cpm::image::{mount_image, registry};
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+
+        let base = std::env::temp_dir().join("egw_boot_remount_raii");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = crate::cpm::image::images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        blank_image_at(&images.join("altair8_a.dsk"));
+        blank_image_at(&images.join("altair8_b.dsk"));
+        mount_image(&base, 1, "altair8_a.dsk").unwrap();
+        mount_image(&base, 2, "altair8_b.dsk").unwrap();
+
+        {
+            let mut remounts =
+                RemountOnDrop { base: base.clone(), taken: Vec::new() };
+            for drive in [1u8, 2] {
+                // The real path: lent, not merely unmounted, so the remount has
+                // to end the loan before `mount_image` will accept the drive.
+                let m = registry::lend_for_boot(drive).expect("taken for the guest");
+                remounts.taken.push((drive, m.filename.clone()));
+            }
+            assert!(registry::get(1).is_none() && registry::get(2).is_none());
+            assert_eq!(registry::boot_loans().len(), 2, "both drives read as lent");
+            // ...and now the session dies here, without reaching any cleanup.
+        }
+
+        assert_eq!(
+            registry::get(1).map(|m| m.filename),
+            Some("altair8_a.dsk".to_string()),
+            "B: must come back"
+        );
+        assert_eq!(
+            registry::get(2).map(|m| m.filename),
+            Some("altair8_b.dsk".to_string()),
+            "C: must come back"
+        );
+        assert!(registry::boot_loans().is_empty(), "no loan may outlive the session");
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Saving must never replace an image the host says is read-only.
+    ///
+    /// The plain write this replaced failed with EACCES on a `chmod 444` file.
+    /// `rename` does not: it needs permission on the *directory*, so the atomic
+    /// save would have quietly overwritten a disk somebody had deliberately
+    /// protected — and left the replacement writable, so the next mount would
+    /// come up read-write too.
+    #[tokio::test]
+    async fn test_a_read_only_image_is_never_replaced() {
+        let dir = std::env::temp_dir().join("egw_save_readonly");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("altair8_precious.dsk");
+        std::fs::write(&path, b"original").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let err = save_image_atomically(&path, b"replacement").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"original", "the disk survived");
+        assert!(
+            std::fs::metadata(&path).unwrap().permissions().readonly(),
+            "and is still protected"
+        );
+
+        // A writable one is replaced, atomically, keeping its mode.
+        let ok = dir.join("altair8_scratch.dsk");
+        std::fs::write(&ok, b"old").unwrap();
+        save_image_atomically(&ok, b"new").await.unwrap();
+        assert_eq!(std::fs::read(&ok).unwrap(), b"new");
+        // No temporary left behind for the mount pickers to find.
+        assert!(!dir.join("altair8_scratch.dsk.saving").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two images differing only in extension must not share a temp name.
+    /// Asserted on the derivation itself, because the collision needs two boot
+    /// sessions racing and a sequential save cannot show it.
+    #[test]
+    fn test_saving_paths_are_distinct_per_image() {
+        let p = |s: &str| saving_path(Path::new(s));
+        assert_ne!(p("/i/games.dsk"), p("/i/games.img"), "one temp for two disks");
+        assert_eq!(p("/i/games.dsk"), Path::new("/i/games.dsk.saving"));
+        // Every mountable extension must stay distinct from every other.
+        let names: Vec<_> = ["dsk", "img", "ima", "image", "cpm"]
+            .iter()
+            .map(|e| p(&format!("/i/x.{e}")))
+            .collect();
+        let mut uniq = names.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), names.len(), "temp names collide: {names:?}");
+        // And the temporary must not itself look like a mountable image, or the
+        // pickers would offer a half-written disk.
+        let tmp = p("/i/x.dsk");
+        let tmp_name = tmp.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            !crate::cpm::image::looks_like_an_image_name(&tmp_name),
+            "a half-written disk must not be offered by the mount pickers: {tmp_name}"
+        );
+    }
+
+    /// Two images differing only in extension must not share a temp name.
+    ///
+    /// `with_extension("dsk.saving")` *replaces* the extension, so `games.img`
+    /// and `games.dsk` — both mountable — collided on one temporary, and two
+    /// concurrent saves could land one disk's bytes in the other.
+    #[tokio::test]
+    async fn test_the_save_temp_name_is_appended_not_substituted() {
+        let dir = std::env::temp_dir().join("egw_save_tempname");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dsk = dir.join("games.dsk");
+        let img = dir.join("games.img");
+        std::fs::write(&dsk, b"aaaa").unwrap();
+        std::fs::write(&img, b"bbbb").unwrap();
+        save_image_atomically(&dsk, b"DSK!").await.unwrap();
+        save_image_atomically(&img, b"IMG!").await.unwrap();
+        assert_eq!(std::fs::read(&dsk).unwrap(), b"DSK!");
+        assert_eq!(std::fs::read(&img).unwrap(), b"IMG!", "one disk landed in the other");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Only drives really taken from the mount table are marked busy.  Marking

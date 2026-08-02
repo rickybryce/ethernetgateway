@@ -137,6 +137,7 @@ pub fn unmount(drive0: u8) -> Option<Mount> {
 
 /// Drop every mount.  Used when the emulator is disabled.
 pub fn clear_all() {
+    lock!(borrowed()).clear();
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     for slot in t.iter_mut() {
         *slot = None;
@@ -203,6 +204,12 @@ pub fn usage_of(drive0: u8) -> Usage {
 /// between an operator changing a disk and a user watching their disk change
 /// under them.
 pub fn check_can_change(drive0: u8) -> Result<(), String> {
+    if lock!(borrowed()).contains_key(&drive0) {
+        return Err(format!(
+            "drive {}: is held by a booted disk — it comes back when that session ends",
+            (b'A' + drive0) as char
+        ));
+    }
     let u = usage_of(drive0);
     match u.describe() {
         Some(what) => Err(format!(
@@ -237,6 +244,50 @@ pub fn tests_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 // ---- session bookkeeping ------------------------------------------------
+
+/// Drives lent to a booted session, as `drive -> filename`.
+///
+/// A booted guest is given the *bytes* of a mounted image and rewrites the file
+/// wholesale when it leaves, so the live [`Mount`] — which caches a directory
+/// and an allocation bitmap — has to go out of service while that happens.
+/// Simply removing it is not enough, though: a drive that reads as empty is a
+/// drive the configuration screens will happily persist as empty, and an
+/// operator would find `cpm_mounts` quietly shortened after somebody booted a
+/// disk.  So a lent drive is *recorded* rather than forgotten.
+fn borrowed() -> &'static Mutex<std::collections::HashMap<u8, String>> {
+    static B: OnceLock<Mutex<std::collections::HashMap<u8, String>>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Take a mount out of service for a booted session, remembering it.
+///
+/// Atomic with respect to [`check_can_change`]: the drive is recorded as lent
+/// before the lock on the mount table is released, so there is no instant in
+/// which it looks like a free drive somebody else may mount over.  That window
+/// is not theoretical — another session entering the emulator re-applies
+/// `cpm_mounts`, and would open a second, live `ImageFs` on the very file the
+/// booted guest is about to rewrite.
+pub fn lend_for_boot(drive0: u8) -> Option<Mount> {
+    // The loan is recorded while the mount table is still locked, so no reader
+    // can see the drive as free-and-unlent.
+    let mut lent = lock!(borrowed());
+    let mut t = table().write().unwrap_or_else(|e| e.into_inner());
+    let mount = t.get_mut(drive0 as usize).and_then(|slot| slot.take())?;
+    lent.insert(drive0, mount.filename.clone());
+    Some(mount)
+}
+
+/// Stop recording a drive as lent.  The caller mounts it again itself.
+pub fn end_boot_loan(drive0: u8) -> Option<String> {
+    lock!(borrowed()).remove(&drive0)
+}
+
+/// Drives currently lent to booted sessions, as `(drive, filename)`.
+pub fn boot_loans() -> Vec<(u8, String)> {
+    let mut v: Vec<(u8, String)> = lock!(borrowed()).iter().map(|(d, n)| (*d, n.clone())).collect();
+    v.sort_by_key(|(d, _)| *d);
+    v
+}
 
 /// Hand out a session id.
 ///

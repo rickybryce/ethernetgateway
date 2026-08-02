@@ -372,11 +372,17 @@ pub fn apply_mount_selection(
 
 /// The live mount table in `cpm_mounts` form, for writing back to the config.
 pub fn current_mounts_value() -> String {
-    let mounts: Vec<(u8, String)> = registry::all()
+    let mut mounts: Vec<(u8, String)> = registry::all()
         .iter()
         .enumerate()
         .filter_map(|(i, m)| m.as_ref().map(|m| (i as u8, m.filename.clone())))
         .collect();
+    // Drives a booted session is holding are still the operator's mounts — they
+    // are simply out of service until it ends.  Leaving them out here would let
+    // any save made during a boot rewrite `cpm_mounts` without them, and the
+    // configuration would come back short after a restart.
+    mounts.extend(registry::boot_loans());
+    mounts.sort_by_key(|(d, _)| *d);
     format_mounts(&mounts)
 }
 
@@ -388,7 +394,7 @@ pub fn current_mounts_value() -> String {
 const IMAGE_EXTENSIONS: &[&str] = &["dsk", "img", "ima", "image", "cpm"];
 
 /// Does this filename look like a disk image rather than a note?
-fn looks_like_an_image_name(name: &str) -> bool {
+pub fn looks_like_an_image_name(name: &str) -> bool {
     match name.rsplit_once('.') {
         Some((_, ext)) => IMAGE_EXTENSIONS
             .iter()
@@ -847,6 +853,50 @@ mod tests {
         drop(guard);
 
         let _ = unmount_drive(1);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A drive lent to a booted session must still count as the operator's
+    /// mount when the configuration is written.
+    ///
+    /// Otherwise any save made while somebody is booted — from any of the three
+    /// UIs, including one that only changed a different drive — rewrites
+    /// `cpm_mounts` without the lent drives, and the operator's configuration
+    /// comes back short after a restart.  The drive is out of service, not
+    /// forgotten.
+    #[test]
+    fn test_a_lent_drive_survives_a_config_save() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_lent_drive_config");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let blank = format::by_token("altair8").unwrap().blank_image().unwrap();
+        std::fs::write(images.join("altair8_one.dsk"), &blank).unwrap();
+        std::fs::write(images.join("altair8_two.dsk"), &blank).unwrap();
+        mount_image(&base, 1, "altair8_one.dsk").unwrap();
+        mount_image(&base, 2, "altair8_two.dsk").unwrap();
+        let full = current_mounts_value();
+        assert_eq!(full, "B=altair8_one.dsk,C=altair8_two.dsk");
+
+        // A booted session takes B:.
+        let lent = registry::lend_for_boot(1).expect("lent");
+        assert_eq!(lent.filename, "altair8_one.dsk");
+        assert!(registry::get(1).is_none(), "the live mount is out of service");
+        assert_eq!(
+            current_mounts_value(),
+            full,
+            "a lent drive must still be in the configuration"
+        );
+        // And nobody may mount over it while it is lent.
+        let err = mount_image(&base, 1, "altair8_two.dsk").unwrap_err();
+        assert!(err.contains("held by a booted disk"), "{err}");
+
+        registry::end_boot_loan(1);
+        mount_image(&base, 1, "altair8_one.dsk").unwrap();
+        assert_eq!(current_mounts_value(), full);
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }
