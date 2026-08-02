@@ -4203,6 +4203,24 @@ mod tests {
     /// the frame — and the Server grid's `1fr` button column collapsed to zero
     /// whenever its `max-content` columns overflowed a narrow frame, doing the
     /// same thing there.
+    /// The mount screen must offer a row for every drive, and its button must
+    /// exist to open it — a modal nothing opens is invisible.
+    #[test]
+    fn test_cpm_mount_modal_has_a_row_per_drive_and_a_way_in() {
+        let cfg = Config::default();
+        let html = render_cpm_disks_modal(&cfg);
+        for drive0 in 0..crate::cpm::NUM_DRIVES {
+            let name = format!("cpm_mount_{}", (b'a' + drive0) as char);
+            assert!(html.contains(&name), "no control for drive {drive0}");
+        }
+        assert!(html.contains("id=\"more-cpm-disks\""));
+        let page = render_more_popups(&cfg);
+        assert!(
+            page.contains("data-target=\"more-cpm-disks\""),
+            "nothing opens the mount modal"
+        );
+    }
+
     /// The mount screen must be able to make a disk as well as mount one — it
     /// is where an operator lands with an empty images folder, and the two
     /// controls plus a submit are what turn that dead end into a first disk.
@@ -4250,24 +4268,6 @@ mod tests {
         let mut mounts_only = HashMap::new();
         mounts_only.insert("cpm_mount_b".to_string(), "altair8_games.dsk".to_string());
         assert_eq!(requested_new_disk(&mounts_only), None);
-    }
-
-    /// The mount screen must offer a row for every drive, and its button must
-    /// exist to open it — a modal nothing opens is invisible.
-    #[test]
-    fn test_cpm_mount_modal_has_a_row_per_drive_and_a_way_in() {
-        let cfg = Config::default();
-        let html = render_cpm_disks_modal(&cfg);
-        for drive0 in 0..crate::cpm::NUM_DRIVES {
-            let name = format!("cpm_mount_{}", (b'a' + drive0) as char);
-            assert!(html.contains(&name), "no control for drive {drive0}");
-        }
-        assert!(html.contains("id=\"more-cpm-disks\""));
-        let page = render_more_popups(&cfg);
-        assert!(
-            page.contains("data-target=\"more-cpm-disks\""),
-            "nothing opens the mount modal"
-        );
     }
 
     /// A drive whose select was not submitted keeps its image.

@@ -77,6 +77,9 @@ struct BootDisk {
     writable: bool,
     /// Held for the life of the session; dropping it releases the image.
     _claim: BootClaim,
+    /// The drive this came off, when it was a mount we took out of the
+    /// registry — so it can be put back when the session ends.
+    remount: Option<u8>,
 }
 
 /// How often to look for a keystroke, in instructions.
@@ -211,23 +214,56 @@ fn gap_warning<T>(disks: &[Option<T>]) -> Option<String> {
 /// RAII for the same reason [`BootClaim`] is — a boot can end through an error,
 /// a dropped connection or the shutdown broadcast, and drives left marked busy
 /// after any of those would need a restart to clear.
-struct BootDrivesBusy(u64);
+struct BootDrivesBusy(Option<u64>);
 
 impl BootDrivesBusy {
     fn hold(units: &[u8]) -> BootDrivesBusy {
         use crate::cpm::image::registry;
+        // No drives taken, no session.  Registering one anyway would not be
+        // free: a session in the table sits on a drive, and the default is A:.
+        if units.is_empty() {
+            return BootDrivesBusy(None);
+        }
         let id = registry::next_session_id();
         registry::session_start(id);
+        // Move off A: before marking anything.  A new session is recorded as
+        // sitting on drive A: — sensible for the emulator, wrong here, and it
+        // would refuse a mount change on A: while naming a drive this session
+        // is not touching.  Park it on a drive it really holds.
+        registry::session_select(id, units[0]);
         for unit in units {
             registry::session_writing(id, *unit);
         }
-        BootDrivesBusy(id)
+        BootDrivesBusy(Some(id))
     }
 }
 
 impl Drop for BootDrivesBusy {
     fn drop(&mut self) {
-        crate::cpm::image::registry::session_end(self.0);
+        if let Some(id) = self.0 {
+            crate::cpm::image::registry::session_end(id);
+        }
+    }
+}
+
+/// Write an image out so a failure cannot leave a damaged one behind.
+///
+/// Into a temporary beside the target, then renamed over it.  `rename` within a
+/// directory is atomic on every platform this runs on, so a reader either sees
+/// the old image or the new one — never a truncated file with no directory.
+/// The plain write this replaced was tolerable when one disk was at stake; it
+/// is not when a booted session can be holding sixteen of an operator's.
+async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("dsk.saving");
+    tokio::fs::write(&tmp, bytes).await?;
+    match tokio::fs::rename(&tmp, path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Leaving the temporary behind would look like a second disk in
+            // the images folder, so clear it up before reporting.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(e)
+        }
     }
 }
 
@@ -286,10 +322,27 @@ impl TelnetSession {
                 notes.push(format!("{letter}: {name} - {e}"));
                 continue;
             }
+            // Take the mount out of the registry while the guest has it.
+            //
+            // This is the difference between handing over a disk and copying
+            // one.  A mounted image is a *live* object: `mount_image` keeps an
+            // open `ImageFs` with the directory and allocation bitmap cached in
+            // memory, and that object outlives the session that caused it.  If
+            // it stayed while a booted guest rewrote the same file, the cache
+            // would describe a disk that no longer exists — the next emulator
+            // write would allocate blocks the guest had already used and lay a
+            // directory entry over live data.  There is no reload that fixes
+            // this after the fact, so the mount goes away for the duration and
+            // is opened again, fresh, at the end.
+            let remount = match registry::unmount(step.unit) {
+                Some(_) => Some(step.unit),
+                None => None,
+            };
             disks[step.unit as usize] = Some(BootDisk {
                 path: step.path.clone(),
                 writable: step.writable,
                 _claim: claim,
+                remount,
             });
             notes.push(format!(
                 "{letter}: {name}{}",
@@ -345,7 +398,12 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.red(&e))).await?;
             return Ok(());
         }
-        disks[0] = Some(BootDisk { path: image.to_path_buf(), writable, _claim: claim });
+        disks[0] = Some(BootDisk {
+            path: image.to_path_buf(),
+            writable,
+            _claim: claim,
+            remount: None,
+        });
 
         // Everything else mounted comes along, at the unit its drive letter
         // names: B: is unit 1, C: is unit 2, and so on.  What the guest calls
@@ -359,12 +417,14 @@ impl TelnetSession {
         // under a running Altair, and the change would be invisible to it —
         // the bytes are already in the machine — until the write-back at the
         // end put the old contents over the new file.
-        let _busy = BootDrivesBusy::hold(
+        // Only the drives that were really taken from the mount table.  Unit 0
+        // is the booted disk and is not a drive anybody else is using, so
+        // marking it would refuse a mount change on A: and name a drive nothing
+        // is touching.
+        let busy = BootDrivesBusy::hold(
             &disks
                 .iter()
-                .enumerate()
-                .filter(|(_, d)| d.is_some())
-                .map(|(u, _)| u as u8)
+                .filter_map(|d| d.as_ref().and_then(|d| d.remount))
                 .collect::<Vec<_>>(),
         );
 
@@ -460,8 +520,42 @@ impl TelnetSession {
                 );
                 continue;
             }
-            if let Err(e) = tokio::fs::write(&disk.path, &bytes).await {
+            // Written beside the image and renamed over it, so a failure
+            // partway — a full disk, a network transfer_dir, the gateway being
+            // killed — leaves the old image intact instead of a half-new file
+            // that parses as neither.  The blast radius here is now every
+            // mounted disk, not just the one the operator chose to boot.
+            if let Err(e) = save_image_atomically(&disk.path, &bytes).await {
                 glog!("CP/M boot: could not save {}: {}", disk.path.display(), e);
+            }
+        }
+
+        // Release the drives *before* putting the mounts back.  `mount_image`
+        // refuses a drive that is in use, and this session is the one holding
+        // them — so remounting while still marked busy fails every time, with
+        // the drives an operator configured quietly staying empty.  Found by
+        // running it.
+        drop(busy);
+
+        // Put back every mount that was taken out for the guest, so the drives
+        // an operator configured are there again — and opened fresh, over
+        // whatever the guest left behind.
+        for disk in disks.iter().flatten() {
+            let Some(drive) = disk.remount else { continue };
+            let name = disk
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let base = self.cpmmount_base();
+            let n2 = name.clone();
+            let re = tokio::task::spawn_blocking(move || {
+                crate::cpm::image::mount_image(&base, drive, &n2)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("{e}")));
+            if let Err(e) = re {
+                glog!("CP/M boot: could not remount {} on drive {}: {}", name, drive, e);
             }
         }
         self.send_line("").await?;
@@ -686,6 +780,7 @@ mod tests {
     }
     use crate::cpm::image::registry::{Mount, Usage};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     fn mount_at(name: &str, read_only: bool) -> Mount {
         Mount {
@@ -858,6 +953,93 @@ mod tests {
         });
         assert_eq!(plan_boot_disks(&m2, &idle(), &real, true, 16).0.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blank Altair image, written where a test can mount it.
+    fn blank_image_at(path: &Path) {
+        std::fs::write(
+            path,
+            crate::cpm::image::format::by_token("altair8").unwrap().blank_image().unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The hazard the remount exists for: a mounted image is a *live* object
+    /// with its directory cached in memory, and a booted guest rewrites the
+    /// whole file underneath it.  Leaving the old mount in place would leave
+    /// that cache describing a disk that no longer exists — and the next write
+    /// through it allocating blocks the guest had already used.
+    ///
+    /// So the drive must be empty while the guest holds it, and mounted again
+    /// afterwards from the bytes on disk.  This drives the two registry calls
+    /// directly, which is the part that has to be right; the boot loop around
+    /// them is exercised live.
+    #[test]
+    fn test_a_taken_mount_is_removed_and_comes_back_fresh() {
+        use crate::cpm::image::{mount_image, registry};
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+
+        let base = std::env::temp_dir().join("egw_boot_remount");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = crate::cpm::image::images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let file = images.join("altair8_taken.dsk");
+        blank_image_at(&file);
+
+        mount_image(&base, 1, "altair8_taken.dsk").expect("mounts on B:");
+        let before = registry::get(1).expect("mounted");
+        assert!(!before.read_only);
+
+        // Booting takes it out of the registry, so nothing is holding a stale
+        // view of a file the guest is about to rewrite.
+        assert!(registry::unmount(1).is_some(), "the mount is taken away");
+        assert!(registry::get(1).is_none(), "drive B: must be empty while booted");
+
+        // The guest rewrites the file wholesale, exactly as the write-back does.
+        let mut changed = std::fs::read(&file).unwrap();
+        changed[0] ^= 0xFF;
+        std::fs::write(&file, &changed).unwrap();
+
+        // And it comes back, reading the bytes that are there now.
+        mount_image(&base, 1, "altair8_taken.dsk").expect("remounts on B:");
+        let after = registry::get(1).expect("mounted again");
+        assert_eq!(after.filename, "altair8_taken.dsk");
+        assert!(!Arc::ptr_eq(&before.fs, &after.fs), "a fresh ImageFs, not the stale one");
+
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Only drives really taken from the mount table are marked busy.  Marking
+    /// unit 0 would refuse a mount change on A: while naming a drive nothing is
+    /// using, for as long as the booted session sits at its prompt.
+    #[test]
+    fn test_only_taken_mounts_are_held_busy() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        crate::cpm::image::registry::tests_reset();
+        {
+            let _busy = BootDrivesBusy::hold(&[2, 3]);
+            let usage = crate::cpm::image::registry::usage();
+            assert!(usage[2].describe().is_some(), "C: is held");
+            assert!(usage[3].describe().is_some(), "D: is held");
+            assert!(usage[0].describe().is_none(), "A: is nobody's business");
+            assert!(usage[1].describe().is_none());
+        }
+        // And holding nothing must register nothing at all.
+        {
+            let _none = BootDrivesBusy::hold(&[]);
+            assert!(
+                crate::cpm::image::registry::usage().iter().all(|u| u.describe().is_none()),
+                "a boot that took no mounts must not mark a drive busy"
+            );
+        }
+        // RAII: a boot that ends any way at all must release them.
+        assert!(
+            crate::cpm::image::registry::usage().iter().all(|u| u.describe().is_none()),
+            "drives stay busy after the session ended"
+        );
+        crate::cpm::image::registry::tests_reset();
     }
 
     /// A gap between drives is warned about, because selecting one looks

@@ -459,6 +459,16 @@ impl Format {
             // would be worse than a refusal.
             Framing::Framed { .. } => None,
             Framing::AltairSplit { seclen, sectrk, split_track, first_off, rest_off } => {
+                // The byte positions below — the stop bytes, the tail, and the
+                // check byte via `sector_check` — were measured on 137-byte
+                // sectors with the data at 3 and 7, and hold for nothing else.
+                // A future `AltairSplit` with another geometry is refused here
+                // rather than indexed out of range, which keeps "an unmeasured
+                // format is not offered" a property of the code and not of a
+                // test that could be deleted.
+                if (seclen, first_off, rest_off) != (137, 3, 7) {
+                    return None;
+                }
                 let mut out = vec![0u8; (total * seclen as u64) as usize];
                 for rec in 0..total {
                     let track = (rec / sectrk as u64) as u8;

@@ -64,10 +64,21 @@ pub fn images_dir(cpm_base: &Path) -> PathBuf {
 
 /// Formats that a blank image can be created in, as `(token, label)`.
 ///
-/// Not simply every entry in `FORMATS`: a format is offered here only if a real
-/// format program's output has been measured for it, because the alternative is
-/// handing someone a file that mounts, looks empty and is rejected by the first
-/// machine that reads it.
+/// Not simply every entry in `FORMATS` — a format is offered only where we know
+/// what a blank one contains, and the two kinds of knowing are worth keeping
+/// apart:
+///
+/// * An unframed format has no per-sector headers to author, so a blank really
+///   is nothing but `0xE5` and the whole question is arithmetic.  `ibm3740` and
+///   `altairhd` are here on that reasoning; neither blank has been read back by
+///   real hardware.
+/// * `altair8` has headers, sector IDs and two checksums, and none of that
+///   could be reasoned out.  Its blank is pinned by hash against what MITS's
+///   own `FORMAT.COM` produced inside a booted Altair.
+///
+/// What is *not* offered is a format where neither applies, because the
+/// alternative is handing someone a file that mounts, looks empty, and is
+/// rejected by the first machine that reads it.
 pub fn creatable_formats() -> Vec<(&'static str, &'static str)> {
     format::FORMATS
         .iter()
