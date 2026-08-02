@@ -1726,6 +1726,154 @@ mod tests {
         }
     }
 
+    /// Drive a booted guest from the command line and hand back what its disks
+    /// look like afterwards.
+    ///
+    /// A workbench rather than a check.  Answering "what does the disk's own
+    /// software actually do here" is the technique that settled the Altair block
+    /// mapping, and it needs a way to type at a guest and dump the result
+    /// without a five-minute rebuild between each guess.
+    ///
+    /// Ignored:
+    ///   `CPM_BOOT_IMAGE=...`   drive A:, boots, read-only
+    ///   `CPM_BOOT_IMAGE2=...`  drive B:, WRITABLE — or `blank:<n>` for `n`
+    ///                          bytes of nothing at all, which is what you want
+    ///                          when the question is about formatting
+    ///   `CPM_KEYS=FORMAT\r;B;Y`  typed in order, `;`-separated, output printed
+    ///                          after each
+    ///   `CPM_DUMP=/tmp/out.dsk`  where to write drive B: at the end
+    #[test]
+    #[ignore]
+    fn test_drive_a_booted_guest() {
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to run this");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&path).unwrap(), true).expect("an 88-DCDD image");
+        if let Ok(second) = std::env::var("CPM_BOOT_IMAGE2") {
+            let bytes = match second.strip_prefix("blank:") {
+                Some(n) => vec![0u8; n.parse().expect("a byte count")],
+                None => std::fs::read(&second).unwrap(),
+            };
+            m.insert(1, bytes, false).expect("an 88-DCDD image in B:");
+        }
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        println!("--- sign-on ---\n{}", printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000)));
+
+        for key in std::env::var("CPM_KEYS").unwrap_or_default().split(';') {
+            if key.is_empty() {
+                continue;
+            }
+            let keys = key.replace("\\r", "\r").replace("\\n", "\n");
+            println!("--- typed {key:?} ---\n{}", type_at(&mut m, &mut cpu, keys.as_bytes(), 2_000_000_000));
+        }
+        if let Ok(dump) = std::env::var("CPM_DUMP") {
+            match m.take_dirty().into_iter().find(|(d, _)| *d == 1) {
+                Some((_, bytes)) => {
+                    std::fs::write(&dump, &bytes).unwrap();
+                    println!("(wrote drive B: to {dump}, {} bytes)", bytes.len());
+                }
+                None => println!("(the guest wrote nothing to B:)"),
+            }
+        }
+    }
+
+    /// Make an Altair floppy **out of nothing** on the host — format and all —
+    /// put a file on it, and have a real Altair CP/M read it.
+    ///
+    /// The last gap in host-side disk handling. `test_host_written_altair_
+    /// floppy_is_read_by_the_guest` writes into a disk somebody else formatted;
+    /// this one owns every byte of the image, so it also covers the sector
+    /// headers, the sector IDs and the initial empty directory.
+    ///
+    /// A blank disk is the case where "looks fine" is worth nothing: a file
+    /// full of `0xE5` mounts, lists as empty and accepts writes, and is refused
+    /// by the first real BIOS that reads it because there is not one sector
+    /// header on it. Only a guest can tell you the difference.
+    ///
+    /// Ignored: set `CPM_TOOL_IMAGE` to an Altair CP/M image carrying PCPUT.COM.
+    #[test]
+    #[ignore]
+    fn test_a_blank_altair_floppy_made_here_works_in_the_guest() {
+        use crate::cpm::image::format::by_token;
+        use crate::cpm::image::fs::ImageFs;
+        use crate::cpm::image::media::FileMedia;
+
+        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
+        let Ok(tool) = std::env::var("CPM_TOOL_IMAGE") else {
+            eprintln!("set CPM_TOOL_IMAGE to run this");
+            return;
+        };
+
+        // ---- a disk that did not exist a moment ago -----------------------
+        let fmt = by_token("altair8").expect("altair8 is a format");
+        let scratch = std::env::temp_dir().join("egw-altair-blank-test.dsk");
+        std::fs::write(&scratch, fmt.blank_image().expect("a blank Altair")).unwrap();
+
+        let mut fs =
+            ImageFs::mount(Box::new(FileMedia::open(&scratch, false).unwrap()), fmt, false)
+                .expect("our own blank mounts read-write");
+        assert!(!fs.is_read_only(), "a fresh blank must not arrive damaged");
+        assert!(fs.entries().is_empty(), "a fresh blank has no files on it");
+        let mut name = [b' '; 8];
+        name[..5].copy_from_slice(b"EGT80");
+        let ext = *b"COM";
+        fs.create(0, &name, &ext).unwrap();
+        for (rec, chunk) in EGT80_COM.chunks(128).enumerate() {
+            let mut buf = [0x1Au8; 128];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            fs.write_record(0, &name, &ext, rec as u32, &buf).unwrap();
+        }
+        drop(fs);
+        let made = std::fs::read(&scratch).unwrap();
+        let _ = std::fs::remove_file(&scratch);
+
+        // ---- now let a real Altair CP/M be the judge ----------------------
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&tool).unwrap(), true).expect("an 88-DCDD tool image");
+        m.insert(1, made, true).expect("what we made is an 88-DCDD image");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+        );
+        m.modem().set_carrier(true);
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        assert!(
+            printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000)).contains("CP/M"),
+            "no sign-on"
+        );
+
+        let dir = type_at(&mut m, &mut cpu, b"DIR B:\r", 400_000_000);
+        println!("--- DIR B: ---\n{dir}");
+        assert!(
+            dir.to_ascii_uppercase().contains("EGT80"),
+            "the guest does not list the file on the disk we made: {dir:?}"
+        );
+
+        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT80.COM B\r", 400_000_000);
+        println!("--- PCPUT ---\n{ready}");
+        assert!(
+            !ready.contains("Bad Sector"),
+            "the guest's BIOS rejected a sector we formatted: {ready:?}"
+        );
+        let (got, during) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
+        let got = got
+            .unwrap_or_else(|| panic!("the guest never sent it back: {}", printable(&during)));
+        assert_eq!(
+            &got[..EGT80_COM.len()],
+            EGT80_COM,
+            "the file came back different from the one we put on our own disk"
+        );
+        println!(
+            "a {} KB floppy formatted and filled on the host, read by the guest's own CP/M",
+            337_568 / 1024
+        );
+    }
+
     /// Write an Altair floppy **from the host** and have the machine it was
     /// written for agree that it worked.
     ///

@@ -92,7 +92,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DISK01.DSK` **from the host**, the disk is then booted, and the guest's own
   `DIR` lists it and its own `PCPUT` sends all 18,048 bytes back byte-identical.
   Each of the three things above fails silently on its own, and that one test
-  catches all three. Written up in the new `web/diskreference.html`.
+  catches all three. Written up in the new `web/diskreference.html`, which also
+  documents how the emulated 88-DCDD controller works — the three ports, the
+  rotational sector position and why it had to be built first, the cold start
+  and why the payload address is not a guess.
+- **Make a new blank disk.** An empty, formatted image, from the mount screen
+  in all three interfaces — telnet `I` then `N`, and a *New blank disk* row on
+  the web and desktop **Mount CP/M Drives** screens. You name the disk and the
+  gateway names the file `<format>_<name>.dsk`, because the format prefix is
+  what makes an image mount read-write; a blank disk you could not write to
+  would be a puzzle rather than a feature. Nothing is ever overwritten.
+
+  For the two unframed formats a blank really is nothing but `0xE5`. The Altair
+  is not, and this is the case where "looks fine" is worth nothing: a file full
+  of `0xE5` mounts, lists as empty and accepts writes, and is refused by the
+  first real machine that reads it, because there is not one sector header on
+  it. So it was measured like everything else — MITS's own `FORMAT.COM` was run
+  inside a booted Altair against 337,568 bytes of nothing, and its `FULL`
+  command initialised and then verified all 77 tracks through our emulated
+  controller with no errors. What we generate is required by test to hash
+  identically to what it wrote. Two things fell out for free: `FORMAT` prints
+  the disk's parameters and they are exactly the DPB read out of the BIOS, and
+  its verify pass is a stronger statement about the controller than any test
+  here. The loop is closed at the other end too — a disk created and filled
+  entirely on the host boots, and the guest's own `DIR` lists the file and its
+  own `PCPUT` sends it back byte-identical.
 - Mount and unmount from all three interfaces: a wizard on the telnet CP/M
   settings screen (`I`), and a **Mount CP/M Drives** screen in the web and
   desktop UIs. Changes take effect immediately in every session and are saved

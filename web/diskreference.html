@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Disk Format Reference &mdash; Ethernet Gateway v0.9.0</title>
-    <meta name="description" content="Measured layouts of the vintage disk images the Ethernet Gateway reads: the MITS Altair 88-DCDD 8-inch floppy (137-byte sectors, the two sector-translation tables, the track-6 format change, the two sector checksum formulas, EXM 0), the IBM 3740 8-inch SSSD, and the Altair 88-HDSK hard disk. Includes the method used to measure them &mdash; booting the disk and asking its own operating system.">
+    <meta name="description" content="Measured layouts of the vintage disk images the Ethernet Gateway reads and writes: the MITS Altair 88-DCDD 8-inch floppy (137-byte sectors, the two sector-translation tables, the track-6 format change, the two sector checksum formulas, EXM 0, and what a freshly formatted blank holds), the IBM 3740 8-inch SSSD, and the Altair 88-HDSK hard disk. Also how the emulated 88-DCDD controller works &mdash; ports 08h-0Ah, rotational sector position, cold start &mdash; and the method behind all of it: boot the disk and ask its own operating system.">
     <style>
         :root {
             --green: #33ff33;
@@ -553,6 +553,7 @@
                 <span class="hdr-badge">IBM 3740</span>
                 <span class="hdr-badge">Altair 88-HDSK</span>
                 <span class="hdr-badge">Measured</span>
+                <span class="hdr-badge">Controller</span>
             </div>
         </header>
 
@@ -567,6 +568,8 @@
             <a href="#altair8">Altair 88-DCDD</a>
             <a href="#checksums">Sector Checksums</a>
             <a href="#exm">EXM</a>
+            <a href="#blank">Blank Disks</a>
+            <a href="#controller">The Controller</a>
             <a href="#others">Other Formats</a>
             <a href="#open">Still Open</a>
         </nav>
@@ -799,10 +802,10 @@ DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2</code></pre>
                     understanding bytes we have not measured.
                 </p>
                 <p>
-                    The consequence is worth stating plainly: <strong>this writes into an
-                    already-formatted image only.</strong> Nothing here authors Altair sector
-                    headers, so a blank file is not a blank floppy, and creating an
-                    <code>altair8</code> image from nothing is not supported.
+                    So a write edits an already-formatted image. Creating one
+                    from nothing is a separate job with its own measurement
+                    behind it &mdash; see <a href="#blank">Making a Blank
+                    Disk</a>.
                 </p>
             </div>
 
@@ -845,6 +848,297 @@ DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2</code></pre>
             </div>
 
             <hr class="divider">
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- BLANK DISKS                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="blank">
+                <div class="section-title">Making a Blank Disk</div>
+                <p class="intro">A file full of <code>0xE5</code> is not a blank floppy. It mounts, lists as empty, accepts writes &mdash; and is refused by the first real machine that reads it, because there is not one sector header on it.</p>
+
+                <p>
+                    So the blank was measured too, the same way everything else
+                    on this page was. A booted Altair CP/M was pointed at
+                    337,568 bytes of nothing in drive B: and told to run its own
+                    <code>FORMAT.COM</code>:
+                </p>
+                <pre><code>A&gt;FORMAT
+*** DISKETTE INITIALIZER ***
+
+DISK DRIVE (A-P)? B
+
+SECTORS PER TRACK: 32
+SECTORS PER BLOCK: 16
+BLOCKS PER DISK:   149
+RESERVED TRACKS:   2
+TRACKS PER DISK:   77
+
+COMMAND: FULL
+WARNING: THIS COMMAND DESTROYS ALL DATA ON THE DISK
+TYPE C TO CONTINUE, A TO ABORT WITHOUT LOSS.
+PROCESSING TRACK# 0 &hellip; PROCESSING TRACK# 76
+INIT DONE - NOW VERIFYING DISKETTE.
+PROCESSING TRACK# 0 &hellip; PROCESSING TRACK# 76
+NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
+                <div class="callout callout-tip">
+                    <p>
+                        Two things fell out of that for free. <code>FORMAT</code>
+                        prints the disk's parameters, and they are
+                        <strong>exactly</strong> the DPB read out of the BIOS
+                        &mdash; an independent confirmation of the geometry from
+                        a completely different piece of software. And its verify
+                        pass read back all 77 tracks through the emulated
+                        controller and found no errors, which is a stronger
+                        statement about the controller than any test written
+                        here.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What a freshly formatted Altair disk holds</h3>
+                <table class="data-table">
+                    <thead><tr><th>Byte</th><th>Tracks 0&ndash;5</th><th>Tracks 6&ndash;76</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>0</code></td><td>track + <code>0x80</code></td><td>track + <code>0x80</code></td></tr>
+                        <tr><td><code>1</code></td><td><code>0x00</code></td><td>sector ID, in the shifted order</td></tr>
+                        <tr><td><code>2</code></td><td><code>0x01</code></td><td><code>0x01</code></td></tr>
+                        <tr><td><code>3</code></td><td>data (<code>0xE5</code>)</td><td><code>0xE5</code></td></tr>
+                        <tr><td><code>4</code></td><td>data</td><td>checksum <code>0x30</code></td></tr>
+                        <tr><td><code>5</code>&ndash;<code>6</code></td><td>data</td><td><code>0xE5</code></td></tr>
+                        <tr><td>data</td><td><code>3</code>&ndash;<code>130</code>, all <code>0xE5</code></td><td><code>7</code>&ndash;<code>134</code>, all <code>0xE5</code></td></tr>
+                        <tr><td>stop</td><td><code>131</code> = <code>0xFF</code></td><td><code>135</code> = <code>0xFF</code></td></tr>
+                        <tr><td>check</td><td><code>132</code> = <code>0x80</code></td><td><em>(byte 4, above)</em></td></tr>
+                        <tr><td>tail</td><td><code>133</code>&ndash;<code>136</code> = <code>0x00</code></td><td><code>136</code> = <code>0x00</code></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Both check bytes are exactly what the
+                    <a href="#checksums">formulas above</a> compute for 128
+                    <code>0xE5</code> bytes: <code>0x80</code> on a boot track,
+                    and <code>0x80 + 0x01 + three 0xE5</code> = <code>0x30</code>
+                    on a data track. Two independently measured things agreeing
+                    is worth more than either on its own.
+                </p>
+                <p>
+                    The sector IDs a fresh format lays down are the same shifted
+                    order the shipped disks carry &mdash; the third independent
+                    sighting of it, after the BIOS table and the disks
+                    themselves.
+                </p>
+                <div class="callout callout-info">
+                    <p>
+                        <strong>The gateway generates this, byte for byte.</strong>
+                        Our blank image is required by test to hash identically
+                        to the one <code>FORMAT.COM</code> wrote. And the loop is
+                        closed at the other end too: a disk created and filled
+                        entirely on the host is booted, and the guest's own
+                        <code>DIR</code> lists the file and its own
+                        <code>PCPUT</code> sends it back byte-identical.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Where to make one</h3>
+                <table class="data-table">
+                    <thead><tr><th>Where</th><th>How</th></tr></thead>
+                    <tbody>
+                        <tr><td>Telnet / SSH</td><td>Settings &rarr; CP/M Emulator &rarr; <code>I</code> &rarr; <code>N</code></td></tr>
+                        <tr><td>Web</td><td>AI, Browser, Weather &amp; CP/M &rarr; More &rarr; <strong>Mount CP/M drives</strong> &rarr; <em>New blank disk</em></td></tr>
+                        <tr><td>Desktop</td><td>Same group &rarr; More &rarr; <strong>Mount CP/M Drives</strong> &rarr; <em>New blank disk</em></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    You name the <em>disk</em>, not the file: the gateway writes
+                    <code>&lt;format&gt;_&lt;name&gt;.dsk</code>, because the
+                    format prefix is what makes an image mount read-write. A
+                    blank disk you could not write to would be a puzzle rather
+                    than a feature. Nothing is ever overwritten &mdash; a name
+                    already in use is refused, since there is no undo for the
+                    disk that used to have it.
+                </p>
+                <p class="dim-text">
+                    All three formats can be created. The two unframed ones are
+                    trivial &mdash; a formatted <code>ibm3740</code> or
+                    <code>altairhd</code> really is nothing but <code>0xE5</code>,
+                    because those images have no per-sector headers to author.
+                    The Altair is the one that needed measuring. A format whose
+                    blank layout had <em>not</em> been measured would simply not
+                    be offered, rather than being guessed at.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- THE CONTROLLER                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="controller">
+                <div class="section-title">How Our 88-DCDD Controller Works</div>
+                <p class="intro">The emulated MITS 88-DCDD is what makes everything else on this page possible: it is how a disk gets to run its own operating system, and therefore how the disk can be asked what its own layout is.</p>
+
+                <p>
+                    Note what the controller does <em>not</em> do. It has no
+                    skew table, no directory, no idea what a file is. It serves
+                    raw 137-byte sectors in physical rotation order and lets the
+                    guest's BIOS do every bit of translation. That is exactly
+                    why a hardware emulator could read these disks perfectly
+                    while our filesystem reader could not, and it is the reason
+                    this path was built first.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The register interface</h3>
+                <p>
+                    Three ports. Taken from the published description of the
+                    88-DCDD and cross-checked against observed behaviour &mdash;
+                    the same clean-room posture as Punter, HBIOS and EGT80. Other
+                    emulators' sources were a check on measurements, not a source
+                    of code.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Port</th><th>Direction</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>08h</code></td><td>OUT</td><td>Drive select. Bit 7 deselects/clears; bits 0&ndash;3 pick the drive.</td></tr>
+                        <tr><td><code>08h</code></td><td>IN</td><td>Status &mdash; <strong>active low</strong>, the byte is returned inverted. Bit 7 new-read-data-available, bit 6 head at track 0, bit 5 interrupts enabled, bit 2 head loaded, bit 1 safe to move the head, bit 0 controller wants the next write byte.</td></tr>
+                        <tr><td><code>09h</code></td><td>OUT</td><td>Drive control. Bit 0 step in, bit 1 step out, bit 2 head load, bit 3 head unload, bit 4 interrupt enable, bit 5 interrupt disable, bit 6 lower head current (ignored), bit 7 begin write.</td></tr>
+                        <tr><td><code>09h</code></td><td>IN</td><td>Sector position. Bits 1&ndash;5 are the sector number &times; 2; bit 0 is &ldquo;sector true&rdquo;, <strong>zero</strong> when that sector is under the head.</td></tr>
+                        <tr><td><code>0Ah</code></td><td>OUT</td><td>Write data.</td></tr>
+                        <tr><td><code>0Ah</code></td><td>IN</td><td>Read data.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Rotation, and why it was built first</h3>
+                <p>
+                    A real disk turns, and software waits for the sector it wants
+                    to come round by polling the position register. So
+                    <strong>the position has to advance on its own or every guest
+                    hangs in a poll loop</strong> &mdash; and a guest hung in a
+                    poll loop looks exactly like a runaway program, a
+                    misdiagnosis this project has already made once. Rotation was
+                    therefore modelled first and tested first.
+                </p>
+                <p>
+                    The model: each read of the position register flips a
+                    &ldquo;sector true&rdquo; flag, and the sector advances on the
+                    flip to <em>false</em>. Every sector therefore gets two reads
+                    at the head &mdash; one positioned, one not.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        That second read is not decoration. Some software waits
+                        for the flag to go <em>false</em> rather than true, and a
+                        controller that only ever reports &ldquo;positioned&rdquo;
+                        leaves it spinning forever. MBASIC saving a file under
+                        CP/M is the known example.
+                    </p>
+                </div>
+                <p>
+                    A guest that polls the same sector for an implausible number
+                    of instructions is counted rather than ignored, and the count
+                    is reported alongside the program counter. A silent guest and
+                    a stuck guest are different faults with the same symptom, and
+                    that counter is what tells them apart.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Cold start</h3>
+                <p>
+                    A real Altair boots from a small PROM: select drive 0, load
+                    the head, wait for sector 0, copy its data into low memory,
+                    jump there. We do not have the PROM, so that sequence is
+                    written out &mdash; a deliberate substitution, and it has to
+                    land the payload at exactly the address the PROM would or the
+                    boot sector's own jumps go nowhere.
+                </p>
+                <p>
+                    <strong>The address is not a guess.</strong> A real Altair
+                    CP/M boot sector begins <code>31 00 DF</code>
+                    (<code>LXI SP,0DF00h</code>), <code>F3</code>
+                    (<code>DI</code>), then talks to the controller with
+                    <code>D3 08</code> / <code>DB 08</code>. Its absolute jumps
+                    target <code>0007h</code>, <code>0015h</code>,
+                    <code>0020h</code>, <code>0030h</code> and <code>0048h</code>
+                    &mdash; and each matches the offset of the corresponding
+                    instruction <em>within the payload itself</em>. The jump to
+                    <code>0007h</code> lands on the <code>DB 08</code> at payload
+                    offset 7. That only works if the payload sits at
+                    <code>0000h</code>.
+                </p>
+                <p>
+                    The bootstrap reads the loader with a <strong>2:1
+                    interleave</strong>. Every Altair disk here &mdash; CP/M and
+                    MITS alike &mdash; uses it, and autodetecting it was tried
+                    and found actively harmful, so it is a constant.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The rest of the machine</h3>
+                <table class="data-table">
+                    <thead><tr><th>Part</th><th>What it is</th></tr></thead>
+                    <tbody>
+                        <tr><td>CPU</td><td>A Z80. The Altair shipped with an 8080, but the Z80 is a superset that runs all of it, Altairs were commonly fitted with Z80 upgrade boards, and the emulator next door was already a Z80.</td></tr>
+                        <tr><td>Memory</td><td>A flat 64&nbsp;KB. The guest's operating system owns all of it.</td></tr>
+                        <tr><td>Console</td><td>An 88-2SIO at <code>10h</code>/<code>11h</code>, bridged to the session both ways.</td></tr>
+                        <tr><td>Sense switches</td><td>Port <code>FFh</code>, reading <code>0x00</code> &mdash; see the warning below.</td></tr>
+                        <tr><td>Virtual modem</td><td>The second 88-2SIO port at <code>12h</code>/<code>13h</code>, where a real Altair put its modem, when the selected profile fits.</td></tr>
+                        <tr><td>Unknown ports</td><td>Read as inert rather than as whatever was last on the bus.</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>MITS software finds its console through the front
+                        panel.</strong> Port <code>FFh</code> is the sense
+                        switches, and Altair DOS, Disk BASIC and Time Sharing
+                        BASIC read it to choose a terminal driver.
+                        <code>0x00</code> selects the 88-2SIO at
+                        <code>10h</code>/<code>11h</code>, which is the console we
+                        emulate. Leaving the port floating at the unknown-port
+                        <code>0xFF</code> is <em>not</em> &ldquo;no answer&rdquo;
+                        &mdash; it is a valid reading meaning 88-SIO, and it cost
+                        a day spent looking at the disk while the guest was
+                        working perfectly and printing to a board that was not
+                        there.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Writing</h3>
+                <p>
+                    The controller does not own the images. It says which sector
+                    it needs and the host moves the bytes, which keeps every file
+                    access on the side where the bounds checking and the
+                    read-only rules already live.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Where a written sector belongs is captured when
+                        the write starts, not when it is committed.</strong> The
+                        head can move in between. A guest writing a directory
+                        entry and then seeking away to write the file's data had
+                        its directory sector land on whatever track it had
+                        stepped to &mdash; a sector whose own header said track 2
+                        was committed to track 69, and CP/M reported
+                        <code>Bdos Err On A: Bad Sector</code>. This was found by
+                        pushing a file into a booted guest and reading it back.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What booting costs</h3>
+                <p>
+                    Every guard that worked by understanding the guest's request
+                    is gone, because there is no request to understand &mdash;
+                    just sectors. Two blunt ones remain: an image opens
+                    <strong>read-only</strong> unless the boot picker is told
+                    otherwise, and it is held <strong>exclusively by one
+                    session</strong>. There is deliberately no instruction
+                    ceiling: a booted operating system <em>is</em> the session
+                    and is meant to sit at its prompt indefinitely, so the
+                    session idle timeout bounds an abandoned one instead.
+                </p>
+                <p class="dim-text">
+                    Source: <code>src/cpm/dcdd.rs</code> (controller),
+                    <code>src/cpm/boot.rs</code> (cold start),
+                    <code>src/cpm/boot_machine.rs</code> (the machine around
+                    them). Reached from the CP/M settings screens &mdash; see the
+                    <a href="cpmreference.html#booting">CP/M Reference</a>.
+                </p>
+            </div>
 
             <!-- ══════════════════════════════════════════════ -->
             <!-- OTHER FORMATS                                 -->
@@ -905,13 +1199,11 @@ DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2</code></pre>
                     <tbody>
                         <tr>
                             <td>Header bytes 3, 5 and 6 on Altair data tracks</td>
-                            <td>Unidentified. They vary per sector and enter the checksum. Writes
-                                preserve them, so their meaning has never had to be known.</td>
-                        </tr>
-                        <tr>
-                            <td>Formatting a blank <code>altair8</code> image</td>
-                            <td>Not supported. Writing edits an existing formatted disk; nothing
-                                here authors sector headers.</td>
+                            <td>Unidentified, and now known not to matter to CP/M: a fresh
+                                <code>FORMAT</code> leaves all three at <code>0xE5</code> and the
+                                disk works. On shipped disks they hold leftovers from whatever
+                                wrote them. Writes preserve them either way, so their meaning has
+                                never had to be known.</td>
                         </tr>
                         <tr>
                             <td>1,113,536-byte Altair images</td>

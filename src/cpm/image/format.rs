@@ -44,6 +44,11 @@
 //! those measurements — the same clean-room posture the Punter and HBIOS
 //! implementations here were written under.
 
+/// The byte CP/M leaves everywhere it has not written: an empty directory entry
+/// and an unused data byte are both `0xE5`, because that is what a bulk-erased
+/// floppy read back as.
+pub const FILL: u8 = 0xE5;
+
 /// How the 128-byte CP/M records are laid out inside the image file.
 ///
 /// Each variant answers one question: given a record's *physical* index
@@ -428,6 +433,76 @@ impl Format {
         self.total_records.saturating_sub(self.reserved_records)
     }
 
+    /// A freshly-formatted, empty image of this format — what a blank floppy
+    /// out of the box looks like, ready to mount and write files to.
+    ///
+    /// `None` for a format where nobody has measured what a real format program
+    /// writes.  Filling a file with `0xE5` and hoping is precisely the kind of
+    /// plausible-but-wrong artefact this module exists to avoid: on a disk with
+    /// per-sector headers it produces a file that mounts, lists as empty, and
+    /// is rejected by the first machine that reads it.
+    ///
+    /// Where a format *is* supported the bytes are not invented either.  The
+    /// Altair layout below is what MITS's own `FORMAT.COM` produced when it was
+    /// pointed at 337,568 bytes of nothing inside a booted Altair — including
+    /// its verify pass reporting `NO ERRORS FOUND ON THIS DISKETTE` — and
+    /// `test_our_blank_altair_matches_the_guests_own_format` requires our output
+    /// to equal it byte for byte.
+    pub fn blank_image(&self) -> Option<Vec<u8>> {
+        let total = self.total_records as u64;
+        match self.framing {
+            // No headers at all: the empty directory and the empty data area
+            // are both just 0xE5, which is what a formatted disk of this shape
+            // holds and what CP/M reads as "unused".
+            Framing::Raw => Some(vec![FILL; (total * 128) as usize]),
+            // Never measured.  Nothing in FORMATS uses it, and a guess here
+            // would be worse than a refusal.
+            Framing::Framed { .. } => None,
+            Framing::AltairSplit { seclen, sectrk, split_track, first_off, rest_off } => {
+                let mut out = vec![0u8; (total * seclen as u64) as usize];
+                for rec in 0..total {
+                    let track = (rec / sectrk as u64) as u8;
+                    let pos = (rec % sectrk as u64) as usize;
+                    let base = (rec * seclen as u64) as usize;
+                    let sec = &mut out[base..base + seclen as usize];
+                    let boot_format = (track as u16) < split_track;
+                    let data_off = if boot_format { first_off } else { rest_off } as usize;
+
+                    sec[0] = track | 0x80;
+                    // On a data track the sector states its own ID, and the ID
+                    // at a position is `ALTAIR_SECTOR_ORDER` read the other way
+                    // — which is the same table, because that permutation is
+                    // its own inverse.  Boot tracks leave it zero.
+                    sec[1] = if boot_format { 0 } else { ALTAIR_SECTOR_ORDER[pos] as u8 };
+                    sec[2] = 0x01;
+                    sec[data_off..data_off + 128].fill(FILL);
+                    if boot_format {
+                        sec[131] = 0xFF; // stop byte
+                        sec[133..137].fill(0x00);
+                    } else {
+                        sec[3] = FILL;
+                        sec[5] = FILL;
+                        sec[6] = FILL;
+                        sec[135] = 0xFF; // stop byte
+                        sec[136] = 0x00;
+                    }
+                    // The check byte last, over whatever the rest of this
+                    // sector ended up being — never a second copy of the rule.
+                    if let Some((at, also)) = self.framing.sector_check(rec) {
+                        let mut sum = sec[data_off..data_off + 128]
+                            .iter()
+                            .fold(0u8, |a, &b| a.wrapping_add(b));
+                        for extra in also {
+                            sum = sum.wrapping_add(sec[(extra - base as u64) as usize]);
+                        }
+                        sec[(at - base as u64) as usize] = sum;
+                    }
+                }
+                Some(out)
+            }
+        }
+    }
+
     /// Records the directory occupies.
     pub fn dir_records(&self) -> u32 {
         // 32 bytes per entry, 4 entries per 128-byte record.
@@ -696,6 +771,101 @@ mod tests {
                     off < data || off >= data + 128,
                     "byte {off} sits on the record's own data"
                 );
+            }
+        }
+    }
+
+    /// Our blank Altair image must be byte-for-byte what MITS's own
+    /// `FORMAT.COM` writes.
+    ///
+    /// The hash is of an image produced by booting a real Altair CP/M disk,
+    /// running `FORMAT`, pointing it at 337,568 bytes of zeros in drive B: and
+    /// letting its `FULL` command initialise and then verify all 77 tracks —
+    /// which it did, reporting no errors. A hash rather than a fixture because
+    /// this is generated, not copied: it is cheap to regenerate and there is no
+    /// reason to carry 330 KB in the repository to check 330 KB we can compute.
+    ///
+    /// This is the check that stops "blank image" meaning "a file full of
+    /// 0xE5". Such a file mounts, lists as empty, and is refused by the first
+    /// real BIOS that reads it, because there is not a single sector header on
+    /// it.
+    #[test]
+    fn test_our_blank_altair_matches_the_guests_own_format() {
+        use sha2::{Digest, Sha256};
+        let alt = by_token("altair8").unwrap();
+        let blank = alt.blank_image().expect("the Altair has a measured blank");
+        assert_eq!(blank.len(), 337_568);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&blank)),
+            "a950b6638d426ecb0266e63767945d928962599f13c2af5ddb86916bf00a1132",
+            "our blank Altair image is not what FORMAT.COM produces"
+        );
+    }
+
+    /// Spot-check the same blank in a form a human can read against a hex dump,
+    /// so a hash mismatch is diagnosable rather than just red.
+    #[test]
+    fn test_blank_altair_sector_headers() {
+        let alt = by_token("altair8").unwrap();
+        let blank = alt.blank_image().unwrap();
+        let sec = |rec: usize| &blank[rec * 137..(rec + 1) * 137];
+
+        // Track 0, boot format: no sector ID, stop byte at 131, sum of 128
+        // 0xE5 bytes at 132, and a zero tail.
+        let t0 = sec(0);
+        assert_eq!(&t0[..3], &[0x80, 0x00, 0x01]);
+        assert!(t0[3..131].iter().all(|&b| b == FILL));
+        assert_eq!(t0[131], 0xFF);
+        assert_eq!(t0[132], 0x80, "128 x 0xE5 sums to 0x80");
+        assert_eq!(&t0[133..137], &[0, 0, 0, 0]);
+
+        // Track 6, data format: the sector ID appears, the check byte moves to
+        // 4 and takes in bytes 2, 3, 5 and 6, and the stop byte moves to 135.
+        let t6 = sec(6 * 32);
+        assert_eq!(&t6[..3], &[0x86, 0x00, 0x01]);
+        assert_eq!(t6[3], FILL);
+        assert_eq!(t6[4], 0x30, "0x80 + 0x01 + three 0xE5 header bytes");
+        assert_eq!(&t6[5..7], &[FILL, FILL]);
+        assert!(t6[7..135].iter().all(|&b| b == FILL));
+        assert_eq!(t6[135], 0xFF);
+        assert_eq!(t6[136], 0x00);
+
+        // And the IDs round a data track are the measured placement, which is
+        // the third independent sighting of it: the BIOS table, the shipped
+        // disks, and now a fresh format.
+        let ids: Vec<u16> = (0..32).map(|p| sec(6 * 32 + p)[1] as u16).collect();
+        assert_eq!(ids, ALTAIR_SECTOR_ORDER, "a fresh format lays IDs out this way");
+    }
+
+    /// `blank_image` reads the sector placement out of `ALTAIR_SECTOR_ORDER`
+    /// backwards — position to ID rather than ID to position — and gets away
+    /// with using the same table only because that permutation is its own
+    /// inverse.  If it ever stops being one, the blank images go silently wrong.
+    #[test]
+    fn test_altair_sector_order_is_its_own_inverse() {
+        for id in 0..32usize {
+            assert_eq!(
+                ALTAIR_SECTOR_ORDER[ALTAIR_SECTOR_ORDER[id] as usize], id as u16,
+                "sector {id}: the placement table is no longer an involution"
+            );
+        }
+    }
+
+    /// A blank must be mountable as the format that made it, and it must be a
+    /// legal size — an image whose geometry does not agree with its own format
+    /// is refused at mount, and generating one would be a strange way to fail.
+    #[test]
+    fn test_every_blank_is_the_size_its_format_expects() {
+        for f in FORMATS {
+            let Some(blank) = f.blank_image() else { continue };
+            assert_eq!(
+                blank.len() as u64,
+                f.min_bytes(),
+                "{}: blank is the wrong size for its own geometry",
+                f.token
+            );
+            if let Some(size) = f.exact_size {
+                assert_eq!(blank.len() as u64, size, "{}", f.token);
             }
         }
     }

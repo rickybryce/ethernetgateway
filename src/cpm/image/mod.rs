@@ -62,6 +62,81 @@ pub fn images_dir(cpm_base: &Path) -> PathBuf {
     cpm_base.join(IMAGES_DIR)
 }
 
+/// Formats that a blank image can be created in, as `(token, label)`.
+///
+/// Not simply every entry in `FORMATS`: a format is offered here only if a real
+/// format program's output has been measured for it, because the alternative is
+/// handing someone a file that mounts, looks empty and is rejected by the first
+/// machine that reads it.
+pub fn creatable_formats() -> Vec<(&'static str, &'static str)> {
+    format::FORMATS
+        .iter()
+        .filter(|f| f.blank_image().is_some())
+        .map(|f| (f.token, f.label))
+        .collect()
+}
+
+/// Create a new blank, formatted image in the images folder.
+///
+/// The filename is built rather than taken: `<token>_<name>.dsk`, so a created
+/// image always carries the format prefix that makes it mountable read-write.
+/// Letting the caller supply the whole filename would make it possible to
+/// create `mydisk.dsk`, which then mounts read-only by the sniffing rule and
+/// looks like a bug.
+///
+/// Refuses to overwrite. Creating a disk is the one operation here that has an
+/// obvious destructive spelling — "make me a fresh disk called BACKUP" — and
+/// there is no undo for the disk that used to have that name.
+pub fn create_blank_image(
+    cpm_base: &Path,
+    token: &str,
+    name: &str,
+) -> Result<String, String> {
+    let fmt = format::by_token(token).ok_or_else(|| format!("no format called '{token}'"))?;
+    let blank = fmt
+        .blank_image()
+        .ok_or_else(|| format!("{}: no measured blank layout for this format", fmt.token))?;
+
+    // The operator names the disk, not the file: strip anything that would make
+    // the assembled name unsafe or unparseable rather than rejecting it, since
+    // the token before the first underscore is what selects the format and a
+    // second underscore would not change that.
+    let stem: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let stem = stem.trim_matches('_').to_string();
+    if stem.is_empty() {
+        return Err("give the disk a name".into());
+    }
+    let filename = format!("{}_{}.dsk", fmt.token, stem);
+    if !is_safe_image_name(&filename) {
+        return Err(format!("'{filename}' is not a valid image name"));
+    }
+
+    let dir = images_dir(cpm_base);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(&filename);
+    if path.exists() {
+        return Err(format!("{filename} already exists — delete it first"));
+    }
+    // `create_new` so two sessions racing cannot both believe they made it.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("{filename}: {e}"))?;
+    use std::io::Write;
+    file.write_all(&blank).map_err(|e| format!("{filename}: {e}"))?;
+    file.flush().map_err(|e| format!("{filename}: {e}"))?;
+
+    Ok(format!(
+        "created {filename} — {}, empty and ready to mount",
+        fmt.label
+    ))
+}
+
 /// Open an image and publish it on a drive.
 ///
 /// Ties the pieces together: validate the name, identify the format, open the
@@ -655,6 +730,114 @@ mod tests {
         assert!(!is_safe_image_name("sub/dir.dsk"));
         assert!(!is_safe_image_name("back\\slash.dsk"));
         assert!(!is_safe_image_name("nul\0byte.dsk"));
+    }
+
+    /// A created disk must land in the images folder under a name that mounts
+    /// read-write — which means carrying the format prefix.  A blank disk you
+    /// cannot write to would be a puzzle, not a feature.
+    #[test]
+    fn test_create_blank_names_the_file_so_it_mounts_read_write() {
+        let base = std::env::temp_dir().join("egw_create_blank_name");
+        let _ = std::fs::remove_dir_all(&base);
+        let note = create_blank_image(&base, "altair8", "scratch").expect("creates");
+        assert!(note.contains("altair8_scratch.dsk"), "{note}");
+        let made = images_dir(&base).join("altair8_scratch.dsk");
+        assert_eq!(
+            std::fs::metadata(&made).unwrap().len(),
+            337_568,
+            "a whole floppy, not a sparse file"
+        );
+        // The name is what makes it writable: identification by prefix rather
+        // than by sniffing.
+        assert_eq!(format::token_of("altair8_scratch.dsk"), Some("altair8"));
+        assert!(available_images(&base).contains(&"altair8_scratch.dsk".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Creating over an existing disk would destroy it with no undo, so it is
+    /// refused rather than confirmed — the operator can delete and retry.
+    #[test]
+    fn test_create_blank_never_overwrites() {
+        let base = std::env::temp_dir().join("egw_create_blank_clobber");
+        let _ = std::fs::remove_dir_all(&base);
+        create_blank_image(&base, "altair8", "keepme").expect("first one works");
+        let path = images_dir(&base).join("altair8_keepme.dsk");
+        std::fs::write(&path, b"precious").unwrap();
+        let err = create_blank_image(&base, "altair8", "keepme").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"precious", "the old disk survived");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The operator names a disk, not a file.  Anything that would make the
+    /// assembled filename unsafe is folded away rather than rejected, but the
+    /// result still has to be a safe bare name and still has to start with the
+    /// format token — a traversal typed into the name box must not become one.
+    #[test]
+    fn test_create_blank_sanitises_the_name() {
+        let base = std::env::temp_dir().join("egw_create_blank_sanitise");
+        let _ = std::fs::remove_dir_all(&base);
+        for (typed, want) in [
+            ("my disk", "altair8_my_disk.dsk"),
+            ("../../etc/passwd", "altair8_etc_passwd.dsk"),
+            ("  spaced  ", "altair8_spaced.dsk"),
+            ("keep-dashes", "altair8_keep-dashes.dsk"),
+        ] {
+            let note = create_blank_image(&base, "altair8", typed)
+                .unwrap_or_else(|e| panic!("{typed:?}: {e}"));
+            assert!(note.contains(want), "{typed:?} became {note}");
+            assert!(images_dir(&base).join(want).exists(), "{want} is not there");
+        }
+        // A name that sanitises away entirely is a refusal, not a file called
+        // "altair8_.dsk".
+        assert!(create_blank_image(&base, "altair8", "///").is_err());
+        assert!(create_blank_image(&base, "altair8", "   ").is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Only formats whose blank layout has actually been measured are offered.
+    /// Anything else would hand out a file that mounts, looks empty, and is
+    /// refused by the first real machine that reads it.
+    #[test]
+    fn test_only_measured_formats_can_be_created() {
+        let offered = creatable_formats();
+        assert!(!offered.is_empty(), "something must be creatable");
+        for (token, _) in &offered {
+            assert!(
+                format::by_token(token).unwrap().blank_image().is_some(),
+                "{token} is offered but has no blank layout"
+            );
+        }
+        assert!(create_blank_image(Path::new("/tmp"), "nosuchformat", "x")
+            .unwrap_err()
+            .contains("no format called"));
+    }
+
+    /// A created disk must be mountable, empty, and writable — the three things
+    /// the operator is going to try in the next thirty seconds.
+    #[test]
+    fn test_a_created_disk_mounts_empty_and_writable() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_create_blank_mount");
+        let _ = std::fs::remove_dir_all(&base);
+        create_blank_image(&base, "altair8", "fresh").expect("creates");
+
+        let note = mount_image(&base, 1, "altair8_fresh.dsk").expect("mounts");
+        assert!(!note.contains("read-only"), "a disk we just made must be writable: {note}");
+        let m = registry::get(1).expect("registered");
+        assert!(!m.read_only);
+        let mut guard = m.fs.lock().unwrap();
+        assert!(guard.entries().is_empty(), "a new disk has no files on it");
+        let (n, e) = (*b"HELLO   ", *b"TXT");
+        guard.create(0, &n, &e).expect("creates a file");
+        guard.write_record(0, &n, &e, 0, &[b'x'; 128]).expect("writes");
+        assert_eq!(guard.read_record(0, &n, &e, 0).unwrap().unwrap(), [b'x'; 128]);
+        drop(guard);
+
+        let _ = unmount_drive(1);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A traversal attempt must be refused before anything touches the disk.

@@ -550,6 +550,11 @@ struct App {
     cpm_mount_draft: Vec<String>,
     /// What the last apply reported, shown under the rows.
     cpm_mount_notice: String,
+    /// Format token selected in the "new blank disk" row.
+    cpm_new_format: String,
+    /// Name typed for a new blank disk.  Cleared once one is created, so the
+    /// next Create cannot silently refuse against the name just used.
+    cpm_new_name: String,
     /// Whether the "AI, Browser & Weather — More..." popup is open.  Holds the
     /// weather location + units (and re-shows the API key / homepage) so the
     /// main frame stays at three rows.
@@ -699,6 +704,8 @@ impl App {
             cpm_mount_popup_open: false,
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_mount_notice: String::new(),
+            cpm_new_format: String::new(),
+            cpm_new_name: String::new(),
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
@@ -1081,6 +1088,68 @@ impl App {
                 }
                     });
             });
+
+        ui.add_space(6.0);
+        ui.separator();
+        // Making a blank disk lives on this screen because it is the answer to
+        // "there is nothing in the list yet".  A separate button, so it can
+        // never be mistaken for the Save that applies the mounts above.
+        let formats = crate::cpm::image::creatable_formats();
+        if !formats.is_empty() {
+            if self.cpm_new_format.is_empty() {
+                self.cpm_new_format = formats[0].0.to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.label("New blank disk:");
+                let shown = formats
+                    .iter()
+                    .find(|(t, _)| *t == self.cpm_new_format)
+                    .map(|(_, l)| *l)
+                    .unwrap_or(formats[0].1);
+                egui::ComboBox::from_id_salt("cpm_new_format")
+                    .width(260.0)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (token, label) in &formats {
+                            ui.selectable_value(
+                                &mut self.cpm_new_format,
+                                token.to_string(),
+                                *label,
+                            );
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cpm_new_name)
+                        .desired_width(140.0)
+                        .char_limit(32)
+                        .hint_text("disk name"),
+                );
+                if ui.button("Create").clicked() {
+                    let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+                    self.cpm_mount_notice = match crate::cpm::image::create_blank_image(
+                        &base,
+                        &self.cpm_new_format,
+                        &self.cpm_new_name,
+                    ) {
+                        Ok(note) => {
+                            logger::log(format!("GUI: CP/M {note}"));
+                            self.cpm_new_name.clear();
+                            note
+                        }
+                        Err(e) => format!("Could not create the disk: {e}"),
+                    };
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    "Creates an empty, formatted image named <format>_<name>.dsk, so it mounts read-write. Nothing is overwritten \u{2014} a name already in use is refused.",
+                )
+                .wrap(),
+            );
+        }
 
         if !self.cpm_mount_notice.is_empty() {
             ui.add_space(6.0);

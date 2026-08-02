@@ -822,6 +822,25 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // that refused (because somebody is on it) therefore keeps its old image in
     // the config too, so a restart does not quietly apply a change the operator
     // was told had failed.
+    // Creating a blank disk happens before the mounts are applied, so a
+    // freshly-made image can be mounted by the same save if the operator picked
+    // it — and so the notice reads in the order things happened.
+    if let Some((token, name)) = requested_new_disk(&fields) {
+        let base = crate::cpm::layout::cpm_dir(&old_cfg.transfer_dir);
+        let created = match crate::cpm::image::create_blank_image(&base, &token, &name) {
+            Ok(note) => {
+                glog!("Web: CP/M {}", note);
+                note
+            }
+            Err(e) => format!("Could not create the disk: {e}"),
+        };
+        notice = if notice.is_empty() {
+            created
+        } else {
+            format!("{notice} {created}")
+        };
+    }
+
     if fields.keys().any(|k| k.starts_with("cpm_mount_")) {
         let (mount_notice, mounts_value) = apply_cpm_mount_form(&fields, &old_cfg);
         updates.retain(|(k, _)| k != "cpm_mounts");
@@ -843,6 +862,25 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
 
     logger::log("Web: configuration saved.".into());
     (notice, action)
+}
+
+/// Did this submission ask for a new blank disk, and if so which?
+///
+/// A separate decision because the mount screen submits its create fields on
+/// *every* save, including the ones that only change a drive.  What marks a
+/// real request is a name having been typed — so an empty or all-space box has
+/// to mean "no", or every mount change would also try to make a disk and report
+/// a failure at somebody who never asked.
+fn requested_new_disk(fields: &HashMap<String, String>) -> Option<(String, String)> {
+    let name = fields.get("cpm_new_name")?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    let token = fields.get("cpm_new_format")?;
+    if token.trim().is_empty() {
+        return None;
+    }
+    Some((token.clone(), name.clone()))
 }
 
 /// Apply the mount screen's sixteen selects, returning (notice, `cpm_mounts`).
@@ -1758,7 +1796,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
 
     let intro = if images.is_empty() {
         format!(
-            "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in              {}/images — readme.txt there explains the naming.</span></div>",
+            "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in              {}/images — readme.txt there explains the naming — or make an empty one below.</span></div>",
             html_escape(&base.display().to_string())
         )
     } else {
@@ -1767,11 +1805,37 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         )
     };
 
+    // Making a blank disk sits on the same screen because it is the answer to
+    // "there is nothing in the list yet", and sending someone elsewhere to
+    // solve that is how a feature goes unused.  Both buttons post the same
+    // form: what decides whether a disk is created is a name being typed, not
+    // which button was pressed, so filling the name in and pressing Save does
+    // the obvious thing rather than silently ignoring it.  The field renders
+    // empty every time, so a create cannot be repeated by a later Save.
+    let mut fmt_opts = String::new();
+    for (token, label) in crate::cpm::image::creatable_formats() {
+        fmt_opts.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            html_escape(token),
+            html_escape(label)
+        ));
+    }
+    let create = format!(
+        "<div class=\"row\"><span class=\"label\">New blank disk</span>\
+         <select name=\"cpm_new_format\">{fmt_opts}</select>\
+         <input type=\"text\" name=\"cpm_new_name\" value=\"\" placeholder=\"disk name\" \
+         maxlength=\"32\" size=\"14\">{create_btn}</div>\
+         <div class=\"row\"><span class=\"sub\">Creates an empty, formatted image in the images \
+         folder, named &lt;format&gt;_&lt;name&gt;.dsk so it mounts read-write. Nothing is \
+         overwritten — a name already in use is refused.</span></div>",
+        create_btn = save_button("save", "Create", "secondary"),
+    );
+
     format!(
         "<div class=\"modal\" id=\"more-cpm-disks\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">Mount CP/M Drives</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-cpm-disks\">\u{00d7}</button></div>\
-         {intro}{rows}\
+         {intro}{rows}{create}\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
@@ -4139,6 +4203,55 @@ mod tests {
     /// the frame — and the Server grid's `1fr` button column collapsed to zero
     /// whenever its `max-content` columns overflowed a narrow frame, doing the
     /// same thing there.
+    /// The mount screen must be able to make a disk as well as mount one — it
+    /// is where an operator lands with an empty images folder, and the two
+    /// controls plus a submit are what turn that dead end into a first disk.
+    #[test]
+    fn test_cpm_mount_modal_can_create_a_blank_disk() {
+        let html = render_cpm_disks_modal(&Config::default());
+        assert!(html.contains("name=\"cpm_new_name\""), "no name box");
+        assert!(html.contains("name=\"cpm_new_format\""), "no format picker");
+        assert!(html.contains(">Create<"), "no way to submit it");
+        // Every creatable format is offered, so the web screen cannot drift
+        // from the telnet and desktop ones.
+        for (token, label) in crate::cpm::image::creatable_formats() {
+            assert!(html.contains(&format!("value=\"{token}\"")), "{token} not offered");
+            assert!(html.contains(&html_escape(label)), "{token} has no label");
+        }
+        // The name field must render empty, or a later Save re-submits the name
+        // just used and reports "already exists" at somebody who did nothing.
+        assert!(
+            html.contains("name=\"cpm_new_name\" value=\"\""),
+            "the name box must come back blank after a create"
+        );
+    }
+
+    /// An empty name box must not create anything.  Every ordinary Save on this
+    /// screen submits the create fields too, so a blank one has to read as "no"
+    /// — otherwise changing a mount also tries to make a disk and reports a
+    /// failure at somebody who never asked for one.
+    #[test]
+    fn test_a_new_disk_is_requested_only_when_a_name_was_typed() {
+        let f = |name: &str, token: &str| {
+            let mut m = HashMap::new();
+            m.insert("cpm_new_name".to_string(), name.to_string());
+            m.insert("cpm_new_format".to_string(), token.to_string());
+            requested_new_disk(&m)
+        };
+        assert_eq!(
+            f("scratch", "altair8"),
+            Some(("altair8".to_string(), "scratch".to_string()))
+        );
+        assert_eq!(f("", "altair8"), None, "an untouched box is not a request");
+        assert_eq!(f("   ", "altair8"), None, "nor is a box of spaces");
+        assert_eq!(f("scratch", ""), None, "no format is not a request either");
+        // The mount screen's ordinary save carries neither field.
+        assert_eq!(requested_new_disk(&HashMap::new()), None);
+        let mut mounts_only = HashMap::new();
+        mounts_only.insert("cpm_mount_b".to_string(), "altair8_games.dsk".to_string());
+        assert_eq!(requested_new_disk(&mounts_only), None);
+    }
+
     /// The mount screen must offer a row for every drive, and its button must
     /// exist to open it — a modal nothing opens is invisible.
     #[test]

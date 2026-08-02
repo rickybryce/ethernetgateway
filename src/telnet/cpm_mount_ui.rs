@@ -69,6 +69,8 @@ impl TelnetSession {
                 .await?;
             self.send_line(&format!("  {}  Boot an image (runs its own OS)", self.cyan("B")))
                 .await?;
+            self.send_line(&format!("  {}  New blank disk", self.cyan("N")))
+                .await?;
             if any {
                 self.send_line(&format!("  {}  Unmount a drive", self.cyan("U")))
                     .await?;
@@ -84,11 +86,99 @@ impl TelnetSession {
             match self.get_menu_input(false).await? {
                 Some(s) if s == "m" => self.cpmmount_pick_image().await?,
                 Some(s) if s == "b" => self.cpmmount_pick_boot().await?,
+                Some(s) if s == "n" => self.cpmmount_new_blank().await?,
                 Some(s) if s == "u" && any => self.cpmmount_pick_unmount().await?,
                 Some(s) if !s.is_empty() => {}
                 _ => return Ok(()),
             }
         }
+    }
+
+    /// Make a new, empty, formatted disk image.
+    ///
+    /// Two questions: which format, and what to call it.  The file is named
+    /// `<format>_<name>.dsk` for the operator rather than typed out, because
+    /// the prefix is what lets the image mount read-write — a disk you just
+    /// created and cannot write to would be a puzzle, not a feature.
+    async fn cpmmount_new_blank(&mut self) -> Result<(), std::io::Error> {
+        let formats = image::creatable_formats();
+        if formats.is_empty() {
+            return Ok(());
+        }
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("NEW BLANK DISK"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.dim("An empty, formatted disk to put files on."))).await?;
+        self.send_line("").await?;
+        let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+        for (i, (_, label)) in formats.iter().enumerate() {
+            self.send_line(&format!(
+                "  {}  {}",
+                self.cyan(&(i + 1).to_string()),
+                self.amber(&truncate_to_width(label, width)),
+            ))
+            .await?;
+        }
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+        self.send(&format!("{}> ", self.cyan("format"))).await?;
+        self.flush().await?;
+
+        let Some(input) = self.get_menu_input(false).await? else {
+            return Ok(());
+        };
+        let Ok(n) = input.trim().parse::<usize>() else {
+            return Ok(());
+        };
+        let Some((token, _)) = formats.get(n.wrapping_sub(1)) else {
+            return Ok(());
+        };
+
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.dim("A short name. The file becomes <format>_<name>.dsk")
+        ))
+        .await?;
+        self.send(&format!("  {}: ", self.cyan("Disk name"))).await?;
+        self.flush().await?;
+        let Some(name) = self.get_line_input().await? else {
+            return Ok(());
+        };
+        if name.trim().is_empty() {
+            return Ok(());
+        }
+
+        let base = self.cpmmount_base();
+        let token = token.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            image::create_blank_image(&base, &token, &name)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("create failed: {e}")));
+
+        self.send_line("").await?;
+        match result {
+            Ok(note) => {
+                glog!("CP/M: {}", note);
+                self.send_line(&format!("  {}", self.green(&note))).await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim("Mount it with M to start putting files on it.")
+                ))
+                .await?;
+            }
+            Err(e) => self.send_line(&format!("  {}", self.red(&e))).await?,
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        let _ = self.wait_for_key().await;
+        Ok(())
     }
 
     /// Choose an image to boot.
