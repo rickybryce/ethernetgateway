@@ -1403,6 +1403,56 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                     the interface.
                 </p>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">It boots on its own</h3>
+                <p>
+                    Worth stating plainly, because the hard disk is reached
+                    through a command protocol rather than the floppy's port
+                    state machine and it would be reasonable to assume it needs
+                    a floppy to start it. It does not. &sect;3-2 of the manual:
+                </p>
+                <blockquote style="border-left: 3px solid var(--border-bright); margin: 12px 0; padding: 4px 0 4px 16px;">
+                    <p class="dim-text">
+                        &ldquo;install the <strong>Boot Loader PROM</strong>
+                        (identified by the label <strong>HD-LDR, 103292</strong>)
+                        &hellip; The Boot Loader PROM address is
+                        <strong>176000 octal (374000)</strong>.&rdquo;
+                        &mdash; &ldquo;Examine location 176000, <strong>set sense
+                        switches as required</strong>, and RUN.&rdquo;
+                    </p>
+                </blockquote>
+                <p>
+                    So the hard disk has its own boot PROM at octal 176000 =
+                    <code>0xFE00</code>, separate from the floppy's, and on a
+                    Turnkey&nbsp;B the machine auto-starts there at power-on. No
+                    floppy is involved.
+                </p>
+                <p>
+                    The images agree: <code>HDSK03.DSK</code> sector 0 begins
+                    with the ASCII sign-on <code>63k CP/M 2.2b</code> and 8080
+                    code follows from sector 1. The geometry matches the manual
+                    exactly &mdash; <strong>406 cylinders &times; 2 heads &times;
+                    24 sectors &times; 256 bytes = 4,988,928</strong>, which is
+                    the file size.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>&ldquo;Set sense switches as required.&rdquo;</strong>
+                        The front panel again, on port <code>FFh</code>. That is
+                        the detail that cost a day on the floppy side, where a
+                        floating <code>0xFF</code> is not &ldquo;no answer&rdquo;
+                        but a valid reading naming hardware that is not there.
+                        Whatever the HD-LDR wants from the switches has to be
+                        established before concluding a boot has failed.
+                    </p>
+                </div>
+                <p class="dim-text">
+                    We do not have the PROM's contents &mdash; exactly as with
+                    the floppy, where the bootstrap is written out here rather
+                    than dumped, and its load address was justified by
+                    disassembling a real boot sector and matching its own
+                    internal jumps. The same method applies.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">The host ports</h3>
                 <p>
                     The controller talks to the Altair through an <strong>88-4PIO</strong>
@@ -1460,6 +1510,34 @@ in   161                            ; clears ready, returns the error byte
                     does not spin at all — an emulation that makes a flag take
                     time will diverge from software that assumes it is already
                     set.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The seven commands</h3>
+                <p>
+                    Each is 16 bits, sent as <strong>low byte to 167 first, then
+                    high byte to 163</strong> &mdash; and writing the high byte
+                    is what starts it. Buffers are four 256-byte areas of the
+                    controller's own 1&nbsp;K memory, so a sector transfer is two
+                    steps: move it between disk and buffer, then between buffer
+                    and the Altair.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Command</th><th>Bits</th></tr></thead>
+                    <tbody>
+                        <tr><td>Seek to cylinder</td><td>0&ndash;8 cylinder (0&ndash;405), 9 unused, 10&ndash;11 unit, 12&ndash;15 zero</td></tr>
+                        <tr><td>Read sector</td><td>0&ndash;4 sector (0&ndash;23), 5&ndash;7 head, 8&ndash;9 buffer, 10&ndash;11 unit, 12&nbsp;&amp;&nbsp;13 one, 14&ndash;15 zero</td></tr>
+                        <tr><td>Write sector</td><td>as read sector, but bit 13 zero</td></tr>
+                        <tr><td>Read buffer</td><td>0&ndash;7 length, 8&ndash;9 buffer, 12 high, 13 low, 14 high, 15 low</td></tr>
+                        <tr><td>Write buffer</td><td>as read buffer, but bit 12 zero</td></tr>
+                        <tr><td>Status check</td><td>unit, plus a status-word address 0&ndash;255</td></tr>
+                        <tr><td>Set byte</td><td><code>80h</code>, plus an IV byte address</td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    A transfer length of <strong>0 means 256 bytes</strong>, not
+                    none. Heads are 0&ndash;7 with the fixed platter at 2 and 3
+                    and the removable at 0 and 1; a drive with fewer platters
+                    narrows that range. Cylinder runs 0&ndash;405, sector 0&ndash;23.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">The error byte (port 161)</h3>
