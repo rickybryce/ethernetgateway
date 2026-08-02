@@ -572,6 +572,7 @@
             <a href="#controller">The Controller</a>
             <a href="#others">Other Formats</a>
             <a href="#sharing">Who Owns a Disk</a>
+            <a href="#hdsk">88-HDSK Interface</a>
             <a href="#open">Still Open</a>
         </nav>
 
@@ -1317,6 +1318,150 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                 </p>
             </div>
 
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- 88-HDSK                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="hdsk">
+                <div class="section-title">The MITS 88-HDSK Interface</div>
+                <p class="intro">Groundwork for booting the 4.9&nbsp;MB hard-disk images. Taken from the published manual, which — unlike the floppy one — <em>does</em> document the programming interface.</p>
+
+                <div class="callout callout-info">
+                    <p>
+                        <strong>Status: the interface is written down, the
+                        controller is not built.</strong> This section exists so
+                        the reading does not have to be done twice. Nothing in
+                        the gateway speaks this protocol yet; `HDSK*.DSK` images
+                        still <a href="#others">mount</a> as <code>altairhd</code>
+                        and do not boot.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Where to read it</h3>
+                <p>
+                    <code>88-HDSK.pdf</code> on deramp.com — 170 scanned pages,
+                    no text layer. The part that matters is <strong>§3-5,
+                    Computer-Controller Communications</strong>, printed pages
+                    33&ndash;43, plus §3-4 Assembly Language Operation from page
+                    22. Several pages carry loose <strong>errata sheets</strong>
+                    that correct the body text, and they matter: one of them
+                    fixes a sample routine the manual admits is
+                    &ldquo;nonfunctional&rdquo;, and another says the body has
+                    the wrong bit for the CRC result. Read the errata beside
+                    each page, not after.
+                </p>
+                <p class="dim-text">
+                    Contrast with the floppy: the 88-DCDD manual on altairclone
+                    is the <em>assembly</em> documentation and says on its first
+                    page that the Theory of Operation is not in it. This one has
+                    the interface.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The host ports</h3>
+                <p>
+                    The controller talks to the Altair through an <strong>88-4PIO</strong>
+                    board, so the host side is four PIA channels rather than a
+                    bespoke register set. The manual gives them in <strong>octal</strong>;
+                    both are shown here because the code will want hex and the
+                    manual's own examples want octal.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Octal</th><th>Hex</th><th>Dir</th><th>What</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>160</code></td><td><code>A0</code></td><td>IN</td><td>Controller Ready. <strong>Bit 7</strong> high when the controller has finished. Cleared by reading 161.</td></tr>
+                        <tr><td><code>161</code></td><td><code>A1</code></td><td>IN</td><td>Command status &mdash; the error byte. Reading it clears the ready flag at 160.</td></tr>
+                        <tr><td><code>162</code></td><td><code>A2</code></td><td>IN</td><td>Command acknowledged. <strong>Bit 7</strong> high when the controller has taken the command. Cleared by writing 163.</td></tr>
+                        <tr><td><code>163</code></td><td><code>A3</code></td><td>OUT</td><td>Command byte &mdash; writing it starts the command. (Reading it clears the acknowledge flag at 162.)</td></tr>
+                        <tr><td><code>164</code></td><td><code>A4</code></td><td>IN</td><td>Read data available. <strong>Bit 7</strong> high when a byte is waiting at 165. Cleared by reading 165.</td></tr>
+                        <tr><td><code>165</code></td><td><code>A5</code></td><td>IN</td><td>Primary data in &mdash; read-buffer data and status data.</td></tr>
+                        <tr><td><code>166</code></td><td><code>A6</code></td><td>IN</td><td>Write data accepted. <strong>Bit 7</strong> high when the controller will take a byte at 167. Cleared by writing 167.</td></tr>
+                        <tr><td><code>167</code></td><td><code>A7</code></td><td>OUT</td><td>Data out &mdash; command parameters, write-buffer data, set-byte data.</td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    Every status flag is <strong>bit 7</strong> and every one is
+                    cleared by touching its paired data port. That is PIA
+                    behaviour, not something the controller invented: the flag
+                    lives in the channel's control register and reading or
+                    writing the data register clears it.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The handshake, from the manual's own example</h3>
+                <p>
+                    This is the corrected routine from errata sheet
+                    <code>88-HDSK-ME05</code> — the version in the manual body
+                    is described there as nonfunctional because it never clears
+                    Controller Ready. It sends one &ldquo;Set IV Byte&rdquo;
+                    command (<code>80h</code>):
+                </p>
+                <pre><code>in   163        ; clear the command-acknowledge flag
+out  167, addr  ; low byte of the command
+in   167        ; clear the data-port-available flag
+out  163, 80h   ; command byte -- this starts it
+
+wait:  in 166 / test bit 7 / loop   ; controller will take a byte
+out  167, data                      ; the parameter
+
+wait2: in 160 / test bit 7 / loop   ; controller has finished
+in   161                            ; clears ready, returns the error byte
+</code></pre>
+                <p>
+                    Two things worth carrying into an implementation. The
+                    errata's advice is to wait for the controller <em>at the end
+                    of</em> a command rather than at the start, because that is
+                    when the error byte is meaningful. And the real hardware
+                    sets these flags within microseconds, so guest code often
+                    does not spin at all — an emulation that makes a flag take
+                    time will diverge from software that assumes it is already
+                    set.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The error byte (port 161)</h3>
+                <p>
+                    From errata <code>88-HDSK-ME03</code>, which supplies a table
+                    the body text omits. <strong>All bits read as 1 on the first
+                    read after power-on</strong> — an emulated controller has to
+                    reproduce that or a driver may mistake a fresh machine for a
+                    failing drive.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Bit</th><th>Set means</th></tr></thead>
+                    <tbody>
+                        <tr><td>0</td><td>Drive not ready</td></tr>
+                        <tr><td>1</td><td>Illegal sector</td></tr>
+                        <tr><td>2</td><td>CRC error in sector read</td></tr>
+                        <tr><td>3</td><td>CRC error in header read</td></tr>
+                        <tr><td>4</td><td>Header has wrong sector</td></tr>
+                        <tr><td>5</td><td>Header has wrong cylinder</td></tr>
+                        <tr><td>6</td><td>Header has wrong head</td></tr>
+                        <tr><td>7</td><td>Write protect</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
+                <ul>
+                    <li><strong>IV bytes 17, 18 and 19 invert their data.</strong>
+                        To select cylinder 0 you write <code>255</code>. Get this
+                        wrong and every seek goes to the complement of where it
+                        was asked to go.</li>
+                    <li><strong>Bit order is reversed</strong> between the
+                        controller's internal user-data pins and the way the
+                        Altair sees them through Set Byte and Read Status —
+                        user bit 0 is Altair bit 7.</li>
+                    <li><strong>Read Status will not complete if the selected
+                        unit is not ready.</strong> A controller with no drive
+                        attached hangs the command rather than answering it.</li>
+                    <li>The body text puts the CRC result on bit 3; the errata
+                        says it is <strong>only</strong> on bit 5.</li>
+                </ul>
+                <p class="dim-text">
+                    Same clean-room posture as everything else here: this comes
+                    from the published manual and will be cross-checked against
+                    observed behaviour, not transcribed from another emulator.
+                </p>
+            </div>
+
             <!-- ══════════════════════════════════════════════ -->
             <!-- STILL OPEN                                    -->
             <!-- ══════════════════════════════════════════════ -->
@@ -1360,9 +1505,12 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                         </tr>
                         <tr>
                             <td>Controllers for 88-HDSK, Tarbell and Cromemco</td>
-                            <td>Planned, in that order. The Tarbell and Cromemco single-density
-                                disks already <em>mount</em>, so a controller adds booting rather
-                                than access.</td>
+                            <td>Planned, in that order. The 88-HDSK host interface is now written
+                                up &mdash; see <a href="#hdsk">above</a> &mdash; but the controller
+                                is not built, and `BootMachine` still hardwires the 88-DCDD at ports
+                                08&ndash;0Ah, so it needs a set-of-controllers refactor first. The
+                                Tarbell and Cromemco single-density disks already <em>mount</em>, so
+                                a controller adds booting rather than access.</td>
                         </tr>
                     </tbody>
                 </table>
