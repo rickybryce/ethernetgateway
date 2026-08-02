@@ -1396,9 +1396,11 @@ mod tests {
     /// link: a UART that drops a byte under load, or gets its transmit-ready
     /// bit wrong, passes a short burst and fails a file. This sends 4 KB — 32
     /// XMODEM blocks, each acknowledged — through the terminal we ship, has the
-    /// guest write it to its own disk, and then reads it back with `PCPUT` and
+    /// guest write it to its own disk, and then has EGT80 read it back off that
+    /// disk and send it out again, and
     /// compares. Every byte has to survive EGT80's receiver, our modem rings,
-    /// the guest's filesystem and the 88-DCDD write path.
+    /// the guest's filesystem, the 88-DCDD write and read paths, and EGT80's
+    /// sender — and come back identical.
     ///
     /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
     #[test]
@@ -1466,11 +1468,46 @@ mod tests {
         );
         println!("{} bytes through EGT80's own XMODEM, onto the guest's disk", payload.len());
 
-        // NOT YET COVERED: reading it back out through EGT80 (its `U` upload)
-        // or through `PCPUT`, which would also prove the guest can *read* what
-        // it wrote.  `test_pcget_pulls_egt80_in_over_the_virtual_modem` already
-        // does a full write-then-read round trip over this same port, so what
-        // is missing here is EGT80's send path, not the port's.
+        // The other half: EGT80's *send* path, reading the file back off the
+        // guest's disk and pushing it out the same port.  That closes the loop
+        // through the terminal we ship rather than through the disk's own
+        // tools.
+        //
+        // EGT80 ends a transfer with "Press any key." before it returns to its
+        // menu, so a key comes first.  Getting that wrong is what made an
+        // earlier attempt type its next command into the menu instead of at
+        // `A>`.
+        let back_at_menu = type_at(&mut m, &mut cpu, b" ", 200_000_000);
+        assert!(
+            back_at_menu.contains("Choice:"),
+            "EGT80 did not come back to its menu: {back_at_menu:?}"
+        );
+        let ask = type_at(&mut m, &mut cpu, b"U", 200_000_000);
+        if !ask.contains("Send which file?") {
+            println!("--- EGT80 after U ---\n{ask}");
+            panic!("EGT80 did not ask which file to send");
+        }
+        type_at(&mut m, &mut cpu, b"XFER.DAT\r", 400_000_000);
+
+        let (back, sending) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
+        println!("--- EGT80 send ---\n{}", printable(&sending));
+        let back = back.expect("EGT80 never sent the file back");
+        assert!(
+            back.len() >= payload.len(),
+            "EGT80 sent {} bytes of {}",
+            back.len(),
+            payload.len()
+        );
+        // XMODEM pads the last block, so compare only what was sent in.
+        assert_eq!(
+            &back[..payload.len()],
+            &payload[..],
+            "what EGT80 sent back differs from what it received"
+        );
+        println!(
+            "{} bytes in through EGT80's XMODEM, onto the disk, and back out again",
+            payload.len()
+        );
     }
 
     /// Boot every image in a folder and print what each one says.
