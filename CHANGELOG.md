@@ -60,12 +60,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that drive then reads and writes the CP/M filesystem *inside the image*
   instead of its folder under `CPM/`. Mounting hides a drive folder rather than
   touching it — the files are exactly where they were and come back on unmount.
-  Three formats, each measured from real images and verified byte for byte
-  against `cpmtools`: `ibm3740` (8" single density — Tarbell, Cromemco,
-  IMSAI/z80pack) and `altairhd` (Altair 88-HDSK hard disk, the Altair-Duino
-  set). The Altair 88-DCDD *floppy* is not supported yet: its directory reads
-  correctly but file content past the first allocation block does not, and a
-  format that quietly returns wrong bytes is worse than one that is absent.
+  Three formats, each measured from real images rather than transcribed:
+  `ibm3740` (8" single density — Tarbell, Cromemco, IMSAI/z80pack), `altair8`
+  (the MITS Altair 88-DCDD 8" floppy) and `altairhd` (Altair 88-HDSK hard disk,
+  the Altair-Duino set).
+- **The Altair 88-DCDD floppy reads and writes.** This one was withdrawn for a
+  long time — its directory read correctly while file content past the first
+  half of a track did not — and it took a different kind of evidence to settle,
+  not a better guess. The gateway can now boot these disks, so a booted Altair
+  was made to read its own files with its own BIOS and send them out over the
+  virtual modem, and every 128-byte slice was located in the image by exact byte
+  match: 447 records, eight files, twenty tracks, unambiguous. Two causes, which
+  is why no single hypothesis ever fitted. The BIOS translation recovered from
+  the disk is correct but maps a record to a *sector ID*, and a sector ID is not
+  its position in the file: on the data tracks the odd sectors sit half a
+  revolution from where their number says, which every sector states in its own
+  header. Tracks 0–5 are written in boot format and have no such shift, so the
+  sector translation changes at track 6 — the same boundary as the framing, for
+  the same reason.
+
+  Writing works too, which needs two more things. The disk's BIOS states
+  `EXM 0` where the standard derivation gives 1, so `Format` now carries an
+  explicit extent mask; this is also why `cpmtools` cannot write these disks
+  correctly and should not be used on them. And every Altair sector carries a
+  checksum the BIOS verifies, so a write refreshes it — both formulas measured,
+  and holding for every sector of six real disks. A write touches the 128 data
+  bytes and the check byte and nothing else, which means it edits an already
+  formatted image; nothing here authors Altair sector headers from scratch.
+
+  Proven the only way that means anything: EGT80 is written into a copy of
+  `DISK01.DSK` **from the host**, the disk is then booted, and the guest's own
+  `DIR` lists it and its own `PCPUT` sends all 18,048 bytes back byte-identical.
+  Each of the three things above fails silently on its own, and that one test
+  catches all three. Written up in the new `web/diskreference.html`.
 - Mount and unmount from all three interfaces: a wizard on the telnet CP/M
   settings screen (`I`), and a **Mount CP/M Drives** screen in the web and
   desktop UIs. Changes take effect immediately in every session and are saved

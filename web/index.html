@@ -2302,6 +2302,20 @@ relay_transport = ssh</span></code></pre>
                         </p>
                     </div>
                     <div class="compat-card">
+                        <h3><a href="diskreference.html">Disk Format Reference</a></h3>
+                        <p>
+                            The measured layout of every vintage disk image the gateway
+                            reads: the MITS Altair 88-DCDD 8&Prime; floppy (137-byte
+                            sectors, a framing and a sector translation that both change
+                            at track 6, two sector-checksum formulas, and the
+                            <code>EXM&nbsp;0</code> that stops <code>cpmtools</code>
+                            writing these disks), the IBM 3740 8&Prime; SSSD, and the
+                            Altair 88-HDSK hard disk &mdash; plus the technique that
+                            settled the Altair layout after months of near misses: boot
+                            the disk and ask its own operating system.
+                        </p>
+                    </div>
+                    <div class="compat-card">
                         <h3><a href="punterreference.html">Punter C1 Protocol Reference</a></h3>
                         <p>
                             The Commodore protocol CCGMS, Novaterm, and StrikeTerm speak

@@ -1660,4 +1660,183 @@ mod tests {
             "the guest never said {want:?}; it printed: {text:?}"
         );
     }
+
+    /// Capture the *true* contents of files on an Altair floppy, by asking the
+    /// disk's own operating system for them.
+    ///
+    /// This is the measurement the block-mapping work needs and never had. Every
+    /// previous attempt scored a hypothesis against a heuristic — "do this
+    /// assembler listing's addresses ascend?" — which cannot tell "nearly right"
+    /// from "right", and 81% is exactly where such a score stops discriminating.
+    /// A booted guest has no such problem: it reads the file with the BIOS that
+    /// was written for this disk and sends it out byte for byte.
+    ///
+    /// Two drives, because the disk being *measured* must not be touched. Drive
+    /// 0 is a tool disk carrying `PCPUT.COM` (DISK07 in the Altair-Duino set);
+    /// drive 1 is the disk under study, mounted read-only, and files are named
+    /// `B:NAME.EXT`.
+    ///
+    /// Ignored:
+    ///   `CPM_TOOL_IMAGE=...DISK07.DSK`   boots, has PCPUT.COM
+    ///   `CPM_DATA_IMAGE=...DISK01.DSK`   the disk to measure, drive B:
+    ///   `CPM_GT_FILES=DEMO.PRN,PIP.COM`  files to pull off B:
+    ///   `CPM_GT_DIR=/tmp/gt`             where to write them
+    #[test]
+    #[ignore]
+    fn test_capture_altair_ground_truth() {
+        let (Ok(tool), Ok(data), Ok(out)) = (
+            std::env::var("CPM_TOOL_IMAGE"),
+            std::env::var("CPM_DATA_IMAGE"),
+            std::env::var("CPM_GT_DIR"),
+        ) else {
+            eprintln!("set CPM_TOOL_IMAGE, CPM_DATA_IMAGE and CPM_GT_DIR to run this");
+            return;
+        };
+        let files = std::env::var("CPM_GT_FILES").unwrap_or_else(|_| "DEMO.PRN".into());
+        std::fs::create_dir_all(&out).unwrap();
+
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&tool).unwrap(), true).expect("an 88-DCDD tool image");
+        m.insert(1, std::fs::read(&data).unwrap(), true).expect("an 88-DCDD data image");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+        );
+        m.modem().set_carrier(true);
+
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{signon}");
+        assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
+
+        for name in files.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let cmd = format!("PCPUT B:{name} B\r");
+            let ready = type_at(&mut m, &mut cpu, cmd.as_bytes(), 400_000_000);
+            println!("--- PCPUT B:{name} ---\n{ready}");
+            let (got, during) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
+            let Some(got) = got else {
+                panic!("the guest never sent {name}: {}", printable(&during));
+            };
+            let path = std::path::Path::new(&out).join(name);
+            std::fs::write(&path, &got).unwrap();
+            println!("{name}: {} bytes -> {}", got.len(), path.display());
+            // Back to the prompt before the next one.
+            run_until_quiet(&mut m, &mut cpu, 400_000_000);
+        }
+    }
+
+    /// Write an Altair floppy **from the host** and have the machine it was
+    /// written for agree that it worked.
+    ///
+    /// This is the check that matters for host-side writing, and nothing weaker
+    /// would do.  Our writer has to get three separate things right at once —
+    /// the block mapping, the disk's stated `EXM 0`, and the per-sector
+    /// checksum — and each of them fails *quietly* on its own: a wrong mapping
+    /// scrambles content that still looks like a file, a wrong EXM writes a
+    /// directory entry CP/M declines to list, and a stale checksum turns into
+    /// `Bdos Err On A: Bad Sector` only when a real BIOS reads the sector.
+    /// Booting the disk afterwards catches all three, because the guest's own
+    /// `DIR` and its own reader are the acceptance test.
+    ///
+    /// The payload is EGT80, which is a genuinely useful thing to put on one of
+    /// these disks and is also byte-exact and to hand.
+    ///
+    /// Ignored:
+    ///   `CPM_TOOL_IMAGE=...DISK07.DSK`   boots, has PCPUT.COM
+    ///   `CPM_DATA_IMAGE=...DISK01.DSK`   written by us, then read as B:
+    #[test]
+    #[ignore]
+    fn test_host_written_altair_floppy_is_read_by_the_guest() {
+        use crate::cpm::image::format::by_token;
+        use crate::cpm::image::fs::ImageFs;
+        use crate::cpm::image::media::FileMedia;
+
+        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
+        let (Ok(tool), Ok(data)) = (
+            std::env::var("CPM_TOOL_IMAGE"),
+            std::env::var("CPM_DATA_IMAGE"),
+        ) else {
+            eprintln!("set CPM_TOOL_IMAGE and CPM_DATA_IMAGE to run this");
+            return;
+        };
+
+        // ---- write it with our own writer, on the host --------------------
+        // A scratch copy — the sample images are read-only ground truth and
+        // this test writes.
+        let scratch = std::env::temp_dir().join("egw-altair-write-test.dsk");
+        std::fs::write(&scratch, std::fs::read(&data).unwrap()).unwrap();
+
+        let fmt = by_token("altair8").expect("altair8 is a format again");
+        let mut fs = ImageFs::mount(
+            Box::new(FileMedia::open(&scratch, false).unwrap()),
+            fmt,
+            false,
+        )
+        .expect("mounts read-write");
+        assert!(!fs.is_read_only(), "the image arrived in a writable state");
+        let mut name = [b' '; 8];
+        name[..5].copy_from_slice(b"EGT80");
+        let ext = *b"COM";
+        fs.create(0, &name, &ext).expect("creates the file");
+        for (rec, chunk) in EGT80_COM.chunks(128).enumerate() {
+            let mut buf = [0x1Au8; 128];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            fs.write_record(0, &name, &ext, rec as u32, &buf).expect("writes a record");
+        }
+        drop(fs);
+        let written = std::fs::read(&scratch).unwrap();
+        let _ = std::fs::remove_file(&scratch);
+
+        // ---- now let the machine it was written for judge it --------------
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&tool).unwrap(), true).expect("an 88-DCDD tool image");
+        m.insert(1, written, true).expect("our written image is still an 88-DCDD image");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+            ModemAttach::Ports(0x12, 0x13),
+        );
+        m.modem().set_carrier(true);
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        assert!(
+            printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000)).contains("CP/M"),
+            "no sign-on"
+        );
+
+        // The guest's own directory: this is what a wrong EXM fails.
+        let dir = type_at(&mut m, &mut cpu, b"DIR B:\r", 400_000_000);
+        println!("--- DIR B: ---\n{dir}");
+        assert!(
+            dir.to_ascii_uppercase().contains("EGT80"),
+            "the guest does not list the file we wrote: {dir:?}"
+        );
+
+        // The guest's own reader: this is what a wrong checksum or a wrong
+        // block mapping fails.
+        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT80.COM B\r", 400_000_000);
+        println!("--- PCPUT ---\n{ready}");
+        assert!(
+            !ready.contains("Bad Sector"),
+            "the guest's BIOS rejected a sector we wrote: {ready:?}"
+        );
+        let (got, during) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
+        let got = got.unwrap_or_else(|| panic!("the guest never sent it back: {}", printable(&during)));
+        assert!(
+            got.len() >= EGT80_COM.len(),
+            "got {} bytes back, wrote {}",
+            got.len(),
+            EGT80_COM.len()
+        );
+        assert_eq!(
+            &got[..EGT80_COM.len()],
+            EGT80_COM,
+            "what we wrote from the host is not what the guest reads back"
+        );
+        println!(
+            "{} bytes written by the host, read back byte-identical by the guest's own CP/M",
+            EGT80_COM.len()
+        );
+    }
 }

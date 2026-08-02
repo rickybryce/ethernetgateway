@@ -114,11 +114,23 @@ impl Params {
         // wrapping to 65535 usable blocks.
         let max_block = total_blocks.saturating_sub(1).min(u16::MAX as u32) as u16;
         let wide_blocks = max_block > 255;
-        let map_slots = if wide_blocks { 8 } else { 16 };
-        // One entry addresses `map_slots` blocks; how many 128-record extents
+        let slots_in_map = if wide_blocks { 8 } else { 16 };
+        // One entry addresses `slots_in_map` blocks; how many 128-record extents
         // is that?
-        let records_per_entry = map_slots as u32 * records_per_block;
-        let exm = (records_per_entry / RECORDS_PER_EXTENT).max(1) - 1;
+        let records_per_entry = slots_in_map as u32 * records_per_block;
+        // The disk gets the last word.  A BIOS that states an EXM the standard
+        // rule does not produce is not a broken disk — the MITS Altair floppy
+        // says 0 where the rule says 1 — and believing the rule over the disk
+        // puts a file in an entry CP/M will not list.
+        let exm = match fmt.exm {
+            Some(e) => e,
+            None => (records_per_entry / RECORDS_PER_EXTENT).max(1) - 1,
+        };
+        // With EXM stated rather than derived, an entry may use fewer slots
+        // than the 16-byte map has room for: it addresses exactly the blocks
+        // its extents cover, and the rest of the map stays zero.
+        let map_slots = (((exm + 1) * RECORDS_PER_EXTENT) / records_per_block.max(1))
+            .min(slots_in_map as u32) as usize;
         Params {
             records_per_block,
             max_block,
@@ -491,13 +503,39 @@ impl ImageFs {
             ));
         }
         let rec = block as u32 * self.params.records_per_block + offset_in_block;
-        let off = self.fmt.data_record_offset(rec).ok_or_else(|| {
+        let phys = self.fmt.data_physical_record(rec).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!("block {block} record {offset_in_block} is past the end of the disk"),
             )
         })?;
-        self.media.write_at(off, data)
+        self.write_physical_record(phys, data)
+    }
+
+    /// Write the 128 bytes of one physical record, and refresh whatever the
+    /// format keeps alongside them.
+    ///
+    /// Everything else in the sector — the track and sector numbers in its
+    /// header, the stop byte, anything we have not identified — is left exactly
+    /// as it was found.  That is deliberate: the only bytes we understand well
+    /// enough to author are the data and the check byte, so the disk keeps its
+    /// own formatting and a write is the smallest edit that can be correct.
+    /// It also means writing is only supported *into an already formatted
+    /// image*; there is no path here that creates Altair sector headers from
+    /// nothing, and a blank file is not a blank floppy.
+    fn write_physical_record(&mut self, phys: u64, data: &[u8; 128]) -> std::io::Result<()> {
+        let off = self.fmt.framing.record_offset(phys);
+        self.media.write_at(off, data)?;
+        let Some((check_at, also)) = self.fmt.framing.sector_check(phys) else {
+            return Ok(());
+        };
+        let mut sum = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        for extra in also {
+            let mut byte = [0u8; 1];
+            self.media.read_at(extra, &mut byte)?;
+            sum = sum.wrapping_add(byte[0]);
+        }
+        self.media.write_at(check_at, &[sum])
     }
 
     /// Write a 32-byte directory entry back to the disk, then read it back and
@@ -518,18 +556,19 @@ impl ImageFs {
         }
         let rec = index as u32 / ENTRIES_PER_RECORD as u32;
         let slot = index as usize % ENTRIES_PER_RECORD;
-        let off = self.fmt.data_record_offset(rec).ok_or_else(|| {
+        let phys = self.fmt.data_physical_record(rec).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "directory record is past the end of the disk",
             )
         })?;
+        let off = self.fmt.framing.record_offset(phys);
         // Read-modify-write: the other three entries in this record are
         // somebody else's file and must come through untouched.
         let mut buf = [0u8; 128];
         self.media.read_at(off, &mut buf)?;
         buf[slot * ENTRY_SIZE..(slot + 1) * ENTRY_SIZE].copy_from_slice(raw);
-        self.media.write_at(off, &buf)?;
+        self.write_physical_record(phys, &buf)?;
         self.media.flush()?;
 
         let mut check = [0u8; 128];
@@ -937,6 +976,15 @@ impl ImageFs {
                 raw
             })
             .collect()
+    }
+
+    /// One raw byte of the image, for tests that need to see what a write put
+    /// on the medium rather than what reading it back says.
+    #[cfg(test)]
+    fn peek(&mut self, offset: u64) -> u8 {
+        let mut b = [0u8; 1];
+        self.media.read_at(offset, &mut b).expect("in range");
+        b[0]
     }
 
     /// Read a whole file, up to `cap` bytes.  `Ok(None)` if it does not exist.
@@ -2091,5 +2139,150 @@ mod tests {
         let fs = mount(img, fmt);
         assert_eq!(fs.entries().len(), 1, "only the real file");
         assert_eq!(&fs.entries()[0].name[..4], b"REAL");
+    }
+    /// The gate on the Altair block mapping: read every file this reader can
+    /// find on a real `DISK01.DSK` and require the bytes to match what the
+    /// disk's own CP/M produced when it read the same files out over a virtual
+    /// modem.
+    ///
+    /// The expected values are **hashes, not content**.  These files come from
+    /// third-party images we do not redistribute, so a fixture of their bytes
+    /// would be redistributing them; a SHA-256 proves the match and carries
+    /// nothing.  The ground truth behind each hash was captured by
+    /// `cpm::boot_machine::tests::test_capture_altair_ground_truth`.
+    ///
+    /// Eight files, 447 records, chosen to cover both sides of the track-6
+    /// format change: `L80.COM`, `ED.COM` and `DUMP.COM` live in the
+    /// boot-format tracks, the rest in the data tracks, and `MBASIC.COM` spans
+    /// two directory entries so it also exercises the disk's stated EXM 0.
+    ///
+    /// Ignored: set `CPM_ALTAIR_IMAGE` to a real `DISK01.DSK` (337,568 bytes).
+    #[test]
+    #[ignore]
+    fn test_altair_extraction_matches_the_booted_guest() {
+        use sha2::{Digest, Sha256};
+        /// (file, SHA-256 of what the guest's own CP/M sent out).
+        const EXPECT: &[(&str, &str)] = &[
+            ("DEMO.ASM", "b5fffdf431c9b9673e00b6f8e18c29ce772be8e0a45970f8def43e3e1f634bdb"),
+            ("DEMO.PRN", "3b7c7ec0364ba3f8cdab74580bfb0d0adc8d473bae0d2515dd6a080a92b23b06"),
+            ("DUMP.COM", "43d745e0eadb36d9fe9f1e2a927e9cb091622a74bb36c0d68afd7d21b6ca69b1"),
+            ("ED.COM", "6c201ae1195bfcd216c0604a0cb6b15cf553e46db13eb57b3e0de9461aa4d84c"),
+            ("L80.COM", "7407f61e7788660550ea0a12ba44794f9786235c0a58aafb6d6c4bc3329d2831"),
+            ("MBASIC.COM", "29d957fc6899c24f6296a1662a27eca545d85ee3f7d70d2794c9d045d92ff157"),
+            ("PIP.COM", "583dfebfb7e69372810f957527cb259f376c11369fa6703945cd1454a85b8707"),
+            ("WM.HLP", "4a85e67caf3ac765d0f1c962c7bd5321ed1c7d3ae96e93147b582656cfd3fe5f"),
+        ];
+        let Ok(path) = std::env::var("CPM_ALTAIR_IMAGE") else {
+            eprintln!("set CPM_ALTAIR_IMAGE to a real DISK01.DSK to run this");
+            return;
+        };
+        let fmt = by_token("altair8").unwrap();
+        let mut fs = mount(std::fs::read(&path).unwrap(), fmt);
+        for (file, want) in EXPECT {
+            let (n, e) = name_of(file);
+            let got = fs
+                .read_whole(0, &n, &e, 8 << 20)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{file} is not on the disk"));
+            let sum = format!("{:x}", Sha256::digest(&got));
+            assert_eq!(&sum, want, "{file}: {} bytes, wrong content", got.len());
+        }
+        println!("{} files match the guest's own reading", EXPECT.len());
+    }
+    /// A write to an Altair image must leave a correct sector check byte, on
+    /// both sides of the track-6 format change.
+    ///
+    /// This runs in CI, unlike the live test that boots a real disk, and it is
+    /// the only cover for the boot-format half of the arithmetic — the guest
+    /// never reads a boot-track record as a file, so a real disk cannot fail on
+    /// that path even when it is wrong.
+    ///
+    /// Every sector the write touched is checked rather than a predicted few:
+    /// a blank image is all `0xE5`, so any sector whose data is not is one we
+    /// wrote, and that finds the directory records as well as the file's.
+    #[test]
+    fn test_altair_writes_refresh_the_sector_check_byte() {
+        let fmt = by_token("altair8").unwrap();
+        let mut fs = mount(blank(fmt), fmt);
+        let (n, e) = name_of("CHK.DAT");
+        fs.create(0, &n, &e).unwrap();
+        // Enough records to run past the boot-format tracks.  The data area
+        // starts on track 2 and the format changes at track 6, so four tracks
+        // of 32 records is the first record that can land in data format.
+        let last: u32 = 4 * 32 + 5;
+        for rec in 0..=last {
+            // Never 0xE5, so "differs from blank" means "we wrote it".
+            fs.write_record(0, &n, &e, rec, &[(rec as u8).wrapping_add(1); 128]).unwrap();
+        }
+
+        let mut boot_side = 0;
+        let mut data_side = 0;
+        for phys in 0..fmt.total_records as u64 {
+            let at = fmt.framing.record_offset(phys);
+            let data: Vec<u8> = (0..128).map(|i| fs.peek(at + i)).collect();
+            if data.iter().all(|&b| b == E5) {
+                continue; // untouched
+            }
+            // Written out from the measurement, NOT from `sector_check` — a
+            // test that asks the code under test where the byte goes agrees
+            // with it however wrong it is, which is exactly what this one did
+            // before a mutation showed it passing with the offset moved.
+            let sector = phys * 137;
+            let (check_at, also): (u64, &[u64]) = if phys / 32 < 6 {
+                (sector + 132, &[])
+            } else {
+                (sector + 4, &[sector + 2, sector + 3, sector + 5, sector + 6])
+            };
+            let mut want = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            for extra in also {
+                want = want.wrapping_add(fs.peek(*extra));
+            }
+            assert_eq!(
+                fs.peek(check_at),
+                want,
+                "physical record {phys} (track {}) has a stale check byte",
+                phys / 32
+            );
+            if phys / 32 < 6 {
+                boot_side += 1;
+            } else {
+                data_side += 1;
+            }
+        }
+        assert!(boot_side > 0, "no boot-format sector was written");
+        assert!(data_side > 0, "no data-format sector was written");
+
+        // And the file still reads back, so refreshing the check byte did not
+        // land on top of the record it protects.
+        for rec in [0u32, 1, last] {
+            assert_eq!(
+                fs.read_record(0, &n, &e, rec).unwrap().unwrap(),
+                [(rec as u8).wrapping_add(1); 128]
+            );
+        }
+    }
+
+    /// A disk that states its own EXM is believed over the standard
+    /// derivation, and the whole point is the number of allocation slots one
+    /// directory entry gets.  The Altair says 0 where the rule gives 1.
+    #[test]
+    fn test_stated_exm_overrides_the_derivation() {
+        let alt = by_token("altair8").unwrap();
+        assert_eq!(alt.exm, Some(0), "the Altair BIOS states EXM 0");
+        let p = Params::derive(alt);
+        assert_eq!(p.exm, 0);
+        assert_eq!(p.map_slots, 8, "EXM 0 with 2K blocks uses eight of sixteen slots");
+        // Without the override the same geometry would derive EXM 1.
+        let mut derived = alt.clone();
+        derived.exm = None;
+        assert_eq!(Params::derive(&derived).exm, 1, "the standard rule gives 1 here");
+        assert_eq!(Params::derive(&derived).map_slots, 16);
+        // Every other format is unaffected — the override must be a no-op where
+        // the disk agrees with the rule.
+        for f in super::super::format::FORMATS.iter().filter(|f| f.exm.is_none()) {
+            let mut forced = f.clone();
+            forced.exm = Some(Params::derive(f).exm);
+            assert_eq!(Params::derive(&forced).map_slots, Params::derive(f).map_slots);
+        }
     }
 }

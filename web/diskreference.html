@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Disk Format Reference &mdash; Ethernet Gateway v0.9.0</title>
+    <meta name="description" content="Measured layouts of the vintage disk images the Ethernet Gateway reads: the MITS Altair 88-DCDD 8-inch floppy (137-byte sectors, the two sector-translation tables, the track-6 format change, the two sector checksum formulas, EXM 0), the IBM 3740 8-inch SSSD, and the Altair 88-HDSK hard disk. Includes the method used to measure them &mdash; booting the disk and asking its own operating system.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+            /* Let wide reference tables wrap rather than widening the page. */
+            overflow-wrap: anywhere;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            /* Long unbreakable tokens (config keys, command lines) otherwise set
+               the page's minimum width, and the WHOLE page scrolls sideways on a
+               narrow screen — which breaks reading the prose, not just the token.
+               Measured: every one of these 12 pages overflowed at 390px. */
+            overflow-wrap: anywhere;
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Disk Format Reference</p>
+            <div class="hdr-version">v0.9.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Altair 88-DCDD</span>
+                <span class="hdr-badge">IBM 3740</span>
+                <span class="hdr-badge">Altair 88-HDSK</span>
+                <span class="hdr-badge">Measured</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="cpmreference.html">CP/M Reference</a>
+            <a href="#why">Why This Page</a>
+            <a href="#method">The Method</a>
+            <a href="#altair8">Altair 88-DCDD</a>
+            <a href="#checksums">Sector Checksums</a>
+            <a href="#exm">EXM</a>
+            <a href="#others">Other Formats</a>
+            <a href="#open">Still Open</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- WHY                                           -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="why">
+                <div class="section-title">Why This Page Exists</div>
+                <p class="intro">Everything here was <em>measured</em> from real disks, and most of it cost more than it should have. This is the record so it never has to be measured again.</p>
+
+                <p>
+                    Reading a vintage disk image directly &mdash; without a machine in the loop
+                    &mdash; means knowing three things that the disk normally tells its own
+                    computer and nobody else: where the 128-byte CP/M records sit inside the file,
+                    which physical sector holds which logical one, and what the CP/M Disk Parameter
+                    Block says. Get any of them wrong and you do not get an error. You get a
+                    plausible file listing and quietly wrong file content.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The failure that mattered.</strong> The Altair 88-DCDD floppy sat in
+                        this codebase for months looking correct. Its directory read perfectly. Text
+                        files extracted with no corrupt bytes. Both of those were true and neither
+                        meant anything: a directory is only sixteen records and reads the same under
+                        the wrong table, and a <em>scrambled</em> text file is still all text. The
+                        format was withdrawn once the error was found, and stayed withdrawn until it
+                        could be measured rather than argued about.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- METHOD                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="method">
+                <div class="section-title">The Method &mdash; Ask the Disk's Own Computer</div>
+                <p class="intro">The technique that solved this is worth more than any table below, because it generalises to every disk the gateway can boot.</p>
+
+                <p>
+                    Earlier attempts scored each hypothesis against a heuristic: an assembler
+                    listing on the disk has addresses in it, so do those addresses ascend? That
+                    sounds rigorous and is not. The correct table scored 81%, no translation scored
+                    59%, an inverted one 70% &mdash; and 81% is exactly the region where such a
+                    score stops telling &ldquo;nearly right&rdquo; from &ldquo;right&rdquo;. Four
+                    hypotheses were ruled out this way without the cause ever being found.
+                </p>
+                <p>
+                    The gateway can <a href="cpmreference.html#booting">boot</a> these disks on an
+                    emulated MITS 88-DCDD controller, and a booted disk runs its own operating
+                    system with its own BIOS &mdash; software that has always been right about this
+                    disk. So stop guessing and ask it:
+                </p>
+                <ol>
+                    <li>Boot a tool disk in drive 0 and the disk being measured in drive 1, mounted
+                        <strong>read-only</strong> so the measurement cannot alter its subject.</li>
+                    <li>Run the guest's own <code>PCPUT B:FILE.EXT B</code> &mdash; Mike Douglas's
+                        XMODEM sender &mdash; over the gateway's virtual modem on 2SIO port B, and
+                        collect the bytes. That is the file's true content, read by the BIOS written
+                        for this disk.</li>
+                    <li>De-frame the image and index every 128-byte physical record by (track,
+                        position).</li>
+                    <li>For each 128-byte slice of the captured file, find which physical record
+                        holds those exact bytes. That yields <strong>logical record &rarr; physical
+                        position</strong> directly, as a measurement.</li>
+                    <li>Read the pattern off the map. Do not guess before this step produces it.</li>
+                </ol>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>447 records, eight files, twenty tracks, no ambiguity.</strong> The
+                        map came out in one run and the pattern was visible by eye. Choose files
+                        that straddle every boundary you suspect &mdash; that is what caught the
+                        track-6 change, which two files alone would have missed entirely.
+                    </p>
+                </div>
+                <p class="dim-text">
+                    In the source: <code>cpm::boot_machine::tests::test_capture_altair_ground_truth</code>
+                    captures, and <code>cpm::image::fs::tests::test_altair_extraction_matches_the_booted_guest</code>
+                    holds our reader to SHA-256 hashes of what the guest produced. Hashes rather
+                    than the bytes, because those files come from third-party images this project
+                    does not redistribute.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ALTAIR 88-DCDD                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="altair8">
+                <div class="section-title">MITS Altair 88-DCDD 8&Prime; Floppy</div>
+                <p class="intro">Token <code>altair8</code>. 337,568 bytes: 77 tracks &times; 32 sectors &times; 137 bytes. The <code>DISKnn.DSK</code> images in the Altair-Duino / altairclone sets.</p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The disk's own Disk Parameter Block</h3>
+                <p>
+                    Found in the BIOS on the boot tracks, at offset <code>0x1CA9</code> of the
+                    de-framed image &mdash; fourteen bytes before the sector-translation table,
+                    which is the usual BIOS arrangement of DPB then XLT.
+                </p>
+                <pre><code>SPT 32   BSH 4   BLM 15   EXM 0
+DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2</code></pre>
+                <p>
+                    So: 2&nbsp;KB allocation blocks, 150 of them, 64 directory entries, two
+                    reserved tracks, two blocks reserved for the directory. Two of those contradict
+                    what the standard derivations give &mdash; <code>DRM 63</code> means
+                    <strong>64</strong> directory entries rather than 128, and <code>EXM 0</code>
+                    rather than 1. See <a href="#exm">EXM</a>.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Framing &mdash; and it changes at track 6</h3>
+                <p>
+                    Each 137-byte sector carries its 128 CP/M data bytes at an offset that is
+                    <em>not</em> the same all the way down the disk. Tracks 0&ndash;5 are written in
+                    &ldquo;boot format&rdquo; and tracks 6&ndash;76 are not.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Byte</th><th>Tracks 0&ndash;5 (boot format)</th><th>Tracks 6&ndash;76 (data format)</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>0</code></td><td>track number + <code>0x80</code></td><td>track number + <code>0x80</code></td></tr>
+                        <tr><td><code>1</code></td><td><code>0x00</code></td><td><strong>sector ID</strong> &mdash; see below</td></tr>
+                        <tr><td><code>2</code></td><td><code>0x01</code></td><td><code>0x01</code></td></tr>
+                        <tr><td><code>3</code></td><td>first data byte</td><td>enters the checksum</td></tr>
+                        <tr><td><code>4</code></td><td>data</td><td><strong>checksum</strong></td></tr>
+                        <tr><td><code>5</code>&ndash;<code>6</code></td><td>data</td><td>enter the checksum</td></tr>
+                        <tr><td><code>7</code>&hellip;</td><td>data</td><td>first data byte</td></tr>
+                        <tr><td><code>131</code></td><td><code>0xFF</code> stop byte</td><td>data</td></tr>
+                        <tr><td><code>132</code></td><td><strong>checksum</strong></td><td>data</td></tr>
+                        <tr><td><code>135</code></td><td><code>0x00</code></td><td><code>0xFF</code> stop byte</td></tr>
+                        <tr><td><code>136</code></td><td><code>0x00</code></td><td><code>0x00</code></td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    Data at offset&nbsp;3 below track&nbsp;6 and offset&nbsp;7 from track&nbsp;6 on.
+                    The directory lives in the boot region and reads perfectly at the first offset,
+                    so a reader that misses this gets a correct file listing and then mangles every
+                    byte of file content.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Sector translation &mdash; two effects, not one</h3>
+                <p>
+                    This is the part that was unsolved for months, and the reason is that
+                    <strong>two independent things</strong> stand between a logical record and its
+                    position in the file. Either one alone gives an answer that is mostly right.
+                </p>
+                <p>
+                    <strong>1. The BIOS translation.</strong> A four-way interleave, sixteen evens
+                    then sixteen odds, recovered from the disk's own BIOS at de-framed offset
+                    <code>0x1CB8</code> (stored there 1-based; shown here 0-based). It maps a
+                    logical record to a <em>sector ID</em>:
+                </p>
+                <pre><code>ALTAIR_BIOS_XLT
+  0,  8, 16, 24,  2, 10, 18, 26,  4, 12, 20, 28,  6, 14, 22, 30,
+  1,  9, 17, 25,  3, 11, 19, 27,  5, 13, 21, 29,  7, 15, 23, 31</code></pre>
+                <p>
+                    <strong>2. A sector ID is not its position in the file.</strong> On the data
+                    tracks the odd sectors were laid down half a revolution from where their number
+                    suggests: ID&nbsp;<em>n</em> is at position&nbsp;<em>n</em> when <em>n</em> is
+                    even, and at <em>(n&nbsp;+&nbsp;16)&nbsp;mod&nbsp;32</em> when it is odd. This
+                    is not inferred &mdash; every data sector states its own ID in header byte 1,
+                    and on every data track of every CP/M disk in the Altair-Duino set the positions
+                    hold <code>0, 17, 2, 19, 4, 21, &hellip;</code> rather than
+                    <code>0, 1, 2, 3, &hellip;</code>
+                </p>
+                <pre><code>ALTAIR_SECTOR_ORDER   (indexed by sector ID, gives position)
+  0, 17,  2, 19,  4, 21,  6, 23,  8, 25, 10, 27, 12, 29, 14, 31,
+ 16,  1, 18,  3, 20,  5, 22,  7, 24,  9, 26, 11, 28, 13, 30, 15</code></pre>
+                <p>
+                    Compose them and you get the table the reader actually uses on tracks
+                    6&ndash;76. Tracks 0&ndash;5 have no sector IDs and no such shift, so they use
+                    the BIOS table unmodified &mdash; which means <strong>the skew changes at
+                    track 6, the same boundary as the framing, for the same reason.</strong>
+                </p>
+                <pre><code>ALTAIR_SKEW   (tracks 6-76: logical record -> position in file)
+  0,  8, 16, 24,  2, 10, 18, 26,  4, 12, 20, 28,  6, 14, 22, 30,
+ 17, 25,  1,  9, 19, 27,  3, 11, 21, 29,  5, 13, 23, 31,  7, 15</code></pre>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Why this hid so well.</strong> The two tables are
+                        <em>identical</em> for logical sectors 0&ndash;15 and differ only in the
+                        second half. A 64-entry directory is exactly sixteen records, so the
+                        directory reads correctly under either one. Only file content past the
+                        first half of a track comes back wrong &mdash; and only in a pattern that
+                        is locally scrambled rather than obviously broken. A good directory listing
+                        proves nothing about the mapping on this disk.
+                    </p>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CHECKSUMS                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="checksums">
+                <div class="section-title">The Two Sector Checksums</div>
+                <p class="intro">Needed only for writing &mdash; and not optional there. The Altair BIOS verifies every sector it reads.</p>
+
+                <p>
+                    Both formulas are a one-byte sum with wraparound, and both were verified against
+                    every sector of six real disks: 192 of 192 boot sectors and 2,272 of 2,272 data
+                    sectors, each time.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Region</th><th>Data at</th><th>Check byte</th><th>Covers</th></tr></thead>
+                    <tbody>
+                        <tr><td>tracks 0&ndash;5</td><td>offset 3</td><td>byte 132</td><td>the 128 data bytes</td></tr>
+                        <tr><td>tracks 6&ndash;76</td><td>offset 7</td><td>byte 4</td><td>the 128 data bytes <strong>plus header bytes 2, 3, 5 and 6</strong></td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>A stale check byte is a silent write.</strong> The host write
+                        succeeds, the image looks fine, and the disk is unreadable on the machine it
+                        was written for: the guest's BIOS reports
+                        <code>Bdos Err On A: Bad Sector</code>. There is no way to notice this
+                        without a real BIOS reading the sector back, which is why the write test
+                        boots the disk afterwards.
+                    </p>
+                </div>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What a write touches, and what it must not</h3>
+                <p>
+                    A write here changes the 128 data bytes and the check byte, and <strong>nothing
+                    else</strong>. The track and sector numbers, the stop byte, and the two header
+                    bytes on the data tracks whose meaning is still unidentified all stay exactly as
+                    found. That is the smallest edit that can be correct, and it does not require
+                    understanding bytes we have not measured.
+                </p>
+                <p>
+                    The consequence is worth stating plainly: <strong>this writes into an
+                    already-formatted image only.</strong> Nothing here authors Altair sector
+                    headers, so a blank file is not a blank floppy, and creating an
+                    <code>altair8</code> image from nothing is not supported.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- EXM                                           -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="exm">
+                <div class="section-title">EXM &mdash; Why <code>cpmtools</code> Cannot Write These Disks</div>
+                <p class="intro">The extent mask is stated by the disk, not derived from it, and this disk states something the standard rule does not produce.</p>
+
+                <p>
+                    The usual derivation says: 2&nbsp;KB blocks, fewer than 256 of them, so block
+                    numbers are one byte, so a 16-byte allocation map holds sixteen of them, so one
+                    directory entry covers 32&nbsp;KB &mdash; two 16&nbsp;KB extents &mdash; so
+                    <code>EXM 1</code>. This disk's BIOS says <strong><code>EXM 0</code></strong>:
+                    one entry covers a single extent and uses only eight of its sixteen allocation
+                    slots. The disks agree; look at any multi-extent file on <code>DISK01.DSK</code>
+                    and its first entry has exactly eight blocks in it.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <code>diskdefs</code> has no field for EXM, so <code>cpmtools</code> derives
+                        it and cannot be told otherwise. Writing an Altair floppy with it produces a
+                        single directory entry marked <code>EX=01</code> holding nine blocks, with
+                        no extent&nbsp;0 anywhere on the disk. CP/M's <code>DIR</code> lists
+                        extent-0 entries, so the guest correctly does not show the file, and it
+                        would be truncated if it did. Changing <code>maxdir</code> to the disk's real
+                        64 makes no difference. <strong>This is not a bug to work around &mdash; do
+                        not patch <code>cpmtools</code>; use a writer that can be told the EXM.</strong>
+                    </p>
+                </div>
+                <p>
+                    In this codebase that is a <code>Format::exm</code> field, explicit and
+                    optional: <code>None</code> derives it the standard way, and a disk that states
+                    something else gets to say so. Other vendors made the same unusual choice, so
+                    this is a field rather than a special case.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OTHER FORMATS                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="others">
+                <div class="section-title">The Other Formats</div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">IBM 3740 8&Prime; SSSD &mdash; <code>ibm3740</code></h3>
+                <p>
+                    256,256 bytes: 77 tracks &times; 26 sectors &times; 128. Two reserved tracks,
+                    1&nbsp;KB blocks, 64 directory entries, records laid end to end with no framing
+                    at all. A plain skew of 6, written out as an explicit permutation so no reader
+                    has to remember which convention a bare number implies:
+                </p>
+                <pre><code>IBM3740_SKEW
+  0,  6, 12, 18, 24,  4, 10, 16, 22,  2,  8, 14, 20,  1,  7, 13,
+ 19, 25,  5, 11, 17, 23,  3,  9, 15, 21</code></pre>
+                <p class="dim-text">
+                    The closest thing CP/M had to a universal disk. Tarbell and Cromemco
+                    single-density 8&Prime; images are both this, as are the IMSAI / z80pack ones.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Altair 88-HDSK hard disk &mdash; <code>altairhd</code></h3>
+                <p>
+                    4,988,928 bytes. 812 tracks &times; 24 sectors &times; 256 bytes, so
+                    <strong>two CP/M records ride in every physical sector</strong> and the skew
+                    moves them as a pair. Getting that wrong scatters every second record &mdash;
+                    the drive can only start reading at a sector boundary, so the two records inside
+                    one sector always travel together. 4&nbsp;KB blocks, 192 directory entries, two
+                    reserved tracks, no framing. A three-way interleave over 24 sectors:
+                </p>
+                <pre><code>ALTAIR_HDSK_SKEW
+  0,  7, 14, 21,  4, 11, 18,  1,  8, 15, 22,  5,
+ 12, 19,  2,  9, 16, 23,  6, 13, 20,  3, 10, 17</code></pre>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Named versus sniffed</h3>
+                <p>
+                    An image whose filename carries a format token
+                    (<code>altair8_wordstar.dsk</code>) mounts read-write: the operator has said
+                    what it is. An image without one still mounts, but always
+                    <strong>read-only</strong>, because the format was inferred from size and
+                    content. A misidentified format is the one failure no consistency check can
+                    catch &mdash; every offset comes from the wrong geometry, so every check agrees
+                    with every other check.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- STILL OPEN                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="open">
+                <div class="section-title">What Is Still Open</div>
+
+                <table class="data-table">
+                    <thead><tr><th>Item</th><th>State</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td>Header bytes 3, 5 and 6 on Altair data tracks</td>
+                            <td>Unidentified. They vary per sector and enter the checksum. Writes
+                                preserve them, so their meaning has never had to be known.</td>
+                        </tr>
+                        <tr>
+                            <td>Formatting a blank <code>altair8</code> image</td>
+                            <td>Not supported. Writing edits an existing formatted disk; nothing
+                                here authors sector headers.</td>
+                        </tr>
+                        <tr>
+                            <td>1,113,536-byte Altair images</td>
+                            <td>Uniform 137-byte sectors with data at offset 3, unlike the split
+                                layout above. Framing is understood; the CP/M parameters are not yet
+                                confirmed against real content.</td>
+                        </tr>
+                        <tr>
+                            <td>Altair mini-disk (76,800 bytes)</td>
+                            <td>Not a CP/M disk in the sets seen &mdash; Altair Mini-Disk BASIC and
+                                DOS. A case for <a href="cpmreference.html#booting">booting</a>,
+                                not mounting.</td>
+                        </tr>
+                        <tr>
+                            <td>Controllers for 88-HDSK, Tarbell and Cromemco</td>
+                            <td>Planned, in that order. The Tarbell and Cromemco single-density
+                                disks already <em>mount</em>, so a controller adds booting rather
+                                than access.</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The rule this page is really about.</strong> A check that can only
+                        score a hypothesis will stall at &ldquo;nearly right&rdquo; forever. Find an
+                        oracle that answers exactly &mdash; here, the disk's own operating system
+                        &mdash; and the answer arrives in one run.
+                    </p>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.9.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

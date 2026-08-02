@@ -15,25 +15,34 @@
 //! 2. **Skew** — CP/M numbers the sectors in a track logically, and the BIOS
 //!    translates each to the physical sector that actually holds it, so that
 //!    consecutively-read records are spread around the platter and the drive
-//!    does not miss a revolution between them.  [`Format::skew_table`] is
-//!    that translation.
+//!    does not miss a revolution between them.  [`Skew`] is that translation.
 //!
-//! **The skew is a property of the CP/M BIOS that shipped on the disk, not of
-//! the image format.**  That is why a hardware emulator needs no skew table at
-//! all (the guest's own BIOS does the translation, and the emulator just
-//! serves physical sectors) while we — reading the filesystem directly, with
-//! no guest in the loop — cannot do without one.  When an image turns up whose
-//! skew we do not know, it can be recovered by scanning the image's own boot
-//! tracks for a permutation of the sector numbers — which is where the Altair
-//! table below came from.
+//! The skew is mostly a property of the CP/M BIOS that shipped on the disk, and
+//! that is why a hardware emulator needs no skew table at all (the guest's own
+//! BIOS does the translation, and the emulator just serves physical sectors)
+//! while we — reading the filesystem directly, with no guest in the loop —
+//! cannot do without one.  It is *not* purely a BIOS property, though: where a
+//! sector physically sits also depends on how the track was formatted, and on
+//! the Altair 88-DCDD those two effects compose and change partway down the
+//! disk.  See [`Skew::Split`].
 //!
 //! Every entry in [`FORMATS`] was measured from a real image rather than
-//! transcribed: the geometry arithmetic was checked against the file size, and
-//! the CP/M parameters were confirmed by extracting a text file and requiring
-//! zero non-printable bytes.  The published descriptions of this hardware (the
-//! Altair 8800 simulator sources, the `cpmtools` `diskdefs` database) were used
-//! only to cross-check those measurements — the same clean-room posture the
-//! Punter and HBIOS implementations here were written under.
+//! transcribed, and the geometry arithmetic was checked against the file size.
+//! Two different strengths of check are represented here, and it is worth
+//! knowing which you are relying on:
+//!
+//! * **Weak** — extract a text file and require zero non-printable bytes.  This
+//!   is what the Altair entry passed for months while being wrong, because a
+//!   scrambled text file is still all text.  Never trust it alone again.
+//! * **Strong** — boot the disk on the emulated controller, have its own
+//!   operating system read a file out over a virtual modem, and match every
+//!   128-byte slice against the image byte for byte.  No heuristic, no scoring,
+//!   and it settled the Altair layout in one run.
+//!
+//! The published descriptions of this hardware (the Altair 8800 simulator
+//! sources, the `cpmtools` `diskdefs` database) were used only to cross-check
+//! those measurements — the same clean-room posture the Punter and HBIOS
+//! implementations here were written under.
 
 /// How the 128-byte CP/M records are laid out inside the image file.
 ///
@@ -115,6 +124,46 @@ impl Framing {
         }
     }
 
+    /// The per-sector check byte a write has to refresh, if this format has
+    /// one: `(absolute offset of the check byte, other bytes that enter the
+    /// sum)`.  The 128 data bytes always enter it and are not listed.
+    ///
+    /// Only the Altair 88-DCDD has one, and it is not optional there.  Its BIOS
+    /// verifies every sector it reads, so a record written with a stale check
+    /// byte comes back to the guest as `Bdos Err On A: Bad Sector` — the write
+    /// looks like it worked and the disk is unreadable on the machine it was
+    /// written for.
+    ///
+    /// Both layouts were measured, and both hold for every sector of six real
+    /// disks (192/192 boot sectors and 2272/2272 data sectors each):
+    ///
+    /// ```text
+    /// tracks 0-5    data at 3   byte 132 = sum(data)
+    /// tracks 6-76   data at 7   byte 4   = sum(data) + bytes 2, 3, 5, 6
+    /// ```
+    ///
+    /// The two offsets in the returned pair are absolute, so a caller never has
+    /// to know which side of the split it is on.
+    ///
+    /// The positions below are tied to the measured data offsets of 3 and 7.  A
+    /// future `AltairSplit` with different ones would get the wrong check byte,
+    /// so `test_the_only_split_framing_is_the_one_the_checksums_were_measured_on`
+    /// refuses to let one into `FORMATS` unnoticed.
+    pub fn sector_check(&self, rec: u64) -> Option<(u64, Vec<u64>)> {
+        match *self {
+            Framing::Raw | Framing::Framed { .. } => None,
+            Framing::AltairSplit { seclen, sectrk, split_track, .. } => {
+                let base = rec * seclen as u64;
+                let track = rec / sectrk as u64;
+                if track < split_track as u64 {
+                    Some((base + 132, Vec::new()))
+                } else {
+                    Some((base + 4, vec![base + 2, base + 3, base + 5, base + 6]))
+                }
+            }
+        }
+    }
+
     /// Bytes the image must contain to hold `records` physical records.
     ///
     /// Used to bound-check a mount: an image shorter than its format claims is
@@ -143,29 +192,126 @@ pub enum Skew {
     /// An explicit permutation, one entry per sector in a track.  Recovered
     /// from the BIOS on the disk itself; see the module comment.
     Table(&'static [u16]),
+
+    /// Two permutations, with the disk changing from one to the other partway
+    /// down — the Altair 88-DCDD case.
+    ///
+    /// This exists because a disk can be *formatted* two different ways in two
+    /// different regions, which is not the same thing as having two BIOS
+    /// tables.  On these disks the system area and the data area were written
+    /// by different code, and the data area also shifted every odd sector half
+    /// a revolution from where its number says.  The boundary is the same
+    /// `split_track` as [`Framing::AltairSplit`], and it is the same cause: one
+    /// region is in "boot format" and the other is not.
+    ///
+    /// Getting this wrong is quiet.  The two tables below agree on logical
+    /// sectors 0-15, and a 64-entry directory is exactly sixteen records — so
+    /// the directory reads perfectly either way and only file content past the
+    /// first half of a track comes back scrambled.
+    Split {
+        /// First track (absolute, counting the boot area) that uses `rest`.
+        split_track: u16,
+        /// Translation below `split_track`.
+        first: &'static [u16],
+        /// Translation from `split_track` on.
+        rest: &'static [u16],
+    },
 }
 
 impl Skew {
-    /// Physical sector for a logical sector within one track.
+    /// Physical sector for a logical sector within one *absolute* track.
+    ///
+    /// The track is absolute — counted from the start of the disk, boot area
+    /// included — because that is what a `split_track` boundary is measured in
+    /// and the only reading that is unambiguous.
     ///
     /// Out-of-range input maps to itself rather than panicking: a corrupt
     /// directory can produce a wild sector number, and a mounted image must
     /// fail as a read error, never as a crash of the whole gateway.
-    pub fn physical(&self, logical: u16) -> u16 {
-        match self {
-            Skew::None => logical,
-            Skew::Table(t) => t.get(logical as usize).copied().unwrap_or(logical),
+    pub fn physical(&self, track: u32, logical: u16) -> u16 {
+        let table: &[u16] = match self {
+            Skew::None => return logical,
+            Skew::Table(t) => t,
+            Skew::Split { split_track, first, rest } => {
+                if track < *split_track as u32 {
+                    first
+                } else {
+                    rest
+                }
+            }
+        };
+        table.get(logical as usize).copied().unwrap_or(logical)
+    }
+
+    /// Every permutation this translation can use, for the checks that must
+    /// hold of all of them — a `Split` has two, and both have to be a full
+    /// permutation of the track or the tail of it silently maps to itself.
+    #[cfg(test)]
+    pub fn tables(&self) -> Vec<&'static [u16]> {
+        match *self {
+            Skew::None => Vec::new(),
+            Skew::Table(t) => vec![t],
+            Skew::Split { first, rest, .. } => vec![first, rest],
         }
     }
 }
 
-/// The Altair 88-DCDD sector translation, recovered from the BIOS in the boot
-/// tracks of `DISK01.DSK` (found there as a 1-based permutation; stored 0-based
-/// here).  A four-way interleave: every fourth physical sector, four times over.
-#[allow(dead_code)]
-pub const ALTAIR_SKEW: &[u16] = &[
+/// The Altair 88-DCDD **BIOS** sector translation, recovered from the BIOS in
+/// the boot tracks of `DISK01.DSK` at de-framed offset `0x1cb8` (found there as
+/// a 1-based permutation; stored 0-based here).  A four-way interleave: every
+/// fourth sector, four times over, evens then odds.
+///
+/// This is a *logical record → sector ID* map, and on its own it is not enough
+/// to find a record in the file — see [`ALTAIR_SECTOR_ORDER`].
+pub const ALTAIR_BIOS_XLT: &[u16] = &[
     0, 8, 16, 24, 2, 10, 18, 26, 4, 12, 20, 28, 6, 14, 22, 30,
     1, 9, 17, 25, 3, 11, 19, 27, 5, 13, 21, 29, 7, 15, 23, 31,
+];
+
+/// Where each Altair 88-DCDD sector **ID** sits in a *data* track, as an
+/// ID-indexed table of positions in the image file.
+///
+/// A `.dsk` stores the 32 sectors of a track in rotational-position order, and
+/// on tracks 6 and up the position a sector occupies is **not** its number: ID
+/// *n* is at position *n* when *n* is even and at position *(n + 16) mod 32*
+/// when it is odd — the odd sectors are half a revolution from where their
+/// numbering suggests.
+///
+/// Not inferred.  Every 137-byte sector on a data track carries its own ID in
+/// the second byte of its header, and reading them back says so directly: on
+/// every data track of every CP/M disk in the Altair-Duino set the positions
+/// hold IDs `0, 17, 2, 19, 4, 21, …` rather than `0, 1, 2, 3, …`.  Tracks 0-5
+/// are written in boot format, with that byte left at zero and no such shift —
+/// which is why the skew has to change at track 6 and not before.
+///
+/// Not consulted at run time — [`ALTAIR_SKEW`] is the composition, computed
+/// once here and pinned by a test.  It is kept because it is half of *why* that
+/// table is what it is, and losing that would mean measuring it again.
+#[allow(dead_code)]
+pub const ALTAIR_SECTOR_ORDER: &[u16] = &[
+    0, 17, 2, 19, 4, 21, 6, 23, 8, 25, 10, 27, 12, 29, 14, 31,
+    16, 1, 18, 3, 20, 5, 22, 7, 24, 9, 26, 11, 28, 13, 30, 15,
+];
+
+/// The Altair 88-DCDD translation for the **data** tracks: the BIOS table
+/// composed with the on-disk sector placement, mapping a logical record
+/// straight to a position in the image file.
+///
+/// `ALTAIR_SKEW[l] == ALTAIR_SECTOR_ORDER[ALTAIR_BIOS_XLT[l]]`, pinned by
+/// `test_altair_data_skew_is_the_composition_of_its_two_causes` so this table
+/// can never drift from the two measurements it came from.
+///
+/// It is also measured end to end, and that is the part that matters.  A booted
+/// Altair was made to read its own files with its own BIOS and send them out
+/// over a virtual modem, and every 128-byte slice of the result was located in
+/// the image by exact byte match — 447 records across eight files and twenty
+/// tracks, all of them where these tables say.  That is logical record →
+/// physical position as a *measurement*, with no scoring heuristic anywhere in
+/// it, which is what every earlier attempt lacked.  See
+/// `boot_machine::tests::test_capture_altair_ground_truth`.
+pub const ALTAIR_SKEW: &[u16] = &[
+    0, 8, 16, 24, 2, 10, 18, 26, 4, 12, 20, 28, 6, 14, 22, 30,
+    17, 25, 1, 9, 19, 27, 3, 11, 21, 29, 5, 13, 23, 31, 7, 15,
 ];
 
 /// The IBM 3740 8" single-density translation — a plain skew of 6, written out
@@ -210,6 +356,18 @@ pub struct Format {
     pub blocksize: u32,
     /// Maximum directory entries.
     pub maxdir: u16,
+    /// The classic EXM, when the disk states one that the usual derivation does
+    /// not produce.  `None` means "derive it", which is right for every disk
+    /// whose BIOS followed the published rule.
+    ///
+    /// **Explicit on purpose.**  Deriving EXM from block size and disk size is
+    /// exactly what went wrong with the Altair floppy: the rule gives 1, the
+    /// disk's own DPB says 0, and the difference is one directory entry
+    /// covering eight allocation slots instead of sixteen.  `cpmtools` cannot
+    /// express EXM at all, which is why it writes these disks into an entry
+    /// CP/M will not list.  Other vendors made the same unusual choice, so this
+    /// is a field rather than a special case.
+    pub exm: Option<u32>,
     /// Physical layout of records inside the file.
     pub framing: Framing,
     /// Logical-to-physical sector translation within a data track.
@@ -233,6 +391,16 @@ impl Format {
     /// (record 0 is the first directory record).  Returns `None` past the end
     /// of the disk.
     pub fn data_record_offset(&self, rec: u32) -> Option<u64> {
+        Some(self.framing.record_offset(self.data_physical_record(rec)?))
+    }
+
+    /// The *physical* record a logical one lands on — its index in the file,
+    /// counting from the first record of the boot area, before framing.
+    ///
+    /// Separate from [`Format::data_record_offset`] because a write needs to
+    /// find the whole physical sector, not just the 128 bytes inside it: the
+    /// Altair sectors carry a checksum that a write has to refresh.
+    pub fn data_physical_record(&self, rec: u32) -> Option<u64> {
         let track = rec / self.sectrk as u32;
         let within = (rec % self.sectrk as u32) as u16;
         // Skew moves whole sectors.  On a disk whose sectors hold more than one
@@ -241,7 +409,10 @@ impl Format {
         let rps = self.records_per_sector.max(1);
         let logical_sector = within / rps;
         let sub = within % rps;
-        let physical_sector = self.skew.physical(logical_sector);
+        // Absolute track — the boot area included — because a skew that changes
+        // partway down the disk changes at an absolute track.
+        let abs_track = self.reserved_records / self.sectrk as u32 + track;
+        let physical_sector = self.skew.physical(abs_track, logical_sector);
         let abs = self.reserved_records as u64
             + track as u64 * self.sectrk as u64
             + physical_sector as u64 * rps as u64
@@ -249,7 +420,7 @@ impl Format {
         if abs >= self.total_records as u64 {
             return None;
         }
-        Some(self.framing.record_offset(abs))
+        Some(abs)
     }
 
     /// Records in the data area (everything after the boot tracks).
@@ -286,78 +457,69 @@ pub const FORMATS: &[Format] = &[
         maxdir: 64,
         framing: Framing::Raw,
         skew: Skew::Table(IBM3740_SKEW),
+        exm: None,
         exact_size: Some(256_256),
     },
-    // ---- Altair 88-DCDD 8" — WITHDRAWN, see below --------------------------
-    // The entry that was here is deliberately gone.  Its directory and its
-    // first allocation block read correctly, which is exactly what made it
-    // look right: every text file came back with no corrupt bytes, because a
-    // *jumbled* text file is still all text.  Checking continuity across a
-    // block boundary — using an assembler listing on the disk, whose addresses
-    // must ascend — showed the second block of a multi-block file does not
-    // follow the first.  A format that silently returns wrong file content is
-    // worse than one that is absent, so it stays out until the mapping is
-    // solved.  `Framing::AltairSplit` and `ALTAIR_SKEW` below are kept: the
-    // framing is confirmed (the directory and block 0 depend on it) and the
-    // skew table came out of the disk's own BIOS.  What is unresolved is how
-    // blocks after the first are addressed.
+    // ---- Altair 88-DCDD 8" single density, 337,568 bytes -------------------
+    // 77 tracks x 32 sectors x 137 bytes.  This entry was withdrawn for a long
+    // time, and it is worth recording why and what settled it, because the
+    // failure was a *quiet* one.
     //
-    // The disk states its own parameters, and they are worth writing down
-    // because finding them again is the expensive part.  A CP/M Disk Parameter
-    // Block sits in the BIOS on the boot tracks at offset 0x1ca9 of the
-    // de-framed image — 14 bytes before the sector-translation table, which is
-    // the usual BIOS arrangement (DPB then XLT).  It reads:
+    // The directory and the first half of every track read correctly, so a
+    // file listing looked right and text files came back all-text — a jumbled
+    // text file is still text.  What was wrong was the second half of each data
+    // track.  Two facts had to be measured before that could be seen:
     //
-    //     SPT 32   BSH 4   BLM 15   EXM 0
-    //     DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2
+    //   * the disk's own DPB, in the BIOS on the boot tracks at de-framed
+    //     offset 0x1ca9 (fourteen bytes before the translation table, the usual
+    //     BIOS arrangement of DPB then XLT):
     //
-    // So: 2 KB blocks, 150 of them, 64 directory entries, two reserved tracks,
-    // two blocks reserved for the directory.  Two of those contradict what was
-    // assumed here — DRM 63 means **64** directory entries rather than 128, and
-    // **EXM 0** rather than the 1 that the usual "2 KB blocks on a small disk"
-    // derivation gives.  EXM 0 means one directory entry covers a single 16 KB
-    // extent and uses only eight of its sixteen allocation slots.
+    //         SPT 32   BSH 4   BLM 15   EXM 0
+    //         DSM 149  DRM 63  AL0 0xC0  AL1 0x00  OFF 2
     //
-    // The oracle to test against is DEMO.PRN on DISK01.DSK, an assembler
-    // listing whose addresses must ascend across its block boundary at 2048.
+    //     EXM 0 rather than the 1 the standard derivation gives, which is what
+    //     `exm: Some(0)` below is for and why `cpmtools` cannot write these
+    //     disks correctly at all;
     //
-    // Ruled out so far, so nobody spends the time twice:
+    //   * that the *skew changes at track 6*, exactly where the framing does.
+    //     See `Skew::Split` and `ALTAIR_SECTOR_ORDER`.
     //
-    //   * EXM.  It cannot be the cause for this file.  DEMO.PRN's directory
-    //     entry is EX=0 RC=30 with allocation map [130, 131] — a *single*
-    //     extent — so the start and length arithmetic is identical whether EXM
-    //     is 0 or 1.  The allocation map is being read correctly too: block 130
-    //     really does hold the start of the file and 131 the rest.
-    //   * The directory size.  Setting maxdir to the DRM the disk states (64)
-    //     changes nothing about file content.
-    //   * The skew being absent.  An identity translation scores far worse
-    //     (59% of listing addresses ascending, against 81% for the BIOS table).
-    //   * The skew being inverted.  Using the inverse permutation is also worse
-    //     (70%), so the table is being applied in the right direction.
-    //
-    // Confirmed from the Altair 8800 simulator's `drive.cpp`, which is a fair
-    // source for this because it describes the *hardware*, not a filesystem:
-    // a sector lives at `track * sectors_per_track * 137 + sector * 137`,
-    // sectors are 0-based and stored in physical rotation order, and the guest
-    // is handed all 137 bytes. So where the 128 data bytes sit inside a sector
-    // is the guest BIOS's business, which is why no emulator needs to know it.
-    //
-    // Also tried and rejected: the scan for a permutation found *two* valid
-    // candidates, at 0x1cb7 and 0x1cb8, and the other one is worse (the table
-    // in use scores 81% of listing addresses ascending; the alternative is
-    // lower). Deriving the order empirically from the listing addresses on
-    // track 67 produces a sequence that matches the BIOS table as a multiset
-    // and differs from it only by local transpositions — but several of those
-    // records share an address, so the derivation cannot resolve their order
-    // and is not trustworthy enough to replace the table with.
-    //
-    // What is left is that the translation is nearly right but not exactly:
-    // the file's records come back in an order that is mostly correct and
-    // locally wrong.  The next thing to try is deriving the permutation from
-    // the data itself rather than from the BIOS — the whole of DEMO.PRN lives
-    // in one track (absolute track 67), so ordering that track's 32 sectors by
-    // the listing's ascending addresses yields the true logical-to-physical map
-    // directly, which can then be compared against the table at 0x1cb8.
+    // Earlier attempts stalled because every hypothesis was scored against a
+    // heuristic — "do this assembler listing's addresses ascend?" — which
+    // cannot tell "nearly right" from "right", and the answer sat at 81%, which
+    // is exactly where such a score stops discriminating.  What broke it open
+    // was not a better hypothesis but a better oracle: boot the disk, have its
+    // own CP/M read its own files out over a virtual modem, and find each
+    // 128-byte slice in the image by exact byte match.  That yields logical
+    // record → physical sector directly, as a measurement.  Ruled out along the
+    // way, so nobody spends the time again: EXM (real, but not the cause for
+    // the file being scored), the directory size, an absent skew, an inverted
+    // skew, and the second permutation candidate at de-framed offset 0x1cb7.
+    Format {
+        token: "altair8",
+        label: "Altair 88-DCDD 8\" SSSD, 300K (MITS)",
+        total_records: 2464, // 77 tracks x 32 sectors
+        sectrk: 32,
+        records_per_sector: 1,
+        reserved_records: 64, // 2 boot tracks, per the disk's own OFF
+        blocksize: 2048,
+        maxdir: 64, // the disk's DRM is 63
+        framing: Framing::AltairSplit {
+            seclen: 137,
+            sectrk: 32,
+            split_track: 6,
+            first_off: 3,
+            rest_off: 7,
+        },
+        skew: Skew::Split {
+            split_track: 6,
+            first: ALTAIR_BIOS_XLT,
+            rest: ALTAIR_SKEW,
+        },
+        // The disk's BIOS states EXM 0 where the usual derivation gives 1.
+        exm: Some(0),
+        exact_size: Some(337_568),
+    },
 
     // ---- Altair 88-HDSK hard disk (the Altair-Duino disk set) --------------
     // 256-byte sectors, so two CP/M records ride in each and skew moves them
@@ -373,6 +535,7 @@ pub const FORMATS: &[Format] = &[
         maxdir: 192,
         framing: Framing::Raw,
         skew: Skew::Table(ALTAIR_HDSK_SKEW),
+        exm: None,
         exact_size: Some(4_988_928),
     },
 ];
@@ -448,10 +611,134 @@ mod tests {
 
     #[test]
     fn test_altair_skew_is_a_permutation() {
-        assert_eq!(ALTAIR_SKEW.len(), 32);
-        let mut seen: Vec<u16> = ALTAIR_SKEW.to_vec();
-        seen.sort_unstable();
-        assert_eq!(seen, (0..32).collect::<Vec<u16>>());
+        for t in [ALTAIR_SKEW, ALTAIR_BIOS_XLT, ALTAIR_SECTOR_ORDER] {
+            assert_eq!(t.len(), 32);
+            let mut seen: Vec<u16> = t.to_vec();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..32).collect::<Vec<u16>>());
+        }
+    }
+
+    /// The data-track table is not an independent guess: it is what you get by
+    /// composing the two things that were separately measured — the BIOS's
+    /// logical-record-to-sector-ID table, and where each ID physically sits.
+    /// Pinning the composition means a future edit to either half that forgets
+    /// the other one fails here instead of scrambling files.
+    #[test]
+    fn test_altair_data_skew_is_the_composition_of_its_two_causes() {
+        for l in 0..32usize {
+            assert_eq!(
+                ALTAIR_SKEW[l],
+                ALTAIR_SECTOR_ORDER[ALTAIR_BIOS_XLT[l] as usize],
+                "logical {l}: composition disagrees with the table"
+            );
+        }
+    }
+
+    /// The odd sectors of a data track are half a revolution from where their
+    /// number says, and the even ones are not.  That single fact is the whole
+    /// difference between the two Altair tables, so state it directly rather
+    /// than leaving a reader to diff two 32-entry lists.
+    #[test]
+    fn test_altair_sector_order_shifts_only_the_odd_sectors() {
+        for id in 0..32u16 {
+            let want = if id % 2 == 0 { id } else { (id + 16) % 32 };
+            assert_eq!(ALTAIR_SECTOR_ORDER[id as usize], want, "sector id {id}");
+        }
+    }
+
+    /// The two Altair tables agree on the first sixteen logical sectors — which
+    /// is exactly why this was invisible for so long.  A 64-entry directory is
+    /// sixteen records, so it reads correctly under either table and only file
+    /// content past the first half of a track comes back wrong.  Pinned so the
+    /// next person does not conclude from a good directory that the mapping is
+    /// right.
+    #[test]
+    fn test_the_two_altair_tables_agree_over_the_whole_directory() {
+        assert_eq!(ALTAIR_SKEW[..16], ALTAIR_BIOS_XLT[..16]);
+        assert_ne!(ALTAIR_SKEW[16..], ALTAIR_BIOS_XLT[16..]);
+        let alt = by_token("altair8").unwrap();
+        assert_eq!(alt.dir_records(), 16, "the directory is one half-track");
+    }
+
+    /// `Framing::sector_check` places the Altair check byte from constants that
+    /// only hold for the data offsets it was measured on.  Anything else in
+    /// `FORMATS` claiming `AltairSplit` would get a wrong checksum on every
+    /// write and be rejected by its own BIOS, so it has to be caught here.
+    #[test]
+    fn test_the_only_split_framing_is_the_one_the_checksums_were_measured_on() {
+        for f in FORMATS {
+            let Framing::AltairSplit { seclen, first_off, rest_off, .. } = f.framing else {
+                continue;
+            };
+            assert_eq!(
+                (seclen, first_off, rest_off),
+                (137, 3, 7),
+                "{}: sector_check's byte positions were measured on 137/3/7 only",
+                f.token
+            );
+        }
+    }
+
+    /// Both Altair check bytes must land inside the sector and outside the 128
+    /// data bytes — placing one on top of the data would corrupt the record it
+    /// is meant to protect.
+    #[test]
+    fn test_altair_check_byte_is_inside_the_sector_and_clear_of_the_data() {
+        let alt = by_token("altair8").unwrap();
+        for (rec, data_off) in [(0u64, 3u64), (6 * 32, 7)] {
+            let (at, also) = alt.framing.sector_check(rec).expect("the Altair has a check byte");
+            let base = rec * 137;
+            let data = base + data_off;
+            for off in std::iter::once(at).chain(also) {
+                assert!(off >= base && off < base + 137, "byte {off} is outside its sector");
+                assert!(
+                    off < data || off >= data + 128,
+                    "byte {off} sits on the record's own data"
+                );
+            }
+        }
+    }
+
+    /// The Altair skew changes at the same track as its framing does, because
+    /// it is the same cause: the system area is written in boot format and the
+    /// data area is not.  Two constants that must move together.
+    #[test]
+    fn test_altair_skew_and_framing_split_at_the_same_track() {
+        let alt = by_token("altair8").unwrap();
+        let Framing::AltairSplit { split_track: fs, .. } = alt.framing else {
+            panic!("altair8 should be split-framed");
+        };
+        let Skew::Split { split_track: ss, .. } = alt.skew else {
+            panic!("altair8 should be split-skewed");
+        };
+        assert_eq!(fs, ss, "framing and skew must change on the same track");
+    }
+
+    /// The measurement itself, pinned: a handful of the 447 (file record →
+    /// position) pairs that a booted Altair produced when it read its own disk
+    /// out over the virtual modem.  Two of them straddle the track-6 boundary,
+    /// which is the pair that would catch a regression to a single table.
+    ///
+    /// Offsets are stated as (absolute track, position in track) so they can be
+    /// checked against a hex dump of a real `DISK01.DSK` by hand.
+    #[test]
+    fn test_altair_offsets_match_the_booted_guest_measurement() {
+        let alt = by_token("altair8").unwrap();
+        let at = |track: u64, pos: u64| Some(alt.framing.record_offset(track * 32 + pos));
+        // L80.COM, blocks 2-5: boot-format tracks, the plain BIOS table.
+        // Logical record 32 is track 3 sector 0; record 48 is track 3 sector 16,
+        // which the BIOS table sends to position 1.
+        assert_eq!(alt.data_record_offset(32), at(3, 0));
+        assert_eq!(alt.data_record_offset(48), at(3, 1));
+        assert_eq!(alt.data_record_offset(49), at(3, 9));
+        // DEMO.PRN, block 130: data-format track 67, the shifted table.  The
+        // same logical sector 16 now lands on position 17, not 1.
+        assert_eq!(alt.data_record_offset(2080), at(67, 0));
+        assert_eq!(alt.data_record_offset(2096), at(67, 17));
+        assert_eq!(alt.data_record_offset(2097), at(67, 25));
+        // PIP.COM, block 59: logical record 944 is track 31 sector 16.
+        assert_eq!(alt.data_record_offset(944), at(31, 17));
     }
 
     #[test]
@@ -467,7 +754,20 @@ mod tests {
     #[test]
     fn test_skew_out_of_range_is_identity_not_panic() {
         let s = Skew::Table(ALTAIR_SKEW);
-        assert_eq!(s.physical(99), 99);
+        assert_eq!(s.physical(0, 99), 99);
+        let split = Skew::Split { split_track: 6, first: ALTAIR_BIOS_XLT, rest: ALTAIR_SKEW };
+        assert_eq!(split.physical(0, 99), 99);
+        assert_eq!(split.physical(70, 99), 99);
+    }
+
+    /// A split translation must switch tables *at* its boundary track, not one
+    /// either side of it — an off-by-one here scrambles exactly one track.
+    #[test]
+    fn test_split_skew_switches_at_its_boundary_track() {
+        let s = Skew::Split { split_track: 6, first: ALTAIR_BIOS_XLT, rest: ALTAIR_SKEW };
+        assert_eq!(s.physical(5, 16), ALTAIR_BIOS_XLT[16], "track 5 is boot format");
+        assert_eq!(s.physical(6, 16), ALTAIR_SKEW[16], "track 6 is data format");
+        assert_ne!(s.physical(5, 16), s.physical(6, 16));
     }
 
     /// Every format's declared geometry must agree with the size of a real
@@ -550,8 +850,8 @@ mod tests {
     #[test]
     fn test_skew_tables_match_their_sector_count() {
         for f in FORMATS {
-            if let Skew::Table(t) = f.skew {
-                let sectors = f.sectrk / f.records_per_sector.max(1);
+            let sectors = f.sectrk / f.records_per_sector.max(1);
+            for t in f.skew.tables() {
                 assert_eq!(
                     t.len(),
                     sectors as usize,
@@ -559,6 +859,14 @@ mod tests {
                     f.token,
                     sectors,
                     t.len()
+                );
+                let mut seen: Vec<u16> = t.to_vec();
+                seen.sort_unstable();
+                assert_eq!(
+                    seen,
+                    (0..sectors).collect::<Vec<u16>>(),
+                    "{}: a skew table that is not a permutation loses sectors",
+                    f.token
                 );
             }
         }

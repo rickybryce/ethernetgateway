@@ -793,18 +793,20 @@ altairhd_cobol.dsk</code></pre>
                     <thead><tr><th>Token</th><th>Format</th><th>Size</th></tr></thead>
                     <tbody>
                         <tr><td><code>ibm3740</code></td><td>IBM 3740 8&quot; SSSD &mdash; the closest thing CP/M had to a universal disk. Tarbell, Cromemco SD, IMSAI / z80pack.</td><td>256,256</td></tr>
+                        <tr><td><code>altair8</code></td><td>Altair 88-DCDD 8&Prime; SSSD floppy (MITS). 137-byte sectors, and a layout that changes partway down the disk &mdash; see the <a href="diskreference.html">Disk Format Reference</a>.</td><td>337,568</td></tr>
                         <tr><td><code>altairhd</code></td><td>Altair 88-HDSK hard disk (the Altair-Duino set). 256-byte sectors, two CP/M records in each.</td><td>4,988,928</td></tr>
                     </tbody>
                 </table>
                 <p class="dim-text">
-                    Every entry was measured from a real image and verified against
-                    <code>cpmtools</code> byte for byte, rather than transcribed from a table.
-                    The Altair 88-DCDD 8&Prime; floppy (337,568 bytes) is <em>not</em> yet
-                    supported: its directory reads correctly but file content past the first
-                    allocation block does not, and shipping a format that returns wrong bytes
-                    quietly is worse than leaving it out.
-                    <code>CPM/images/readme.txt</code> carries the same list, generated from the
-                    same source, along with what to rename an Altair-Duino or IMSAI disk to.
+                    Every entry was measured from a real image rather than transcribed from a
+                    table. <code>altair8</code> was withdrawn for months because its directory read
+                    correctly while file content past the first half of a track did not; it is back
+                    because a booted Altair was made to read its own disk out over the virtual
+                    modem, which gave an exact answer where every earlier check could only score a
+                    guess. That measurement, the two skew tables and the sector-checksum formulas
+                    are written up in the <a href="diskreference.html">Disk Format Reference</a>.
+                    <code>CPM/images/readme.txt</code> carries the same format list, generated from
+                    the same source, along with what to rename an Altair-Duino or IMSAI disk to.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Not every <code>.dsk</code> is a CP/M disk</h3>
@@ -1444,6 +1446,10 @@ altairhd_cobol.dsk</code></pre>
                     <div class="compat-card">
                         <h3><a href="punterreference.html">Punter</a></h3>
                         <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="diskreference.html">Disk Formats</a></h3>
+                        <p>Measured Altair / IBM 3740 layouts, skew, checksums, EXM.</p>
                     </div>
                     <div class="compat-card">
                         <h3><a href="atcommandreference.html">AT Commands</a></h3>
