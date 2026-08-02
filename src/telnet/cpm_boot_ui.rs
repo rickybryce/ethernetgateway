@@ -31,14 +31,6 @@ use crate::cpm::boot_machine::{BootMachine, ModemAttach};
 use crate::telnet::cpm_emu::{cpm_peer_register, idle_nap, poll_once};
 use crate::telnet::cpm_modem::CpmModem;
 use iz80::Cpu;
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
-
-/// Images currently booted, by path, so one is never run twice at once.
-fn booted() -> &'static Mutex<HashSet<std::path::PathBuf>> {
-    static B: OnceLock<Mutex<HashSet<std::path::PathBuf>>> = OnceLock::new();
-    B.get_or_init(|| Mutex::new(HashSet::new()))
-}
 
 /// Claims an image for one session and releases it however the session ends.
 ///
@@ -49,7 +41,7 @@ struct BootClaim(std::path::PathBuf);
 
 impl Drop for BootClaim {
     fn drop(&mut self) {
-        booted().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        crate::cpm::image::registry::release_booted_image(&self.0);
     }
 }
 
@@ -65,13 +57,10 @@ impl BootClaim {
     /// discarding the other's work. That is precisely the "one session per
     /// image" rule this type exists to keep.
     fn take(path: &std::path::Path) -> Option<BootClaim> {
-        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let mut held = booted().lock().unwrap_or_else(|e| e.into_inner());
-        if held.contains(&key) {
+        if !crate::cpm::image::registry::claim_booted_image(path) {
             return None;
         }
-        held.insert(key.clone());
-        Some(BootClaim(key))
+        Some(BootClaim(path.to_path_buf()))
     }
 }
 
@@ -155,14 +144,15 @@ struct BootPlanStep {
 ///   image appearing twice, which would be two views of one file with separate
 ///   write-backs and the last one saved winning.
 ///
-/// Returns the plan and the lines to show for whatever was left out.
+/// Returns the plan and the lines to show for whatever was left out, or `Err`
+/// with a reason the boot must not go ahead at all.
 fn plan_boot_disks(
     mounts: &[Option<crate::cpm::image::registry::Mount>],
     usage: &[crate::cpm::image::registry::Usage],
     boot_image: &std::path::Path,
     writable: bool,
     units: usize,
-) -> (Vec<BootPlanStep>, Vec<String>) {
+) -> Result<(Vec<BootPlanStep>, Vec<String>), String> {
     let mut plan = Vec::new();
     let mut notes = Vec::new();
     for (drive0, slot) in mounts.iter().enumerate() {
@@ -180,6 +170,20 @@ fn plan_boot_disks(
         // unlinked inode: every later read shows pre-boot content and every
         // write disappears into a deleted file, silently.
         if same_file(&mount.path, boot_image) {
+            // The boot disk's mount *must* go out of service — the session
+            // rewrites that file — so a drive somebody is working in cannot be
+            // taken quietly the way another disk's can simply be left out.
+            // There is no version of this that is safe, so the boot is refused
+            // instead.  Every other drive is skipped by the check below; doing
+            // that here would take the drive anyway, which is the asymmetry
+            // that made this a defect.
+            if usage.get(drive0).and_then(|u| u.describe()).is_some() {
+                return Err(format!(
+                    "{} is in use on drive {letter}: by another session, and booting it \
+                     would take that drive away mid-file",
+                    mount.filename
+                ));
+            }
             plan.push(BootPlanStep {
                 unit: drive0 as u8,
                 path: mount.path.clone(),
@@ -211,7 +215,7 @@ fn plan_boot_disks(
             lend_only: false,
         });
     }
-    (plan, notes)
+    Ok((plan, notes))
 }
 
 /// Warn about empty units between the occupied ones.
@@ -288,10 +292,12 @@ impl Drop for BootDrivesBusy {
 /// socket that can drop, and an early return through any of them used to leave
 /// an operator's configured drives silently empty until they restarted.
 ///
-/// So it is RAII, for the same reason [`BootClaim`] is. The remount is the
-/// synchronous `mount_image` because `Drop` cannot await; it opens one file and
-/// reads a directory, at session teardown, which is a fair price for a
-/// guarantee that holds when the connection has already gone.
+/// So it is RAII, for the same reason [`BootClaim`] is. The remount is
+/// synchronous because `Drop` cannot await: it opens a file and reads a
+/// directory per borrowed drive, so up to sixteen of each, once, at session
+/// teardown. That is a real cost on a runtime worker and it is accepted
+/// deliberately — the alternative is a guarantee that stops holding exactly
+/// when it is needed, which is after the connection has already gone.
 struct RemountOnDrop {
     base: std::path::PathBuf,
     /// `(drive, bare filename)` for each mount taken.
@@ -387,7 +393,7 @@ impl TelnetSession {
         writable: bool,
         remounts: &mut RemountOnDrop,
         boot_image: &std::path::Path,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, String> {
         use crate::cpm::image::registry;
         let (plan, mut notes) = plan_boot_disks(
             &registry::all(),
@@ -395,7 +401,7 @@ impl TelnetSession {
             boot_image,
             writable,
             disks.len(),
-        );
+        )?;
         for step in plan {
             let letter = (b'A' + step.unit) as char;
             // The booted disk's own mount: take it out of service and stop.
@@ -416,7 +422,14 @@ impl TelnetSession {
             // a process-wide table, and a planning function that took one would
             // be untestable and would leak claims on every dry run.
             let Some(claim) = BootClaim::take(&step.path) else {
-                notes.push(format!("{letter}: {name} is booted elsewhere."));
+                // Somebody else is running this file — most often *this*
+                // session, when one image is mounted on two drives.  Either
+                // way it is about to be rewritten under this mount, so the
+                // mount goes out of service even though no disk goes in.
+                if let Some(m) = registry::lend_for_boot(step.unit) {
+                    remounts.taken.push((step.unit, m.filename.clone()));
+                }
+                notes.push(format!("{letter}: {name} is booted elsewhere; held."));
                 continue;
             };
             let bytes = match std::fs::read(&step.path) {
@@ -465,7 +478,7 @@ impl TelnetSession {
             ));
         }
         notes.extend(gap_warning(disks));
-        notes
+        Ok(notes)
     }
 
     /// Boot an image and run it until the guest stops or the user leaves.
@@ -530,8 +543,16 @@ impl TelnetSession {
         // about and refuses the rest, which for stock Altair CP/M means A: to
         // D:.  We present the hardware and let the disk decide, exactly as with
         // everything else on this path.
-        let notes =
-            self.cpm_boot_attach_mounts(&mut machine, &mut disks, writable, &mut remounts, image);
+        let notes = match self
+            .cpm_boot_attach_mounts(&mut machine, &mut disks, writable, &mut remounts, image)
+        {
+            Ok(n) => n,
+            Err(why) => {
+                self.send_line(&format!("  {}", self.red(&why))).await?;
+                self.send_line("").await?;
+                return Ok(());
+            }
+        };
         // Hold every drive we took for as long as the guest runs.  Without
         // this a mount screen elsewhere would happily swap a disk out from
         // under a running Altair, and the change would be invisible to it —
@@ -925,7 +946,7 @@ mod tests {
     #[test]
     fn test_mounts_ride_the_unit_their_letter_names() {
         let m = mounts(&[(0, "boot.dsk", false), (1, "b.dsk", false), (5, "f.dsk", false)]);
-        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert_eq!(
             plan.iter()
                 .filter(|s| !s.lend_only)
@@ -948,14 +969,14 @@ mod tests {
         // unit 0 — but the mount must still be taken out of service, because
         // the session is going to rewrite that very file.
         let m = mounts(&[(0, "boot.dsk", false)]);
-        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert_eq!(plan.len(), 1);
         assert!(plan[0].lend_only, "the boot disk's own mount is lent, not inserted");
 
         // A: holds something else — it is shadowed, and the operator is told.
         // It is not touched: it stays mounted and usable elsewhere.
         let m = mounts(&[(0, "other.dsk", false)]);
-        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert!(plan.is_empty(), "unit 0 is the boot disk's, always");
         assert!(notes.iter().any(|n| n.contains("behind the boot disk")), "{notes:?}");
     }
@@ -967,7 +988,7 @@ mod tests {
     #[test]
     fn test_the_boot_image_is_lent_but_never_inserted_twice() {
         let m = mounts(&[(3, "boot.dsk", false)]);
-        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert_eq!(plan.len(), 1);
         assert!(plan[0].lend_only, "taken out of service, not given a unit");
         assert_eq!(plan[0].unit, 3, "lent from the drive it is actually on");
@@ -981,7 +1002,7 @@ mod tests {
     fn test_read_only_is_the_stricter_of_mount_and_session() {
         let m = mounts(&[(1, "rw.dsk", false), (2, "ro.dsk", true)]);
         let w = |writable| {
-            plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), writable, 16)
+            plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), writable, 16).unwrap()
                 .0
                 .iter()
                 .map(|s| (s.unit, s.writable))
@@ -995,6 +1016,24 @@ mod tests {
         );
     }
 
+    /// The boot disk's own mount has to go out of service — the session
+    /// rewrites that file — so unlike every other drive it cannot simply be
+    /// left out when somebody is working in it.  The boot is refused instead.
+    #[test]
+    fn test_booting_a_disk_somebody_is_working_in_is_refused() {
+        let m = mounts(&[(1, "boot.dsk", false)]);
+        let mut u = idle();
+        u[1] = Usage { sitting: 1, writing: 0 };
+        let err = plan_boot_disks(&m, &u, Path::new("/images/boot.dsk"), true, 16)
+            .expect_err("must refuse rather than take the drive anyway");
+        assert!(err.contains("boot.dsk") && err.contains("B:"), "{err}");
+        // Idle, it is taken as normal.
+        assert!(plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16)
+            .unwrap()
+            .0[0]
+            .lend_only);
+    }
+
     /// A drive another session is working in must not be handed to a guest that
     /// owns whole platters.
     #[test]
@@ -1002,7 +1041,7 @@ mod tests {
         let m = mounts(&[(1, "busy.dsk", false), (2, "free.dsk", false)]);
         let mut u = idle();
         u[1] = Usage { sitting: 1, writing: 0 };
-        let (plan, notes) = plan_boot_disks(&m, &u, Path::new("/images/boot.dsk"), true, 16);
+        let (plan, notes) = plan_boot_disks(&m, &u, Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert_eq!(plan.iter().map(|s| s.unit).collect::<Vec<_>>(), vec![2]);
         assert!(notes.iter().any(|n| n.contains("in use elsewhere")), "{notes:?}");
     }
@@ -1012,7 +1051,7 @@ mod tests {
     #[test]
     fn test_the_plan_respects_the_unit_count() {
         let m = mounts(&[(1, "b.dsk", false), (9, "j.dsk", false)]);
-        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 4);
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 4).unwrap();
         assert_eq!(plan.iter().map(|s| s.unit).collect::<Vec<_>>(), vec![1]);
     }
 
@@ -1046,7 +1085,7 @@ mod tests {
             format: "altair8",
             fs: mount_at("boot.dsk", false).fs,
         });
-        let (plan, notes) = plan_boot_disks(&m, &idle(), &real, true, 16);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), &real, true, 16).unwrap();
         assert_eq!(plan.len(), 1);
         assert!(plan[0].lend_only, "the boot disk must not be inserted twice");
         assert!(notes.iter().any(|n| n.contains("boot disk")), "{notes:?}");
@@ -1063,7 +1102,7 @@ mod tests {
             format: "altair8",
             fs: mount_at("other.dsk", false).fs,
         });
-        let other_plan = plan_boot_disks(&m2, &idle(), &real, true, 16).0;
+        let other_plan = plan_boot_disks(&m2, &idle(), &real, true, 16).unwrap().0;
         assert_eq!(other_plan.len(), 1);
         assert!(!other_plan[0].lend_only, "a different file really is inserted");
         let _ = std::fs::remove_dir_all(&dir);

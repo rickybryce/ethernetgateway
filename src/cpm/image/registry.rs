@@ -31,7 +31,7 @@
 
 use super::fs::ImageFs;
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::cpm::fs::NUM_DRIVES;
@@ -137,7 +137,6 @@ pub fn unmount(drive0: u8) -> Option<Mount> {
 
 /// Drop every mount.  Used when the emulator is disabled.
 pub fn clear_all() {
-    lock!(borrowed()).clear();
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     for slot in t.iter_mut() {
         *slot = None;
@@ -231,6 +230,11 @@ pub fn check_can_change(drive0: u8) -> Result<(), String> {
 pub fn tests_reset() {
     clear_all();
     lock!(sessions()).clear();
+    // Not part of `clear_all`: a loan belongs to a live booted session, which
+    // will end it itself.  Disabling the emulator mid-boot must not make a lent
+    // drive look folder-backed again to a session still inside it.
+    lock!(borrowed()).clear();
+    lock!(booted_images()).clear();
 }
 
 /// The registry is process-global, so tests that touch it must not run beside
@@ -244,6 +248,42 @@ pub fn tests_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 // ---- session bookkeeping ------------------------------------------------
+
+/// Images a booted session is running, by canonical path.
+///
+/// This lives here rather than in the boot module because [`mount_image`] has
+/// to be able to ask.  A booted image that is *not* mounted anywhere has no
+/// loan and no busy mark, so nothing stopped a second session mounting the same
+/// file on a drive and writing to it — and the boot's write-back then replaced
+/// the whole file, discarding that work and leaving the new mount's cached
+/// directory describing bytes that no longer exist.  The rule was "one session
+/// per image", enforced boot-against-boot only.
+fn booted_images() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static B: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Claim an image for a booted session.  `false` if somebody already has it.
+///
+/// The key is canonicalised: boot targets and mount paths are built from one
+/// config value by two routes and only one of them canonicalises, so comparing
+/// them raw would let the same file be claimed twice under two names.
+pub fn claim_booted_image(path: &Path) -> bool {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    lock!(booted_images()).insert(key)
+}
+
+/// Release a booted image.
+pub fn release_booted_image(path: &Path) {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    lock!(booted_images()).remove(&key);
+}
+
+/// Is this image being run by a booted session right now?
+pub fn is_image_booted(path: &Path) -> bool {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    lock!(booted_images()).contains(&key)
+}
 
 /// Drives lent to a booted session, as `drive -> filename`.
 ///

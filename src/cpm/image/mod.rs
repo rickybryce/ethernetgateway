@@ -158,6 +158,16 @@ pub fn create_blank_image(
 /// A drive somebody is using is refused; see [`registry::check_can_change`].
 pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
     registry::check_can_change(drive0)?;
+    // An image somebody is running cannot also be mounted.  A booted session
+    // holds the whole disk in memory and writes it back over the file when it
+    // leaves, so a mount made meanwhile would have its work silently replaced —
+    // and would afterwards be caching a directory for bytes that are gone.
+    // The "one session per image" rule used to be enforced only between boots.
+    if registry::is_image_booted(&images_dir(cpm_base).join(filename)) {
+        return Err(format!(
+            "{filename} is being run by a booted session — it cannot be mounted at the same time"
+        ));
+    }
     mount_image_unchecked(cpm_base, drive0, filename)
 }
 
@@ -962,6 +972,67 @@ mod tests {
         assert_eq!(current_mounts_value(), "B=altair8_borrowed.dsk");
 
         registry::session_end(squatter);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An image a booted session is running must not also be mountable.
+    ///
+    /// A booted guest holds the whole disk in memory and writes it back over
+    /// the file when it leaves, so a mount made meanwhile has its work silently
+    /// replaced — and is afterwards caching a directory for bytes that are
+    /// gone.  This case has no loan and no busy mark to catch it: the image
+    /// need not be mounted anywhere for a session to boot it.
+    #[test]
+    fn test_a_booted_image_cannot_be_mounted() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_booted_not_mountable");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let path = images.join("altair8_running.dsk");
+        std::fs::write(&path, format::by_token("altair8").unwrap().blank_image().unwrap()).unwrap();
+
+        assert!(registry::claim_booted_image(&path), "a free image claims");
+        assert!(!registry::claim_booted_image(&path), "and only once");
+        let err = mount_image(&base, 1, "altair8_running.dsk").unwrap_err();
+        assert!(err.contains("booted session"), "{err}");
+
+        registry::release_booted_image(&path);
+        mount_image(&base, 1, "altair8_running.dsk").expect("mounts once the boot ends");
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Disabling the emulator must not steal a loan from a running boot.
+    ///
+    /// `clear_all` drops the mount table, and it used to drop the loans with
+    /// it — so for a session still inside a booted disk the lent drive silently
+    /// became folder-backed again, which is how a file ends up half in the
+    /// image and half in `CPM/B/`.  Loans belong to the session holding them.
+    #[test]
+    fn test_clearing_the_mounts_does_not_steal_a_loan() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_clear_keeps_loans");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(
+            images.join("altair8_lent.dsk"),
+            format::by_token("altair8").unwrap().blank_image().unwrap(),
+        )
+        .unwrap();
+        mount_image(&base, 1, "altair8_lent.dsk").unwrap();
+        registry::lend_for_boot(1).expect("lent to a booted session");
+        assert!(registry::is_lent(1));
+
+        registry::clear_all();
+        assert!(registry::is_lent(1), "the loan outlives the mount table");
+
+        registry::end_boot_loan(1);
+        assert!(!registry::is_lent(1));
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }

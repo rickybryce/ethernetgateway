@@ -18,7 +18,14 @@ impl TelnetSession {
     /// The `CPM/` container this gateway is configured for.
     pub(in crate::telnet) fn cpmmount_base(&self) -> std::path::PathBuf {
         let cfg = config::get_config();
-        crate::cpm::layout::cpm_dir(&cfg.transfer_dir)
+        let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
+        // Canonicalised to match what the emulator's own setup produces.  The
+        // two spellings are otherwise interchangeable, except that
+        // `CpmFs::image_file_key` uses a mount's path verbatim as the key for
+        // the cross-session per-file write claim — so a drive mounted through
+        // one route and a drive mounted through the other would not collide
+        // there, and two sessions could interleave records into one file.
+        std::fs::canonicalize(&base).unwrap_or(base)
     }
 
     /// Entry point: mount or unmount?
