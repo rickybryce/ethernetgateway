@@ -371,6 +371,25 @@ impl CpmFs {
         self.base.join(((b'A' + drive0) as char).to_string())
     }
 
+    /// The folder behind a drive, or `None` when there is not one to fall back
+    /// to right now.
+    ///
+    /// Every "if a disk is mounted use it, otherwise use the folder" decision
+    /// in this file goes through here, and it is one function on purpose: the
+    /// rule has an exception — a drive lent to a booted session is neither
+    /// image-backed nor folder-backed, it is a drive whose disk has been taken
+    /// out — and an exception written in five places is an exception that holds
+    /// in four.  It already did: guarding only the path that resolves a
+    /// filename left `DIR`, free space, and the file matching that `ERA` runs
+    /// on still listing, measuring and *deleting* the folder behind a lent
+    /// drive, which is not the disk the operator was looking at.
+    fn folder_for(&self, drive0: u8) -> Option<PathBuf> {
+        if self.lent_away(drive0) {
+            return None;
+        }
+        Some(self.drive_dir(drive0))
+    }
+
     /// Resolve an FCB to a concrete, jailed host path.  Returns `None` if
     /// the drive is out of range or the FCB does not name a legal, concrete
     /// (non-wildcard) 8.3 file — which, together with the fixed drive
@@ -384,19 +403,12 @@ impl CpmFs {
     /// path.  Re-validates as a concrete name (rejecting wildcards and
     /// separators) so the join cannot traverse out of the drive directory.
     fn resolve_name(&self, drive0: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<PathBuf> {
-        // A drive lent to a booted session is not folder-backed — it is a drive
-        // whose disk has been taken out.  Falling through to the folder here is
-        // how half a file ends up in the image and half in `CPM/B/`; see
-        // `lent_away`.
-        if self.lent_away(drive0) {
-            return None;
-        }
         let filename = format_8_3(name, ext);
         // Primary defense: a concrete 8.3 name carries no separators or
         // "..", so joining it onto a fixed single-letter drive directory
         // cannot traverse out of the container.
         split_8_3(&filename)?;
-        let dir = self.drive_dir(drive0);
+        let dir = self.folder_for(drive0)?;
         // CP/M names are uppercase 8.3; host files may be any case.  Prefer an
         // existing file that matches case-insensitively (so a lowercase
         // `foo.txt` placed by the operator is openable, not just listed) and
@@ -796,7 +808,9 @@ impl CpmFs {
             Some(d) => d,
             None => return Vec::new(),
         };
-        let dir = self.drive_dir(drive0);
+        let Some(dir) = self.folder_for(drive0) else {
+            return Vec::new();
+        };
         let mut names = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -850,7 +864,11 @@ impl CpmFs {
                 .saturating_sub(reserved_blocks)
                 .saturating_sub(free_units);
         }
-        let dir = self.drive_dir(self.drive);
+        // A lent drive reports nothing in use rather than the folder's contents,
+        // which belong to a different disk than the one the operator sees.
+        let Some(dir) = self.folder_for(self.drive) else {
+            return 0;
+        };
         let mut blocks: u64 = 0;
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -877,8 +895,11 @@ impl CpmFs {
         let Some(drive0) = self.drive_index_for(fcb.drive) else {
             return Vec::new();
         };
+        let Some(dir) = self.folder_for(drive0) else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(self.drive_dir(drive0)) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     continue;
@@ -961,7 +982,9 @@ impl CpmFs {
             Some(d) => d,
             None => return out,
         };
-        let dir = self.drive_dir(drive0);
+        let Some(dir) = self.folder_for(drive0) else {
+            return out;
+        };
         /// One matching host file, ready to be turned into directory entries.
         /// `host_name` is kept only to sort the listing by the on-disk name.
         struct Match {
@@ -1960,6 +1983,7 @@ mod tests {
         let base = std::env::temp_dir().join("egw_lent_not_folder");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("B")).unwrap();
+        std::fs::write(base.join("B").join("BIG.TXT"), b"folder file").unwrap();
         let fs = CpmFs::new(base.clone());
 
         let fcb = fcb_named(2, "BIG", "TXT");
@@ -1973,9 +1997,24 @@ mod tests {
             fs.resolve(&fcb).is_none(),
             "a lent drive must report a failure, not write into its folder"
         );
+        // ...and every other route to that folder must be shut too.  The
+        // listing is what misleads, and `matching_files` is what `ERA` deletes
+        // through: an operator looking at a lent B: must not be shown, or be
+        // able to erase, the files in `CPM/B/`.
+        let star = fcb_named(2, "????????", "???");
+        assert!(fs.list_matching(&star).is_empty(), "DIR listed the folder behind a lent drive");
+        assert!(
+            fs.build_dir_entries(&star).is_empty(),
+            "the BDOS search returned the folder behind a lent drive"
+        );
+        assert!(
+            fs.matching_files(&star).is_empty(),
+            "ERA would have deleted the folder behind a lent drive"
+        );
 
         registry::end_boot_loan(1);
         assert!(fs.resolve(&fcb).is_some(), "and it comes back when the boot ends");
+        assert_eq!(fs.list_matching(&star), vec!["BIG.TXT".to_string()], "the folder is back");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }
