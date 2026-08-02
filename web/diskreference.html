@@ -571,6 +571,7 @@
             <a href="#blank">Blank Disks</a>
             <a href="#controller">The Controller</a>
             <a href="#others">Other Formats</a>
+            <a href="#sharing">Who Owns a Disk</a>
             <a href="#open">Still Open</a>
         </nav>
 
@@ -1224,6 +1225,98 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
 
             <hr class="divider">
 
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SHARING                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="sharing">
+                <div class="section-title">Who Owns a Disk While It Is Open</div>
+                <p class="intro">An image is one file, and more than one thing in this gateway can want it at once. Getting that wrong does not look like an error &mdash; it looks like files disappearing.</p>
+
+                <p>
+                    A mounted image is not a copy, it is a <strong>live object</strong>:
+                    the gateway keeps it open with its CP/M directory and
+                    allocation bitmap cached in memory, and that object outlives
+                    the session that caused it. A booted disk is the opposite
+                    shape &mdash; the guest holds all 330&nbsp;KB in memory and
+                    writes the whole thing back over the file when it leaves.
+                    Put those two on one file and the second one to finish
+                    silently erases the first's work, and the loser is then
+                    caching a directory for bytes that no longer exist: its next
+                    write allocates blocks the other side already used and lays
+                    a directory entry over live data.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The rule is one session per image, and it has to
+                        hold in every direction.</strong> Boot against boot,
+                        boot against mount, mount against mount. It was
+                        originally enforced only between two boots, and each
+                        missing direction was a separate way to lose a disk.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What the gateway does</h3>
+                <table class="data-table">
+                    <thead><tr><th>Situation</th><th>What happens</th></tr></thead>
+                    <tbody>
+                        <tr><td>Two sessions boot the same image</td><td>The second is refused. The claim is keyed on the <em>canonical</em> path, because a boot target and a mount path are built from one setting by two routes and only one of them resolves the name &mdash; comparing them as text let one file be claimed twice.</td></tr>
+                        <tr><td>Mounting an image somebody is running</td><td>Refused by name.</td></tr>
+                        <tr><td>Mounting one image on two drives</td><td>Refused, naming the drive that already has it.</td></tr>
+                        <tr><td>Booting while your disks are mounted</td><td>Each mount is <strong>lent</strong> to the boot &mdash; taken out of service, not forgotten &mdash; and restored, opened fresh, when the session ends. However the session ends: an error, a dropped connection, the idle timeout.</td></tr>
+                        <tr><td>Booting a disk somebody is working in</td><td>Refused. The boot disk's own mount <em>must</em> go out of service, so unlike another drive it cannot simply be left out.</td></tr>
+                        <tr><td>A drive that is lent</td><td>Reads as held in all three interfaces, keeps its place in <code>cpm_mounts</code>, and cannot be changed underneath the guest.</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>A lent drive is not an empty drive.</strong> It
+                        is a drive whose disk has been taken out, and it has to
+                        behave that way everywhere &mdash; not just when a
+                        filename is looked up. Guarding only that one path left
+                        <code>DIR</code> listing the host folder behind the
+                        drive, free space measuring it, and the file matching
+                        that <code>ERA</code> runs on <em>deleting</em> it. An
+                        operator would have been shown a folder's files
+                        believing they were the image's, and
+                        <code>ERA B:*.*</code> would have erased them.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Why writes are staged</h3>
+                <p>
+                    Every write of a whole image &mdash; a booted session's
+                    save, and creating a blank &mdash; goes to a temporary
+                    beside the file and is then renamed over it. A rename within
+                    a directory is atomic, so a reader sees the old image or the
+                    new one and never a truncated file with no directory. That
+                    matters more than it sounds: a blank hard disk is
+                    4.99&nbsp;MB, and a write that stopped partway used to leave
+                    something that mounted, looked plausible, and could not be
+                    recreated because the name was taken.
+                </p>
+                <p>
+                    One consequence worth knowing: <code>rename</code> needs
+                    permission on the <em>directory</em>, not on the file. So
+                    staging would happily replace an image you had deliberately
+                    made read-only, where a plain write failed. The save checks
+                    for that and refuses, and carries the old file's permissions
+                    across when it does write.
+                </p>
+                <p class="dim-text">
+                    None of the above was designed in one go. It is the result
+                    of six review passes over this feature, which between them
+                    found 33 defects &mdash; most of them in the fixes for
+                    earlier ones. Three separate times the defect was the same
+                    shape: a rule written in more than one place, holding in one
+                    of them. The mount-list builder that kept losing lent drives
+                    is now private to its module, so the compiler enforces what
+                    the comments could not.
+                </p>
+            </div>
+
             <!-- ══════════════════════════════════════════════ -->
             <!-- STILL OPEN                                    -->
             <!-- ══════════════════════════════════════════════ -->
@@ -1252,6 +1345,18 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                             <td>Not a CP/M disk in the sets seen &mdash; Altair Mini-Disk BASIC and
                                 DOS. A case for <a href="cpmreference.html#booting">booting</a>,
                                 not mounting.</td>
+                        </tr>
+                        <tr>
+                            <td>The MITS 88-DCDD manual</td>
+                            <td>The one on altairclone.com
+                                (<code>Altair Floppy (88-DCDD).pdf</code>, 249 scanned pages) is the
+                                <em>assembly</em> documentation &mdash; parts lists and schematics.
+                                Its own first page says the Theory of Operation is not in it, and
+                                its parts list ships that as a separate item, 101531. So it does not
+                                contain the register table, and it has no text layer to search.
+                                What would help: that Theory of Operation manual, or the Disk
+                                Extended BASIC manual, which documents the boot PROM and the sector
+                                format.</td>
                         </tr>
                         <tr>
                             <td>Controllers for 88-HDSK, Tarbell and Cromemco</td>

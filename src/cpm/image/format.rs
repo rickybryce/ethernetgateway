@@ -461,7 +461,12 @@ impl Format {
                 (seclen, sectrk, first_off, rest_off) == (137, 32, 3, 7)
                     // And a disk deeper than 256 tracks cannot state its own
                     // track number in a byte, so there is no header to write.
-                    && self.total_records as u64 / sectrk as u64 <= u8::MAX as u64 + 1
+                    // The bound is on the *highest track index*, not the track
+                    // count: a `total_records` that is not a whole number of
+                    // tracks put the last record one track past the check, and
+                    // its header byte wrapped to 0 with no error.
+                    && self.total_records.saturating_sub(1) as u64 / sectrk as u64
+                        <= u8::MAX as u64
             }
         }
     }
@@ -867,8 +872,19 @@ mod tests {
             assert!(with(bad).blank_image().is_none(), "{bad:?} must be refused");
         }
         // And a disk too deep to state its own track number in a byte.
-        let deep = Format { total_records: 300 * 32, ..alt.clone() };
+        // Exactly 256 tracks is the last one that fits (indices 0..=255).
+        let full = Format { total_records: 256 * 32, ..alt.clone() };
+        assert!(full.blank_image().is_some(), "256 tracks is track index 255, which fits");
+        let deep = Format { total_records: 257 * 32, ..alt.clone() };
         assert!(deep.blank_image().is_none(), "past 256 tracks there is no header to write");
+        // The boundary the off-by-one lived on: not a whole number of tracks,
+        // so the count rounds down inside the limit while the last record sits
+        // one track past it and its header byte wraps to zero.
+        let ragged = Format { total_records: 256 * 32 + 1, ..alt.clone() };
+        assert!(
+            ragged.blank_image().is_none(),
+            "a part-track past the limit still has a record whose track will not fit in a byte"
+        );
         // `Framed` has never been measured at all.
         assert!(with(Framing::Framed { seclen: 137, data_off: 3 }).blank_image().is_none());
     }

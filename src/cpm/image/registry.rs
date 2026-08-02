@@ -325,6 +325,21 @@ pub fn lend_for_boot(drive0: u8) -> Option<Mount> {
     Some(mount)
 }
 
+/// The drive an image is already mounted on, if any.
+///
+/// Mounting one file twice gives two independent `ImageFs` objects over it,
+/// each with its own cached directory and allocation bitmap, and a write
+/// through either leaves the other stale.  A lent drive counts: it is still the
+/// operator's mount, just out of service.
+pub fn drive_holding(filename: &str) -> Option<u8> {
+    let t = table().read().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = t.iter().position(|m| m.as_ref().is_some_and(|m| m.filename == filename)) {
+        return Some(i as u8);
+    }
+    drop(t);
+    boot_loans().into_iter().find(|(_, n)| n == filename).map(|(d, _)| d)
+}
+
 /// Is this drive lent to a booted session?
 pub fn is_lent(drive0: u8) -> bool {
     lock!(borrowed()).contains_key(&drive0)
@@ -399,6 +414,12 @@ mod tests {
     fn reset() {
         clear_all();
         lock!(sessions()).clear();
+        // The two tables `clear_all` deliberately leaves alone, because they
+        // belong to live boot sessions.  A test starting with a loan or a claim
+        // left over from another would see `check_can_change` refuse a free
+        // drive.
+        lock!(borrowed()).clear();
+        lock!(booted_images()).clear();
     }
 
     /// Hammer every entry point that touches the mount table and the loan

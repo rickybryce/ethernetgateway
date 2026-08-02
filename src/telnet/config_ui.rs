@@ -589,10 +589,15 @@ impl TelnetSession {
                 ))
             ))
             .await?;
+            // Loans included: a drive lent to a booted session is still one of
+            // the operator's images, and reporting "none" while four are
+            // configured is the same "lent drives are invisible" mistake in a
+            // status line.
             let mounted = crate::cpm::image::registry::all()
                 .iter()
                 .filter(|m| m.is_some())
-                .count();
+                .count()
+                + crate::cpm::image::registry::boot_loans().len();
             self.send_line(&format!(
                 "  Images:    {}",
                 if mounted == 0 {

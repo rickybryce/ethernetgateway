@@ -132,35 +132,45 @@ pub fn create_blank_image(
     if path.exists() {
         return Err(format!("{filename} already exists — delete it first"));
     }
-    // `create_new` so two sessions racing cannot both believe they made it —
-    // and it is the *final* name that is created that way, as an empty
-    // placeholder, so the claim on the name happens before the long write.
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| format!("{filename}: {e}"))?;
-    drop(file);
-
-    // The content goes to a temporary and is renamed over that placeholder.
-    // A blank hard disk is 4.9 MB, and a write that stops partway — a full
-    // disk, a network transfer_dir — would otherwise leave a truncated image
-    // that mounts and looks plausible, with a retry then refused because the
-    // name already exists.  Every other write on this path is already
-    // write-then-rename; this one was not.
+    // Two sessions racing must not both believe they made it, and a write that
+    // stops partway must not leave anything behind that looks like a disk.
+    // Both come from one file: the staging name is what is `create_new`'d, so
+    // it is the lock *and* the buffer.  An earlier version claimed the final
+    // name with an empty file first, which reintroduced exactly the failure
+    // this is here to avoid — a kill during a 4.9 MB write left a 0-byte
+    // `.dsk` that the pickers offered, that would not mount, and that could
+    // never be recreated because the name was taken.
+    //
+    // `.creating` is deliberately not one of `IMAGE_EXTENSIONS`, so a leftover
+    // is never offered as a disk.
     let mut tmp = path.clone().into_os_string();
     tmp.push(".creating");
     let tmp = PathBuf::from(tmp);
+    let staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("{filename}: another session may be creating this ({e})"))?;
+
     let write = (|| -> std::io::Result<()> {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = staged;
         f.write_all(&blank)?;
         f.flush()?;
+        drop(f);
+        // Re-check under the staging lock: `exists` above was before the long
+        // write, and renaming over a disk somebody made meanwhile would destroy
+        // it with no undo.
+        if path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a disk with that name appeared while this one was being made",
+            ));
+        }
         std::fs::rename(&tmp, &path)
     })();
     if let Err(e) = write {
         let _ = std::fs::remove_file(&tmp);
-        let _ = std::fs::remove_file(&path);
         return Err(format!("{filename}: {e}"));
     }
 
@@ -198,6 +208,19 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
     // leaves, so a mount made meanwhile would have its work silently replaced —
     // and would afterwards be caching a directory for bytes that are gone.
     // The "one session per image" rule used to be enforced only between boots.
+    // The same image on two drives would be two `ImageFs` objects over one
+    // file, each caching its own directory and allocation bitmap — so a write
+    // through one leaves the other describing bytes that are gone, and its next
+    // write allocates blocks the first already used.  The registry's own
+    // header states that an image is opened once and shared; this is what makes
+    // that true.  The boot path has enforced its half of the rule since the
+    // claim moved into the registry; this is the mount-against-mount half.
+    if let Some(other) = registry::drive_holding(filename) {
+        return Err(format!(
+            "{filename} is already mounted on drive {}: — unmount it there first",
+            (b'A' + other) as char
+        ));
+    }
     if registry::is_image_booted(&images_dir(cpm_base).join(filename)) {
         return Err(format!(
             "{filename} is being run by a booted session — it cannot be mounted at the same time"
@@ -348,7 +371,16 @@ pub fn parse_mounts(value: &str) -> Vec<(u8, String)> {
 
 /// Render mounts back into the `cpm_mounts` config form.
 // Written by the mount UIs when they save; see `unmount_drive`.
-pub fn format_mounts(mounts: &[(u8, String)]) -> String {
+/// Render a mount list as the `cpm_mounts` config value.
+///
+/// **Private on purpose.** Building this value is the one job that has to
+/// happen in exactly one place, and it has now been got wrong three times by
+/// three different screens each assembling it from `registry::all()` — which
+/// omits a drive lent to a booted session, so saving from that screen dropped
+/// somebody's drives out of their configuration. The compiler enforces the rule
+/// that comments and reviews did not: every caller goes through
+/// [`current_mounts_value`], which is where the loans are merged back in.
+fn format_mounts(mounts: &[(u8, String)]) -> String {
     mounts
         .iter()
         .map(|(d, n)| format!("{}={}", (b'A' + d) as char, n))
@@ -1133,6 +1165,43 @@ mod tests {
                 f.token
             );
         }
+    }
+
+    /// One image must not be mounted on two drives.
+    ///
+    /// That would be two `ImageFs` objects over one file, each caching its own
+    /// directory and allocation bitmap — so a write through one leaves the
+    /// other describing bytes that are gone, and its next write allocates
+    /// blocks the first already used.  The boot path has enforced its half of
+    /// "one session per image" since the claim moved into the registry; this is
+    /// the mount-against-mount half, and it was the remaining asymmetry.
+    #[test]
+    fn test_one_image_cannot_be_mounted_on_two_drives() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_no_double_mount");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let blank = format::by_token("altair8").unwrap().blank_image().unwrap();
+        std::fs::write(images.join("altair8_one.dsk"), &blank).unwrap();
+        std::fs::write(images.join("altair8_two.dsk"), &blank).unwrap();
+
+        mount_image(&base, 1, "altair8_one.dsk").expect("B: mounts");
+        let err = mount_image(&base, 2, "altair8_one.dsk").unwrap_err();
+        assert!(err.contains("already mounted on drive B:"), "{err}");
+        // A different image is fine, and so is the same drive again.
+        mount_image(&base, 2, "altair8_two.dsk").expect("C: takes another image");
+        let _ = unmount_drive(1);
+        mount_image(&base, 3, "altair8_one.dsk").expect("free once unmounted");
+
+        // A drive lent to a booted session still counts as holding it.
+        registry::lend_for_boot(3).expect("lent");
+        let err = mount_image(&base, 4, "altair8_one.dsk").unwrap_err();
+        assert!(err.contains("already mounted on drive D:"), "{err}");
+
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A traversal attempt must be refused before anything touches the disk.

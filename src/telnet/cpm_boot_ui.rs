@@ -876,6 +876,12 @@ mod tests {
     /// without restarting the gateway.
     #[test]
     fn test_an_image_can_only_be_booted_once_at_a_time() {
+        // The claim set lives in the process-global registry, and every test
+        // that resets the registry wipes it — so these must serialise with
+        // them.  Without this they pass alone and fail about one run in ten
+        // beside `test_a_booted_image_cannot_be_mounted`, which is the profile
+        // of a flake that reaches CI and gets re-run away.
+        let _g = crate::cpm::image::registry::tests_lock();
         let p = std::path::Path::new("/tmp/egw_boot_claim_test.dsk");
         let first = BootClaim::take(p).expect("first claim");
         assert!(BootClaim::take(p).is_none(), "a second session must be refused");
@@ -886,6 +892,12 @@ mod tests {
     /// Different images do not block each other.
     #[test]
     fn test_two_different_images_can_run_together() {
+        // The claim set lives in the process-global registry, and every test
+        // that resets the registry wipes it — so these must serialise with
+        // them.  Without this they pass alone and fail about one run in ten
+        // beside `test_a_booted_image_cannot_be_mounted`, which is the profile
+        // of a flake that reaches CI and gets re-run away.
+        let _g = crate::cpm::image::registry::tests_lock();
         let a = BootClaim::take(std::path::Path::new("/tmp/egw_boot_a.dsk")).unwrap();
         let b = BootClaim::take(std::path::Path::new("/tmp/egw_boot_b.dsk"));
         assert!(b.is_some(), "separate images are independent");
@@ -1305,6 +1317,12 @@ mod tests {
     /// equality would put one disk in two machines, both writing it back.
     #[test]
     fn test_a_claim_is_by_identity_not_by_spelling() {
+        // The claim set lives in the process-global registry, and every test
+        // that resets the registry wipes it — so these must serialise with
+        // them.  Without this they pass alone and fail about one run in ten
+        // beside `test_a_booted_image_cannot_be_mounted`, which is the profile
+        // of a flake that reaches CI and gets re-run away.
+        let _g = crate::cpm::image::registry::tests_lock();
         let dir = std::env::temp_dir().join("egw_claim_identity");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -1334,6 +1352,12 @@ mod tests {
     /// relative `transfer_dir` this is not a corner case.
     #[test]
     fn test_a_claim_is_released_even_if_the_image_is_deleted() {
+        // The claim set lives in the process-global registry, and every test
+        // that resets the registry wipes it — so these must serialise with
+        // them.  Without this they pass alone and fail about one run in ten
+        // beside `test_a_booted_image_cannot_be_mounted`, which is the profile
+        // of a flake that reaches CI and gets re-run away.
+        let _g = crate::cpm::image::registry::tests_lock();
         let dir = std::env::temp_dir().join("egw_claim_deleted");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
