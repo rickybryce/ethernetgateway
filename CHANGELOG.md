@@ -96,6 +96,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents how the emulated 88-DCDD controller works — the three ports, the
   rotational sector position and why it had to be built first, the cold start
   and why the payload address is not a guess.
+- **A booted disk now gets all your mounted images**, each on the controller
+  unit its drive letter names — B: is unit 1, C: is unit 2, F: is unit 5. So you
+  can mount several disks, boot one, and copy between them with the guest's own
+  `PIP`. Verified end to end: two files copied onto two different mounted disks
+  inside a booted Altair, each landing in its own image file, both byte-identical
+  when read back out.
+
+  **How many the guest can reach is the disk's decision, not ours.** A drive
+  letter is a CP/M software concept owned by whichever OS is running — our BDOS
+  hands out A: to P: because we wrote it, and stock Altair CP/M hands out A: to
+  D: because MITS wrote it. Measured: both 2.2mits and 2.2b answer `Bdos Err On
+  E: Select` at E:. The controller offers sixteen units and served fifteen disks
+  without complaint; what appears is up to the guest, and nothing here patches
+  somebody else's BIOS to change it.
+
+  The boot disk is always unit 0, because although the bootstrap can load a
+  system from any unit — measured — the system it loads comes up as its own A:
+  and reads unit 0 from then on. Anything mounted on A: sits behind it and the
+  boot banner says so. A mounted disk is writable only if the boot session was
+  opened for writing *and* the mount is; the stricter wins. An empty unit
+  between two full ones answers nothing, exactly as the real board does, so a
+  guest that selects one appears to hang — the banner warns which units are
+  empty, and ESC twice still gets you out.
 - **Make a new blank disk.** An empty, formatted image, from the mount screen
   in all three interfaces — telnet `I` then `N`, and a *New blank disk* row on
   the web and desktop **Mount CP/M Drives** screens. You name the disk and the

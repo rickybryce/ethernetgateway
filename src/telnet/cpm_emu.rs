@@ -433,7 +433,7 @@ impl TelnetSession {
     /// from the folder's real files, so there is nothing to `CLRDIR`/format.
     /// Jailed by construction —
     /// the paths are built under the configured `transfer_dir`.
-    async fn cpmemu_ensure_drives(&mut self) -> Result<(), std::io::Error> {
+    pub(in crate::telnet) async fn cpmemu_ensure_drives(&mut self) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
         // The same layout the enable-time hook builds, so a folder deleted
         // since then is recreated and the two paths cannot disagree about what

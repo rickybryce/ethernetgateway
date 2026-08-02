@@ -845,7 +845,8 @@ pub struct Config {
     ///
     /// **Booting is not mounting.**  A mounted image is one drive among sixteen
     /// with our BDOS underneath; a booted one runs its own operating system and
-    /// owns every drive, so the jail, the CCP-lite prompt, EGT80 and
+    /// owns the hardware (mounted images ride along at the unit their drive
+    /// letter names), so the jail, the CCP-lite prompt, EGT80 and
     /// `cpm_emu_uart` do not apply inside it.  That is why this is a separate
     /// key from `cpm_mounts` and not another entry in it.
     pub cpm_boot_image: String,
@@ -2301,9 +2302,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   MITS 88-DCDD controller, and the disk's own operating system takes the whole
 #   machine - Altair CP/M 2.2 and 3.0, Altair DOS, Disk Extended BASIC and Time
 #   Sharing BASIC all boot this way.  Booting is not mounting: inside a booted
-#   disk there is no jail, no A> from us, no EGT80 and no cpm_emu_uart, because
-#   the guest is talking to hardware rather than to our BDOS.  The image is
-#   opened READ-ONLY.
+#   disk there is no jail, no A> from us and no EGT80, because the guest is
+#   talking to hardware rather than to our BDOS.  Your MOUNTED images do come
+#   along, each on the controller unit its drive letter names (B: is unit 1,
+#   C: unit 2), with the booted disk always unit 0 - but the guest names them
+#   itself and reaches only as many as its own BIOS knows, which for stock
+#   Altair CP/M is four.  The image is opened READ-ONLY.
 ");
     write_kv(&mut content, "cpm_boot_image", &cfg.cpm_boot_image);
     content.push_str("\

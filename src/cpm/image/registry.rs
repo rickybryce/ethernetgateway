@@ -238,6 +238,17 @@ pub fn tests_lock() -> std::sync::MutexGuard<'static, ()> {
 
 // ---- session bookkeeping ------------------------------------------------
 
+/// Hand out a session id.
+///
+/// One allocator, shared by the emulator's `CpmFs` and the boot path, because
+/// the table below is keyed by this number: two counters would eventually issue
+/// the same id and have a booted disk and an emulator session clear each
+/// other's drive bookkeeping.
+pub fn next_session_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Register a CP/M session as present, sitting on drive A:.
 pub fn session_start(id: u64) {
     lock!(sessions()).insert(id, SessionUse::default());

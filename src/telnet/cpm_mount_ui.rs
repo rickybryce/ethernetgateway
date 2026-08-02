@@ -184,8 +184,10 @@ impl TelnetSession {
     /// Choose an image to boot.
     ///
     /// Booting is not mounting, and the screen says so: a booted disk runs its
-    /// own operating system and owns every drive, so it is a different thing
-    /// from putting an image on drive B:.
+    /// own operating system and owns the hardware, so it is a different thing
+    /// from putting an image on drive B:.  The mounted images do come along —
+    /// each at the unit its drive letter names — but what they are *called*
+    /// then belongs to the guest, and so does how many of them it can reach.
     async fn cpmmount_pick_boot(&mut self) -> Result<(), std::io::Error> {
         let base = self.cpmmount_base();
         let images = crate::cpm::image::available_images(&base);
@@ -217,7 +219,9 @@ impl TelnetSession {
             return Ok(());
         }
         self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating system."))).await?;
-        self.send_line(&format!("  {}", self.dim("Drive folders and mounts do not apply."))).await?;
+        self.send_line(&format!("  {}", self.dim("Its drive FOLDERS do not apply. Mounted"))).await?;
+        self.send_line(&format!("  {}", self.dim("images do: each rides the unit its letter"))).await?;
+        self.send_line(&format!("  {}", self.dim("names, and the disk's OS decides how many."))).await?;
         self.send_line("").await?;
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         for (i, n) in bootable.iter().take(Self::TRANSFER_PAGE_SIZE).enumerate() {
@@ -243,6 +247,12 @@ impl TelnetSession {
             return Ok(());
         };
         let path = crate::cpm::image::images_dir(&base).join(name);
+        // Bring `cpm_mounts` up before booting.  Mounting is otherwise lazy —
+        // it happens when a session first enters the emulator — so booting
+        // straight from this picker on a fresh gateway would hand the guest a
+        // machine with one disk in it and no sign that the rest were meant to
+        // be there.
+        self.cpmemu_ensure_drives().await?;
 
         // Writing is a decision, not a default: a booted guest writes raw
         // sectors and nothing above it would notice a mistake.

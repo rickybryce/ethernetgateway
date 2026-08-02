@@ -64,6 +64,21 @@ impl BootClaim {
     }
 }
 
+/// One disk in the booted machine: where its bytes came from and whether the
+/// guest may change them.
+///
+/// The path is carried per unit rather than assumed, because saving is the
+/// dangerous end of this: the guest hands back "unit 3 is dirty" and nothing
+/// else, so a machine that did not remember which file unit 3 came from would
+/// have to guess — and the only cheap guess, "write it to the image we booted",
+/// silently overwrites one disk with another.
+struct BootDisk {
+    path: std::path::PathBuf,
+    writable: bool,
+    /// Held for the life of the session; dropping it releases the image.
+    _claim: BootClaim,
+}
+
 /// How often to look for a keystroke, in instructions.
 ///
 /// The guest polls its console far more often than a person types, so checking
@@ -78,7 +93,213 @@ const KEY_POLL_INTERVAL: u64 = 20_000;
 /// at 161% CPU.
 const YIELD_INTERVAL: u64 = 200_000;
 
+/// Are these two paths the same file?
+///
+/// Textual equality is not enough on its own.  The boot image's path and a
+/// mount's path are built by different code from the same config value, and the
+/// guard that stops the booted disk being inserted a second time depends on
+/// them matching — if they ever did not, one file would sit in two units as two
+/// independent copies with separate write-backs, and whichever saved last would
+/// silently win.  Canonicalising also folds away symlinks and `.` components.
+/// Falls back to the plain comparison when a path cannot be resolved, which is
+/// the honest answer for a file that is not there.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// One disk the boot path intends to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootPlanStep {
+    unit: u8,
+    path: std::path::PathBuf,
+    writable: bool,
+}
+
+/// Decide which mounted images a booted machine should carry, and where.
+///
+/// Pure, so the rules can be tested without a session, a registry or a disk:
+///
+/// * unit 0 is the disk being booted and is not in the plan — the bootstrap can
+///   load a system from any unit (measured), but the system it loads comes up
+///   as its own A: and reads unit 0 from then on, so a boot disk parked
+///   anywhere else runs against whatever is in unit 0 and looks like a hang;
+/// * every other mount rides the unit its drive letter names, because that is
+///   the only mapping under which the letters an operator chose mean anything
+///   to the guest;
+/// * a mount is writable only when the boot session is writable *and* the
+///   mount is — the stricter of the two wins, since this path writes raw
+///   sectors and nothing above it understands the format well enough to catch
+///   a mistake;
+/// * a drive another session is working in is left out, and so is the boot
+///   image appearing twice, which would be two views of one file with separate
+///   write-backs and the last one saved winning.
+///
+/// Returns the plan and the lines to show for whatever was left out.
+fn plan_boot_disks(
+    mounts: &[Option<crate::cpm::image::registry::Mount>],
+    usage: &[crate::cpm::image::registry::Usage],
+    boot_image: &std::path::Path,
+    writable: bool,
+    units: usize,
+) -> (Vec<BootPlanStep>, Vec<String>) {
+    let mut plan = Vec::new();
+    let mut notes = Vec::new();
+    for (drive0, slot) in mounts.iter().enumerate() {
+        let Some(mount) = slot else { continue };
+        if drive0 >= units {
+            continue;
+        }
+        let letter = (b'A' + drive0 as u8) as char;
+        if drive0 == 0 {
+            // Unit 0 is the disk we booted.  Anything mounted on A: is behind
+            // it, and saying so beats letting someone wonder where it went.
+            if !same_file(&mount.path, boot_image) {
+                notes.push(format!("A: {} is behind the boot disk.", mount.filename));
+            }
+            continue;
+        }
+        if same_file(&mount.path, boot_image) {
+            notes.push(format!("{letter}: is the boot disk; not repeated."));
+            continue;
+        }
+        if usage.get(drive0).and_then(|u| u.describe()).is_some() {
+            notes.push(format!("{letter}: {} is in use elsewhere.", mount.filename));
+            continue;
+        }
+        plan.push(BootPlanStep {
+            unit: drive0 as u8,
+            path: mount.path.clone(),
+            writable: writable && !mount.read_only,
+        });
+    }
+    (plan, notes)
+}
+
+/// Warn about empty units between the occupied ones.
+///
+/// An empty unit on a real 88-DCDD answers nothing at all, and a guest that
+/// selects one waits for a head that never loads — so `STAT D:` on a machine
+/// with A:, B:, C: and F: mounted appears to lock up.  That is the hardware's
+/// behaviour and is left alone; what we can do is warn, and point at the way
+/// out, which does still work.
+fn gap_warning<T>(disks: &[Option<T>]) -> Option<String> {
+    let highest = disks.iter().rposition(|d| d.is_some())?;
+    let gaps: Vec<String> = (1..highest)
+        .filter(|u| disks[*u].is_none())
+        .map(|u| format!("{}:", (b'A' + u as u8) as char))
+        .collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} empty - selecting one looks like a hang (ESC ESC out).",
+        gaps.join(" ")
+    ))
+}
+
+/// Marks the drives a booted session is holding as in use, and releases them
+/// however the session ends.
+///
+/// A booted guest owns whole platters for as long as it runs, so the drives it
+/// took must read as busy everywhere else: the mount screens then refuse to
+/// change a disk out from under it, and a second boot skips those drives
+/// instead of taking a second copy of the same file.
+///
+/// RAII for the same reason [`BootClaim`] is — a boot can end through an error,
+/// a dropped connection or the shutdown broadcast, and drives left marked busy
+/// after any of those would need a restart to clear.
+struct BootDrivesBusy(u64);
+
+impl BootDrivesBusy {
+    fn hold(units: &[u8]) -> BootDrivesBusy {
+        use crate::cpm::image::registry;
+        let id = registry::next_session_id();
+        registry::session_start(id);
+        for unit in units {
+            registry::session_writing(id, *unit);
+        }
+        BootDrivesBusy(id)
+    }
+}
+
+impl Drop for BootDrivesBusy {
+    fn drop(&mut self) {
+        crate::cpm::image::registry::session_end(self.0);
+    }
+}
+
+/// Units the 88-DCDD can address.  Sixteen, because the drive-select register
+/// carries four bits — not because any guest here uses that many.
+const MAX_BOOT_UNITS: usize = crate::cpm::dcdd::MAX_DRIVES;
+
 impl TelnetSession {
+    /// Put every mounted image into the booted machine, following the plan
+    /// [`plan_boot_disks`] made, and report what happened for each.
+    ///
+    /// The decision is separated from the doing because the decision is the
+    /// part with rules in it — which unit, whose read-only flag wins, what to
+    /// skip — and none of that should need a live session to test.
+    fn cpm_boot_attach_mounts(
+        &self,
+        machine: &mut BootMachine,
+        disks: &mut [Option<BootDisk>],
+        writable: bool,
+        boot_image: &std::path::Path,
+    ) -> Vec<String> {
+        use crate::cpm::image::registry;
+        let (plan, mut notes) = plan_boot_disks(
+            &registry::all(),
+            &registry::usage(),
+            boot_image,
+            writable,
+            disks.len(),
+        );
+        for step in plan {
+            let letter = (b'A' + step.unit) as char;
+            let name = step
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            // Claimed here rather than in the plan: a claim is a side effect on
+            // a process-wide table, and a planning function that took one would
+            // be untestable and would leak claims on every dry run.
+            let Some(claim) = BootClaim::take(&step.path) else {
+                notes.push(format!("{letter}: {name} is booted elsewhere."));
+                continue;
+            };
+            let bytes = match std::fs::read(&step.path) {
+                Ok(b) => b,
+                Err(e) => {
+                    notes.push(format!("{letter}: cannot read {name} ({e})."));
+                    continue;
+                }
+            };
+            // Only a disk this controller can actually turn.  A hard-disk or
+            // Tarbell image mounts perfectly well for the emulator and has no
+            // business on an 88-DCDD; refusing it by name beats presenting a
+            // drive the guest cannot read.
+            if let Err(e) = machine.insert(step.unit, bytes, !step.writable) {
+                notes.push(format!("{letter}: {name} - {e}"));
+                continue;
+            }
+            disks[step.unit as usize] = Some(BootDisk {
+                path: step.path.clone(),
+                writable: step.writable,
+                _claim: claim,
+            });
+            notes.push(format!(
+                "{letter}: {name}{}",
+                if step.writable { "" } else { " (R/O)" }
+            ));
+        }
+        notes.extend(gap_warning(disks));
+        notes
+    }
+
     /// Boot an image and run it until the guest stops or the user leaves.
     ///
     /// `image` is the host path; `writable` decides whether changes are kept.
@@ -87,7 +308,7 @@ impl TelnetSession {
         image: &std::path::Path,
         writable: bool,
     ) -> Result<(), std::io::Error> {
-        let Some(_claim) = BootClaim::take(image) else {
+        let Some(claim) = BootClaim::take(image) else {
             self.send_line(&format!(
                 "  {}",
                 self.red("That image is already running in another session.")
@@ -113,10 +334,39 @@ impl TelnetSession {
         };
 
         let mut machine = BootMachine::new();
+        // Unit 0 is the disk being booted, and it has to be: the bootstrap can
+        // load a system from any unit — that was measured — but the operating
+        // system it loads comes up as its own A: and reads unit 0 from then on.
+        // Booting a disk parked anywhere else therefore loads fine and then
+        // runs against whatever happens to be in unit 0, which looks like a
+        // hang rather than a mistake.
+        let mut disks: Vec<Option<BootDisk>> = (0..MAX_BOOT_UNITS).map(|_| None).collect();
         if let Err(e) = machine.insert(0, bytes, !writable) {
             self.send_line(&format!("  {}", self.red(&e))).await?;
             return Ok(());
         }
+        disks[0] = Some(BootDisk { path: image.to_path_buf(), writable, _claim: claim });
+
+        // Everything else mounted comes along, at the unit its drive letter
+        // names: B: is unit 1, C: is unit 2, and so on.  What the guest calls
+        // them is the guest's business — its BIOS names the units it knows
+        // about and refuses the rest, which for stock Altair CP/M means A: to
+        // D:.  We present the hardware and let the disk decide, exactly as with
+        // everything else on this path.
+        let notes = self.cpm_boot_attach_mounts(&mut machine, &mut disks, writable, image);
+        // Hold every drive we took for as long as the guest runs.  Without
+        // this a mount screen elsewhere would happily swap a disk out from
+        // under a running Altair, and the change would be invisible to it —
+        // the bytes are already in the machine — until the write-back at the
+        // end put the old contents over the new file.
+        let _busy = BootDrivesBusy::hold(
+            &disks
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.is_some())
+                .map(|(u, _)| u as u8)
+                .collect::<Vec<_>>(),
+        );
 
         // The virtual modem comes along, when the operator's profile is one a
         // booted machine can have.  A real Altair put its modem on the second
@@ -149,6 +399,20 @@ impl TelnetSession {
             self.dim(if writable { "Changes are saved." } else { "Read-only." })
         ))
         .await?;
+        // The other drives, and why any of them is missing.  How many the guest
+        // can actually reach is its BIOS's decision — stock Altair CP/M knows
+        // four — so this says what the hardware offers, not what will appear.
+        if !notes.is_empty() {
+            self.send_line(&format!("  {}", self.dim("Also in the drives:"))).await?;
+            for note in &notes {
+                self.send_line(&format!("   {}", self.dim(note))).await?;
+            }
+            self.send_line(&format!(
+                "  {}",
+                self.dim("The disk's own OS decides how many it uses.")
+            ))
+            .await?;
+        }
         match &attach {
             ModemAttach::Ports(status, data) => {
                 self.send_line(&format!(
@@ -174,20 +438,30 @@ impl TelnetSession {
         // Save whatever the guest changed, whatever ended the session — a user
         // who pressed ESC still wants their work.
         //
-        // Only drive 0, explicitly.  One image is inserted and it goes in drive
-        // 0, so today every dirty entry is that one; writing them all to `image`
-        // regardless of which drive they came from would quietly become a
-        // corrupting bug the moment a second drive is added, and that is exactly
-        // the kind of change nobody would think to re-check this loop for.
-        if writable {
-            for (drive, bytes) in machine.take_dirty() {
-                if drive != 0 {
-                    glog!("CP/M boot: drive {} was written but has no file — not saved", drive);
-                    continue;
-                }
-                if let Err(e) = tokio::fs::write(image, &bytes).await {
-                    glog!("CP/M boot: could not save {}: {}", name, e);
-                }
+        // Every unit goes back to *its own* file.  The previous version of this
+        // loop handled one disk and said, in as many words, that writing every
+        // dirty unit to `image` would become a corrupting bug the moment a
+        // second drive was added.  This is that moment: `disks[unit]` is the
+        // only thing that knows where unit 3 came from, and a unit with no
+        // entry is refused rather than guessed at.
+        for (unit, bytes) in machine.take_dirty() {
+            let Some(disk) = disks.get(unit as usize).and_then(|d| d.as_ref()) else {
+                glog!("CP/M boot: unit {} was written but has no file — not saved", unit);
+                continue;
+            };
+            if !disk.writable {
+                // Belt and braces: the machine should never mark a read-only
+                // disk dirty, so if this fires something above is wrong and
+                // the write is the wrong thing to trust.
+                glog!(
+                    "CP/M boot: unit {} is read-only but reported changes — not saved ({})",
+                    unit,
+                    disk.path.display()
+                );
+                continue;
+            }
+            if let Err(e) = tokio::fs::write(&disk.path, &bytes).await {
+                glog!("CP/M boot: could not save {}: {}", disk.path.display(), e);
             }
         }
         self.send_line("").await?;
@@ -409,5 +683,203 @@ mod tests {
             "the yield must fall on a key-poll boundary, or the two drift apart \
              and one of them effectively stops happening"
         );
+    }
+    use crate::cpm::image::registry::{Mount, Usage};
+    use std::path::{Path, PathBuf};
+
+    fn mount_at(name: &str, read_only: bool) -> Mount {
+        Mount {
+            path: PathBuf::from(format!("/images/{name}")),
+            filename: name.to_string(),
+            read_only,
+            read_only_reason: String::new(),
+            format: "altair8",
+            fs: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cpm::image::fs::ImageFs::mount(
+                    Box::new(crate::cpm::image::media::MemMedia::new(
+                        crate::cpm::image::format::by_token("altair8")
+                            .unwrap()
+                            .blank_image()
+                            .unwrap(),
+                    )),
+                    crate::cpm::image::format::by_token("altair8").unwrap(),
+                    read_only,
+                )
+                .unwrap(),
+            )),
+        }
+    }
+
+    /// Sixteen slots with the named drives filled.
+    fn mounts(spec: &[(usize, &str, bool)]) -> Vec<Option<Mount>> {
+        let mut v: Vec<Option<Mount>> = (0..16).map(|_| None).collect();
+        for (d, n, ro) in spec {
+            v[*d] = Some(mount_at(n, *ro));
+        }
+        v
+    }
+
+    fn idle() -> Vec<Usage> {
+        vec![Usage::default(); 16]
+    }
+
+    /// The mapping the whole feature rests on: a mounted image rides the unit
+    /// its drive letter names.  Anything else and the letters an operator chose
+    /// stop meaning what they say.
+    #[test]
+    fn test_mounts_ride_the_unit_their_letter_names() {
+        let m = mounts(&[(0, "boot.dsk", false), (1, "b.dsk", false), (5, "f.dsk", false)]);
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        assert_eq!(
+            plan.iter().map(|s| (s.unit, s.path.clone())).collect::<Vec<_>>(),
+            vec![
+                (1u8, PathBuf::from("/images/b.dsk")),
+                (5u8, PathBuf::from("/images/f.dsk")),
+            ],
+            "B: must be unit 1 and F: unit 5, gaps and all"
+        );
+    }
+
+    /// Unit 0 belongs to the disk being booted.  The bootstrap can load from
+    /// any unit, but what it loads comes up as A: and reads unit 0 — so a
+    /// second disk there would be running the wrong machine.
+    #[test]
+    fn test_unit_zero_is_never_planned() {
+        // A: holds the boot disk itself — nothing to say, nothing to insert.
+        let m = mounts(&[(0, "boot.dsk", false)]);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        assert!(plan.is_empty());
+        assert!(notes.is_empty(), "no news is the right amount of news: {notes:?}");
+
+        // A: holds something else — it is shadowed, and the operator is told.
+        let m = mounts(&[(0, "other.dsk", false)]);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        assert!(plan.is_empty(), "unit 0 is the boot disk's, always");
+        assert!(notes.iter().any(|n| n.contains("behind the boot disk")), "{notes:?}");
+    }
+
+    /// The same file in two units would be two views of one disk with separate
+    /// write-backs, and whichever saved last would win.
+    #[test]
+    fn test_the_boot_image_is_never_inserted_twice() {
+        let m = mounts(&[(3, "boot.dsk", false)]);
+        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        assert!(plan.is_empty());
+        assert!(notes.iter().any(|n| n.contains("not repeated")), "{notes:?}");
+    }
+
+    /// Two ways to be read-only, and the stricter wins.  This path writes raw
+    /// sectors with nothing above it able to notice a mistake, so a session the
+    /// operator did not open for writing must not write anywhere.
+    #[test]
+    fn test_read_only_is_the_stricter_of_mount_and_session() {
+        let m = mounts(&[(1, "rw.dsk", false), (2, "ro.dsk", true)]);
+        let w = |writable| {
+            plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), writable, 16)
+                .0
+                .iter()
+                .map(|s| (s.unit, s.writable))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(w(true), vec![(1, true), (2, false)], "a R/O mount stays R/O");
+        assert_eq!(
+            w(false),
+            vec![(1, false), (2, false)],
+            "a read-only boot session must not write a writable mount"
+        );
+    }
+
+    /// A drive another session is working in must not be handed to a guest that
+    /// owns whole platters.
+    #[test]
+    fn test_a_busy_drive_is_left_out() {
+        let m = mounts(&[(1, "busy.dsk", false), (2, "free.dsk", false)]);
+        let mut u = idle();
+        u[1] = Usage { sitting: 1, writing: 0 };
+        let (plan, notes) = plan_boot_disks(&m, &u, Path::new("/images/boot.dsk"), true, 16);
+        assert_eq!(plan.iter().map(|s| s.unit).collect::<Vec<_>>(), vec![2]);
+        assert!(notes.iter().any(|n| n.contains("in use elsewhere")), "{notes:?}");
+    }
+
+    /// A machine with fewer units than sixteen must not be handed a plan that
+    /// runs off the end of it.
+    #[test]
+    fn test_the_plan_respects_the_unit_count() {
+        let m = mounts(&[(1, "b.dsk", false), (9, "j.dsk", false)]);
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 4);
+        assert_eq!(plan.iter().map(|s| s.unit).collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// The boot disk must be recognised as the boot disk however its path was
+    /// spelled.  Two different pieces of code build that path from the same
+    /// config value, and if they ever disagreed the same file would sit in two
+    /// units as two independent copies — with separate write-backs, and
+    /// whichever saved last silently winning.
+    #[test]
+    fn test_the_boot_disk_is_recognised_through_a_differently_spelled_path() {
+        let dir = std::env::temp_dir().join("egw_boot_path_identity");
+        let _ = std::fs::create_dir_all(&dir);
+        let real = dir.join("boot.dsk");
+        std::fs::write(&real, b"disk").unwrap();
+
+        // The same file reached by another route.  A `.` component would not
+        // do: Rust's `Path` equality compares components and already folds
+        // those away, so it would prove nothing.  `..` is not folded, and is
+        // what a differently-built base path actually looks like.
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let spelled = dir.join("sub").join("..").join("boot.dsk");
+        assert_ne!(spelled, real, "the test is pointless if these are equal");
+        assert!(same_file(&spelled, &real), "canonicalising must fold this away");
+
+        let mut m: Vec<Option<Mount>> = (0..16).map(|_| None).collect();
+        m[2] = Some(Mount {
+            path: spelled,
+            filename: "boot.dsk".into(),
+            read_only: false,
+            read_only_reason: String::new(),
+            format: "altair8",
+            fs: mount_at("boot.dsk", false).fs,
+        });
+        let (plan, notes) = plan_boot_disks(&m, &idle(), &real, true, 16);
+        assert!(plan.is_empty(), "the boot disk must not be inserted twice");
+        assert!(notes.iter().any(|n| n.contains("not repeated")), "{notes:?}");
+
+        // Two genuinely different files are still two different files.
+        let other = dir.join("other.dsk");
+        std::fs::write(&other, b"other").unwrap();
+        let mut m2: Vec<Option<Mount>> = (0..16).map(|_| None).collect();
+        m2[2] = Some(Mount {
+            path: other,
+            filename: "other.dsk".into(),
+            read_only: false,
+            read_only_reason: String::new(),
+            format: "altair8",
+            fs: mount_at("other.dsk", false).fs,
+        });
+        assert_eq!(plan_boot_disks(&m2, &idle(), &real, true, 16).0.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A gap between drives is warned about, because selecting one looks
+    /// exactly like a crash — an empty 88-DCDD unit answers nothing and the
+    /// guest waits for a head that never loads.
+    #[test]
+    fn test_gaps_between_drives_are_warned_about() {
+        let filled = |units: &[usize]| -> Vec<Option<()>> {
+            let mut v: Vec<Option<()>> = (0..16).map(|_| None).collect();
+            for u in units {
+                v[*u] = Some(());
+            }
+            v
+        };
+        let w = gap_warning(&filled(&[0, 1, 2, 5])).expect("D: and E: are gaps");
+        assert!(w.contains("D:") && w.contains("E:"), "{w}");
+        assert!(w.contains("ESC"), "the way out must be in the warning: {w}");
+        // Contiguous drives have no gap, and neither does a lone boot disk.
+        assert_eq!(gap_warning(&filled(&[0, 1, 2])), None);
+        assert_eq!(gap_warning(&filled(&[0])), None);
+        assert_eq!(gap_warning::<()>(&[]), None);
+        // A gap *above* the last disk is not a gap — nothing is beyond it.
+        assert_eq!(gap_warning(&filled(&[0, 1])), None);
     }
 }

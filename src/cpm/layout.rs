@@ -88,9 +88,16 @@ Booting hands the disk the whole machine, and its OWN operating system runs
 — so booting reaches the disks that are not CP/M at all: Altair DOS, Altair
 Disk Extended BASIC, Time Sharing BASIC, and CP/M 3.0.
 
-Inside a booted disk there is no jail, no A> from us, no EGT80 and no
-drives A:-P: of ours.  Press ESC twice to get back to the gateway.  A
-booted image is opened READ-ONLY and held by one session at a time.
+Inside a booted disk there is no jail, no A> from us and no EGT80.  Press
+ESC twice to get back to the gateway.  A booted image is opened READ-ONLY
+and held by one session at a time.
+
+Your mounted images do come along: each rides the controller unit its
+drive letter names (B: is unit 1, C: is unit 2), and the disk being booted
+is always unit 0.  What the guest CALLS them, and how many it can reach at
+all, belongs to its own BIOS - stock Altair CP/M knows four.  An empty
+unit between two full ones answers nothing, exactly as the real board
+does, so selecting one looks like a hang; ESC ESC still works.
 
 Set what the CP/M menu item runs with cpm_boot_image (the 'CP/M runs'
 setting in every UI), or boot one for a single visit from the telnet boot

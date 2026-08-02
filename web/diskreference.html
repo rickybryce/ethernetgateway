@@ -1119,6 +1119,42 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                     </p>
                 </div>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">More than one drive</h3>
+                <p>
+                    The controller addresses <strong>sixteen units</strong> &mdash; the drive-select
+                    register carries four bits &mdash; and a booted guest is handed every mounted
+                    image, each on the unit its drive letter names. What it <em>calls</em> them, and
+                    how many it can reach at all, belongs to the disk's own BIOS.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Measured: stock Altair CP/M supports four.</strong> Both 2.2mits and
+                        2.2b answer <code>Bdos Err On E: Select</code> at E: while happily using A:
+                        through D:. That is their BDOS refusing, not our controller &mdash; we
+                        served fifteen disks without complaint. Nothing here patches a guest BIOS to
+                        change that; the whole reason booting exists is that the disk's own software
+                        is already right about its own hardware.
+                    </p>
+                </div>
+                <p>
+                    Two facts about unit 0, both measured, that decide the layout:
+                </p>
+                <ul>
+                    <li>The bootstrap <em>can</em> load a system from any unit. Booting a CP/M disk
+                        parked in unit 1 signs on perfectly.</li>
+                    <li>But the system it loads comes up as its own <strong>A:</strong> and reads
+                        <strong>unit 0</strong> from then on. Boot from unit 1 with a blank disk in
+                        unit 0 and the guest goes silent &mdash; it loaded fine and then ran against
+                        the wrong disk.</li>
+                </ul>
+                <p>
+                    So the disk being booted always occupies unit 0, and the rest fill the units
+                    their letters name. An empty unit in between answers nothing at all, exactly as
+                    the real board does, and a guest that selects one waits forever for a head that
+                    never loads &mdash; the boot banner warns which units are empty, and ESC twice
+                    still works.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">What booting costs</h3>
                 <p>
                     Every guard that worked by understanding the guest's request

@@ -13,7 +13,10 @@
 //! we control. Here nothing is trapped. That is the trade the booted path
 //! makes, and it has consequences worth stating rather than discovering:
 //!
-//! * The guest owns every drive. Folder-backed drives, the jail, `EXIT` and the
+//! * The guest owns the drives. Mounted images are handed to it, each at the
+//!   unit its drive letter names, but it names them itself and reaches only as
+//!   many as its own BIOS knows — stock Altair CP/M knows four.
+//!   Folder-backed drives, the jail, `EXIT` and the
 //!   Gateway Shell do not exist inside it.
 //! * The blast radius is the images in the drives — narrower than the
 //!   filesystem path's, and easier to state, but the per-file write claim that
@@ -1751,16 +1754,33 @@ mod tests {
         };
         let mut m = BootMachine::new();
         m.insert(0, std::fs::read(&path).unwrap(), true).expect("an 88-DCDD image");
-        if let Ok(second) = std::env::var("CPM_BOOT_IMAGE2") {
-            let bytes = match second.strip_prefix("blank:") {
+        // Further drives, `,`-separated, filling units 1 upwards.  `blank:<n>`
+        // for an unformatted one; an empty slot leaves that unit empty, so
+        // `,,x.dsk` puts a disk in unit 3 and nothing in 1 or 2.
+        let more = std::env::var("CPM_BOOT_IMAGES")
+            .or_else(|_| std::env::var("CPM_BOOT_IMAGE2"))
+            .unwrap_or_default();
+        for (i, spec) in more.split(',').enumerate() {
+            if spec.is_empty() {
+                continue;
+            }
+            let bytes = match spec.strip_prefix("blank:") {
                 Some(n) => vec![0u8; n.parse().expect("a byte count")],
-                None => std::fs::read(&second).unwrap(),
+                None => std::fs::read(spec).unwrap_or_else(|e| panic!("{spec}: {e}")),
             };
-            m.insert(1, bytes, false).expect("an 88-DCDD image in B:");
+            m.insert(i as u8 + 1, bytes, false)
+                .unwrap_or_else(|e| panic!("{spec}: {e}"));
         }
+        let unit: u8 = std::env::var("CPM_BOOT_UNIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         let mut cpu = BootMachine::new_cpu();
-        m.boot(&mut cpu, 0).expect("boots");
-        println!("--- sign-on ---\n{}", printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000)));
+        m.boot(&mut cpu, unit).expect("boots");
+        println!(
+            "--- sign-on (booted from unit {unit}) ---\n{}",
+            printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000))
+        );
 
         for key in std::env::var("CPM_KEYS").unwrap_or_default().split(';') {
             if key.is_empty() {

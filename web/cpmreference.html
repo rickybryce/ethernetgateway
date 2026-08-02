@@ -861,7 +861,7 @@ altairhd_cobol.dsk</code></pre>
                     <tbody>
                         <tr><td>Scope</td><td>One drive of sixteen</td><td>The whole machine</td></tr>
                         <tr><td>Filesystem</td><td>Ours</td><td>The guest's</td></tr>
-                        <tr><td>Other drives</td><td>Folders and images alongside</td><td>The guest owns them all</td></tr>
+                        <tr><td>Other drives</td><td>Folders and images alongside</td><td>Mounted images come along, at the unit their letter names; folders do not</td></tr>
                         <tr><td>Our <code>A&gt;</code>, <code>EXIT</code>, EGT80</td><td>Yes</td><td>No &mdash; the guest talks to hardware</td></tr>
                         <tr><td>Getting out</td><td><code>EXIT</code></td><td>Press <strong>ESC twice</strong></td></tr>
                     </tbody>
@@ -903,6 +903,51 @@ altairhd_cobol.dsk</code></pre>
                 <p>
                     The setting is <code>cpm_boot_image</code>: empty (the default) runs the CP/M
                     emulator, a bare filename in <code>CPM/images</code> boots that disk.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The other drives</h3>
+                <p>
+                    A booted guest is handed <strong>every mounted image</strong>, each on the
+                    controller unit its drive letter names &mdash; B: is unit 1, C: is unit 2, F:
+                    is unit 5. So you can mount several disks, boot one, and copy between them with
+                    the guest's own <code>PIP</code>.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>How many it can actually reach is the disk's decision, not
+                        ours.</strong> A drive letter is a CP/M software concept, owned by whichever
+                        operating system is running &mdash; our BDOS hands out A: to P: because we
+                        wrote it, and stock Altair CP/M hands out A: to D: because MITS wrote it.
+                        Ask for E: on a booted Altair and its own BDOS answers
+                        <code>Bdos Err On E: Select</code>. The controller offers sixteen units;
+                        what appears is up to the guest, and lifting that would mean modifying
+                        somebody else's BIOS, which is the one thing booting exists to avoid.
+                    </p>
+                </div>
+                <p>
+                    Three more rules, each with a reason:
+                </p>
+                <ul>
+                    <li><strong>The boot disk is always unit 0</strong>, so it is the guest's A:.
+                        The bootstrap can load a system from any unit &mdash; that was measured
+                        &mdash; but what it loads comes up as A: and reads unit 0 from then on, so a
+                        boot disk parked elsewhere runs against whatever is in unit 0. Anything
+                        mounted on A: sits behind the boot disk, and the boot banner says so.</li>
+                    <li><strong>Writes need two yeses.</strong> A mounted disk is writable only if
+                        the boot session was opened for writing <em>and</em> the mount itself is
+                        writable. The stricter wins.</li>
+                    <li><strong>A gap between drives will look like a crash.</strong> An empty unit
+                        on a real 88-DCDD answers nothing at all, so a guest that selects one waits
+                        for a head that never loads. Mount A:, B:, C: and F: and then type
+                        <code>STAT D:</code> and the session appears to lock up. That is the
+                        hardware's behaviour and it is left alone &mdash; the boot banner warns
+                        about the gaps, and <strong>ESC twice</strong> still gets you out.</li>
+                </ul>
+                <p class="dim-text">
+                    Images that are not 88-DCDD floppies &mdash; a hard disk or a Tarbell image
+                    &mdash; mount perfectly well for the emulator but have no place on this
+                    controller, and are named and skipped rather than presented as a drive the
+                    guest cannot read.
                 </p>
 
                 <div class="callout">

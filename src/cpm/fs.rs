@@ -12,7 +12,6 @@
 use super::fcb::{format_8_3, split_8_3, Fcb, FCB_SIZE};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Number of emulated drives.  CP/M 2.2's FCB drive field is 4 bits, so the
@@ -55,9 +54,6 @@ static CPM_WRITERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 fn cpm_writers() -> &'static Mutex<HashMap<PathBuf, u64>> {
     CPM_WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-/// Hands out a distinct id to each `CpmFs`, so a claim can name its owner.
-static NEXT_CPM_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// A synthetic 32-byte CP/M directory entry (one extent of one file).
 pub type DirEntry = [u8; 32];
@@ -115,7 +111,7 @@ impl CpmFs {
     /// A filesystem rooted at `base` (the `CPM/` container), current drive
     /// A:, DMA at the default 0x0080.
     pub fn new(base: PathBuf) -> CpmFs {
-        let session = NEXT_CPM_SESSION.fetch_add(1, Ordering::SeqCst);
+        let session = super::image::registry::next_session_id();
         super::image::registry::session_start(session);
         CpmFs {
             base,
