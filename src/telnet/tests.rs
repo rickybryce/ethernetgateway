@@ -1605,6 +1605,69 @@ fn test_all_error_messages_fit_petscii() {
 /// Calls whose argument contains `format!` are skipped — their width depends on
 /// runtime values (a filename, an `io::Error`) and cannot be checked
 /// statically.  Those are the ones to keep short by hand.
+/// The CP/M disk screens print their own lines rather than going through the
+/// `show_error` helpers, so the scan above does not see them — and four of them
+/// were over budget the moment they were written.
+///
+/// Scanned rather than listed, for the reason given above: a hand-copied list
+/// keeps asserting about a string the code no longer uses.  Only literals are
+/// checked; a `format!` whose width depends on a filename cannot be checked
+/// statically and is truncated at the call site instead.
+#[test]
+fn test_cpm_disk_screen_literals_fit_petscii() {
+    // `\r` stripped: a CRLF checkout would otherwise put a stray byte inside
+    // every literal and fail this on Windows only.
+    const SOURCES: &[(&str, &str)] = &[
+        ("cpm_mount_ui.rs", include_str!("cpm_mount_ui.rs")),
+        ("cpm_boot_ui.rs", include_str!("cpm_boot_ui.rs")),
+    ];
+    /// The literal inside `self.dim("…")` and friends, and the indent of the
+    /// `format!` that prints it.
+    fn scan(src: &str) -> Vec<(usize, String)> {
+        let src = src.replace('\r', "");
+        let mut out = Vec::new();
+        // send_line(&format!("<indent>{}", self.colour("literal")
+        for (i, _) in src.match_indices("send_line(&format!(\"") {
+            let rest = &src[i + "send_line(&format!(\"".len()..];
+            let Some(brace) = rest.find("{}\"") else { continue };
+            let indent = &rest[..brace];
+            if !indent.chars().all(|c| c == ' ') {
+                continue;
+            }
+            let after = &rest[brace..];
+            let Some(q) = after.find("(\"") else { continue };
+            if after[..q].contains(';') {
+                continue; // not this call any more
+            }
+            let lit = &after[q + 2..];
+            let Some(end) = lit.find('"') else { continue };
+            out.push((indent.len(), lit[..end].to_string()));
+        }
+        // send_line("literal")
+        for (i, _) in src.match_indices("send_line(\"") {
+            let lit = &src[i + "send_line(\"".len()..];
+            let Some(end) = lit.find('"') else { continue };
+            out.push((0, lit[..end].to_string()));
+        }
+        out
+    }
+    let mut checked = 0;
+    for (name, src) in SOURCES {
+        for (indent, lit) in scan(src) {
+            if lit.contains('\\') {
+                continue; // an escape we are not measuring correctly
+            }
+            checked += 1;
+            assert!(
+                indent + lit.chars().count() <= PETSCII_WIDTH,
+                "{name}: {} cols wraps on a 40-column screen: {lit:?}",
+                indent + lit.chars().count()
+            );
+        }
+    }
+    assert!(checked > 20, "the scan found only {checked} literals — it stopped matching");
+}
+
 #[test]
 fn test_show_error_literals_fit_petscii() {
     // Every submodule that calls either helper.  A file missing from this list

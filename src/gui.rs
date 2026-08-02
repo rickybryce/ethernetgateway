@@ -1030,7 +1030,13 @@ impl App {
                 for drive0 in 0..crate::cpm::NUM_DRIVES {
                     let idx = drive0 as usize;
                     let letter = (b'A' + drive0) as char;
-                    let busy = usage.get(idx).and_then(|u| u.describe());
+                    // A lent drive reads as empty in the mount table, so it
+                    // would otherwise render free and enabled and then refuse
+                    // on Save with nothing on screen explaining why.
+                    let busy = usage
+                        .get(idx)
+                        .and_then(|u| u.describe())
+                        .or_else(|| crate::cpm::image::drive_held_note(drive0));
                     let mounted = mounts.get(idx).and_then(|m| m.as_ref());
                     {
                         ui.label(format!("{letter}:"));

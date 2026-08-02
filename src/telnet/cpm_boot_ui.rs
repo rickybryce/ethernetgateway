@@ -57,10 +57,12 @@ impl BootClaim {
     /// discarding the other's work. That is precisely the "one session per
     /// image" rule this type exists to keep.
     fn take(path: &std::path::Path) -> Option<BootClaim> {
-        if !crate::cpm::image::registry::claim_booted_image(path) {
-            return None;
-        }
-        Some(BootClaim(path.to_path_buf()))
+        // The key comes back from the claim and is kept verbatim.  Deriving it
+        // again at release time would need the file to still exist, and an
+        // image deleted mid-session would be released under a different name
+        // than it was claimed under — leaking the claim for the life of the
+        // process.
+        crate::cpm::image::registry::claim_booted_image(path).map(BootClaim)
     }
 }
 
@@ -1319,6 +1321,38 @@ mod tests {
         drop(first);
         // Released, so it can be booted again afterwards.
         assert!(BootClaim::take(&other_spelling).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A claim must be released even if the image is deleted while it is
+    /// booted.
+    ///
+    /// The key is canonicalised, and canonicalising needs the file to exist —
+    /// so re-deriving it at release time would file the removal under a
+    /// different name than the claim, and that image could never be booted or
+    /// mounted again without restarting the gateway.  With the shipped
+    /// relative `transfer_dir` this is not a corner case.
+    #[test]
+    fn test_a_claim_is_released_even_if_the_image_is_deleted() {
+        let dir = std::env::temp_dir().join("egw_claim_deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vanishing.dsk");
+        std::fs::write(&path, b"disk").unwrap();
+
+        let claim = BootClaim::take(&path).expect("claimed");
+        assert!(crate::cpm::image::registry::is_image_booted(&path));
+        // The operator deletes it from the images folder mid-session.
+        std::fs::remove_file(&path).unwrap();
+        drop(claim);
+
+        // Put it back and it must be bootable again.
+        std::fs::write(&path, b"disk").unwrap();
+        assert!(
+            !crate::cpm::image::registry::is_image_booted(&path),
+            "the claim leaked: this image can never be booted again"
+        );
+        assert!(BootClaim::take(&path).is_some(), "and can be claimed afresh");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

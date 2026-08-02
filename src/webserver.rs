@@ -1740,7 +1740,13 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let letter = (b'A' + drive0) as char;
         let mounted = mounts.get(drive0 as usize).and_then(|m| m.as_ref());
-        let busy = usage.get(drive0 as usize).and_then(|u| u.describe());
+        // A drive lent to a booted session reads as empty here, so without the
+        // note it would render free and enabled and then refuse on Save.
+        let held = crate::cpm::image::drive_held_note(drive0);
+        let busy = usage
+            .get(drive0 as usize)
+            .and_then(|u| u.describe())
+            .or_else(|| held.clone());
         let disabled = if busy.is_some() { " disabled" } else { "" };
 
         let mut opts = String::from("<option value=\"\">(drive folder)</option>");

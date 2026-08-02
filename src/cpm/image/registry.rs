@@ -263,20 +263,28 @@ fn booted_images() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
     B.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Claim an image for a booted session.  `false` if somebody already has it.
+/// Claim an image for a booted session, returning the key it was filed under,
+/// or `None` if somebody already has it.
 ///
 /// The key is canonicalised: boot targets and mount paths are built from one
 /// config value by two routes and only one of them canonicalises, so comparing
 /// them raw would let the same file be claimed twice under two names.
-pub fn claim_booted_image(path: &Path) -> bool {
+///
+/// **The caller must keep the key and release *that*.** Canonicalising again
+/// later is not the same operation: it needs the file to still be there, and
+/// falls back to the raw path when it is not. With the shipped relative
+/// `transfer_dir`, an image deleted while it was booted would therefore be
+/// released under a different key than it was claimed under — leaking the
+/// claim, so that image could never be booted or mounted again without a
+/// restart.
+pub fn claim_booted_image(path: &Path) -> Option<PathBuf> {
     let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    lock!(booted_images()).insert(key)
+    lock!(booted_images()).insert(key.clone()).then_some(key)
 }
 
-/// Release a booted image.
-pub fn release_booted_image(path: &Path) {
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    lock!(booted_images()).remove(&key);
+/// Release a booted image, by the key [`claim_booted_image`] handed back.
+pub fn release_booted_image(key: &Path) {
+    lock!(booted_images()).remove(key);
 }
 
 /// Is this image being run by a booted session right now?

@@ -82,7 +82,7 @@ pub fn images_dir(cpm_base: &Path) -> PathBuf {
 pub fn creatable_formats() -> Vec<(&'static str, &'static str)> {
     format::FORMATS
         .iter()
-        .filter(|f| f.blank_image().is_some())
+        .filter(|f| f.can_make_blank())
         .map(|f| (f.token, f.label))
         .collect()
 }
@@ -132,20 +132,55 @@ pub fn create_blank_image(
     if path.exists() {
         return Err(format!("{filename} already exists — delete it first"));
     }
-    // `create_new` so two sessions racing cannot both believe they made it.
-    let mut file = std::fs::OpenOptions::new()
+    // `create_new` so two sessions racing cannot both believe they made it —
+    // and it is the *final* name that is created that way, as an empty
+    // placeholder, so the claim on the name happens before the long write.
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
         .map_err(|e| format!("{filename}: {e}"))?;
-    use std::io::Write;
-    file.write_all(&blank).map_err(|e| format!("{filename}: {e}"))?;
-    file.flush().map_err(|e| format!("{filename}: {e}"))?;
+    drop(file);
+
+    // The content goes to a temporary and is renamed over that placeholder.
+    // A blank hard disk is 4.9 MB, and a write that stops partway — a full
+    // disk, a network transfer_dir — would otherwise leave a truncated image
+    // that mounts and looks plausible, with a retry then refused because the
+    // name already exists.  Every other write on this path is already
+    // write-then-rename; this one was not.
+    let mut tmp = path.clone().into_os_string();
+    tmp.push(".creating");
+    let tmp = PathBuf::from(tmp);
+    let write = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&blank)?;
+        f.flush()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("{filename}: {e}"));
+    }
 
     Ok(format!(
         "created {filename} — {}, empty and ready to mount",
         fmt.label
     ))
+}
+
+/// What a drive is doing that stops it being changed, for the mount screens.
+///
+/// A lent drive reads as *empty* in the mount table, so without this the three
+/// screens show a booted session's drives as free and enabled, and the operator
+/// gets an unexplained refusal when they press Save.  One function, because
+/// three screens phrasing the same state three ways is how they drift.
+pub fn drive_held_note(drive0: u8) -> Option<String> {
+    registry::boot_loans()
+        .into_iter()
+        .find(|(d, _)| *d == drive0)
+        .map(|(_, name)| format!("{name} — held by a booted disk"))
 }
 
 /// Open an image and publish it on a drive.
@@ -994,12 +1029,12 @@ mod tests {
         let path = images.join("altair8_running.dsk");
         std::fs::write(&path, format::by_token("altair8").unwrap().blank_image().unwrap()).unwrap();
 
-        assert!(registry::claim_booted_image(&path), "a free image claims");
-        assert!(!registry::claim_booted_image(&path), "and only once");
+        let key = registry::claim_booted_image(&path).expect("a free image claims");
+        assert!(registry::claim_booted_image(&path).is_none(), "and only once");
         let err = mount_image(&base, 1, "altair8_running.dsk").unwrap_err();
         assert!(err.contains("booted session"), "{err}");
 
-        registry::release_booted_image(&path);
+        registry::release_booted_image(&key);
         mount_image(&base, 1, "altair8_running.dsk").expect("mounts once the boot ends");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
@@ -1035,6 +1070,69 @@ mod tests {
         assert!(!registry::is_lent(1));
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A lent drive must be visible as held, in every screen, or the operator
+    /// sees a free drive and gets an unexplained refusal on Save.
+    #[test]
+    fn test_a_lent_drive_is_reported_as_held() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_held_note");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(
+            images.join("altair8_held.dsk"),
+            format::by_token("altair8").unwrap().blank_image().unwrap(),
+        )
+        .unwrap();
+        mount_image(&base, 1, "altair8_held.dsk").unwrap();
+        assert_eq!(drive_held_note(1), None, "an ordinary mount is not held");
+
+        registry::lend_for_boot(1).expect("lent");
+        let note = drive_held_note(1).expect("a lent drive is held");
+        assert!(note.contains("altair8_held.dsk"), "{note}");
+        assert!(note.contains("booted"), "{note}");
+        assert_eq!(drive_held_note(2), None, "and only that drive");
+
+        registry::end_boot_loan(1);
+        assert_eq!(drive_held_note(1), None);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Creating a blank must not leave a truncated image behind if the write
+    /// cannot finish — it would mount, look plausible, and refuse a retry
+    /// because the name is taken.
+    #[test]
+    fn test_a_created_blank_is_all_there_or_not_there() {
+        let base = std::env::temp_dir().join("egw_create_atomic");
+        let _ = std::fs::remove_dir_all(&base);
+        create_blank_image(&base, "altair8", "whole").expect("creates");
+        let made = images_dir(&base).join("altair8_whole.dsk");
+        assert_eq!(std::fs::metadata(&made).unwrap().len(), 337_568, "a whole disk");
+        // No staging file survives a success.
+        assert!(!images_dir(&base).join("altair8_whole.dsk.creating").exists());
+        // And what landed really is a mountable blank, not a part of one.
+        let fmt = format::by_token("altair8").unwrap();
+        assert_eq!(std::fs::read(&made).unwrap(), fmt.blank_image().unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `can_make_blank` is what the screens ask, `blank_image` is what actually
+    /// builds one, and they must never disagree about which formats work — the
+    /// cheap answer existing at all is only safe while it is the same answer.
+    #[test]
+    fn test_can_make_blank_agrees_with_blank_image() {
+        for f in format::FORMATS {
+            assert_eq!(
+                f.can_make_blank(),
+                f.blank_image().is_some(),
+                "{}: the cheap check and the real one disagree",
+                f.token
+            );
+        }
     }
 
     /// A traversal attempt must be refused before anything touches the disk.

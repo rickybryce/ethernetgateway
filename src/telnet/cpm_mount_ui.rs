@@ -44,7 +44,8 @@ impl TelnetSession {
 
             // What is mounted right now, so the operator sees the state before
             // being asked to change it.
-            let any = mounts.iter().any(|m| m.is_some());
+            let lent = image::registry::boot_loans();
+            let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
             if any {
                 self.send_line("  Mounted:").await?;
                 for (i, m) in mounts.iter().enumerate() {
@@ -63,6 +64,17 @@ impl TelnetSession {
                         self.amber(&truncate_to_width(&m.filename, width)),
                         ro,
                         self.dim(&busy),
+                    ))
+                    .await?;
+                }
+                for (drive0, name) in &lent {
+                    let letter = (b'A' + drive0) as char;
+                    let width = if self.terminal_type == TerminalType::Petscii { 20 } else { 52 };
+                    self.send_line(&format!(
+                        "   {}: {} {}",
+                        self.cyan(&letter.to_string()),
+                        self.amber(&truncate_to_width(name, width)),
+                        self.dim("(booted)"),
                     ))
                     .await?;
                 }
@@ -119,7 +131,7 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.yellow("NEW BLANK DISK"))).await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
-        self.send_line(&format!("  {}", self.dim("An empty, formatted disk to put files on."))).await?;
+        self.send_line(&format!("  {}", self.dim("An empty, formatted disk for files."))).await?;
         self.send_line("").await?;
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         for (i, (_, label)) in formats.iter().enumerate() {
@@ -218,17 +230,17 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.amber("No bootable images found."))).await?;
             self.send_line("").await?;
             self.send_line("  Only Altair 88-DCDD floppies can boot:").await?;
-            self.send_line("  337,568 bytes (8-inch) or 76,720 (minidisk).").await?;
+            self.send_line("  337,568 bytes (8in) or 76,720 (mini).").await?;
             self.send_line("").await?;
             self.send("  Press any key to continue.").await?;
             self.flush().await?;
             let _ = self.wait_for_key().await;
             return Ok(());
         }
-        self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating system."))).await?;
-        self.send_line(&format!("  {}", self.dim("Its drive FOLDERS do not apply. Mounted"))).await?;
-        self.send_line(&format!("  {}", self.dim("images do: each rides the unit its letter"))).await?;
-        self.send_line(&format!("  {}", self.dim("names, and the disk's OS decides how many."))).await?;
+        self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating"))).await?;
+        self.send_line(&format!("  {}", self.dim("system. Its drive FOLDERS do not"))).await?;
+        self.send_line(&format!("  {}", self.dim("apply; mounted images do, each on"))).await?;
+        self.send_line(&format!("  {}", self.dim("the unit its letter names."))).await?;
         self.send_line("").await?;
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         for (i, n) in bootable.iter().take(Self::TRANSFER_PAGE_SIZE).enumerate() {
@@ -354,7 +366,7 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.amber("No disk images found.")))
                 .await?;
             self.send_line("").await?;
-            self.send_line("  Put .dsk files in the transfer directory").await?;
+            self.send_line("  Put .dsk files in the transfer dir").await?;
             self.send_line("  under CPM/images, then try again.").await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.dim("readme.txt there explains the names.")))
@@ -558,12 +570,14 @@ impl TelnetSession {
 
     /// Write the live mount table back to `cpm_mounts` so it survives a restart.
     fn cpmmount_persist(&self) {
-        let mounts: Vec<(u8, String)> = image::registry::all()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| m.as_ref().map(|m| (i as u8, m.filename.clone())))
-            .collect();
-        let value = image::format_mounts(&mounts);
+        // The shared helper, not a local rebuild of the same list.  This screen
+        // used to assemble it from `registry::all()` alone, which omits a drive
+        // lent to a booted session — so mounting anything here while somebody
+        // was booted rewrote `cpm_mounts` without their drives, and they were
+        // gone after the next restart.  The web and desktop screens already
+        // went through `current_mounts_value`; this was the same defect
+        // surviving in a second copy of the rule.
+        let value = image::current_mounts_value();
         std::thread::spawn(move || {
             config::update_config_value("cpm_mounts", &value);
         });

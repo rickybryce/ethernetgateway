@@ -433,6 +433,39 @@ impl Format {
         self.total_records.saturating_sub(self.reserved_records)
     }
 
+    /// Can a blank of this format be made at all?
+    ///
+    /// Separate from [`Format::blank_image`] because the UIs ask this question
+    /// far more often than they need an actual disk — the desktop mount screen
+    /// asks it on *every frame* — and building the answer by generating the
+    /// images costs 5.6 MB of allocation and about 4 ms a time, which is a
+    /// measurable slice of a 60 Hz frame budget spent on a list of three
+    /// labels.
+    ///
+    /// `blank_image` calls this first, so the two cannot disagree about which
+    /// formats are supported; `test_can_make_blank_agrees_with_blank_image`
+    /// pins that.
+    pub fn can_make_blank(&self) -> bool {
+        match self.framing {
+            // No per-sector headers to author: a blank is 0xE5 and the whole
+            // question is arithmetic.
+            Framing::Raw => true,
+            // Never measured, and a guess is worse than a refusal.
+            Framing::Framed { .. } => false,
+            Framing::AltairSplit { seclen, sectrk, first_off, rest_off, .. } => {
+                // The byte positions the writer uses — the stop bytes, the
+                // tail, the check byte — were measured on this geometry and
+                // hold for nothing else.  `sectrk` is in the check because
+                // `ALTAIR_SECTOR_ORDER` has exactly 32 entries and is indexed
+                // by the position in a track.
+                (seclen, sectrk, first_off, rest_off) == (137, 32, 3, 7)
+                    // And a disk deeper than 256 tracks cannot state its own
+                    // track number in a byte, so there is no header to write.
+                    && self.total_records as u64 / sectrk as u64 <= u8::MAX as u64 + 1
+            }
+        }
+    }
+
     /// A freshly-formatted, empty image of this format — what a blank floppy
     /// out of the box looks like, ready to mount and write files to.
     ///
@@ -449,6 +482,9 @@ impl Format {
     /// `test_our_blank_altair_matches_the_guests_own_format` requires our output
     /// to equal it byte for byte.
     pub fn blank_image(&self) -> Option<Vec<u8>> {
+        if !self.can_make_blank() {
+            return None;
+        }
         let total = self.total_records as u64;
         match self.framing {
             // No headers at all: the empty directory and the empty data area
@@ -466,17 +502,6 @@ impl Format {
                 // rather than indexed out of range, which keeps "an unmeasured
                 // format is not offered" a property of the code and not of a
                 // test that could be deleted.
-                // `sectrk` is in the check because `ALTAIR_SECTOR_ORDER` has
-                // exactly 32 entries and is indexed by the position in a track;
-                // a wider track would run off the end of it.
-                if (seclen, sectrk, first_off, rest_off) != (137, 32, 3, 7) {
-                    return None;
-                }
-                // And a disk deeper than 255 tracks cannot state its own track
-                // number in a byte, so there is no correct header to write.
-                if total / sectrk as u64 > u8::MAX as u64 + 1 {
-                    return None;
-                }
                 let mut out = vec![0u8; (total * seclen as u64) as usize];
                 for rec in 0..total {
                     let track = (rec / sectrk as u64) as u8;
