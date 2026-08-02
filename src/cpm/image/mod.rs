@@ -157,10 +157,26 @@ pub fn create_blank_image(
 ///
 /// A drive somebody is using is refused; see [`registry::check_can_change`].
 pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
+    registry::check_can_change(drive0)?;
+    mount_image_unchecked(cpm_base, drive0, filename)
+}
+
+/// Put back a mount a booted session borrowed.
+///
+/// The same work as [`mount_image`] without the in-use check, because this is
+/// not a change anybody may veto: the drive was already the operator's, and it
+/// is being restored to what it was.  A lent drive reads as *empty*, so another
+/// session can park on it while the boot runs — and if that were allowed to
+/// refuse the restore, the drive would end up neither mounted nor lent and
+/// would vanish from `cpm_mounts` on the next save from any screen.
+pub fn restore_mount(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
+    mount_image_unchecked(cpm_base, drive0, filename)
+}
+
+fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
     if !is_safe_image_name(filename) {
         return Err(format!("'{filename}' is not a valid image name"));
     }
-    registry::check_can_change(drive0)?;
 
     let path = images_dir(cpm_base).join(filename);
     let size = std::fs::metadata(&path)
@@ -897,6 +913,55 @@ mod tests {
         registry::end_boot_loan(1);
         mount_image(&base, 1, "altair8_one.dsk").unwrap();
         assert_eq!(current_mounts_value(), full);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Putting a borrowed mount back is a restore, not a change, and nobody
+    /// may veto it.
+    ///
+    /// A lent drive reads as *empty*, so while a boot runs another session can
+    /// simply park on that drive.  If the restore went through the ordinary
+    /// in-use check it would then be refused, and the drive would end up
+    /// neither mounted nor lent — which drops it from `cpm_mounts` on the next
+    /// save from any screen, losing the operator's configuration for good.
+    #[test]
+    fn test_restoring_a_borrowed_mount_cannot_be_refused() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_restore_not_vetoable");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(
+            images.join("altair8_borrowed.dsk"),
+            format::by_token("altair8").unwrap().blank_image().unwrap(),
+        )
+        .unwrap();
+        mount_image(&base, 1, "altair8_borrowed.dsk").unwrap();
+
+        // A booted session borrows B:.
+        registry::lend_for_boot(1).expect("lent");
+        registry::end_boot_loan(1);
+
+        // Meanwhile somebody parks on the now-empty-looking drive.
+        let squatter = registry::next_session_id();
+        registry::session_start(squatter);
+        registry::session_select(squatter, 1);
+        assert!(
+            mount_image(&base, 1, "altair8_borrowed.dsk").is_err(),
+            "an ordinary mount is still refused while a session sits there"
+        );
+
+        // The restore goes through anyway — it is giving back what was taken.
+        restore_mount(&base, 1, "altair8_borrowed.dsk").expect("a restore is not vetoable");
+        assert_eq!(
+            registry::get(1).map(|m| m.filename),
+            Some("altair8_borrowed.dsk".to_string())
+        );
+        assert_eq!(current_mounts_value(), "B=altair8_borrowed.dsk");
+
+        registry::session_end(squatter);
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }

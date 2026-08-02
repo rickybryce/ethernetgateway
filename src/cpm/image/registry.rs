@@ -277,6 +277,18 @@ pub fn lend_for_boot(drive0: u8) -> Option<Mount> {
     Some(mount)
 }
 
+/// Is this drive lent to a booted session?
+pub fn is_lent(drive0: u8) -> bool {
+    lock!(borrowed()).contains_key(&drive0)
+}
+
+/// Record a loan without a mount behind it, for tests that need a drive to
+/// read as lent.
+#[cfg(test)]
+pub fn note_loan_for_tests(drive0: u8, filename: &str) {
+    lock!(borrowed()).insert(drive0, filename.to_string());
+}
+
 /// Stop recording a drive as lent.  The caller mounts it again itself.
 pub fn end_boot_loan(drive0: u8) -> Option<String> {
     lock!(borrowed()).remove(&drive0)
@@ -339,6 +351,78 @@ mod tests {
     fn reset() {
         clear_all();
         lock!(sessions()).clear();
+    }
+
+    /// Hammer every entry point that touches the mount table and the loan
+    /// table from several threads at once, and require the lot to finish.
+    ///
+    /// `lend_for_boot` is the only place that holds one of those locks while
+    /// taking the other, so a lock-order inversion added later is the defect
+    /// this shape of code invites — and a deadlock is not something reading the
+    /// diff reliably catches.  The deadline is the assertion: if the ordering
+    /// is ever inverted this stops finishing rather than failing an assert, so
+    /// the test reports it instead of hanging the suite.
+    #[test]
+    fn test_the_mount_and_loan_locks_do_not_deadlock() {
+        let _g = registry_lock();
+        reset();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::new();
+        for t in 0..6u8 {
+            let tx = tx.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..3_000u32 {
+                    let d = ((t as u32 + i) % NUM_DRIVES as u32) as u8;
+                    match i % 6 {
+                        0 => {
+                            let _ = lend_for_boot(d);
+                        }
+                        1 => {
+                            let _ = end_boot_loan(d);
+                        }
+                        2 => {
+                            let _ = boot_loans();
+                        }
+                        3 => {
+                            let _ = check_can_change(d);
+                        }
+                        4 => {
+                            let _ = all();
+                        }
+                        _ => {
+                            let _ = unmount(d);
+                        }
+                    }
+                }
+                let _ = tx.send(());
+            }));
+        }
+        drop(tx);
+        for n in 0..6 {
+            rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_else(|_| {
+                panic!("thread {n} never finished — the mount and loan locks deadlocked")
+            });
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        reset();
+    }
+
+    /// The loan table has to behave at its edges: a drive that is not mounted
+    /// cannot be lent, a drive already lent cannot be lent twice, and a drive
+    /// number past the end is refused rather than panicking.
+    #[test]
+    fn test_loan_edges() {
+        let _g = registry_lock();
+        reset();
+        assert!(lend_for_boot(0).is_none(), "nothing mounted, nothing to lend");
+        assert!(lend_for_boot(200).is_none(), "a wild drive number must not panic");
+        assert!(end_boot_loan(200).is_none());
+        assert!(boot_loans().is_empty());
+        assert!(check_can_change(0).is_ok());
+        reset();
     }
 
     #[test]

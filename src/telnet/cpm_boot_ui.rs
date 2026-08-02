@@ -54,13 +54,24 @@ impl Drop for BootClaim {
 }
 
 impl BootClaim {
+    /// Claim an image, by identity rather than by spelling.
+    ///
+    /// The key is canonicalised for the same reason [`same_file`] exists: boot
+    /// targets and mount paths are built from the same config value by
+    /// different code, and only one of those routes canonicalises — so the same
+    /// file arrives under a relative and an absolute name. Comparing the two
+    /// raw would let one disk be claimed twice, put it in two machines at once,
+    /// and have both write it back at teardown with the last one out silently
+    /// discarding the other's work. That is precisely the "one session per
+    /// image" rule this type exists to keep.
     fn take(path: &std::path::Path) -> Option<BootClaim> {
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let mut held = booted().lock().unwrap_or_else(|e| e.into_inner());
-        if held.contains(path) {
+        if held.contains(&key) {
             return None;
         }
-        held.insert(path.to_path_buf());
-        Some(BootClaim(path.to_path_buf()))
+        held.insert(key.clone());
+        Some(BootClaim(key))
     }
 }
 
@@ -119,6 +130,10 @@ struct BootPlanStep {
     unit: u8,
     path: std::path::PathBuf,
     writable: bool,
+    /// Take the mount out of service but do **not** put the disk in a unit.
+    /// Only the booted disk itself: it is already unit 0, and its mount exists
+    /// solely to be got out of the way of the write-back.
+    lend_only: bool,
 }
 
 /// Decide which mounted images a booted machine should carry, and where.
@@ -156,16 +171,33 @@ fn plan_boot_disks(
             continue;
         }
         let letter = (b'A' + drive0 as u8) as char;
-        if drive0 == 0 {
-            // Unit 0 is the disk we booted.  Anything mounted on A: is behind
-            // it, and saying so beats letting someone wonder where it went.
-            if !same_file(&mount.path, boot_image) {
-                notes.push(format!("A: {} is behind the boot disk.", mount.filename));
-            }
+        // The disk being booted, if it also happens to be mounted somewhere.
+        // It must not go into a second unit — one file in two units is two
+        // views with separate write-backs — but the mount still has to be taken
+        // out of service, and *that* is the case the first version of this
+        // missed.  The boot session rewrites this file wholesale, so a live
+        // `ImageFs` left over it ends up holding an open descriptor on an
+        // unlinked inode: every later read shows pre-boot content and every
+        // write disappears into a deleted file, silently.
+        if same_file(&mount.path, boot_image) {
+            plan.push(BootPlanStep {
+                unit: drive0 as u8,
+                path: mount.path.clone(),
+                writable: false,
+                lend_only: true,
+            });
+            notes.push(if drive0 == 0 {
+                format!("A: {} is the boot disk.", mount.filename)
+            } else {
+                format!("{letter}: is the boot disk; held, not repeated.")
+            });
             continue;
         }
-        if same_file(&mount.path, boot_image) {
-            notes.push(format!("{letter}: is the boot disk; not repeated."));
+        if drive0 == 0 {
+            // Unit 0 belongs to the disk we booted, so anything else mounted on
+            // A: is behind it.  Saying so beats letting someone wonder where it
+            // went — but it is not touched, and stays usable elsewhere.
+            notes.push(format!("A: {} is behind the boot disk.", mount.filename));
             continue;
         }
         if usage.get(drive0).and_then(|u| u.describe()).is_some() {
@@ -176,6 +208,7 @@ fn plan_boot_disks(
             unit: drive0 as u8,
             path: mount.path.clone(),
             writable: writable && !mount.read_only,
+            lend_only: false,
         });
     }
     (plan, notes)
@@ -197,10 +230,11 @@ fn gap_warning<T>(disks: &[Option<T>]) -> Option<String> {
     if gaps.is_empty() {
         return None;
     }
-    Some(format!(
-        "{} empty - selecting one looks like a hang (ESC ESC out).",
-        gaps.join(" ")
-    ))
+    // Two short lines rather than one long one: this is read on a 40-column
+    // PETSCII screen as often as an 80-column one, and the neighbouring static
+    // text was hand-split to fit.  Generated text has to be built to the same
+    // width or it is the only thing on the screen that wraps.
+    Some(format!("{} empty - a guest that picks", gaps.join(" ")))
 }
 
 /// Marks the drives a booted session is holding as in use, and releases them
@@ -269,9 +303,15 @@ impl Drop for RemountOnDrop {
         for (drive, name) in std::mem::take(&mut self.taken) {
             // End the loan first: a lent drive refuses a mount change, and this
             // session is the one holding it.
+            // Restoring is not a mount *change*, so it is not something another
+            // session may veto.  `mount_image` refuses a drive that reads as in
+            // use, and a lent drive reads as empty — so anyone who parked on it
+            // meanwhile could otherwise block the restore, and the drive would
+            // end up neither mounted nor lent, which drops it from
+            // `cpm_mounts` on the next save from any screen.
             crate::cpm::image::registry::end_boot_loan(drive);
-            if let Err(e) = crate::cpm::image::mount_image(&self.base, drive, &name) {
-                glog!("CP/M boot: could not remount {} on drive {}: {}", name, drive, e);
+            if let Err(e) = crate::cpm::image::restore_mount(&self.base, drive, &name) {
+                glog!("CP/M boot: could not restore {} on drive {}: {}", name, drive, e);
             }
         }
     }
@@ -358,6 +398,15 @@ impl TelnetSession {
         );
         for step in plan {
             let letter = (b'A' + step.unit) as char;
+            // The booted disk's own mount: take it out of service and stop.
+            // It is already in unit 0, and claiming or inserting it again would
+            // be the double-view this exists to prevent.
+            if step.lend_only {
+                if let Some(m) = registry::lend_for_boot(step.unit) {
+                    remounts.taken.push((step.unit, m.filename.clone()));
+                }
+                continue;
+            }
             let name = step
                 .path
                 .file_name()
@@ -535,14 +584,17 @@ impl TelnetSession {
         // four — so this says what the hardware offers, not what will appear.
         if !notes.is_empty() {
             self.send_line(&format!("  {}", self.dim("Also in the drives:"))).await?;
+            let width = if self.terminal_type == TerminalType::Petscii { 36 } else { 74 };
             for note in &notes {
-                self.send_line(&format!("   {}", self.dim(note))).await?;
+                self.send_line(&format!("   {}", self.dim(&truncate_to_width(note, width))))
+                    .await?;
             }
-            self.send_line(&format!(
-                "  {}",
-                self.dim("The disk's own OS decides how many it uses.")
-            ))
-            .await?;
+            if notes.iter().any(|n| n.contains("empty")) {
+                self.send_line(&format!("   {}", self.dim("one looks like a hang: ESC ESC out.")))
+                    .await?;
+            }
+            self.send_line(&format!("  {}", self.dim("The disk's own OS decides how"))).await?;
+            self.send_line(&format!("  {}", self.dim("many of them it can use."))).await?;
         }
         match &attach {
             ModemAttach::Ports(status, data) => {
@@ -875,7 +927,10 @@ mod tests {
         let m = mounts(&[(0, "boot.dsk", false), (1, "b.dsk", false), (5, "f.dsk", false)]);
         let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
         assert_eq!(
-            plan.iter().map(|s| (s.unit, s.path.clone())).collect::<Vec<_>>(),
+            plan.iter()
+                .filter(|s| !s.lend_only)
+                .map(|s| (s.unit, s.path.clone()))
+                .collect::<Vec<_>>(),
             vec![
                 (1u8, PathBuf::from("/images/b.dsk")),
                 (5u8, PathBuf::from("/images/f.dsk")),
@@ -888,14 +943,17 @@ mod tests {
     /// any unit, but what it loads comes up as A: and reads unit 0 — so a
     /// second disk there would be running the wrong machine.
     #[test]
-    fn test_unit_zero_is_never_planned() {
-        // A: holds the boot disk itself — nothing to say, nothing to insert.
+    fn test_unit_zero_never_receives_a_disk() {
+        // A: holds the boot disk itself.  Nothing is inserted — it is already
+        // unit 0 — but the mount must still be taken out of service, because
+        // the session is going to rewrite that very file.
         let m = mounts(&[(0, "boot.dsk", false)]);
-        let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
-        assert!(plan.is_empty());
-        assert!(notes.is_empty(), "no news is the right amount of news: {notes:?}");
+        let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].lend_only, "the boot disk's own mount is lent, not inserted");
 
         // A: holds something else — it is shadowed, and the operator is told.
+        // It is not touched: it stays mounted and usable elsewhere.
         let m = mounts(&[(0, "other.dsk", false)]);
         let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
         assert!(plan.is_empty(), "unit 0 is the boot disk's, always");
@@ -903,13 +961,17 @@ mod tests {
     }
 
     /// The same file in two units would be two views of one disk with separate
-    /// write-backs, and whichever saved last would win.
+    /// write-backs, and whichever saved last would win.  It is still lent,
+    /// though: the session rewrites that file, and a live `ImageFs` left over
+    /// it would afterwards be holding an unlinked inode.
     #[test]
-    fn test_the_boot_image_is_never_inserted_twice() {
+    fn test_the_boot_image_is_lent_but_never_inserted_twice() {
         let m = mounts(&[(3, "boot.dsk", false)]);
         let (plan, notes) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16);
-        assert!(plan.is_empty());
-        assert!(notes.iter().any(|n| n.contains("not repeated")), "{notes:?}");
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].lend_only, "taken out of service, not given a unit");
+        assert_eq!(plan[0].unit, 3, "lent from the drive it is actually on");
+        assert!(notes.iter().any(|n| n.contains("boot disk")), "{notes:?}");
     }
 
     /// Two ways to be read-only, and the stricter wins.  This path writes raw
@@ -985,8 +1047,9 @@ mod tests {
             fs: mount_at("boot.dsk", false).fs,
         });
         let (plan, notes) = plan_boot_disks(&m, &idle(), &real, true, 16);
-        assert!(plan.is_empty(), "the boot disk must not be inserted twice");
-        assert!(notes.iter().any(|n| n.contains("not repeated")), "{notes:?}");
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].lend_only, "the boot disk must not be inserted twice");
+        assert!(notes.iter().any(|n| n.contains("boot disk")), "{notes:?}");
 
         // Two genuinely different files are still two different files.
         let other = dir.join("other.dsk");
@@ -1000,7 +1063,9 @@ mod tests {
             format: "altair8",
             fs: mount_at("other.dsk", false).fs,
         });
-        assert_eq!(plan_boot_disks(&m2, &idle(), &real, true, 16).0.len(), 1);
+        let other_plan = plan_boot_disks(&m2, &idle(), &real, true, 16).0;
+        assert_eq!(other_plan.len(), 1);
+        assert!(!other_plan[0].lend_only, "a different file really is inserted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1193,6 +1258,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// One image must never be claimed twice because two code paths spell its
+    /// path differently.  Boot targets and mount paths come from the same
+    /// config value by different routes and only one canonicalises, so raw
+    /// equality would put one disk in two machines, both writing it back.
+    #[test]
+    fn test_a_claim_is_by_identity_not_by_spelling() {
+        let dir = std::env::temp_dir().join("egw_claim_identity");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let real = dir.join("one.dsk");
+        std::fs::write(&real, b"disk").unwrap();
+        let other_spelling = dir.join("sub").join("..").join("one.dsk");
+        assert_ne!(other_spelling, real, "the test needs two spellings");
+
+        let first = BootClaim::take(&real).expect("first claim");
+        assert!(
+            BootClaim::take(&other_spelling).is_none(),
+            "the same file claimed twice under another name"
+        );
+        drop(first);
+        // Released, so it can be booted again afterwards.
+        assert!(BootClaim::take(&other_spelling).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Only drives really taken from the mount table are marked busy.  Marking
     /// unit 0 would refuse a mount change on A: while naming a drive nothing is
     /// using, for as long as the booted session sits at its prompt.
@@ -1238,7 +1328,9 @@ mod tests {
         };
         let w = gap_warning(&filled(&[0, 1, 2, 5])).expect("D: and E: are gaps");
         assert!(w.contains("D:") && w.contains("E:"), "{w}");
-        assert!(w.contains("ESC"), "the way out must be in the warning: {w}");
+        // Generated text goes on a 40-column PETSCII screen too, and the three
+        // spaces it is indented by count against it.
+        assert!(w.len() + 3 <= 40, "{} chars will wrap on PETSCII: {w:?}", w.len() + 3);
         // Contiguous drives have no gap, and neither does a lone boot disk.
         assert_eq!(gap_warning(&filled(&[0, 1, 2])), None);
         assert_eq!(gap_warning(&filled(&[0])), None);

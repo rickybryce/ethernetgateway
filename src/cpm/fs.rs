@@ -137,6 +137,21 @@ impl CpmFs {
         super::image::registry::get(drive0)
     }
 
+    /// Is this drive lent to a booted session right now?
+    ///
+    /// A lent drive is not the same as an unmounted one, and the difference
+    /// matters most in the middle of a file.  A session writing `B:BIG.TXT`
+    /// record by record is invisible to the in-use check a boot consults
+    /// (`session_writing` brackets a single record), so a boot can take drive
+    /// B: away between two of them.  Without this the remaining records would
+    /// fall through to the *folder* behind that drive — half the file in the
+    /// image, half in `CPM/B/`, and not one error anywhere.  Reporting the
+    /// drive as unavailable turns silent corruption into an ordinary CP/M
+    /// failure, which is what a disk that has been pulled out should look like.
+    fn lent_away(&self, drive0: u8) -> bool {
+        super::image::registry::is_lent(drive0)
+    }
+
     /// The image mounted on the drive an FCB names, if any.
     fn mounted_for(&self, fcb: &Fcb) -> Option<super::image::registry::Mount> {
         self.mounted(self.drive_index_for(fcb.drive)?)
@@ -369,6 +384,13 @@ impl CpmFs {
     /// path.  Re-validates as a concrete name (rejecting wildcards and
     /// separators) so the join cannot traverse out of the drive directory.
     fn resolve_name(&self, drive0: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<PathBuf> {
+        // A drive lent to a booted session is not folder-backed — it is a drive
+        // whose disk has been taken out.  Falling through to the folder here is
+        // how half a file ends up in the image and half in `CPM/B/`; see
+        // `lent_away`.
+        if self.lent_away(drive0) {
+            return None;
+        }
         let filename = format_8_3(name, ext);
         // Primary defense: a concrete 8.3 name carries no separators or
         // "..", so joining it onto a fixed single-letter drive directory
@@ -1924,4 +1946,38 @@ mod tests {
         assert_eq!(fs.ro_vector(), 0);
         let _ = std::fs::remove_dir_all(&base);
     }
+    /// A drive lent to a booted session must not quietly become folder-backed.
+    ///
+    /// The window is real: a session writing `B:BIG.TXT` record by record is
+    /// invisible to the in-use check a boot consults, so a boot can take drive
+    /// B: away between two records.  Falling through to `CPM/B/` would put half
+    /// the file in the image and half in the folder, with no error anywhere.
+    #[test]
+    fn test_a_lent_drive_is_unavailable_not_folder_backed() {
+        use crate::cpm::image::registry;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_lent_not_folder");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        let fs = CpmFs::new(base.clone());
+
+        let fcb = fcb_named(2, "BIG", "TXT");
+        assert!(fs.resolve(&fcb).is_some(), "B: is an ordinary folder drive to begin with");
+
+        // Now a booted session takes B:.  There is no mount to lend in this
+        // test, so record the loan directly — what matters is how the
+        // filesystem behaves while a drive reads as lent.
+        registry::note_loan_for_tests(1, "altair8_work.dsk");
+        assert!(
+            fs.resolve(&fcb).is_none(),
+            "a lent drive must report a failure, not write into its folder"
+        );
+
+        registry::end_boot_loan(1);
+        assert!(fs.resolve(&fcb).is_some(), "and it comes back when the boot ends");
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }
