@@ -12,7 +12,7 @@
 //! is, and the readme is written only when absent — an operator who has
 //! annotated it keeps their notes.
 
-use super::boot_machine::{BOOT_GEOMETRIES, MAX_IMAGE_TRAILER};
+use super::dcdd::{BOOT_GEOMETRIES, MAX_IMAGE_TRAILER};
 use super::image::{format::FORMATS, IMAGES_DIR};
 use std::path::{Path, PathBuf};
 

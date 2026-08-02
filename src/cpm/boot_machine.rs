@@ -28,7 +28,8 @@
 //!   instead of an echo of itself.
 
 use super::boot::{cold_boot, BootError};
-use super::dcdd::{Dcdd, Disk, Geometry, Request, SECTOR_LEN};
+use super::controller::{Controller, HostRequest};
+use super::dcdd::{Dcdd, SECTOR_LEN};
 use super::modem_port::ModemPort;
 use super::uart::{ModemAccess, UartFamily};
 use iz80::{Cpu, Machine};
@@ -93,9 +94,11 @@ pub enum ModemAttach {
 }
 
 /// One image in a drive.
+///
+/// No geometry here any more: where a byte lives is the controller's
+/// arithmetic, and the machine's only job is to copy the range it is given.
 struct Mounted {
     bytes: Vec<u8>,
-    geometry: Geometry,
     read_only: bool,
     dirty: bool,
 }
@@ -103,7 +106,12 @@ struct Mounted {
 /// Memory, ports and drives for a booted disk.
 pub struct BootMachine {
     mem: Vec<u8>,
-    dcdd: Dcdd,
+    /// The controllers this machine carries, each claiming its own ports.
+    ///
+    /// A list rather than a field per board: adding the 88-HDSK should be
+    /// writing a `Controller` and pushing it here, not surgery on the port
+    /// dispatch.  One entry today.
+    controllers: Vec<Box<dyn Controller>>,
     disks: Vec<Option<Mounted>>,
     /// Bytes the guest has printed.
     tx: Vec<u8>,
@@ -136,7 +144,7 @@ impl BootMachine {
     pub fn new() -> BootMachine {
         BootMachine {
             mem: vec![0; 0x10000],
-            dcdd: Dcdd::new(),
+            controllers: vec![Box::new(Dcdd::new())],
             disks: (0..16).map(|_| None).collect(),
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
@@ -226,11 +234,32 @@ impl BootMachine {
     /// sector off the host would turn every `DIR` into a storm of small reads.
     /// Writes are collected and given back with [`BootMachine::take_dirty`].
     pub fn insert(&mut self, drive: u8, bytes: Vec<u8>, read_only: bool) -> Result<(), String> {
-        let geometry = geometry_for(bytes.len() as u64)
-            .ok_or_else(|| format!("{} bytes is not an 88-DCDD image", bytes.len()))?;
-        self.dcdd.insert(drive, Disk { geometry, read_only });
+        // Offered to each controller in turn; the first that recognises the
+        // size takes it.  That is how an image is matched to hardware — the
+        // boards took different media, and before anything is running the file
+        // length is all there is to go on.
+        let len = bytes.len() as u64;
+        let taken = self
+            .controllers
+            .iter_mut()
+            .find(|c| c.accepts(len).is_some())
+            .map(|c| c.insert(drive, len, read_only));
+        match taken {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(e),
+            None => {
+                // Name the hardware rather than just refusing: with more than
+                // one controller "wrong size" is not enough to act on, and the
+                // operator needs to know what this machine actually takes.
+                let carries: Vec<&str> = self.controllers.iter().map(|c| c.name()).collect();
+                return Err(format!(
+                    "{len} bytes is not a disk this machine can carry — it has: {}",
+                    carries.join(", ")
+                ));
+            }
+        }
         if let Some(slot) = self.disks.get_mut(drive as usize) {
-            *slot = Some(Mounted { bytes, geometry, read_only, dirty: false });
+            *slot = Some(Mounted { bytes, read_only, dirty: false });
         }
         Ok(())
     }
@@ -262,10 +291,16 @@ impl BootMachine {
     /// to do with a disk that loads and then runs off into nothing.
     #[cfg(test)]
     fn boot_with_step(&mut self, cpu: &mut Cpu, drive: u8, step: u8) -> Result<(), BootError> {
-        let disks = &self.disks;
+        let BootMachine { disks, controllers, mem, .. } = self;
+        let disks = &*disks;
+        // Only the floppy controller has a bootstrap; see `Controller::as_dcdd`.
+        let dcdd = controllers
+            .iter_mut()
+            .find_map(|c| c.as_dcdd())
+            .ok_or(BootError::NoDisk(drive))?;
         let mut chunks: Vec<(u16, Vec<u8>)> = Vec::new();
         let entry = super::boot::cold_boot_with_step(
-            &mut self.dcdd,
+            dcdd,
             drive,
             step,
             |d, t, s| {
@@ -273,7 +308,12 @@ impl BootMachine {
                     .get(d as usize)
                     .and_then(|x| x.as_ref())
                     .ok_or_else(|| format!("drive {d} is empty"))?;
-                let off = m.geometry.offset(t, s) as usize;
+                // Recomputed from the image rather than stored beside it: where
+                // a byte lives is the controller's arithmetic now, and the
+                // bootstrap is the one place left that still needs it directly.
+                let geometry = super::dcdd::geometry_for(m.bytes.len() as u64)
+                    .ok_or_else(|| format!("drive {d} does not hold an 88-DCDD image"))?;
+                let off = geometry.offset(t, s) as usize;
                 m.bytes
                     .get(off..off + SECTOR_LEN)
                     .map(|b| b.to_vec())
@@ -283,8 +323,8 @@ impl BootMachine {
         )?;
         for (addr, bytes) in chunks {
             let at = addr as usize;
-            let end = (at + bytes.len()).min(self.mem.len());
-            self.mem[at..end].copy_from_slice(&bytes[..end - at]);
+            let end = (at + bytes.len()).min(mem.len());
+            mem[at..end].copy_from_slice(&bytes[..end - at]);
         }
         cpu.registers().set_pc(entry);
         Ok(())
@@ -292,20 +332,33 @@ impl BootMachine {
 
     /// Cold-boot from a drive, leaving the CPU ready to run.
     pub fn boot(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
-        let disks = &self.disks;
+        let BootMachine { disks, controllers, mem, .. } = self;
+        let disks = &*disks;
+        // Only the floppy controller has a bootstrap; see `Controller::as_dcdd`.
+        // A machine carrying only a board that cannot cold-start reports the
+        // drive as unbootable rather than pretending to try.
+        let dcdd = controllers
+            .iter_mut()
+            .find_map(|c| c.as_dcdd())
+            .ok_or(BootError::NoDisk(drive))?;
         // Every chunk with the address it belongs at.  The bootstrap stores
         // more than one, and keeping only the last — or ignoring the address —
         // silently loads a partial loader that runs off its own end.
         let mut chunks: Vec<(u16, Vec<u8>)> = Vec::new();
         let entry = cold_boot(
-            &mut self.dcdd,
+            dcdd,
             drive,
             |d, t, s| {
                 let m = disks
                     .get(d as usize)
                     .and_then(|x| x.as_ref())
                     .ok_or_else(|| format!("drive {d} is empty"))?;
-                let off = m.geometry.offset(t, s) as usize;
+                // Recomputed from the image rather than stored beside it: where
+                // a byte lives is the controller's arithmetic now, and the
+                // bootstrap is the one place left that still needs it directly.
+                let geometry = super::dcdd::geometry_for(m.bytes.len() as u64)
+                    .ok_or_else(|| format!("drive {d} does not hold an 88-DCDD image"))?;
+                let off = geometry.offset(t, s) as usize;
                 m.bytes
                     .get(off..off + SECTOR_LEN)
                     .map(|b| b.to_vec())
@@ -315,8 +368,8 @@ impl BootMachine {
         )?;
         for (addr, bytes) in chunks {
             let at = addr as usize;
-            let end = (at + bytes.len()).min(self.mem.len());
-            self.mem[at..end].copy_from_slice(&bytes[..end - at]);
+            let end = (at + bytes.len()).min(mem.len());
+            mem[at..end].copy_from_slice(&bytes[..end - at]);
         }
         cpu.registers().set_pc(entry);
         Ok(())
@@ -360,40 +413,45 @@ impl BootMachine {
 
     /// Position-register reads without the disk moving on.
     pub fn stuck_polls(&self) -> u32 {
-        self.dcdd.polls_on_sector()
+        self.controllers.iter().map(|c| c.stuck_polls()).max().unwrap_or(0)
+    }
+
+    /// Which controller answers at this port, if any.
+    fn controller_for(&self, port: u8) -> Option<usize> {
+        self.controllers.iter().position(|c| c.owns_port(port))
     }
 
     /// Serve whatever the controller asked for after a port access.
-    fn service(&mut self, req: Request) {
+    fn service(&mut self, req: HostRequest, ctrl: usize) {
         match req {
-            Request::None => {}
-            Request::Read { drive, track, sector } => {
+            HostRequest::None => {}
+            HostRequest::Read { drive, offset, len } => {
                 let bytes = self
                     .disks
                     .get(drive as usize)
                     .and_then(|x| x.as_ref())
                     .and_then(|m| {
-                        let off = m.geometry.offset(track, sector) as usize;
-                        m.bytes.get(off..off + SECTOR_LEN).map(|b| b.to_vec())
+                        let off = offset as usize;
+                        m.bytes.get(off..off + len).map(|b| b.to_vec())
                     });
                 // A read past the end of the image gives the guest an erased
                 // sector rather than a panic: a real drive returns *something*
                 // from unformatted media, and the guest's own error handling
                 // is better placed to react than we are.
-                self.dcdd
-                    .sector_loaded(drive, &bytes.unwrap_or_else(|| vec![0xE5; SECTOR_LEN]));
+                self.controllers[ctrl]
+                    .buffer_loaded(drive, &bytes.unwrap_or_else(|| vec![0xE5; len]));
             }
-            Request::Write { drive, track, sector } => {
-                let Some(buf) = self.dcdd.sector_buffer(drive).copied() else {
+            HostRequest::Write { drive, offset, len } => {
+                let Some(buf) = self.controllers[ctrl].buffer(drive).map(|b| b.to_vec()) else {
                     return;
                 };
                 if let Some(m) = self.disks.get_mut(drive as usize).and_then(|x| x.as_mut()) {
                     if m.read_only {
                         return;
                     }
-                    let off = m.geometry.offset(track, sector) as usize;
-                    if let Some(dst) = m.bytes.get_mut(off..off + SECTOR_LEN) {
-                        dst.copy_from_slice(&buf);
+                    let off = offset as usize;
+                    if let Some(dst) = m.bytes.get_mut(off..off + len) {
+                        dst.copy_from_slice(&buf[..len]);
                         m.dirty = true;
                     }
                 }
@@ -402,43 +460,6 @@ impl BootMachine {
     }
 }
 
-impl Default for BootMachine {
-    fn default() -> BootMachine {
-        BootMachine::new()
-    }
-}
-
-/// The disk geometries a booted 88-DCDD can carry, with what to call them.
-///
-/// A list rather than two constants because the documentation an operator reads
-/// is rendered from it — the same discipline `image::format::FORMATS` follows,
-/// so a geometry added here cannot go missing from the readme that tells people
-/// which disks work.
-pub const BOOT_GEOMETRIES: &[(Geometry, &str)] = &[
-    (Geometry::EIGHT_INCH, "Altair 88-DCDD 8\" floppy"),
-    (Geometry::MINIDISK, "Altair 88-MDS 5.25\" minidisk"),
-];
-
-/// Which geometry an image of this size has, if any.
-///
-/// A short trailer is allowed. Several of the images in circulation carry a few
-/// bytes past the last sector — 96 bytes on the CP/M 3 and MITS+Tarbell disks,
-/// 80 bytes of `1A` on the minidisks, which is a CP/M end-of-file pad from
-/// whatever copied them. Rejecting those on an exact size match cost us seven
-/// perfectly good disks, including both CP/M 3 images.
-///
-/// The tolerance is deliberately less than one sector: past that, the size no
-/// longer identifies the geometry and accepting it would mean reading a disk we
-/// have not actually recognised.
-pub fn geometry_for(len: u64) -> Option<Geometry> {
-    BOOT_GEOMETRIES.iter().map(|(g, _)| *g).find(|g| {
-        let want = g.image_len();
-        len >= want && len - want < SECTOR_LEN as u64
-    })
-}
-
-/// The largest trailer a bootable image may carry past its last sector.
-pub const MAX_IMAGE_TRAILER: u64 = SECTOR_LEN as u64 - 1;
 
 impl Machine for BootMachine {
     fn peek(&mut self, address: u16) -> u8 {
@@ -456,11 +477,12 @@ impl Machine for BootMachine {
             *self.port_hits.entry(port).or_insert(0) += 1;
         }
         match port {
-            0x08..=0x0A => {
+            p if self.controller_for(p).is_some() => {
+                let ctrl = self.controller_for(port).expect("just matched");
                 self.disk_accesses = self.disk_accesses.saturating_add(1);
-                let (v, req) = self.dcdd.port_in(port);
-                let was_fill = matches!(req, Request::Read { .. });
-                self.service(req);
+                let (v, req) = self.controllers[ctrl].port_in(port);
+                let was_fill = matches!(req, HostRequest::Read { .. });
+                self.service(req, ctrl);
                 self.idle_status_reads = 0;
                 if was_fill {
                     // The controller asked for the sector *because* the guest
@@ -470,8 +492,8 @@ impl Machine for BootMachine {
                     // would eat the first byte of every sector the guest reads
                     // — which boots far enough to look like it is working and
                     // then produces silence.
-                    let (v2, req2) = self.dcdd.port_in(port);
-                    self.service(req2);
+                    let (v2, req2) = self.controllers[ctrl].port_in(port);
+                    self.service(req2, ctrl);
                     return v2;
                 }
                 v
@@ -509,10 +531,11 @@ impl Machine for BootMachine {
             *self.port_hits.entry(port | 0x80).or_insert(0) += 1;
         }
         match port {
-            0x08..=0x0A => {
+            p if self.controller_for(p).is_some() => {
+                let ctrl = self.controller_for(port).expect("just matched");
                 self.disk_accesses = self.disk_accesses.saturating_add(1);
-                let req = self.dcdd.port_out(port, value);
-                self.service(req);
+                let req = self.controllers[ctrl].port_out(port, value);
+                self.service(req, ctrl);
                 self.idle_status_reads = 0;
             }
             CONSOLE_DATA_PORT => {
@@ -531,6 +554,7 @@ impl Machine for BootMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpm::dcdd::{geometry_for, Geometry};
 
     fn image(geom: Geometry) -> Vec<u8> {
         vec![0u8; geom.image_len() as usize]
@@ -559,11 +583,102 @@ mod tests {
         assert_eq!(geometry_for(337_567), None, "and short is never rounded up");
     }
 
+    /// The point of the refactor, asserted rather than asserted-in-a-comment:
+    /// a second controller is a `Controller` pushed into the list, and the
+    /// machine's port dispatch and media matching pick it up with no change of
+    /// their own.
+    ///
+    /// A stand-in board rather than the real 88-HDSK, because the question here
+    /// is whether the *seam* works — that ports outside the floppy's range
+    /// reach a second controller, that an image size the floppy refuses is
+    /// offered to it, and that its byte-range requests are served from the
+    /// right image. Wiring the real thing is the next change.
+    struct FakeBoard {
+        /// Shared with the test so it can see what the board was told, without
+        /// having to reach back through the trait object.
+        last_write: std::sync::Arc<std::sync::Mutex<Option<(u8, u8)>>>,
+        buf: Vec<u8>,
+        inserted: Option<u8>,
+    }
+
+    /// Sized so nothing the floppy controller takes can be confused with it.
+    const FAKE_IMAGE_LEN: u64 = 4096;
+
+    impl Controller for FakeBoard {
+        fn name(&self) -> &'static str {
+            "test board"
+        }
+        fn owns_port(&self, port: u8) -> bool {
+            (0xA0..=0xA7).contains(&port)
+        }
+        fn port_in(&mut self, _port: u8) -> (u8, HostRequest) {
+            // Ask for the second 128 bytes of the image, to prove the offset
+            // travels rather than being assumed to be zero.
+            (0x5A, HostRequest::Read { drive: 1, offset: 128, len: 128 })
+        }
+        fn port_out(&mut self, port: u8, value: u8) -> HostRequest {
+            *self.last_write.lock().unwrap() = Some((port, value));
+            HostRequest::None
+        }
+        fn accepts(&self, image_len: u64) -> Option<&'static str> {
+            (image_len == FAKE_IMAGE_LEN).then_some("test medium")
+        }
+        fn insert(&mut self, drive: u8, image_len: u64, _ro: bool) -> Result<(), String> {
+            if image_len != FAKE_IMAGE_LEN {
+                return Err("not mine".into());
+            }
+            self.inserted = Some(drive);
+            Ok(())
+        }
+        fn buffer_loaded(&mut self, _drive: u8, bytes: &[u8]) {
+            self.buf = bytes.to_vec();
+        }
+        fn buffer(&self, _drive: u8) -> Option<&[u8]> {
+            Some(&self.buf)
+        }
+        fn stuck_polls(&self) -> u32 {
+            0
+        }
+    }
+
+    #[test]
+    fn test_a_second_controller_needs_no_change_to_the_machine() {
+        let mut m = BootMachine::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        m.controllers.push(Box::new(FakeBoard {
+            last_write: seen.clone(),
+            buf: Vec::new(),
+            inserted: None,
+        }));
+
+        // An image the floppy controller refuses is offered on to the next one.
+        let mut img = vec![0u8; FAKE_IMAGE_LEN as usize];
+        img[128..256].fill(0xC3);
+        m.insert(1, img, true).expect("the second controller takes it");
+
+        // Its ports reach it...
+        m.port_out(0xA3, 0x80);
+        assert_eq!(*seen.lock().unwrap(), Some((0xA3, 0x80)));
+        let v = m.port_in(0xA5);
+        assert_eq!(v, 0x5A, "the second controller answered its own port");
+        // ...and the floppy's ports still reach the floppy, untouched.
+        m.port_in(0x08);
+
+        // The byte-range request was served from the right image at the right
+        // offset — the arithmetic the controller did, not the machine.
+        let fake = m.controllers[1].buffer(1).expect("buffered").to_vec();
+        assert_eq!(fake.len(), 128);
+        assert!(fake.iter().all(|&b| b == 0xC3), "wrong bytes or wrong offset");
+    }
+
     #[test]
     fn test_inserting_a_wrong_sized_image_is_refused() {
         let mut m = BootMachine::new();
         let err = m.insert(0, vec![0; 1234], true).unwrap_err();
-        assert!(err.contains("not an 88-DCDD image"), "{err}");
+        assert!(err.contains("not a disk this machine can carry"), "{err}");
+        // And it names the hardware, which is the part an operator can act on
+        // once there is more than one controller to be wrong about.
+        assert!(err.contains("88-DCDD"), "{err}");
     }
 
     /// Console output must reach the caller, and input must reach the guest.

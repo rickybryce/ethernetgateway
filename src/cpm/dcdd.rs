@@ -526,6 +526,129 @@ impl Dcdd {
     }
 }
 
+// ---- the machine-facing seam -------------------------------------------
+//
+// `Dcdd` keeps its own vocabulary internally — tracks, sectors, a rotating
+// position register — because that is what the board is.  What crosses this
+// boundary is a byte range, so the machine above does not have to know any of
+// it, and the next controller can have a completely different vocabulary
+// without the machine changing.  See `crate::cpm::controller`.
+
+impl super::controller::Controller for Dcdd {
+    fn name(&self) -> &'static str {
+        "MITS 88-DCDD floppy"
+    }
+
+    fn owns_port(&self, port: u8) -> bool {
+        (0x08..=0x0A).contains(&port)
+    }
+
+    fn port_in(&mut self, port: u8) -> (u8, super::controller::HostRequest) {
+        let (v, req) = Dcdd::port_in(self, port);
+        (v, self.to_host(req))
+    }
+
+    fn port_out(&mut self, port: u8, value: u8) -> super::controller::HostRequest {
+        let req = Dcdd::port_out(self, port, value);
+        self.to_host(req)
+    }
+
+    fn accepts(&self, image_len: u64) -> Option<&'static str> {
+        BOOT_GEOMETRIES
+            .iter()
+            .find(|(g, _)| {
+                let want = g.image_len();
+                image_len >= want && image_len - want < SECTOR_LEN as u64
+            })
+            .map(|(_, label)| *label)
+    }
+
+    fn insert(&mut self, drive: u8, image_len: u64, read_only: bool) -> Result<(), String> {
+        let geometry = geometry_for(image_len)
+            .ok_or_else(|| format!("{image_len} bytes is not an 88-DCDD image"))?;
+        Dcdd::insert(self, drive, Disk { geometry, read_only });
+        Ok(())
+    }
+
+    fn buffer_loaded(&mut self, drive: u8, bytes: &[u8]) {
+        Dcdd::sector_loaded(self, drive, bytes);
+    }
+
+    fn buffer(&self, drive: u8) -> Option<&[u8]> {
+        Dcdd::sector_buffer(self, drive).map(|b| &b[..])
+    }
+
+    fn as_dcdd(&mut self) -> Option<&mut Dcdd> {
+        Some(self)
+    }
+
+    fn stuck_polls(&self) -> u32 {
+        self.polls_on_sector()
+    }
+}
+
+impl Dcdd {
+    /// Turn a track/sector request into the byte range it means.
+    ///
+    /// The address arithmetic stays here, with the board that defines it.  A
+    /// request naming a drive with no disk becomes `None`: the geometry is a
+    /// property of the medium, so without one there is no offset to give.
+    fn to_host(&self, req: Request) -> super::controller::HostRequest {
+        use super::controller::HostRequest as H;
+        let (drive, track, sector, write) = match req {
+            Request::None => return H::None,
+            Request::Read { drive, track, sector } => (drive, track, sector, false),
+            Request::Write { drive, track, sector } => (drive, track, sector, true),
+        };
+        let Some(geometry) = self.geometry_of(drive) else {
+            return H::None;
+        };
+        let offset = geometry.offset(track, sector);
+        if write {
+            H::Write { drive, offset, len: SECTOR_LEN }
+        } else {
+            H::Read { drive, offset, len: SECTOR_LEN }
+        }
+    }
+
+    /// The geometry of the disk in a drive, if there is one.
+    fn geometry_of(&self, drive: u8) -> Option<Geometry> {
+        self.drives.get(drive as usize)?.disk.as_ref().map(|d| d.geometry)
+    }
+}
+
+/// The disk geometries a booted 88-DCDD can carry, with what to call them.
+///
+/// A list rather than two constants because the documentation an operator reads
+/// is rendered from it — the same discipline `image::format::FORMATS` follows,
+/// so a geometry added here cannot go missing from the readme that tells people
+/// which disks work.
+pub const BOOT_GEOMETRIES: &[(Geometry, &str)] = &[
+    (Geometry::EIGHT_INCH, "Altair 88-DCDD 8\" floppy"),
+    (Geometry::MINIDISK, "Altair 88-MDS 5.25\" minidisk"),
+];
+
+/// Which geometry an image of this size has, if any.
+///
+/// A short trailer is allowed. Several of the images in circulation carry a few
+/// bytes past the last sector — 96 bytes on the CP/M 3 and MITS+Tarbell disks,
+/// 80 bytes of `1A` on the minidisks, which is a CP/M end-of-file pad from
+/// whatever copied them. Rejecting those on an exact size match cost us seven
+/// perfectly good disks, including both CP/M 3 images.
+///
+/// The tolerance is deliberately less than one sector: past that, the size no
+/// longer identifies the geometry and accepting it would mean reading a disk we
+/// have not actually recognised.
+pub fn geometry_for(len: u64) -> Option<Geometry> {
+    BOOT_GEOMETRIES.iter().map(|(g, _)| *g).find(|g| {
+        let want = g.image_len();
+        len >= want && len - want < SECTOR_LEN as u64
+    })
+}
+
+/// The largest trailer a bootable image may carry past its last sector.
+pub const MAX_IMAGE_TRAILER: u64 = SECTOR_LEN as u64 - 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;

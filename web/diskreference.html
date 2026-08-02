@@ -1329,14 +1329,59 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
 
                 <div class="callout callout-info">
                     <p>
-                        <strong>Status: the interface is written down, the
-                        controller is not built.</strong> This section exists so
+                        <strong>Status: the interface is written down and the
+                        machine is ready for a second controller; the 88-HDSK
+                        board itself is not built.</strong> This section exists so
                         the reading does not have to be done twice. Nothing in
                         the gateway speaks this protocol yet; `HDSK*.DSK` images
                         still <a href="#others">mount</a> as <code>altairhd</code>
                         and do not boot.
                     </p>
                 </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The machine now holds a <em>set</em> of controllers</h3>
+                <p>
+                    Done before the second board rather than after, which is
+                    what the plan asked for and is simple arithmetic: adapting
+                    one implementation to a trait is mechanical, unpicking three
+                    interleaved ones is not. A controller now answers three
+                    questions and the machine asks nothing else of it &mdash;
+                    <em>which ports do you claim</em>, <em>can you carry an
+                    image this size</em>, and <em>what bytes do you want moved</em>.
+                </p>
+                <p>
+                    The third is the choice that matters. The 88-DCDD thinks in
+                    137-byte sectors addressed by track and sector; the 88-HDSK
+                    thinks in 256-byte sectors addressed by cylinder, head and
+                    sector, reached through a command protocol rather than a
+                    rotating position register. Neither vocabulary belongs above
+                    the controller, so a controller now does its own address
+                    arithmetic and asks the machine for a <strong>byte
+                    range</strong>. The machine's job shrinks to "copy these
+                    bytes out of, or into, that image" &mdash; the same job for
+                    every board there will ever be.
+                </p>
+                <div class="callout callout-info">
+                    <p>
+                        <strong>One thing is deliberately still board-specific:
+                        cold-starting a disk.</strong> The floppy bootstrap is
+                        the sequence a PROM would run, driving the controller's
+                        port state machine directly; the hard disk's is a
+                        different sequence through its command protocol. Folding
+                        both behind one method before the second exists would
+                        mean designing an abstraction from a single example,
+                        which is how the wrong one gets made. It stays as an
+                        explicit, documented escape hatch until there are two
+                        bootstraps to generalise against.
+                    </p>
+                </div>
+                <p class="dim-text">
+                    Behaviour-preserving, and measured rather than asserted: the
+                    whole sample set was booted before and after and the results
+                    are identical &mdash; 19 disks reach a sign-on, 3 stay
+                    silent, 1 is refused, 13 are not 88-DCDD media. The three
+                    byte-exact ground-truth gates still pass.
+                </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Where to read it</h3>
                 <p>
