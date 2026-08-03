@@ -45,7 +45,7 @@
 //! them. Software written against that will often not poll at all, so a model
 //! that made a flag take time would hang guests the real board never hung.
 
-use super::controller::{Controller, HostRequest};
+use super::controller::{ColdStart, Controller, HostRequest, Medium};
 
 /// Bytes in one hard-disk sector.
 pub const SECTOR_LEN: usize = 256;
@@ -79,6 +79,22 @@ const LABEL_BOOT_COUNT: usize = 0x2A;
 
 /// Data buffers in the controller's own memory, 256 bytes each.
 const BUFFERS: usize = 4;
+
+/// IV bytes the controller addresses, per the diagnostic's `MAXIV equ 0FFh`.
+const IV_BYTES: usize = 256;
+
+/// What a formatted but unwritten sector holds.
+///
+/// **Measured, not assumed.** The whole second half of HDSK03 is 9,744 sectors
+/// of nothing but `E5`, uniform, and HDSK04's free space is the same byte. That
+/// is the CP/M erased-directory value as well, which is the point: a formatted
+/// surface reads as empty to the filesystem above it.
+///
+/// What this deliberately does *not* reproduce is the sector headers a real
+/// format writes — these images hold sector *data* only, with no header bytes
+/// anywhere, so at the level this controller operates a format is exactly "the
+/// data comes back erased".
+const FORMAT_FILL: u8 = 0xE5;
 
 /// Drives the board can address.
 const UNITS: usize = 4;
@@ -125,6 +141,31 @@ pub mod error {
 /// be ones and bits 14 and 15 must be zeros" — which is unreadable at the point
 /// of use and easy to transcribe wrongly. Collected here once, as the nibble
 /// they add up to.
+///
+/// # These are not deduced from the bit conditions — the disks state them
+///
+/// Four of the hard-disk images carry the assembler source of the 88-HDSK
+/// software itself, and it defines the command set outright:
+///
+/// ```text
+///     CSEEK   equ 00h     ;Seek                 Bits 15:12 = 0000b
+///     CWRSEC  equ 020h    ;Write Sector         same bit fields as CRDSECT
+///     CRDSEC  equ 030h    ;Read Sector          Bits 15:12 = 0011b
+///     CWRBUF  equ 040h    ;Write Buffer
+///     CRDBUF  equ 050h    ;Read Buffer          Bits 15:12 = 0101b
+///     CRSTAT  equ 060h    ;Read Status (IV Byte)
+///     CSETIV  equ 080h    ;Set IV Byte
+///     CFORMT  equ 0C0h    ;Format
+///     CINIT   equ 0E0h    ;Initialize
+/// ```
+///
+/// That is **eight** commands, not the seven the manual's table lists, and it
+/// is why this decodes the whole four-bit nibble rather than testing bit 15
+/// first. Testing bit 15 first — which is what the manual's Set Byte example
+/// invites, since `80h` is the only value it shows with that bit set — folded
+/// Format (`C0h`) and Initialize (`E0h`) into Set Byte. Both then "succeeded"
+/// while doing nothing, which is the same silent-success failure the Write
+/// Sector nibble already caused once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     /// Move the heads. Cylinder in bits 0–8, unit in 10–11.
@@ -137,46 +178,54 @@ enum Command {
     ReadBuffer,
     /// Altair → buffer.
     WriteBuffer,
+    /// Read one of the controller's internal IV bytes back to the Altair.
+    ReadStatus,
     /// Write one of the controller's internal IV bytes.
     SetByte,
+    /// Format one whole side of one platter.
+    Format,
+    /// Reset the controller. The one command, with Set Byte, that does not
+    /// need a ready drive.
+    Initialize,
     /// Anything the board would not recognise.
     Unknown,
 }
 
 impl Command {
     fn of(word: u16) -> Command {
-        // Bit 15 first: Set Byte is 80h in the high byte, and the manual's own
-        // example sends exactly that.
-        if word & 0x8000 != 0 {
-            return Command::SetByte;
-        }
         // Bit 12 is the direction — 1 reads, 0 writes — in all four transfer
         // commands.
         //
-        // **This is a deviation from the manual, arrived at by observation.**
-        // §3-4 says Write Sector is Read Sector "except that bit 13 must be
-        // zero rather than one", which would make it `0001`. The CP/M that
-        // shipped on this hardware issues `0010` instead, and while the manual
-        // was followed those eight commands per save were decoded here as
-        // unrecognised: the guest filled a buffer, never committed it, and the
-        // file it saved silently failed to appear.
+        // **Write Sector is a deviation from the manual.** §3-4 says it is Read
+        // Sector "except that bit 13 must be zero rather than one", which would
+        // make it `0001`. It is `0010`, and there are now two independent
+        // witnesses to that. The first was observation: the CP/M that shipped on
+        // this hardware issues `0010`, and while the manual was followed those
+        // eight commands per save decoded here as unrecognised — the guest
+        // filled a buffer, never committed it, and the file it saved silently
+        // failed to appear. The second is documentary and stronger: the 88-HDSK
+        // source on the disks themselves says `CWRSEC equ 020h`, commented
+        // "same bit fields as CRDSECT". That is the people who wrote this
+        // hardware's software, not an inference of ours.
         //
-        // Taking `0010` is not just what the disk does, it is also the more
-        // coherent reading — bit 12 then means the same thing for sectors as it
-        // demonstrably does for buffers, where the manual and the hardware agree
-        // that 1 reads and 0 writes. But the manual is not being dismissed:
-        // this is one observation of one CP/M implementation, the errata for
-        // this section already corrects other bit assignments, and it is
-        // possible the two bits are simply numbered the other way round
-        // somewhere in the chain. Recorded as a deviation, in
-        // `web/diskreference.html`, so the next person meets the evidence
+        // `0010` is also the more coherent reading — bit 12 then means the same
+        // thing for sectors as it demonstrably does for buffers, where the
+        // manual and the hardware agree that 1 reads and 0 writes. The manual
+        // still is not being called wrong: the errata for this section already
+        // corrects other bit assignments, and the two bits may simply be
+        // numbered the other way round somewhere in the chain. The evidence is
+        // laid out in `web/diskreference.html` so the next person meets it
         // rather than a verdict.
-        match (word >> 12) & 0x07 {
-            0b000 => Command::Seek,
-            0b010 => Command::WriteSector,
-            0b011 => Command::ReadSector,
-            0b100 => Command::WriteBuffer,
-            0b101 => Command::ReadBuffer,
+        match (word >> 12) & 0x0F {
+            0x0 => Command::Seek,
+            0x2 => Command::WriteSector,
+            0x3 => Command::ReadSector,
+            0x4 => Command::WriteBuffer,
+            0x5 => Command::ReadBuffer,
+            0x6 => Command::ReadStatus,
+            0x8 => Command::SetByte,
+            0xC => Command::Format,
+            0xE => Command::Initialize,
             _ => Command::Unknown,
         }
     }
@@ -213,6 +262,49 @@ pub struct Hdsk {
     /// Errata ME03: every bit reads as 1 on the first read after power-on.
     /// A driver that has not seen that yet may take a zero as "no controller".
     first_status_read: bool,
+    /// No command has run yet, so the power-on error byte is still what a read
+    /// would find.
+    ///
+    /// Without this the all-ones answer was given to whichever status read
+    /// happened to come first, *including one after a command that worked* —
+    /// telling a driver its successful seek had every fault the board can
+    /// report. It only means "power-on" until the board has done something.
+    fresh: bool,
+
+    /// The controller's own IV bytes, written by Set Byte and read back by Read
+    /// Status.
+    ///
+    /// 256 of them, which is the range the diagnostic on these disks allows
+    /// (`MAXIV equ 0FFh`), addressed by the low byte of either command.
+    ///
+    /// **What this models and what it does not.** A write is remembered and a
+    /// read returns it, which is exactly what the IV byte *test* in that
+    /// diagnostic asks for — write a pattern, read it back, compare. It is not
+    /// a model of the 8X300's own registers: on the real board some of these
+    /// are inputs reflecting drive state, and its own source says so — "the IV
+    /// Byte on the Disk Data Card is an input, so this test..." — while others
+    /// drive the head positioner directly (IV 18 and 19 are the cylinder
+    /// latches, and the source notes the cylinder bits are inverted). Nothing
+    /// here knows which is which, because the manual we have does not say, and
+    /// guessing at hardware semantics is how the sector layout went wrong for
+    /// four hypotheses. So: the addressable store is real, the meanings are
+    /// not, and no guest OS here needs them — seeking goes through Seek.
+    iv: [u8; IV_BYTES],
+    /// A Set Byte waiting for its data byte, with the address it will go to.
+    ///
+    /// The command carries the *address* in its low byte and the *data* arrives
+    /// afterwards at port 167, which is what the disk's own `WRITIV` does:
+    /// `mov a,c` / `out ADATA` for the address, then the data once the
+    /// write-ready flag comes up. Without this phase that data byte fell
+    /// through to `pending_low` and was silently taken as half of the next
+    /// command.
+    iv_pending: Option<u8>,
+    /// A byte Read Status has put on the read channel for the guest to take.
+    ///
+    /// Its own field rather than a buffer transfer: it comes out of port 165
+    /// like buffer data, but it is one byte from a different place, and giving
+    /// it a fake buffer would mean a status read could clobber a sector.
+    status_byte: Option<u8>,
 
     /// An in-progress Read Buffer or Write Buffer transfer.
     transfer: Option<Transfer>,
@@ -263,6 +355,10 @@ impl Hdsk {
             write_ready: false,
             status: 0,
             first_status_read: true,
+            fresh: true,
+            iv: [0; IV_BYTES],
+            iv_pending: None,
+            status_byte: None,
             transfer: None,
             pending_buffer: 0,
             idle_polls: 0,
@@ -300,6 +396,9 @@ impl Hdsk {
         // does — the errata measures microseconds and says not to spin on it.
         self.ack = true;
         self.status = 0;
+        // The board has now done something, so the power-on error byte is no
+        // longer what a status read should find.
+        self.fresh = false;
         let unit = ((word >> 10) & 0x03) as u8;
         self.selected = unit;
         if std::env::var_os("CPM_HDSK_TRACE").is_some() {
@@ -377,15 +476,106 @@ impl Hdsk {
                 HostRequest::None
             }
             Command::SetByte => {
-                // The IV bytes are the controller's own internals — drive
-                // select, start/stop, the cylinder latches. Nothing above the
-                // board can observe them, so they are accepted and the command
-                // completes, which is what the guest is waiting on.
+                // The address is this command's low byte; the data byte follows
+                // at port 167 once the write-ready flag comes up. So the
+                // command is *not* finished here — `ready` stays low until the
+                // byte arrives, which is exactly the sequence the errata's own
+                // example waits through.
+                self.iv_pending = Some((word & 0xFF) as u8);
                 self.write_ready = true;
+                self.ready = false;
+                HostRequest::None
+            }
+            Command::ReadStatus => {
+                // "Note that no IV Bytes can be read without the Disk Interface
+                // Card present and the Ready line on that card active, because
+                // the Datakeeper Read Status command insists that the selected
+                // Unit be ready before it will return status." — the diagnostic
+                // on these disks, which is also the only software here that
+                // issues this command. So an absent drive is refused rather
+                // than answered with a byte.
+                let addr = (word & 0xFF) as usize;
+                if !self.units.get(unit as usize).is_some_and(|u| u.present) {
+                    self.status |= error::NOT_READY;
+                    self.ready = true;
+                    return HostRequest::None;
+                }
+                self.status_byte = Some(self.iv[addr % IV_BYTES]);
+                self.read_ready = true;
+                // **Ready and the byte come up together**, which is the one way
+                // this differs from a Read Buffer of one — and it is not a
+                // guess. `READIV` on the disk waits for Ready *first* and then
+                // takes the byte, with the comment "HDCMD returns when CRDY -
+                // so CDA should already be set". Modelling it like a buffer
+                // transfer, finished only once the guest has read the byte,
+                // leaves that routine spinning on Ready forever: a hang, and in
+                // the one piece of software that uses this command at all.
+                //
+                // Set Byte is the opposite order — the errata's own example
+                // waits on the write flag, sends the parameter, and only then
+                // waits on Ready — so the two are not symmetric and cannot be
+                // written from one pattern.
+                self.ready = true;
+                HostRequest::None
+            }
+            Command::Format => {
+                // One whole side of one platter, which is what the utility on
+                // these disks announces it is doing ("Formatting platter N,
+                // side M") and what its 60-second timeout is sized for. The
+                // operands are in the low byte — the source's own comment on
+                // `CFORMT` reads "ADATA Bits 7:6 = Platter #, Bit 5 = Side #",
+                // and its `GETHED` folds those into the same head field the
+                // sector commands use, because head 0-7 *is* platter × 2 + side.
+                let head = ((word >> 5) & 0x07) as u8;
+                let Some(u) = self.units.get(unit as usize).copied().filter(|u| u.present) else {
+                    self.status |= error::NOT_READY;
+                    self.ready = true;
+                    return HostRequest::None;
+                };
+                if u.read_only {
+                    self.status |= error::WRITE_PROTECT;
+                    self.ready = true;
+                    return HostRequest::None;
+                }
+                if head >= HEADS {
+                    self.status |= error::ILLEGAL_SECTOR;
+                    self.ready = true;
+                    return HostRequest::None;
+                }
+                // A surface is not contiguous in the image: this head's 24
+                // sectors sit once per cylinder, a whole cylinder apart. Hence
+                // the strided fill — the controller does its own address
+                // arithmetic, as every other command here does, and the machine
+                // only copies bytes.
+                self.ready = true;
+                HostRequest::Fill {
+                    drive: unit,
+                    offset: head as u64 * SECTORS as u64 * SECTOR_LEN as u64,
+                    chunk: SECTORS as usize * SECTOR_LEN,
+                    stride: HEADS as u64 * SECTORS as u64 * SECTOR_LEN as u64,
+                    count: CYLINDERS as usize,
+                    byte: FORMAT_FILL,
+                }
+            }
+            Command::Initialize => {
+                // A controller reset. The one command besides Set Byte that the
+                // errata's error table exempts from needing a ready drive, so
+                // it must not report one missing: an empty machine being
+                // initialised is not a fault.
+                self.transfer = None;
+                self.status_byte = None;
+                self.iv_pending = None;
+                self.read_ready = false;
+                self.write_ready = false;
                 self.ready = true;
                 HostRequest::None
             }
             Command::Unknown => {
+                // Completed rather than left hanging, and with the error byte
+                // clear, because the errata's table has no illegal-command bit
+                // to report — there is nothing truthful to say in it. The
+                // command is logged under `CPM_HDSK_TRACE` above, which is
+                // where an unrecognised one becomes visible.
                 self.ready = true;
                 HostRequest::None
             }
@@ -413,7 +603,11 @@ impl Controller for Hdsk {
                 // documented pairing, and a driver that never reads it will
                 // wait forever on the *next* command.
                 self.ready = false;
-                if self.first_status_read {
+                // Errata ME03's all-ones answer, but only while it is still
+                // true: once a command has run, the error byte is that
+                // command's result and handing back 0xFF instead would report
+                // every fault the board can name on a operation that worked.
+                if self.first_status_read && self.fresh {
                     self.first_status_read = false;
                     return (0xFF, HostRequest::None);
                 }
@@ -436,6 +630,14 @@ impl Controller for Hdsk {
             }
             port::DATA_IN => {
                 self.read_ready = false;
+                // A Read Status byte comes out of this port too, and it is
+                // checked first: it is one byte from the IV store, not part of
+                // any buffer. `ready` is deliberately not touched — that command
+                // completed when it was issued, and raising the flag again here
+                // would report a board ready for work it has not been given.
+                if let Some(b) = self.status_byte.take() {
+                    return (b, HostRequest::None);
+                }
                 let Some(t) = self.transfer.as_mut().filter(|t| !t.writing) else {
                     return (0xFF, HostRequest::None);
                 };
@@ -470,6 +672,16 @@ impl Controller for Hdsk {
             }
             port::DATA_OUT => {
                 self.write_ready = false;
+                // A Set Byte's data byte, if one is owed. Checked before both
+                // the buffer transfer and the command-assembly fallthrough:
+                // taking it as `pending_low` is precisely the bug this replaced,
+                // and it would have made the byte disappear into the next
+                // command word.
+                if let Some(addr) = self.iv_pending.take() {
+                    self.iv[addr as usize] = value;
+                    self.ready = true;
+                    return HostRequest::None;
+                }
                 match self.transfer.as_mut().filter(|t| t.writing) {
                     Some(t) => {
                         self.buffers[t.buffer][t.pos % SECTOR_LEN] = value;
@@ -491,12 +703,28 @@ impl Controller for Hdsk {
         }
     }
 
-    fn accepts(&self, image_len: u64) -> Option<&'static str> {
-        (image_len == IMAGE_LEN).then_some("Altair 88-HDSK hard disk")
+    fn media(&self) -> Vec<Medium> {
+        // One medium, and the trailer allowance comes with it: demanding an
+        // exact length was the same mistake that locked out both CP/M 3 disks
+        // and every minidisk on the floppy side. Images in circulation carry a
+        // few bytes past the last sector, and a hard disk is no less likely to
+        // have been copied by something that padded it.
+        vec![Medium {
+            bytes: IMAGE_LEN,
+            label: "Altair 88-HDSK hard disk",
+            trailer: SECTOR_LEN as u64 - 1,
+            shape: format!(
+                "{CYLINDERS} cylinders x {HEADS} heads x {SECTORS} sectors x {SECTOR_LEN}"
+            ),
+        }]
     }
 
     fn insert(&mut self, drive: u8, image_len: u64, read_only: bool) -> Result<(), String> {
-        if image_len != IMAGE_LEN {
+        // Asked of `accepts` rather than re-tested, so the two cannot come to
+        // disagree about what fits — which they did, in the direction that
+        // matters least visibly: `accepts` claiming a disk that `insert` then
+        // refused.
+        if self.accepts(image_len).is_none() {
             return Err(format!("{image_len} bytes is not an 88-HDSK image"));
         }
         let u = self
@@ -518,7 +746,7 @@ impl Controller for Hdsk {
         Some(&self.buffers[self.pending_buffer])
     }
 
-    fn boot_program(&self, image: &[u8]) -> Option<(u64, usize, u16)> {
+    fn cold_start(&self, image: &[u8]) -> ColdStart {
         // Sector 0 of every one of these disks is a volume label, and it says
         // where the boot program is rather than the location being fixed.  That
         // was found by comparing the four hard-disk images: the CP/M pair name
@@ -527,19 +755,34 @@ impl Controller for Hdsk {
         // 63 K system — and the two Disk BASIC images name sector 24, where
         // their own `F3 C3` (`DI`, then a jump) sits and where the CP/M disks
         // have nothing but zeros.  A fixed sector 7 would boot half of them.
-        let label = image.get(..LABEL_LEN)?;
+        let Some(label) = image.get(..LABEL_LEN) else {
+            return ColdStart::NoProgram;
+        };
         let sector = u16::from_le_bytes([label[LABEL_BOOT_SECTOR], label[LABEL_BOOT_SECTOR + 1]]);
         let count = u16::from_le_bytes([label[LABEL_BOOT_COUNT], label[LABEL_BOOT_COUNT + 1]]);
-        // A count of zero would mean loading nothing and jumping into it.
+        // A count of zero would mean loading nothing and jumping into it, and a
+        // sector of zero would mean the label is its own boot program. Either
+        // way this disk does not name one — which is a fact about the disk, not
+        // about the controller, and is reported as such.
         if sector == 0 || count == 0 {
-            return None;
+            return ColdStart::NoProgram;
         }
         let offset = sector as u64 * SECTOR_LEN as u64;
         let len = count as usize * SECTOR_LEN;
+        // A program that does not fit on the disk is not a program, and this is
+        // the case a *blank* hard disk produces: an erased platter has an erased
+        // label, so both fields read `E5E5` and name 58,853 sectors starting
+        // 15 MB into a 4.9 MB disk. Bounded here, where the medium's size is
+        // known, because the alternative was a caller reporting "the boot
+        // program runs past the end" — which reads as a fault in the gateway
+        // when the honest answer is that the disk is empty.
+        if offset.saturating_add(len as u64) > image.len() as u64 {
+            return ColdStart::NoProgram;
+        }
         // Both stages of every disk here are loaded at zero, which is what the
         // CP/M loader's own source says of itself: "the hard disk bootloader ROM
         // (HDBL) loads this program into memory at address zero".
-        Some((offset, len, 0x0000))
+        ColdStart::Program { offset, len, load: 0x0000 }
     }
 
     fn stuck_polls(&self) -> u32 {
@@ -730,6 +973,259 @@ mod tests {
         assert!(h.owns_port(0xA0) && h.owns_port(0xA7));
         assert!(!h.owns_port(0x08), "the floppy's ports stay the floppy's");
         assert!(!h.owns_port(0xA8));
+    }
+
+    /// Every command the disks' own source defines, decoded as itself.
+    ///
+    /// The values are transcribed from the 88-HDSK source carried *on* four of
+    /// these hard disks — the equate names are theirs. This is the test that
+    /// would have caught the bug it was written for: testing bit 15 first made
+    /// `CFORMT` and `CINIT` both decode as Set Byte, so a format reported
+    /// success and erased nothing.
+    #[test]
+    fn test_the_eight_commands_decode_as_the_disks_define_them() {
+        for (high, want, name) in [
+            (0x00u8, Command::Seek, "CSEEK"),
+            (0x20, Command::WriteSector, "CWRSEC"),
+            (0x30, Command::ReadSector, "CRDSEC"),
+            (0x40, Command::WriteBuffer, "CWRBUF"),
+            (0x50, Command::ReadBuffer, "CRDBUF"),
+            (0x60, Command::ReadStatus, "CRSTAT"),
+            (0x80, Command::SetByte, "CSETIV"),
+            (0xC0, Command::Format, "CFORMT"),
+            (0xE0, Command::Initialize, "CINIT"),
+        ] {
+            // With the operand bits full of ones as well as empty: the decode
+            // must depend on the command nibble alone.
+            for low in [0x00u16, 0x00FF] {
+                let word = u16::from(high) << 8 | low;
+                assert_eq!(Command::of(word), want, "{name} ({word:#06x})");
+            }
+        }
+        // And the two that used to be swallowed are distinct from Set Byte.
+        assert_ne!(Command::of(0xC000), Command::of(0x8000), "format is not set-byte");
+        assert_ne!(Command::of(0xE000), Command::of(0x8000), "initialize is not set-byte");
+    }
+
+    /// Set Byte then Read Status, through the handshake the errata documents.
+    ///
+    /// The address rides in each command's low byte and the data follows at
+    /// port 167 — which is what the `WRITIV` routine on these disks does.
+    #[test]
+    fn test_an_iv_byte_written_by_set_byte_reads_back_through_read_status() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+
+        // Set IV byte 0xA8 — the address the disks' own diagnostic uses to test
+        // the processor card's data bus.
+        command(&mut h, 0x80A8);
+        assert!(!ready(&mut h), "not finished until the data byte arrives");
+        assert!(h.port_in(port::WRITE_READY).0 & 0x80 != 0, "it wants the byte");
+        h.port_out(port::DATA_OUT, 0x5A);
+        assert!(ready(&mut h), "and now the command is done");
+
+        // Read Status for the same address, in the order the disk's own READIV
+        // uses: wait for Ready, read the error byte, *then* take the data. Its
+        // comment is explicit — "HDCMD returns when CRDY - so CDA should already
+        // be set" — so both flags must be up together. Modelling this like a
+        // one-byte Read Buffer, finished only once the guest has read it, leaves
+        // that routine spinning on Ready forever.
+        command(&mut h, 0x60A8);
+        assert!(ready(&mut h), "ready comes up with the byte, not after it");
+        assert!(h.port_in(port::READ_READY).0 & 0x80 != 0, "and the byte is waiting");
+        assert_eq!(h.port_in(port::STATUS).0, 0, "no error");
+        assert_eq!(h.port_in(port::DATA_IN).0, 0x5A, "then the byte itself");
+        assert_eq!(
+            h.port_in(port::READ_READY).0 & 0x80,
+            0,
+            "with nothing further offered"
+        );
+    }
+
+    /// A Set Byte's data byte must not become half of the next command.
+    ///
+    /// It did: with no parameter phase the byte fell through to `pending_low`,
+    /// so the *next* command was assembled from a stale low half. Proved with a
+    /// command whose low byte decides which sector is read.
+    #[test]
+    fn test_a_set_byte_data_byte_is_not_taken_as_a_command_half() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 0x8010);
+        h.port_out(port::DATA_OUT, 0x07); // would have been a sector number
+
+        // Now a read of sector 0, sent low-then-high as always.
+        let req = command(&mut h, 0x3000);
+        assert_eq!(
+            req,
+            HostRequest::Read { drive: 0, offset: 0, len: SECTOR_LEN },
+            "the sector must come from this command, not the last data byte"
+        );
+    }
+
+    /// "the Datakeeper Read Status command insists that the selected Unit be
+    /// ready before it will return status" — the diagnostic's own comment, and
+    /// the only software here that issues the command.
+    #[test]
+    fn test_read_status_refuses_an_absent_unit() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        // Unit 1 has no disk.
+        command(&mut h, 0x6000 | (1 << 10));
+        assert_eq!(h.port_in(port::READ_READY).0 & 0x80, 0, "no byte is offered");
+        assert_eq!(h.port_in(port::STATUS).0 & error::NOT_READY, error::NOT_READY);
+    }
+
+    /// A format erases one whole recording surface — every cylinder's worth of
+    /// that head, a cylinder apart, which is why the request is strided.
+    #[test]
+    fn test_a_format_erases_one_whole_side() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        // Format head 1 (platter 0, side 1): the operands are in the low byte.
+        let req = command(&mut h, 0xC000 | (1 << 5));
+        assert_eq!(
+            req,
+            HostRequest::Fill {
+                drive: 0,
+                offset: SECTORS as u64 * SECTOR_LEN as u64,
+                chunk: SECTORS as usize * SECTOR_LEN,
+                stride: HEADS as u64 * SECTORS as u64 * SECTOR_LEN as u64,
+                count: CYLINDERS as usize,
+                byte: 0xE5,
+            }
+        );
+        assert!(ready(&mut h));
+        // The whole surface and no more: 406 cylinders x 24 sectors x 256.
+        assert_eq!(CYLINDERS as u64 * SECTORS as u64 * SECTOR_LEN as u64, IMAGE_LEN / 2);
+    }
+
+    /// The read-only default is the blunt guard a booted disk has instead of
+    /// every guard that understood the guest's request. A format must meet it.
+    #[test]
+    fn test_a_read_only_disk_refuses_a_format() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, true).unwrap();
+        let _ = h.port_in(port::STATUS);
+        assert_eq!(command(&mut h, 0xC000), HostRequest::None, "nothing is erased");
+        assert_eq!(h.port_in(port::STATUS).0 & error::WRITE_PROTECT, error::WRITE_PROTECT);
+    }
+
+    /// Initialize is one of the two commands the errata's error table exempts
+    /// from needing a ready drive, so an empty machine being initialised must
+    /// not be reported as a fault.
+    #[test]
+    fn test_initialize_needs_no_disk() {
+        let mut h = Hdsk::new();
+        let _ = h.port_in(port::STATUS);
+        assert_eq!(command(&mut h, 0xE000), HostRequest::None);
+        assert!(ready(&mut h), "it completes");
+        assert_eq!(h.port_in(port::STATUS).0, 0, "and reports nothing wrong");
+    }
+
+    /// It also clears whatever the board was in the middle of, which is what a
+    /// driver reaches for it *for*.
+    #[test]
+    fn test_initialize_abandons_a_transfer_in_flight() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 0x4000); // write buffer, 256 bytes
+        assert!(h.port_in(port::WRITE_READY).0 & 0x80 != 0);
+        command(&mut h, 0xE000);
+        assert_eq!(h.port_in(port::WRITE_READY).0 & 0x80, 0, "the transfer is gone");
+        assert!(ready(&mut h));
+    }
+
+    /// The power-on all-ones error byte must not be handed to a status read that
+    /// follows a command — that reports every fault the board can name on an
+    /// operation which worked.
+    #[test]
+    fn test_the_power_on_error_byte_does_not_mask_a_real_result() {
+        let mut h = board();
+        // No dummy read at init, which is the case that broke: straight to a
+        // seek, then ask how it went.
+        command(&mut h, 5);
+        assert_eq!(h.port_in(port::STATUS).0, 0x00, "the seek worked; say so");
+
+        // And on a board nobody has commanded, the errata's answer still holds.
+        let mut fresh = board();
+        assert_eq!(fresh.port_in(port::STATUS).0, 0xFF);
+    }
+
+    /// Images in circulation carry a few bytes past the last sector. Demanding
+    /// an exact length locked out both CP/M 3 disks and every minidisk on the
+    /// floppy side; the trait asks every controller not to repeat it.
+    #[test]
+    fn test_a_short_trailer_is_still_a_hard_disk() {
+        let h = Hdsk::new();
+        assert!(h.accepts(IMAGE_LEN).is_some(), "exact");
+        assert!(h.accepts(IMAGE_LEN + 96).is_some(), "96-byte trailer");
+        assert!(h.accepts(IMAGE_LEN + SECTOR_LEN as u64 - 1).is_some(), "the largest trailer");
+        assert!(
+            h.accepts(IMAGE_LEN + SECTOR_LEN as u64).is_none(),
+            "a whole extra sector is a different disk, not a trailer"
+        );
+        assert!(h.accepts(IMAGE_LEN - 1).is_none(), "and short is never rounded up");
+        // `insert` must agree, because it asks the same question.
+        let mut h = Hdsk::new();
+        assert!(h.insert(0, IMAGE_LEN + 96, false).is_ok());
+        assert!(h.insert(0, IMAGE_LEN - 1, false).is_err());
+    }
+
+    /// Each unit keeps its own head position. A controller that kept one
+    /// cylinder for the board would read the right sector of the wrong track as
+    /// soon as a guest used two hard disks.
+    #[test]
+    fn test_each_unit_remembers_its_own_cylinder() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, false).unwrap();
+        h.insert(1, IMAGE_LEN, false).unwrap();
+        let _ = h.port_in(port::STATUS);
+
+        command(&mut h, 5); // unit 0 to cylinder 5
+        command(&mut h, (1 << 10) | 9); // unit 1 to cylinder 9
+
+        let req = command(&mut h, 0x3000 | (1 << 10) | 3); // read unit 1, sector 3
+        let want = ((9u64 * HEADS as u64) * SECTORS as u64 + 3) * SECTOR_LEN as u64;
+        assert_eq!(req, HostRequest::Read { drive: 1, offset: want, len: SECTOR_LEN });
+
+        let req = command(&mut h, 0x3000 | 3); // read unit 0, sector 3
+        let want = ((5u64 * HEADS as u64) * SECTORS as u64 + 3) * SECTOR_LEN as u64;
+        assert_eq!(req, HostRequest::Read { drive: 0, offset: want, len: SECTOR_LEN });
+    }
+
+    /// A disk whose label names no boot program is a data disk — a fact about
+    /// the disk. Reporting it as "no controller can cold-start this" sends the
+    /// reader after missing code of ours.
+    #[test]
+    fn test_a_disk_that_names_no_boot_program_says_which_it_is() {
+        let h = Hdsk::new();
+        // Big enough to hold the program the label will name, since a program
+        // that does not fit is itself a reason to say NoProgram.
+        let mut image = vec![0u8; 8 * SECTOR_LEN];
+        assert_eq!(h.cold_start(&image), ColdStart::NoProgram, "an empty label");
+
+        image[LABEL_BOOT_SECTOR] = 7;
+        assert_eq!(h.cold_start(&image), ColdStart::NoProgram, "a count of zero");
+
+        image[LABEL_BOOT_COUNT] = 1;
+        assert_eq!(
+            h.cold_start(&image),
+            ColdStart::Program { offset: 7 * SECTOR_LEN as u64, len: SECTOR_LEN, load: 0 },
+            "sector 7, one sector, at zero — the CP/M pair's own label"
+        );
+        assert_eq!(h.cold_start(&[]), ColdStart::NoProgram, "and no label at all");
+
+        // The blank-disk case, which is the one that reaches a user: an erased
+        // platter has an erased label, so both fields read E5E5 and name a
+        // program 15 MB into a 4.9 MB disk.
+        let blank = vec![0xE5u8; IMAGE_LEN as usize];
+        assert_eq!(h.cold_start(&blank), ColdStart::NoProgram, "a formatted, empty disk");
+        // And a label naming one sector too many is refused on the same ground.
+        let mut over = vec![0u8; 8 * SECTOR_LEN];
+        over[LABEL_BOOT_SECTOR] = 7;
+        over[LABEL_BOOT_COUNT] = 2;
+        assert_eq!(h.cold_start(&over), ColdStart::NoProgram, "one sector past the end");
     }
 
     /// A guest waiting on a flag that never sets looks exactly like a crashed

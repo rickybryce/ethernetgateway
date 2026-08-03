@@ -755,7 +755,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. On by default (jailed, bounded, and shipping its own terminal); set <code>false</code> to hide the item and reject the key. configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>How the emulated CP/M reaches the virtual modem. Defaults to <code>rc2014_1b</code> (0x82/0x83), the port the bundled EGT80 terminal expects, so the two work together untouched; every UI offers a one-click &ldquo;Default port&rdquo; to come back to it. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
-        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>What the CP/M menu item runs. Empty = the CP/M emulator (our BDOS, drives A:&ndash;P:, EGT80, the virtual modem). A bare filename in <code>CPM/images</code> instead cold-boots that disk on an emulated MITS 88-DCDD controller, and the disk&rsquo;s own operating system takes the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80. The image is opened <strong>read-only</strong>. See §8.11.</td></tr>
+        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>What the CP/M menu item runs. Empty = the CP/M emulator (our BDOS, drives A:&ndash;P:, EGT80, the virtual modem). A bare filename in <code>CPM/images</code> instead cold-boots that disk on the emulated MITS controller its size names &mdash; an 88-DCDD floppy board or an 88-HDSK hard disk &mdash; and the disk&rsquo;s own operating system takes the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80. The image is opened <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>cpm_mounts</code></td><td>string</td><td><em>(empty)</em></td><td>Disk images mounted on CP/M drives, as <code>A=name.dsk,C=other.dsk</code>. Values are bare filenames inside <code>CPM/images</code>, never paths. A mounted drive uses the CP/M filesystem inside the image instead of its folder; the folder&rsquo;s files are untouched and return on unmount. An image whose name carries no format prefix is identified by inspection and mounts <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>log_to_file</code></td><td>bool</td><td><code>true</code></td><td>Mirror the log to <code>log_file</code> as well as stderr and the console buffer. On by default. Configured in the General &ldquo;More&hellip;&rdquo; panel of the GUI and web UI (telnet: Other Settings &rarr; <code>L</code>). Takes effect on the next restart.</td></tr>
@@ -2451,15 +2451,13 @@ it, and the folder&rsquo;s files return the moment you unmount.
 
 <p>
 Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
-<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Two formats are
-supported, both measured from real images and verified against
-<code>cpmtools</code> byte for byte: <code>ibm3740</code> (the 256,256-byte
-8&Prime; single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack
-library) and <code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk
-from the Altair-Duino set). The 337,568-byte Altair 88-DCDD <em>floppy</em> is
-not supported yet &mdash; its directory reads but file content past the first
-allocation block does not, and a format that quietly returns wrong bytes is
-worse than one that is absent.
+<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Three formats
+are supported, all measured from real images rather than transcribed from
+another tool&rsquo;s tables: <code>ibm3740</code> (the 256,256-byte 8&Prime;
+single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack library),
+<code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk from the
+Altair-Duino set) and <code>altair8</code> (the 337,568-byte Altair 88-DCDD
+8&Prime; floppy, which reads, writes and formats).
 </p>
 
 <aside class="note">
@@ -2496,19 +2494,25 @@ shows no files, which is correct rather than a fault. Those disks are for
 <p>
 Mounting gives you one drive with the gateway&rsquo;s BDOS underneath.
 <strong>Booting</strong> hands the whole machine to the disk: 64&nbsp;KB of
-memory, a MITS 88-DCDD floppy controller, an 88-2SIO console and the
-front-panel sense switches. The disk&rsquo;s own operating system then runs and
-does its own filesystem work &mdash; which is exactly why booting reaches the
-disks mounting cannot, and why it needs no knowledge of their layout.
+memory, a MITS 88-DCDD floppy controller, a MITS 88-HDSK hard disk controller
+(the &ldquo;Datakeeper&rdquo;), an 88-2SIO console and the front-panel sense
+switches. Which controller a disk lands on is decided by its size alone. The
+disk&rsquo;s own operating system then runs and does its own filesystem work
+&mdash; which is exactly why booting reaches the disks mounting cannot, and why
+it needs no knowledge of their layout.
 </p>
 
 <p>
-Twenty of the twenty-six 88-DCDD images in the widely-circulated Altair sample
-set reach a sign-on: Altair CP/M 2.2, <strong>CP/M 3.0</strong>, CP/M 2.2AT,
-<strong>Altair DOS</strong>, <strong>Altair Disk Extended BASIC</strong> and
-<strong>Time Sharing BASIC</strong> V1.1 and V2. The rest are
-<em>programs</em> disks &mdash; data rather than system disks &mdash; and are
-refused with a message saying so.
+Twenty-four of the images in the widely-circulated Altair sample set boot,
+and twenty-two of those print a sign-on straight away: Altair CP/M 2.2, <strong>CP/M 3.0</strong>, CP/M 2.2AT,
+<strong>Altair DOS</strong>, <strong>Altair Disk Extended BASIC</strong>,
+<strong>Time Sharing BASIC</strong> V1.1 and V2, and &mdash; on the 4.9&nbsp;MB
+hard disks &mdash; 63K CP/M 2.2b and <strong>Altair Hard Disk BASIC</strong>.
+Of the rest, one is a <em>programs</em> disk (data rather than a system disk,
+refused with a message saying so) and the others are Tarbell and Cromemco
+images, whose controllers are not emulated yet &mdash; those still
+<em>mount</em>. Separately, every one of the eleven 4.9&nbsp;MB
+<code>HDSK*</code> hard-disk images boots.
 </p>
 
 <p>
@@ -4788,7 +4792,7 @@ numeric values fall back to the default.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software sandboxed to <code>CPM/A</code>&ndash;<code>CPM/P</code> under <code>transfer_dir</code>. <strong>On by default</strong>: the guest is jailed to those folders, bounded by <code>cpm_emu_max_minstr</code>, always escapable with a double-<code>ESC</code>, and has no path to a host command. Set <code>false</code> to hide the item and reject the key. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>&ge; 1</td><td>CP/M emulator runaway ceiling, in millions of Z80 instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. See §8.11.</td></tr>
-        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>empty, or a filename in <code>CPM/images</code></td><td>What the CP/M menu item runs. Empty = the CP/M emulator. A bare filename cold-boots that disk on an emulated MITS 88-DCDD controller and gives the disk&rsquo;s own operating system the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80, no <code>EXIT</code>; press ESC twice to leave. Opened <strong>read-only</strong> and held by one session. See §8.11.</td></tr>
+        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>empty, or a filename in <code>CPM/images</code></td><td>What the CP/M menu item runs. Empty = the CP/M emulator. A bare filename cold-boots that disk on the emulated MITS controller its size names (88-DCDD floppy or 88-HDSK hard disk) and gives the disk&rsquo;s own operating system the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT80, no <code>EXIT</code>; press ESC twice to leave. Opened <strong>read-only</strong> and held by one session. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. Default <code>rc2014_1b</code> &mdash; the port the bundled EGT80 expects. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
         <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from this network&rsquo;s router (the default route&rsquo;s next hop, queried from the OS &mdash; see &sect;7.6; falls back to <code>*.*.*.1</code> if the query fails) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>

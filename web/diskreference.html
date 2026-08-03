@@ -1521,7 +1521,7 @@ in   161                            ; clears ready, returns the error byte
                     set.
                 </p>
 
-                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The seven commands</h3>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The eight commands</h3>
                 <p>
                     Each is 16 bits, sent as <strong>low byte to 167 first, then
                     high byte to 163</strong> &mdash; and writing the high byte
@@ -1531,17 +1531,41 @@ in   161                            ; clears ready, returns the error byte
                     and the Altair.
                 </p>
                 <table class="data-table">
-                    <thead><tr><th>Command</th><th>Bits</th></tr></thead>
+                    <thead><tr><th>Command</th><th>High byte</th><th>Bits</th></tr></thead>
                     <tbody>
-                        <tr><td>Seek to cylinder</td><td>0&ndash;8 cylinder (0&ndash;405), 9 unused, 10&ndash;11 unit, 12&ndash;15 zero</td></tr>
-                        <tr><td>Read sector</td><td>0&ndash;4 sector (0&ndash;23), 5&ndash;7 head, 8&ndash;9 buffer, 10&ndash;11 unit, 12&nbsp;&amp;&nbsp;13 one, 14&ndash;15 zero</td></tr>
-                        <tr><td>Write sector</td><td>as read sector, but bit 13 zero</td></tr>
-                        <tr><td>Read buffer</td><td>0&ndash;7 length, 8&ndash;9 buffer, 12 high, 13 low, 14 high, 15 low</td></tr>
-                        <tr><td>Write buffer</td><td>as read buffer, but bit 12 zero</td></tr>
-                        <tr><td>Status check</td><td>unit, plus a status-word address 0&ndash;255</td></tr>
-                        <tr><td>Set byte</td><td><code>80h</code>, plus an IV byte address</td></tr>
+                        <tr><td>Seek to cylinder</td><td><code>CSEEK 00h</code></td><td>0&ndash;8 cylinder (0&ndash;405), 9 unused, 10&ndash;11 unit, 12&ndash;15 zero</td></tr>
+                        <tr><td>Write sector</td><td><code>CWRSEC 20h</code></td><td>as read sector &mdash; see the deviation below</td></tr>
+                        <tr><td>Read sector</td><td><code>CRDSEC 30h</code></td><td>0&ndash;4 sector (0&ndash;23), 5&ndash;7 head, 8&ndash;9 buffer, 10&ndash;11 unit</td></tr>
+                        <tr><td>Write buffer</td><td><code>CWRBUF 40h</code></td><td>as read buffer</td></tr>
+                        <tr><td>Read buffer</td><td><code>CRDBUF 50h</code></td><td>0&ndash;7 length, 8&ndash;9 buffer</td></tr>
+                        <tr><td>Read status</td><td><code>CRSTAT 60h</code></td><td>10&ndash;11 unit, plus an IV byte address 0&ndash;255 in the low byte</td></tr>
+                        <tr><td>Set byte</td><td><code>CSETIV 80h</code></td><td>an IV byte address in the low byte; the data follows at 167</td></tr>
+                        <tr><td>Format</td><td><code>CFORMT C0h</code></td><td>unit in high-byte bits 2&ndash;3; low byte 7&ndash;6 platter, 5 side</td></tr>
+                        <tr><td>Initialize</td><td><code>CINIT E0h</code></td><td>&mdash;</td></tr>
                     </tbody>
                 </table>
+                <p>
+                    <strong>The equate names in that table are the disks' own.</strong>
+                    Four of the hard-disk images carry the assembler source of the
+                    88-HDSK software itself &mdash; the CP/M BIOS on HDSK03/04, and on
+                    HDSK08&ndash;0B a controller diagnostic with <code>IR</code>/<code>IW</code>
+                    commands for reading and writing IV bytes and a platter formatter.
+                    It states the command set outright, which is how this table came to
+                    have eight rows: the manual's own table lists seven and omits
+                    <code>CINIT</code>, and it names &ldquo;status check&rdquo; without
+                    giving its bits at all.
+                </p>
+                <p>
+                    That mattered more than a documentation tidy-up. Decoding on
+                    <em>bit 15</em> &mdash; which the manual invites, because <code>80h</code>
+                    is the only value it shows with that bit set &mdash; folds
+                    <code>CFORMT</code> (<code>C0h</code>) and <code>CINIT</code>
+                    (<code>E0h</code>) into Set Byte, and both then <em>succeeded while
+                    doing nothing</em>. A format that reports success and erases nothing
+                    is the same failure as the write bit below, from the same cause:
+                    reasoning from a bit condition instead of reading what the
+                    software sends. Decode the whole four-bit nibble.
+                </p>
                 <p class="dim-text">
                     A transfer length of <strong>0 means 256 bytes</strong>, not
                     none. Heads are 0&ndash;7 with the fixed platter at 2 and 3
@@ -1702,9 +1726,10 @@ in   161                            ; clears ready, returns the error byte
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">A deviation from the manual, on the write bit</h3>
                 <p>
-                    Recorded as a <em>deviation</em> rather than a verdict,
-                    because it rests on one observation of one CP/M
-                    implementation.
+                    Recorded as a <em>deviation</em> rather than a verdict. It
+                    began as one observation of one CP/M implementation; there
+                    are now <strong>two independent witnesses</strong>, and the
+                    second is documentary.
                 </p>
                 <p>
                     &sect;3-4 says Write Sector is Read Sector &ldquo;except that
@@ -1734,19 +1759,149 @@ in   161                            ; clears ready, returns the error byte
                     sectors exactly as the manual and the hardware already agree
                     it does for buffers. That is a reason to prefer it, not proof.
                 </p>
+                <p>
+                    <strong>The second witness: the disks say so in words.</strong>
+                    The 88-HDSK source carried on the hard disks themselves defines
+                    the command as
+                </p>
+                <pre><code>CWRSEC  equ 020h    ;Write Sector
+CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
+                <p>
+                    &mdash; two copies of the same equate, from the CP/M BIOS and
+                    from the controller diagnostic, both giving <code>20h</code>
+                    and one saying explicitly that the fields are otherwise those
+                    of Read Sector. This is not our inference from watching a
+                    running guest: it is the source of the software that shipped
+                    with the hardware, telling the assembler what byte to emit.
+                    Observation and documentation now agree, from different
+                    directions.
+                </p>
                 <div class="callout callout-info">
                     <p>
-                        <strong>Why this is not filed as &ldquo;the manual is
-                        wrong&rdquo;.</strong> It is one implementation's
-                        behaviour, the errata for this very section already
-                        corrects several other bit assignments, and it is
-                        entirely possible the two bits are numbered the other way
-                        round somewhere in the chain between the 8X300 firmware,
-                        the 4PIO and the prose. The honest statement is that the
-                        hardware's own software does this, so we do too. Anyone
-                        with a second driver to compare against should compare.
+                        <strong>Why this is still not filed as &ldquo;the manual
+                        is wrong&rdquo;.</strong> Two witnesses agreeing is a much
+                        stronger position than one, but they are witnesses to the
+                        same thing: what MITS-lineage <em>software</em> sends. The
+                        errata for this very section already corrects several other
+                        bit assignments, and it remains entirely possible the two
+                        bits are numbered the other way round somewhere in the
+                        chain between the 8X300 firmware, the 4PIO and the prose
+                        &mdash; in which case the manual is right about the pin and
+                        wrong only about the numbering. The honest statement is
+                        that the hardware's own software does this, so we do too.
+                        What would settle it is a schematic or a second,
+                        unrelated driver &mdash; and anyone holding one should
+                        compare.
                     </p>
                 </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The IV bytes, and the two commands that reach them</h3>
+                <p>
+                    <code>CSETIV</code> and <code>CRSTAT</code> are a matched
+                    pair: they write and read the controller's own internal
+                    registers, which MITS calls <strong>IV bytes</strong>. No
+                    guest operating system here uses either &mdash; seeking goes
+                    through <code>CSEEK</code> &mdash; but the diagnostic on
+                    HDSK08&ndash;0B is built almost entirely out of them, and it
+                    is the only software that exercises this corner at all.
+                </p>
+                <p>
+                    Both carry the <strong>address in the command's low byte</strong>.
+                    Set Byte then takes its data as a separate byte at port 167,
+                    which is the detail worth having from the disk's own
+                    <code>WRITIV</code>:
+                </p>
+                <pre><code>WRITIV: mov  e,a       ;save IV data
+        in   ACMD      ;reset CMDACK
+        mov  a,c       ;recover address
+        out  ADATA     ;low byte of command  &lt;- the ADDRESS
+        in   ADATA     ;clear ADPA
+        mvi  a,CSETIV
+        out  ACMD      ;start it
+        ...            ;wait on 166, then out ADATA with the DATA</code></pre>
+                <p>
+                    So the command is <em>not</em> finished when it is issued: it
+                    completes when the data byte arrives. An implementation that
+                    raises <em>ready</em> immediately and has nowhere to put that
+                    byte will take it as half of the next command word instead,
+                    which is exactly what happened here &mdash; harmless only
+                    because the next command overwrote the low half first.
+                </p>
+                <p>
+                    Read Status is the mirror, but <strong>not symmetrically</strong>,
+                    and this is the detail that will bite whoever writes it next.
+                    Set Byte finishes when its parameter arrives &mdash; the
+                    errata's example waits on the write flag, sends the byte, and
+                    only <em>then</em> waits on Ready. Read Status raises
+                    <em>Ready and the data flag together</em>: <code>READIV</code>
+                    waits for Ready first and takes the byte afterwards, noting
+                    &ldquo;HDCMD returns when CRDY - so CDA should already be
+                    set&rdquo;. Model it as a one-byte Read Buffer, finished only
+                    once the guest has read it, and that routine spins on Ready
+                    forever &mdash; in the only software that uses the command at
+                    all. It also carries one rule that is not in the manual we
+                    have, stated plainly in the diagnostic's own comments:
+                </p>
+                <div class="callout callout-info">
+                    <p>
+                        &ldquo;Note that no IV Bytes can be read without the Disk
+                        Interface Card present and the Ready line on that card
+                        active, because <strong>the Datakeeper Read Status command
+                        insists that the selected Unit be ready</strong> before it
+                        will return status.&rdquo;
+                    </p>
+                </div>
+                <p>
+                    <strong>What is modelled and what is not.</strong> The gateway
+                    keeps 256 IV bytes &mdash; the range the diagnostic itself
+                    allows, <code>MAXIV equ 0FFh</code> &mdash; where a write is
+                    remembered and a read returns it. That is exactly what the
+                    diagnostic's IV byte <em>test</em> asks for: write a pattern,
+                    read it back, compare. It is deliberately <em>not</em> a model
+                    of the 8X300's registers, because the same source shows why
+                    that would be guesswork: some IV bytes are inputs reflecting
+                    drive state (&ldquo;the IV Byte on the Disk Data Card is an
+                    input, so this test&hellip;&rdquo;), and others drive the head
+                    positioner directly &mdash; IV 18 and 19 are the cylinder
+                    latches, and the cylinder bits there are <em>inverted</em>.
+                    Nothing we have says which address is which, so the store is
+                    real and the meanings are absent, and the head-positioning
+                    parts of that diagnostic will not behave like the real board.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Format, and what a formatted surface holds</h3>
+                <p>
+                    <code>CFORMT</code> formats <strong>one whole side of one
+                    platter</strong> &mdash; which is what the utility announces
+                    (&ldquo;Formatting platter <em>N</em>, side <em>M</em>&rdquo;)
+                    and what its 60-second timeout is sized for. Its operands are
+                    split across the word, and the source's comment on the equate
+                    is the only statement of that we have found: unit in the high
+                    byte's bits 2&ndash;3, then <code>ADATA</code> bits 7&ndash;6
+                    platter and bit 5 side. Those fold into the same head number
+                    the sector commands use, since head 0&ndash;7 <em>is</em>
+                    platter&times;2&nbsp;+&nbsp;side.
+                </p>
+                <p>
+                    The fill byte is <strong>measured, not chosen</strong>: the
+                    entire second half of HDSK03 is 9,744 sectors of uniform
+                    <code>E5</code>, and HDSK04's free space is the same. So at the
+                    level this controller works, a format is &ldquo;the data comes
+                    back erased&rdquo;. What is <em>not</em> reproduced is the
+                    sector headers a real format writes &mdash; these images hold
+                    sector data only, with no header bytes anywhere, which is the
+                    same reason a blank file is not a blank floppy on the 88-DCDD
+                    side.
+                </p>
+                <p class="dim-text">
+                    A surface is not contiguous in the image: one head's 24 sectors
+                    sit once per cylinder, a whole cylinder apart. So the request
+                    the controller hands down is a <em>strided</em> fill, 406 runs
+                    of 6,144 bytes &mdash; and the test asserts on the last
+                    cylinder as well as the first, because a fill that treated a
+                    surface as contiguous would erase the first half of the disk,
+                    both heads, and pass any check that only looked at the front.
+                </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Proving the write path needs <em>two</em> sessions</h3>
                 <p>
@@ -1851,9 +2006,10 @@ in   161                            ; clears ready, returns the error byte
                         </tr>
                         <tr>
                             <td>Controllers for Tarbell and Cromemco</td>
-                            <td><strong>The 88-HDSK is done</strong> &mdash; built, booting all four
-                                hard-disk images, and reading and writing verified against the disk's
-                                own operating system. The set-of-controllers refactor it needed is
+                            <td><strong>The 88-HDSK is done</strong> &mdash; built, booting
+                                <strong>all eleven</strong> hard-disk images in the sample set, and
+                                reading and writing verified against the disk's own operating system
+                                on two of them. The set-of-controllers refactor it needed is
                                 done with it, so <code>BootMachine</code> no longer hardwires the
                                 88-DCDD and a further board costs only its own
                                 <code>Controller</code> impl. Tarbell (6 images) and Cromemco (3)
@@ -1862,22 +2018,34 @@ in   161                            ; clears ready, returns the error byte
                                 survey currently declines to try.</td>
                         </tr>
                         <tr>
-                            <td>88-HDSK corners with no disk to exercise them</td>
-                            <td>Three, all reasoned rather than run, because nothing in the image
-                                sets asks for them: <em>Status Check</em> is not implemented (no
-                                guest issues it); <em>Set Byte</em> is accepted but the IV bytes it
-                                writes are not modelled; and the head count is fixed at 2, which is
-                                what the Datakeeper had. Multiple hard-disk units are likewise
-                                untested &mdash; stock Altair CP/M only reaches four drives at all.</td>
+                            <td>88-HDSK corners &mdash; now closed, by asking the disks</td>
+                            <td>The three corners recorded here as &ldquo;reasoned rather than
+                                run&rdquo; turned out to be findable after all, because four of the
+                                hard disks carry the 88-HDSK source and a controller diagnostic.
+                                <em>Read Status</em> and <em>Set Byte</em> are implemented against
+                                that source, including the 256-byte IV store and the rule that Read
+                                Status refuses an unready unit; <em>Format</em> and
+                                <em>Initialize</em> exist at all, having previously decoded as Set
+                                Byte and silently succeeded; and per-unit head position has a test.
+                                What stays open is small and stated: the IV bytes have no hardware
+                                <em>meanings</em>, the head count is still 2 (what the Datakeeper
+                                had, and what these images are), and no guest here reaches a second
+                                hard disk to try &mdash; stock Altair CP/M only addresses four
+                                drives at all.</td>
                         </tr>
                         <tr>
                             <td>Boot coverage as it stands</td>
-                            <td><strong>24 of the 33 images boot</strong> &mdash; every one in the
-                                <code>DISK*</code> and <code>HDSK*</code> families that has a boot
-                                sector. Of the rest, <code>DISK0D</code> is genuinely data and not a
-                                system disk, and the other 9 are the Tarbell and Cromemco images
-                                above. Between them these reach CP/M 2.2, CP/M 3.0, Altair DOS, Disk
-                                Extended BASIC, Time Sharing BASIC and Hard Disk BASIC.</td>
+                            <td>Every image in the <code>DISK*</code> and <code>HDSK*</code>
+                                families that has a boot sector &mdash; <strong>24 of the 33</strong>
+                                in the working set, and separately <strong>all eleven</strong>
+                                <code>HDSK*</code> images once the removable backup volume is
+                                included (the working set stops at HDSK03, and HDSK05&ndash;0B had
+                                never been tried before: seven more, all reaching
+                                <code>63K CP/M 2.2b</code>). Of the rest, <code>DISK0D</code> is
+                                genuinely data and not a system disk, and the other 9 are the Tarbell
+                                and Cromemco images above. Between them these reach CP/M 2.2, CP/M
+                                3.0, Altair DOS, Disk Extended BASIC, Time Sharing BASIC and Hard
+                                Disk BASIC.</td>
                         </tr>
                     </tbody>
                 </table>

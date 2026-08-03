@@ -46,6 +46,57 @@ pub enum HostRequest {
     Read { drive: u8, offset: u64, len: usize },
     /// Write the controller's buffer for `drive` back at `offset`.
     Write { drive: u8, offset: u64, len: usize },
+    /// Set `count` runs of `chunk` bytes, `stride` apart, to `byte`.
+    ///
+    /// What a format is: one whole recording surface erased. It is strided
+    /// because a surface is not contiguous in an image — one head's sectors sit
+    /// once per cylinder, a cylinder apart — and it is expressed as arithmetic
+    /// the controller does rather than as a list of ranges, so this stays a
+    /// plain `Copy` value like the other two.
+    Fill { drive: u8, offset: u64, chunk: usize, stride: u64, count: usize, byte: u8 },
+}
+
+/// What a controller's PROM would do with an image, when asked to cold-start it.
+///
+/// Three answers rather than an `Option`, because the two ways of not booting
+/// are different facts and a caller has to tell a user which one happened. They
+/// were conflated once: a hard disk with no boot program reported "this disk is
+/// on a controller that cannot cold-start one yet", which is untrue and sends
+/// the reader looking for missing code rather than at their disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColdStart {
+    /// This board's cold start is its own sequence, not a run of sectors.
+    ///
+    /// The 88-DCDD's is: its PROM drives the port state machine against a
+    /// rotating sector counter, which stays in [`crate::cpm::boot`] behind
+    /// [`Controller::as_dcdd`].
+    Own,
+    /// Load `len` bytes from `offset` at `load`, and enter there.
+    Program { offset: u64, len: usize, load: u16 },
+    /// This board loads a program the disk names, and this disk names none.
+    NoProgram,
+}
+
+/// One kind of medium a controller takes.
+///
+/// Exists so that "what can this machine boot" has a single answer with a
+/// single owner. The generated readme used to build its own list from the
+/// floppy's geometry table, which is why it told operators that only 88-DCDD
+/// floppies boot for as long as the hard disk had been booting them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Medium {
+    /// Bytes in a full image of it.
+    pub bytes: u64,
+    /// What to call it, to a person.
+    pub label: &'static str,
+    /// The largest trailer past the last sector still taken as this medium.
+    ///
+    /// Always less than one sector: past that the size no longer identifies the
+    /// medium, and accepting it would mean reading a disk we have not actually
+    /// recognised.
+    pub trailer: u64,
+    /// How the size is made up, for a readme — "77 tracks x 32 sectors x 137".
+    pub shape: String,
 }
 
 /// A disk controller a booted machine can carry.
@@ -66,14 +117,26 @@ pub trait Controller: Send {
     /// Write one of its ports.
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest;
 
+    /// Every medium this board takes.
+    fn media(&self) -> Vec<Medium>;
+
     /// Can this controller carry an image this size, and what is that medium
     /// called?
     ///
     /// `None` means "not mine", which is how an image is matched to hardware.
-    /// Implementations are expected to allow a short trailer: several images in
-    /// circulation carry a few bytes past the last sector, and rejecting those
-    /// on an exact match cost seven perfectly good disks once already.
-    fn accepts(&self, image_len: u64) -> Option<&'static str>;
+    ///
+    /// **Derived from [`Controller::media`], and not overridden.** The trailer
+    /// allowance is the reason: it is easy to write an exact-length test here
+    /// and not notice, because every image on hand is exact — and then a disk
+    /// that some copying tool padded is refused as "not a disk this machine can
+    /// carry". That happened to the floppy (seven disks, including both CP/M 3
+    /// images) and then happened again to the hard disk. Stating the medium once
+    /// and computing the test from it is what stops a third time.
+    fn accepts(&self, image_len: u64) -> Option<&'static str> {
+        self.media().into_iter().find_map(|m| {
+            (image_len >= m.bytes && image_len - m.bytes <= m.trailer).then_some(m.label)
+        })
+    }
 
     /// Put a disk of `image_len` bytes in a drive. `Err` if it will not fit
     /// this controller.
@@ -100,21 +163,15 @@ pub trait Controller: Send {
         None
     }
 
-    /// The boot program this controller's PROM would load, read out of the
-    /// image itself: `(byte offset, byte length, load address)`.
-    ///
-    /// `None` for a board whose cold start is more than "load a run of sectors
-    /// and jump" — the 88-DCDD's is, because its PROM drives the port state
-    /// machine through a rotating sector counter, and that stays in
-    /// [`crate::cpm::boot`] behind [`Controller::as_dcdd`].
+    /// What this controller's PROM would load out of `image`, and from where.
     ///
     /// The image is passed in because a controller knows its own on-disk
     /// conventions and the machine does not. The 88-HDSK needs that: the
     /// location is not fixed but recorded in the disk's own volume label, which
     /// is how one bootstrap serves both the CP/M disks and the Disk BASIC ones
     /// that live somewhere else entirely.
-    fn boot_program(&self, _image: &[u8]) -> Option<(u64, usize, u16)> {
-        None
+    fn cold_start(&self, _image: &[u8]) -> ColdStart {
+        ColdStart::Own
     }
 
     /// How many times a guest has polled for something that never arrived.

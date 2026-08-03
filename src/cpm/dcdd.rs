@@ -553,14 +553,16 @@ impl super::controller::Controller for Dcdd {
         self.to_host(req)
     }
 
-    fn accepts(&self, image_len: u64) -> Option<&'static str> {
+    fn media(&self) -> Vec<super::controller::Medium> {
         BOOT_GEOMETRIES
             .iter()
-            .find(|(g, _)| {
-                let want = g.image_len();
-                image_len >= want && image_len - want < SECTOR_LEN as u64
+            .map(|(g, label)| super::controller::Medium {
+                bytes: g.image_len(),
+                label,
+                trailer: MAX_IMAGE_TRAILER,
+                shape: format!("{} tracks x {} sectors x {SECTOR_LEN}", g.tracks, g.sectors),
             })
-            .map(|(_, label)| *label)
+            .collect()
     }
 
     fn insert(&mut self, drive: u8, image_len: u64, read_only: bool) -> Result<(), String> {

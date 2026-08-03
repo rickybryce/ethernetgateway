@@ -126,6 +126,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that program — its opening `31 00 D7` is `LXI SP,0D700h`, and a few bytes
   later `DB FF` reads the front-panel sense switches to choose a platter,
   exactly as its own comments describe.
+- **The 88-HDSK's whole command set, taken from the disks' own source.** Four of
+  the hard disks carry the assembler source of the 88-HDSK software itself — the
+  CP/M BIOS, and on some of them a controller diagnostic with commands for
+  reading and writing IV bytes and a platter formatter — and it defines the
+  command set outright. Three of the eight commands had been decoded wrongly:
+
+  - **Read Status** (`CRSTAT 60h`) was unrecognised, so the controller reported
+    "finished, no error" and never offered the status byte; a guest polling for
+    it would have waited forever.
+  - **Format** (`CFORMT C0h`) and **Initialize** (`CINIT E0h`) both decoded as
+    Set Byte, because the decoder tested bit 15 before the command nibble — the
+    reading the manual invites, since `80h` is the only value it shows with that
+    bit set. Both then *succeeded while doing nothing*, which is the same silent
+    failure the write bit caused before it.
+
+  All eight now decode on the full nibble, and the two new ones do their jobs:
+  Format erases one whole recording surface with the fill byte the images
+  themselves show (`E5`, measured across 9,744 uniform sectors), honouring the
+  read-only default; Initialize resets the board and, per the errata's own error
+  table, needs no ready drive. **Set Byte and Read Status are a matched pair over
+  a 256-byte IV store** — a write is remembered and a read returns it, which is
+  what the diagnostic's IV byte test asks for. Set Byte's data byte now has a
+  phase to arrive in; without one it was being taken as half of the next command.
+
+  The same source also gives the write bit a **second, documentary witness**:
+  `CWRSEC equ 020h`, commented "same bit fields as CRDSECT". That is the software
+  that shipped with the hardware, agreeing with what we had observed from a
+  running guest. It is still recorded as a deviation rather than "the manual is
+  wrong" — both witnesses are witnesses to what MITS-lineage software *sends*,
+  and the bits may simply be numbered the other way round somewhere in the chain.
+- **All eleven Altair hard-disk images boot**, not the four we had tried. Seven
+  more turned up on a backup volume and every one reaches `63K CP/M 2.2b`.
+- **A blank hard disk now says it is blank.** An erased platter has an erased
+  volume label, so the two words that name its boot program both read `E5E5` and
+  point 15 MB into a 4.9 MB disk. That was reported as "the boot program runs
+  past the end", which reads as a fault in the gateway; and a hard disk naming no
+  boot program at all was reported as "this disk is on a controller that cannot
+  cold-start one yet", which sends the reader after missing code of ours. Both
+  now say **"it is data, not a system disk"**, and the bound is applied where the
+  medium's size is known.
+
 - **A booted disk now gets all your mounted images**, each on the controller
   unit its drive letter names — B: is unit 1, C: is unit 2, F: is unit 5. So you
   can mount several disks, boot one, and copy between them with the guest's own
@@ -197,6 +238,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and images before a first session, not after. Nothing is ever overwritten.
 
 ### Fixed
+
+- **A hard-disk image with a few bytes of trailer is no longer refused.** The
+  88-HDSK demanded an exact 4,988,928 bytes while the floppy allowed a short
+  trailer — the same mistake that had already cost seven perfectly good floppies,
+  including both CP/M 3 images. Every controller's media list now states its own
+  trailer allowance once and the size test is *derived* from it, so the two
+  cannot drift apart again.
+- **A virtual-modem profile can no longer be silently shadowed by the hard-disk
+  controller.** The list of ports a booted machine reserves for its own hardware
+  was written down beside the controllers instead of asked of them, and it named
+  only the floppy's three — so a profile landing on `A0`–`A7` was accepted and
+  then answered by the controller in the port dispatch, leaving a modem that was
+  simply mute. It is now derived from the boards themselves.
+- **The images-folder readme said only 88-DCDD floppies boot**, for as long as
+  the hard disk had been booting them, because it built its own list from the
+  floppy's geometry table. It now renders from the machine's controllers, so a
+  board that can boot a medium documents itself. The user manual's mount-format
+  list was stale in the same way — it still said the Altair 88-DCDD floppy was
+  unsupported, which stopped being true when `altair8` was solved.
 
 - **A booted disk now runs on a Z80 core rather than an 8080.** The Altair
   shipped with an 8080, so that is the more literal machine — but the Z80 is a

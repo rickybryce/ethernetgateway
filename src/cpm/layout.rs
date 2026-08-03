@@ -12,7 +12,6 @@
 //! is, and the readme is written only when absent — an operator who has
 //! annotated it keeps their notes.
 
-use super::dcdd::{BOOT_GEOMETRIES, MAX_IMAGE_TRAILER};
 use super::image::{format::FORMATS, IMAGES_DIR};
 use std::path::{Path, PathBuf};
 
@@ -95,11 +94,12 @@ while an image is mounted, and they come straight back when you unmount it.
 MOUNTING IS NOT BOOTING
 -----------------------
 
-An Altair 88-DCDD floppy can also be BOOTED, which is a different thing.
-Mounting gives you one drive of sixteen with the gateway's CP/M underneath.
-Booting hands the disk the whole machine, and its OWN operating system runs
-— so booting reaches the disks that are not CP/M at all: Altair DOS, Altair
-Disk Extended BASIC, Time Sharing BASIC, and CP/M 3.0.
+An Altair 88-DCDD floppy or an 88-HDSK hard disk can also be BOOTED, which
+is a different thing.  Mounting gives you one drive of sixteen with the
+gateway's CP/M underneath.  Booting hands the disk the whole machine, and
+its OWN operating system runs — so booting reaches the disks that are not
+CP/M at all: Altair DOS, Altair Disk Extended BASIC, Time Sharing BASIC,
+Hard Disk BASIC, and CP/M 3.0.
 
 Inside a booted disk there is no jail, no A> from us and no EGT80.  Press
 ESC twice to get back to the gateway.  A booted image is opened READ-ONLY
@@ -114,8 +114,8 @@ does, so selecting one looks like a hang; ESC ESC still works.
 
 Set what the CP/M menu item runs with cpm_boot_image (the 'CP/M runs'
 setting in every UI), or boot one for a single visit from the telnet boot
-picker.  Only 88-DCDD floppies boot: 337,568 bytes (8-inch) or 76,720
-(minidisk), plus any short trailer.
+picker.  What can be booted is decided by size alone - see FORMATS YOU CAN
+BOOT below.
 
 
 NAMING: PUT THE FORMAT IN THE FILENAME
@@ -159,41 +159,39 @@ with its token to make it writable, as above.
 FORMATS YOU CAN BOOT
 --------------------
 
-These are MITS 88-DCDD floppies.  The gateway does not read their
-filesystem at all — it runs the disk, and the disk's own operating system
-does that work.  There is no naming convention here and nothing to rename:
-an image is bootable if it is the right size.  A few bytes of trailer past
-the last sector are allowed, because several images in circulation have
-one.
+The gateway does not read the filesystem of these at all — it runs the
+disk, and the disk's own operating system does that work.  There is no
+naming convention here and nothing to rename: an image is bootable if it is
+the right size.  A few bytes of trailer past the last sector are allowed,
+because several images in circulation have one.
 
 ",
     );
-    for (g, label) in BOOT_GEOMETRIES {
+    // Asked of the machine rather than listed here.  A controller that can boot
+    // a medium says so itself, so adding a board documents it — this section
+    // said "these are MITS 88-DCDD floppies" for as long as the hard disk had
+    // been booting them.
+    for m in super::boot_machine::BootMachine::bootable_media() {
         // The label sits in the mount table's token column: there is no token
         // to put there, and leaving the gap makes the entry look truncated.
-        s.push_str(&format!("    {label}\n"));
-        s.push_str(&format!(
-            "    {:<10} {} bytes = {} tracks x {} sectors x 137\n",
-            "",
-            g.image_len(),
-            g.tracks,
-            g.sectors,
-        ));
+        s.push_str(&format!("    {}\n", m.label));
+        s.push_str(&format!("    {:<10} {} bytes = {}\n", "", m.bytes, m.shape));
         s.push_str(&format!(
             "    {:<10} plus up to {} bytes of trailer\n\n",
-            "", MAX_IMAGE_TRAILER,
+            "", m.trailer,
         ));
     }
     s.push_str(
         "\
 This is how the disks that are NOT CP/M run: Altair DOS, Altair Disk
-Extended BASIC and Time Sharing BASIC all boot, and so does CP/M 3.0.
-Mounting any of them shows nothing, which is correct — they are not CP/M
-filesystems.  A programs disk (data, with no boot sector) is refused.
+Extended BASIC, Time Sharing BASIC and Hard Disk BASIC all boot, and so
+does CP/M 3.0.  Mounting any of them shows nothing, which is correct — they
+are not CP/M filesystems.  A programs disk (data, with no boot sector) is
+refused.
 
-Not all of these are the same disk.  A 337,568-byte image is an 8-inch
-floppy; 76,720 is a minidisk.  The gateway tells them apart by size, so a
-truncated or padded file may be refused even though it looks fine.
+Not all of these are the same disk, and the gateway tells them apart by
+size alone — so a truncated or badly padded file may be refused even though
+it looks fine.
 
 
 WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO
@@ -370,25 +368,35 @@ mod tests {
         }
     }
 
-    /// Every geometry that BOOTS must appear too.
+    /// Every medium that BOOTS must appear too.
     ///
     /// The readme used to list only the mountable formats, which meant someone
     /// holding an Altair floppy — the commonest disk there is for this hardware
     /// — read it and concluded the gateway did not support their image, when in
-    /// fact it boots. Rendered from `BOOT_GEOMETRIES` so a geometry added to
-    /// the code cannot go missing from the file operators actually read.
+    /// fact it boots. Then it listed the floppy geometries *only*, and said so in
+    /// prose ("these are MITS 88-DCDD floppies"), for as long as the hard disk
+    /// had been booting. Both faults were the same one: a second list. It is now
+    /// rendered from the machine's own controllers, so a board that can boot a
+    /// medium documents it by existing.
     #[test]
-    fn test_readme_documents_every_bootable_geometry() {
+    fn test_readme_documents_every_bootable_medium() {
         let text = images_readme();
         assert!(text.contains("FORMATS YOU CAN BOOT"), "the section must exist");
-        for (g, label) in BOOT_GEOMETRIES {
-            assert!(text.contains(label), "readme omits the bootable {label}");
+        let media = crate::cpm::boot_machine::BootMachine::bootable_media();
+        assert!(media.len() >= 3, "the floppy, the minidisk and the hard disk at least");
+        for m in media {
+            assert!(text.contains(m.label), "readme omits the bootable {}", m.label);
             assert!(
-                text.contains(&g.image_len().to_string()),
-                "readme omits the size of {label} ({} bytes)",
-                g.image_len()
+                text.contains(&m.bytes.to_string()),
+                "readme omits the size of {} ({} bytes)",
+                m.label,
+                m.bytes
             );
         }
+        assert!(
+            !text.contains("These are MITS 88-DCDD floppies"),
+            "the prose must not narrow what the list says"
+        );
     }
 
     /// Mounting and booting are different things and the readme has to say so —

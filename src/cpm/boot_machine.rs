@@ -28,7 +28,7 @@
 //!   instead of an echo of itself.
 
 use super::boot::{cold_boot, BootError};
-use super::controller::{Controller, HostRequest};
+use super::controller::{ColdStart, Controller, HostRequest};
 use super::dcdd::{Dcdd, SECTOR_LEN};
 use super::modem_port::ModemPort;
 use super::uart::{ModemAccess, UartFamily};
@@ -68,17 +68,6 @@ pub const DEFAULT_SENSE_SWITCHES: u8 = 0x00;
 /// person types, and small enough that a client streaming into a guest which
 /// never reads its console cannot grow the host's memory.
 const KEY_QUEUE_CAP: usize = 4096;
-
-/// Ports this machine's own hardware answers, which a virtual modem may not
-/// take over: the 88-DCDD controller, the console, and the front panel.
-const RESERVED_PORTS: &[u8] = &[
-    0x08,
-    0x09,
-    0x0A,
-    CONSOLE_STATUS_PORT,
-    CONSOLE_DATA_PORT,
-    SENSE_SWITCH_PORT,
-];
 
 /// What happened when the configured virtual modem was offered to a booted
 /// machine.
@@ -217,15 +206,10 @@ impl BootMachine {
                 "HBIOS is RomWBW firmware, which a booted Altair disk does not have".into(),
             ),
             ModemAccess::Ports(u) => {
-                if let Some(&clash) = RESERVED_PORTS
-                    .iter()
-                    .find(|&&p| p == u.status_port || p == u.data_port)
+                if let Some((clash, what)) = [u.status_port, u.data_port]
+                    .into_iter()
+                    .find_map(|p| self.reserved_port(p).map(|w| (p, w)))
                 {
-                    let what = match clash {
-                        CONSOLE_STATUS_PORT | CONSOLE_DATA_PORT => "the console",
-                        SENSE_SWITCH_PORT => "the front panel",
-                        _ => "the disk controller",
-                    };
                     return ModemAttach::Unavailable(format!(
                         "port {clash:#04x} is {what} on this machine — try altair_2sio2"
                     ));
@@ -367,20 +351,32 @@ impl BootMachine {
             .get(drive as usize)
             .and_then(|x| x.as_ref())
             .ok_or(BootError::NoDisk(drive))?;
-        if let Some((offset, len, load_at)) = controllers[which].boot_program(&m.bytes) {
-            let at = offset as usize;
-            let program = m
-                .bytes
-                .get(at..at + len)
-                .ok_or_else(|| BootError::Unreadable("the boot program runs past the end".into()))?;
-            if program.iter().all(|&b| b == 0 || b == 0xE5) {
-                return Err(BootError::NotBootable);
+        match controllers[which].cold_start(&m.bytes) {
+            ColdStart::Program { offset, len, load } => {
+                let at = offset as usize;
+                let program = m.bytes.get(at..at + len).ok_or_else(|| {
+                    BootError::Unreadable("the boot program runs past the end".into())
+                })?;
+                // The same test the floppy's bootstrap applies to its boot
+                // sector, rather than a weaker one of this path's own: a disk
+                // whose label names a program that turns out to be text is data
+                // with a plausible label, and running text on a Z80 does
+                // something that is never useful.
+                if !super::boot::looks_bootable(&program[..super::boot::BOOT_DATA_LEN.min(len)]) {
+                    return Err(BootError::NotBootable);
+                }
+                let start = load as usize;
+                let end = (start + program.len()).min(mem.len());
+                mem[start..end].copy_from_slice(&program[..end - start]);
+                cpu.registers().set_pc(load);
+                return Ok(());
             }
-            let start = load_at as usize;
-            let end = (start + program.len()).min(mem.len());
-            mem[start..end].copy_from_slice(&program[..end - start]);
-            cpu.registers().set_pc(load_at);
-            return Ok(());
+            // The controller loads a program the disk names, and this disk names
+            // none. That is a data disk, and saying "no controller can
+            // cold-start this" instead — which is what an `Option` here used to
+            // make it say — sends the reader after missing code of ours.
+            ColdStart::NoProgram => return Err(BootError::NotBootable),
+            ColdStart::Own => {}
         }
         let dcdd = controllers[which].as_dcdd().ok_or(BootError::NoBootstrap)?;
         // Every chunk with the address it belongs at.  The bootstrap stores
@@ -471,6 +467,17 @@ impl BootMachine {
             .find_map(|c| c.accepts(image_len))
     }
 
+    /// Every medium a booted machine here can carry, board by board.
+    ///
+    /// For the generated readme, so that a new controller becomes documented by
+    /// existing rather than by somebody remembering to add it to a list. The
+    /// readme built its own from the floppy's geometry table and therefore told
+    /// operators that only 88-DCDD floppies boot for as long as the hard disk
+    /// had been booting them.
+    pub fn bootable_media() -> Vec<super::controller::Medium> {
+        BootMachine::new().controllers.iter().flat_map(|c| c.media()).collect()
+    }
+
     /// Which controller answers at this port, if any.
     fn controller_for(&self, port: u8) -> Option<usize> {
         self.controllers.iter().position(|c| c.owns_port(port))
@@ -511,6 +518,44 @@ impl BootMachine {
                     }
                 }
             }
+            HostRequest::Fill { drive, offset, chunk, stride, count, byte } => {
+                let Some(m) = self.disks.get_mut(drive as usize).and_then(|x| x.as_mut()) else {
+                    return;
+                };
+                if m.read_only {
+                    return;
+                }
+                for i in 0..count {
+                    let at = offset.saturating_add(stride.saturating_mul(i as u64)) as usize;
+                    // A run past the end of the image is skipped rather than
+                    // clamped or panicked on: the same posture as a read past
+                    // the end, and a controller asking for one is a bug in the
+                    // controller, not something to half-do.
+                    if let Some(dst) = m.bytes.get_mut(at..at + chunk) {
+                        dst.fill(byte);
+                        m.dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// What this machine's own hardware answers at `port`, if anything.
+    ///
+    /// Derived from the controllers rather than listed, because a list is a
+    /// second place for the same rule and this one had already fallen behind:
+    /// it named the floppy's three ports and knew nothing of the hard disk's
+    /// eight, so a modem profile landing on A0–A7 would have been accepted here
+    /// and then silently shadowed by the controller in the port dispatch — a
+    /// modem that is simply mute, with nothing said about why.
+    fn reserved_port(&self, port: u8) -> Option<&'static str> {
+        if self.controllers.iter().any(|c| c.owns_port(port)) {
+            return Some("the disk controller");
+        }
+        match port {
+            CONSOLE_STATUS_PORT | CONSOLE_DATA_PORT => Some("the console"),
+            SENSE_SWITCH_PORT => Some("the front panel"),
+            _ => None,
         }
     }
 }
@@ -678,8 +723,13 @@ mod tests {
             *self.last_write.lock().unwrap() = Some((port, value));
             HostRequest::None
         }
-        fn accepts(&self, image_len: u64) -> Option<&'static str> {
-            (image_len == FAKE_IMAGE_LEN).then_some("test medium")
+        fn media(&self) -> Vec<super::super::controller::Medium> {
+            vec![super::super::controller::Medium {
+                bytes: FAKE_IMAGE_LEN,
+                label: "test medium",
+                trailer: 0,
+                shape: "one sector".into(),
+            }]
         }
         fn insert(&mut self, drive: u8, image_len: u64, _ro: bool) -> Result<(), String> {
             if image_len != FAKE_IMAGE_LEN {
@@ -926,6 +976,102 @@ mod tests {
             m.port_in(0x09);
         }
         assert!(m.take_dirty().is_empty(), "a protected image stays clean");
+    }
+
+    /// A blank hard disk is refused as the data disk it is.
+    ///
+    /// It used to be refused as "this disk is on a controller that cannot
+    /// cold-start one yet", because a hard disk naming no boot program and a
+    /// board with no bootstrap were the same `None`. The message sent the reader
+    /// after missing code of ours when the truth was on the disk: an erased
+    /// platter has an erased volume label, so there is nothing there to say
+    /// where a boot program lives.
+    #[test]
+    fn test_a_blank_hard_disk_is_refused_as_data() {
+        use crate::cpm::hdsk::IMAGE_LEN;
+
+        for (fill, what) in [(0xE5u8, "formatted and empty"), (0x00, "all zeros")] {
+            let mut m = BootMachine::new();
+            m.insert(0, vec![fill; IMAGE_LEN as usize], true).unwrap();
+            let mut cpu = BootMachine::new_cpu();
+            let err = m.boot(&mut cpu, 0).expect_err("a blank disk cannot boot");
+            assert_eq!(err, BootError::NotBootable, "{what}");
+            assert!(err.to_string().contains("data, not a system disk"), "{what}: {err}");
+        }
+    }
+
+    /// A format erases one whole recording surface of the image, and nothing of
+    /// the other one.
+    ///
+    /// The interleaving is the part worth pinning: one head's sectors sit once
+    /// per cylinder, a cylinder apart, so a fill that treated a surface as
+    /// contiguous would erase the first half of the disk — both heads — and
+    /// leave the second untouched.
+    #[test]
+    fn test_a_format_erases_one_surface_and_leaves_the_other() {
+        use crate::cpm::hdsk::{IMAGE_LEN, SECTORS, SECTOR_LEN as HD_SECTOR};
+
+        let track = SECTORS as usize * HD_SECTOR;
+        let mut m = BootMachine::new();
+        m.insert(0, vec![0x42; IMAGE_LEN as usize], false).unwrap();
+        // Format head 1 on unit 0: operands in the low byte, bit 5 = side.
+        m.port_out(0xA7, 1 << 5);
+        m.port_out(0xA3, 0xC0);
+
+        let dirty = m.take_dirty();
+        assert_eq!(dirty.len(), 1, "the erased image comes back to be persisted");
+        let bytes = &dirty[0].1;
+        // Cylinder 0: head 0 untouched, head 1 erased. And the same at the end
+        // of the disk, which is what proves the stride rather than a prefix.
+        assert!(bytes[..track].iter().all(|&b| b == 0x42), "head 0 of cylinder 0 kept");
+        assert!(bytes[track..2 * track].iter().all(|&b| b == 0xE5), "head 1 erased");
+        let last = (IMAGE_LEN as usize) - 2 * track;
+        assert!(bytes[last..last + track].iter().all(|&b| b == 0x42), "head 0 of the last");
+        assert!(bytes[last + track..].iter().all(|&b| b == 0xE5), "head 1 of the last");
+        assert_eq!(
+            bytes.iter().filter(|&&b| b == 0xE5).count(),
+            IMAGE_LEN as usize / 2,
+            "exactly half the disk — one surface of two"
+        );
+    }
+
+    /// And a protected image is not formatted, however the guest asks.
+    #[test]
+    fn test_a_read_only_image_is_never_formatted() {
+        use crate::cpm::hdsk::IMAGE_LEN;
+
+        let mut m = BootMachine::new();
+        m.insert(0, vec![0x42; IMAGE_LEN as usize], true).unwrap();
+        m.port_out(0xA7, 0);
+        m.port_out(0xA3, 0xC0);
+        assert!(m.take_dirty().is_empty(), "a protected image stays clean");
+    }
+
+    /// The reserved-port list is derived from the controllers, not written down
+    /// beside them.
+    ///
+    /// It was written down, and it had already fallen behind: it named the
+    /// floppy's three ports and knew nothing of the hard disk's eight, so a
+    /// modem profile on A0–A7 would have been accepted and then shadowed by the
+    /// controller in the port dispatch — a mute modem with nothing said about
+    /// why.
+    #[test]
+    fn test_every_controller_port_is_refused_to_a_modem() {
+        use crate::cpm::uart::{UartFamily, UartProfile};
+
+        let mut m = BootMachine::new();
+        for port in [0x08u8, 0x09, 0x0A, 0xA0, 0xA3, 0xA7] {
+            let profile = UartProfile { status_port: port, data_port: port + 1, family: UartFamily::Acia };
+            match m.attach_modem(ModemAccess::Ports(profile)) {
+                ModemAttach::Unavailable(why) => {
+                    assert!(why.contains("disk controller"), "{port:#04x}: {why}");
+                }
+                other => panic!("{port:#04x} belongs to a controller, got {other:?}"),
+            }
+        }
+        // A port no board here claims is still fine.
+        let profile = UartProfile { status_port: 0x12, data_port: 0x13, family: UartFamily::Acia };
+        assert_eq!(m.attach_modem(ModemAccess::Ports(profile)), ModemAttach::Ports(0x12, 0x13));
     }
 
     /// Reading past the end of an image gives an erased sector rather than
