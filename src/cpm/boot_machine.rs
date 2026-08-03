@@ -656,6 +656,11 @@ mod tests {
     use super::*;
     use crate::cpm::dcdd::{geometry_for, Geometry};
 
+    /// The EGT80 binary, for the gates that put it on a disk and then check what
+    /// came back. Module-level so the helper that writes it and the assertions
+    /// that compare against it cannot end up looking at different bytes.
+    const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+
     fn image(geom: Geometry) -> Vec<u8> {
         vec![0u8; geom.image_len() as usize]
     }
@@ -978,6 +983,118 @@ mod tests {
         assert!(m.take_dirty().is_empty(), "a protected image stays clean");
     }
 
+    /// What a controller *claims* it can carry and what it will actually take
+    /// must be the same set.
+    ///
+    /// `accepts` is now derived from `media`, but `insert` is still each board's
+    /// own code — the floppy's has to look up a geometry, so it cannot simply be
+    /// the same call. That leaves two expressions of one rule, which is the
+    /// arrangement that produced the exact-length bug in the first place. This
+    /// pins them together at every boundary rather than trusting them to agree:
+    /// the disagreement that matters is `accepts` saying yes to a disk `insert`
+    /// then refuses, because the machine picks a controller with the first and
+    /// then reports the second's error as though no board wanted the disk.
+    #[test]
+    fn test_what_each_board_accepts_is_what_it_will_insert() {
+        let boards: Vec<Box<dyn Controller>> =
+            vec![Box::new(Dcdd::new()), Box::new(crate::cpm::hdsk::Hdsk::new())];
+        for board in &boards {
+            let mut sizes = vec![0u64, 1, 137, 256, 256_256, 1_000_000];
+            for m in board.media() {
+                sizes.extend([
+                    m.bytes - 1,
+                    m.bytes,
+                    m.bytes + 1,
+                    m.bytes + m.trailer,
+                    m.bytes + m.trailer + 1,
+                ]);
+            }
+            for size in sizes {
+                let claimed = board.accepts(size).is_some();
+                // A fresh board each time: `insert` mutates, and a drive that
+                // already holds a disk is a different question.
+                let mut fresh: Box<dyn Controller> = if board.name() == Dcdd::new().name() {
+                    Box::new(Dcdd::new())
+                } else {
+                    Box::new(crate::cpm::hdsk::Hdsk::new())
+                };
+                let taken = fresh.insert(0, size, true).is_ok();
+                assert_eq!(
+                    claimed,
+                    taken,
+                    "{}: accepts({size}) = {claimed} but insert = {taken}",
+                    board.name(),
+                );
+            }
+        }
+    }
+
+    /// Two boards in one machine must not read each other's disks.
+    ///
+    /// The two controllers' unit numbers share **one index space** — `disks[1]`
+    /// is "unit 1" for whichever board took the disk at drive letter B: — so
+    /// this is the shape of a silent-corruption bug: the hard disk asking for
+    /// unit 1 at a 4.9 MB offset, served out of a 337 KB floppy image, or the
+    /// floppy handed hard-disk sectors. What stops it is that each board keeps
+    /// its own present-flags and `insert` only ever sets them for a disk of its
+    /// own size, so a board asked for a unit it was never given refuses instead
+    /// of reaching into the array.
+    ///
+    /// Asserted rather than reasoned, because "it happens to be guarded" and "it
+    /// is guaranteed" look identical right up to the day someone adds a third
+    /// board.
+    #[test]
+    fn test_two_controllers_do_not_read_each_others_disks() {
+        use crate::cpm::hdsk::{IMAGE_LEN, SECTOR_LEN as HD_SECTOR};
+
+        let mut m = BootMachine::new();
+        // A floppy at drive 0 and a hard disk at drive 1, each filled with a
+        // recognisable byte.
+        m.insert(0, vec![0x11; Geometry::EIGHT_INCH.image_len() as usize], false).unwrap();
+        m.insert(1, vec![0x22; IMAGE_LEN as usize], false).unwrap();
+
+        // The hard disk reads *its* unit 1 and gets its own bytes.
+        m.port_out(0xA1, 0); // a status read first, to clear the power-on byte
+        m.port_in(0xA1);
+        m.port_out(0xA7, 0x00);
+        m.port_out(0xA3, 0x30 | 0x04); // read sector 0, head 0, unit 1
+        m.port_out(0xA7, 0x00);
+        m.port_out(0xA3, 0x50); // read buffer, all 256
+        let mut got = Vec::new();
+        for _ in 0..HD_SECTOR {
+            got.push(m.port_in(0xA5));
+        }
+        assert!(got.iter().all(|&b| b == 0x22), "the hard disk must read its own image");
+
+        // And *its* unit 0 — where the floppy is — is refused, not served with
+        // floppy bytes at a hard-disk offset.
+        m.port_out(0xA7, 0x00);
+        m.port_out(0xA3, 0x30); // read sector 0, unit 0
+        let err = m.port_in(0xA1);
+        assert_eq!(
+            err & crate::cpm::hdsk::error::NOT_READY,
+            crate::cpm::hdsk::error::NOT_READY,
+            "unit 0 holds a floppy, so the hard disk has no disk there: {err:#04x}"
+        );
+
+        // The floppy still reads its own drive 0, unaffected.
+        m.port_out(0x08, 0);
+        m.port_out(0x09, 0x04);
+        for _ in 0..64 {
+            if m.port_in(0x09) & 0x01 == 0 {
+                break;
+            }
+        }
+        let first = m.port_in(0x0A);
+        let second = m.port_in(0x0A);
+        assert!(
+            [first, second].contains(&0x11),
+            "the floppy must still read its own image, got {first:#04x} {second:#04x}"
+        );
+        // Nothing was written anywhere by reading.
+        assert!(m.take_dirty().is_empty(), "reads must not dirty an image");
+    }
+
     /// A blank hard disk is refused as the data disk it is.
     ///
     /// It used to be refused as "this disk is on a controller that cannot
@@ -1233,8 +1350,9 @@ mod tests {
     /// virtual modem port and write it with its own BDOS. That is the next
     /// thing to try, and it would test more of the path than this does.
     ///
-    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image with `EGT80.COM`
-    /// really on it. Framing an image back up needs two sector checksums, both
+    /// Ignored: set `CPM_DATA_IMAGE` to an Altair CP/M floppy — EGT80 is written
+    /// into a copy of it by our own writer, so this also exercises that path
+    /// end to end. Framing an image back up needs two sector checksums, both
     /// measured from the disks themselves and holding for every sector of
     /// DISK01 (192/192 and 2272/2272): tracks 0-5 keep a plain sum of the 128
     /// data bytes at byte 132; tracks 6-76 keep the sum of the data plus header
@@ -1242,11 +1360,15 @@ mod tests {
     #[test]
     #[ignore]
     fn test_run_egt80_inside_a_booted_disk() {
-        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
-            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying EGT80.COM");
+        // Built here rather than demanded of the operator.  This asked for
+        // `CPM_BOOT_IMAGE` to be "an image carrying EGT80.COM", which no test
+        // produces and none keeps — so it could not be run, and an `#[ignore]`
+        // test that cannot be run looks exactly like one that passes.
+        let Ok(path) = std::env::var("CPM_DATA_IMAGE") else {
+            eprintln!("set CPM_DATA_IMAGE to an Altair CP/M floppy (EGT80 is written into a copy)");
             return;
         };
-        let bytes = std::fs::read(&path).unwrap();
+        let bytes = altair_floppy_carrying_egt80(&path);
         let mut m = BootMachine::new();
         m.insert(0, bytes, true).expect("an 88-DCDD image");
 
@@ -2355,40 +2477,30 @@ mod tests {
     /// would do.  Our writer has to get three separate things right at once —
     /// the block mapping, the disk's stated `EXM 0`, and the per-sector
     /// checksum — and each of them fails *quietly* on its own: a wrong mapping
-    /// scrambles content that still looks like a file, a wrong EXM writes a
-    /// directory entry CP/M declines to list, and a stale checksum turns into
-    /// `Bdos Err On A: Bad Sector` only when a real BIOS reads the sector.
-    /// Booting the disk afterwards catches all three, because the guest's own
-    /// `DIR` and its own reader are the acceptance test.
+    /// A copy of `data_image` with EGT80 written into it by *our own* writer.
     ///
-    /// The payload is EGT80, which is a genuinely useful thing to put on one of
-    /// these disks and is also byte-exact and to hand.
+    /// Extracted because two gates need the same disk and only one of them used
+    /// to make it. The other asked for `CPM_BOOT_IMAGE` to be "an Altair CP/M
+    /// image carrying EGT80.COM" — an image nothing produces and nothing keeps,
+    /// since the test that writes one deletes it again. So that gate could not
+    /// be run at all, which is the quiet way a test stops being evidence: it is
+    /// listed, it is never green, and nobody notices because `#[ignore]` hides
+    /// both states equally.
     ///
-    /// Ignored:
-    ///   `CPM_TOOL_IMAGE=...DISK07.DSK`   boots, has PCPUT.COM
-    ///   `CPM_DATA_IMAGE=...DISK01.DSK`   written by us, then read as B:
-    #[test]
-    #[ignore]
-    fn test_host_written_altair_floppy_is_read_by_the_guest() {
+    /// The payload is EGT80 because it is byte-exact, to hand, and a genuinely
+    /// useful thing to have on one of these disks.
+    #[cfg(test)]
+    fn altair_floppy_carrying_egt80(data_image: &str) -> Vec<u8> {
         use crate::cpm::image::format::by_token;
         use crate::cpm::image::fs::ImageFs;
         use crate::cpm::image::media::FileMedia;
 
-        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
-
-        let (Ok(tool), Ok(data)) = (
-            std::env::var("CPM_TOOL_IMAGE"),
-            std::env::var("CPM_DATA_IMAGE"),
-        ) else {
-            eprintln!("set CPM_TOOL_IMAGE and CPM_DATA_IMAGE to run this");
-            return;
-        };
-
-        // ---- write it with our own writer, on the host --------------------
-        // A scratch copy — the sample images are read-only ground truth and
-        // this test writes.
-        let scratch = std::env::temp_dir().join("egw-altair-write-test.dsk");
-        std::fs::write(&scratch, std::fs::read(&data).unwrap()).unwrap();
+        // A scratch copy — the sample images are read-only ground truth and this
+        // writes.  Named per-process so two gates running at once cannot write
+        // the same file.
+        let scratch = std::env::temp_dir()
+            .join(format!("egw-altair-write-test-{}.dsk", std::process::id()));
+        std::fs::write(&scratch, std::fs::read(data_image).unwrap()).unwrap();
 
         let fmt = by_token("altair8").expect("altair8 is a format again");
         let mut fs = ImageFs::mount(
@@ -2410,6 +2522,34 @@ mod tests {
         drop(fs);
         let written = std::fs::read(&scratch).unwrap();
         let _ = std::fs::remove_file(&scratch);
+        written
+    }
+
+    /// scrambles content that still looks like a file, a wrong EXM writes a
+    /// directory entry CP/M declines to list, and a stale checksum turns into
+    /// `Bdos Err On A: Bad Sector` only when a real BIOS reads the sector.
+    /// Booting the disk afterwards catches all three, because the guest's own
+    /// `DIR` and its own reader are the acceptance test.
+    ///
+    /// The payload is EGT80, which is a genuinely useful thing to put on one of
+    /// these disks and is also byte-exact and to hand.
+    ///
+    /// Ignored:
+    ///   `CPM_TOOL_IMAGE=...DISK07.DSK`   boots, has PCPUT.COM
+    ///   `CPM_DATA_IMAGE=...DISK01.DSK`   written by us, then read as B:
+    #[test]
+    #[ignore]
+    fn test_host_written_altair_floppy_is_read_by_the_guest() {
+        let (Ok(tool), Ok(data)) = (
+            std::env::var("CPM_TOOL_IMAGE"),
+            std::env::var("CPM_DATA_IMAGE"),
+        ) else {
+            eprintln!("set CPM_TOOL_IMAGE and CPM_DATA_IMAGE to run this");
+            return;
+        };
+
+        // ---- write it with our own writer, on the host --------------------
+        let written = altair_floppy_carrying_egt80(&data);
 
         // ---- now let the machine it was written for judge it --------------
         let mut m = BootMachine::new();

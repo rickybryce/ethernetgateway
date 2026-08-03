@@ -194,6 +194,27 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// One line per bootable medium: its size, then what it is.
+    ///
+    /// Asked of the machine's controllers rather than written here. This screen
+    /// is what a telnet user reads when nothing in their images folder can be
+    /// booted, and it said "Only Altair 88-DCDD floppies can boot" — with the
+    /// two floppy sizes and no mention of the hard disk — for as long as hard
+    /// disks had been booting. That is the *fourth* place the same list had been
+    /// written down; the readme and the manual were the others.
+    ///
+    /// Kept inside PETSCII's 40 columns, which is why the label column is
+    /// narrow and the size is not comma-grouped: 2 indent + 7 size + 1 + 28
+    /// label = 38. Extracted so the width can be measured rather than argued
+    /// about, since a runtime `format!` is invisible to the source-scanning
+    /// layout tests.
+    pub(in crate::telnet) fn bootable_size_lines() -> Vec<String> {
+        crate::cpm::boot_machine::BootMachine::bootable_media()
+            .into_iter()
+            .map(|m| format!("  {:>7} {}", m.bytes, m.label))
+            .collect()
+    }
+
     /// Choose an image to boot.
     ///
     /// Booting is not mounting, and the screen says so: a booted disk runs its
@@ -225,8 +246,11 @@ impl TelnetSession {
         if bootable.is_empty() {
             self.send_line(&format!("  {}", self.amber("No bootable images found."))).await?;
             self.send_line("").await?;
-            self.send_line("  Only Altair 88-DCDD floppies can boot:").await?;
-            self.send_line("  337,568 bytes (8in) or 76,720 (mini).").await?;
+            self.send_line("  A bootable image is one of these").await?;
+            self.send_line("  sizes (a short trailer is OK):").await?;
+            for line in Self::bootable_size_lines() {
+                self.send_line(&line).await?;
+            }
             self.send_line("").await?;
             self.send("  Press any key to continue.").await?;
             self.flush().await?;

@@ -7249,3 +7249,41 @@ fn test_cpmemu_idle_nap_paces_only_an_established_idle_loop() {
     // Saturating growth must not wrap into "no nap" for a long-idle session.
     assert_eq!(idle_nap(u32::MAX), Some(long));
 }
+
+/// The bootable-size lines the boot picker shows when nothing can be booted
+/// must fit a 40-column PETSCII screen, and must name every bootable medium.
+///
+/// Both halves matter. The width cannot be checked by the source-scanning fit
+/// test above, because these lines are built by a runtime `format!` — which is
+/// exactly how a screen ends up wider than the terminal without anyone
+/// noticing. The completeness half is the one that had already failed: the
+/// screen said "Only Altair 88-DCDD floppies can boot", with the two floppy
+/// sizes, for as long as hard disks had been booting.
+#[test]
+fn test_bootable_size_lines_fit_petscii_and_name_every_medium() {
+    let lines = TelnetSession::bootable_size_lines();
+    let media = crate::cpm::boot_machine::BootMachine::bootable_media();
+    assert_eq!(lines.len(), media.len(), "one line per medium");
+    assert!(media.len() >= 3, "the floppy, the minidisk and the hard disk at least");
+
+    for line in &lines {
+        assert!(
+            line.chars().count() <= PETSCII_WIDTH,
+            "{} chars, over the {PETSCII_WIDTH}-column budget: {line:?}",
+            line.chars().count(),
+        );
+    }
+    for m in &media {
+        assert!(
+            lines.iter().any(|l| l.contains(m.label)),
+            "no line names the bootable {}: {lines:?}",
+            m.label,
+        );
+        assert!(
+            lines.iter().any(|l| l.contains(&m.bytes.to_string())),
+            "no line gives the size of {} ({} bytes)",
+            m.label,
+            m.bytes,
+        );
+    }
+}

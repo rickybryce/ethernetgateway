@@ -53,6 +53,15 @@ pub const BOOT_EMULATOR_LABEL: &str = "CP/M Emulator (gateway drives A:-P:)";
 ///
 /// Each entry is `(value, label)` — the value is what goes in the config file,
 /// the label is what a person reads.
+///
+/// **Every image is offered, bootable or not, and that is deliberate** — it is
+/// not an oversight next to the telnet boot picker, which filters to what a
+/// controller can carry. The two answer different questions. The picker is a
+/// live action, so a list of things that would fail is only keystrokes wasted;
+/// this is a persisted setting, and a Tarbell image selected here fails at boot
+/// with a message naming the boards this machine actually has, which is more
+/// use to whoever chose it than the file quietly not being in the list. Do not
+/// make one match the other without deciding which of those you want.
 pub fn boot_choices(cpm_base: &std::path::Path) -> Vec<(String, String)> {
     let mut out = vec![(BOOT_EMULATOR.to_string(), BOOT_EMULATOR_LABEL.to_string())];
     for name in super::image::available_images(cpm_base) {

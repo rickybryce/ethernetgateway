@@ -317,7 +317,11 @@ mod tests {
         // (file, expected token or None if it must be refused)
         let cases: [(&str, Option<&str>); 4] = [
             ("TDISK01.DSK", Some("ibm3740")),
-            ("DISK01.DSK", None),   // Altair 88-DCDD — format withdrawn, see format.rs
+            // Altair 88-DCDD.  `None` here until 2026-08-01, when the block
+            // mapping was solved and `altair8` went back into FORMATS — the
+            // expectation outlived the fact by three days because this gate is
+            // `#[ignore]` and nobody re-ran it.
+            ("DISK01.DSK", Some("altair8")),
             ("DISK0C.DSK", None),  // Altair minidisk — Disk BASIC, not CP/M
             ("HDSK01.DSK", None),  // hard disk — no CP/M directory anywhere
         ];

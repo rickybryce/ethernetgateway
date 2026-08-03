@@ -2298,10 +2298,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push_str("\
 # cpm_boot_image: what the CP/M menu item runs.  Empty (default) = the CP/M
 #   emulator: our BDOS, drives A:-P: under CPM/, EGT80 and the virtual modem.
-#   A bare filename in CPM/images instead COLD-BOOTS that disk on an emulated
-#   MITS 88-DCDD controller, and the disk's own operating system takes the whole
-#   machine - Altair CP/M 2.2 and 3.0, Altair DOS, Disk Extended BASIC and Time
-#   Sharing BASIC all boot this way.  Booting is not mounting: inside a booted
+#   A bare filename in CPM/images instead COLD-BOOTS that disk on whichever
+#   emulated MITS controller its size names - an 88-DCDD floppy board or an
+#   88-HDSK hard disk - and the disk's own operating system takes the whole
+#   machine.  Altair CP/M 2.2 and 3.0, Altair DOS, Disk Extended BASIC, Time
+#   Sharing BASIC and Hard Disk BASIC all boot this way.  Booting is not mounting: inside a booted
 #   disk there is no jail, no A> from us and no EGT80, because the guest is
 #   talking to hardware rather than to our BDOS.  Your MOUNTED images do come
 #   along, each on the controller unit its drive letter names (B: is unit 1,

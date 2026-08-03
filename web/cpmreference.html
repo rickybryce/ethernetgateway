@@ -850,8 +850,10 @@ altairhd_cobol.dsk</code></pre>
                 <div class="section-title">Booting a Disk Image</div>
                 <p class="intro">
                     Mounting gives you one drive with our BDOS underneath. <strong>Booting</strong>
-                    hands the whole machine to the disk: 64&nbsp;KB of memory, a MITS 88-DCDD
-                    controller, an 88-2SIO console and the front-panel sense switches. The disk's
+                    hands the whole machine to the disk: 64&nbsp;KB of memory, a MITS 88-DCDD floppy
+                    controller, a MITS 88-HDSK hard disk controller, an 88-2SIO console and the
+                    front-panel sense switches &mdash; the disk's size decides which controller it
+                    lands on. The disk's
                     own operating system then does everything, including its own filesystem work
                     &mdash; which is why booting reaches the disks mounting cannot.
                 </p>
@@ -869,10 +871,12 @@ altairhd_cobol.dsk</code></pre>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">What boots</h3>
                 <p>
-                    Twenty of the twenty-six 88-DCDD images in the Altair-Duino sample set reach a
-                    sign-on. Images may be 8-inch (337,568 bytes) or minidisk (76,720), and a short
-                    trailer past the last sector is accepted &mdash; several images in circulation
-                    carry one.
+                    Twenty-four of the images in the Altair-Duino sample set boot, and
+                    twenty-two of those print a sign-on straight away. An image may be an 8-inch
+                    floppy (337,568 bytes), a minidisk (76,720) or a 4.9&nbsp;MB 88-HDSK hard disk
+                    (4,988,928) &mdash; and every one of the eleven hard-disk images in that
+                    collection boots. A short trailer past the last sector is accepted, since
+                    several images in circulation carry one.
                 </p>
                 <table class="data-table">
                     <thead><tr><th>System</th><th>Sign-on</th></tr></thead>
@@ -944,10 +948,16 @@ altairhd_cobol.dsk</code></pre>
                         about the gaps, and <strong>ESC twice</strong> still gets you out.</li>
                 </ul>
                 <p class="dim-text">
-                    Images that are not 88-DCDD floppies &mdash; a hard disk or a Tarbell image
-                    &mdash; mount perfectly well for the emulator but have no place on this
-                    controller, and are named and skipped rather than presented as a drive the
-                    guest cannot read.
+                    An image no controller here can carry &mdash; a Tarbell or Cromemco disk
+                    &mdash; mounts perfectly well for the emulator but has no board to sit on, and is
+                    named and skipped rather than presented as a drive the guest cannot read. Hard
+                    disks are not in that category: they have their own controller and boot on it.
+                    Floppies and hard disks <em>can</em> be mixed in one booted machine &mdash; each
+                    goes on its own board, and a board asked for a unit it was never given refuses
+                    rather than reading the other one's disk. What a drive letter cannot be is a unit
+                    on both boards at once: B: is unit 1 of whichever board took the disk, so a hard
+                    disk at B: leaves the floppy board's drive 1 empty. Whether the guest can reach
+                    both at all is its own BIOS's business, as ever.
                 </p>
 
                 <div class="callout">

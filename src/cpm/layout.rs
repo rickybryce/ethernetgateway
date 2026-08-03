@@ -232,23 +232,20 @@ controller they belonged to, which says nothing about their layout.  Map
 them by their SIZE:
 
   CDISK01.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
+  DISKnn.DSK    337,568 bytes  ->  altair8_<what-it-holds>.dsk
   HDSKnn.DSK  4,988,928 bytes  ->  altairhd_<what-it-holds>.dsk
   TDISKnn.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
 
   So a 256,256-byte disk holding WordStar becomes
   ibm3740_wordstar.dsk .
 
-  The 337,568-byte Altair 88-DCDD floppies are a different case: they
-  BOOT rather than mount, and need no renaming at all.  Mounting one is
-  still not supported — its directory reads but file content past the
-  first allocation block does not, so it is refused rather than mounted
-  with bad data.  Booting sidesteps that entirely, because the disk's own
-  operating system does the reading.
+  The Altair 88-DCDD floppies and the 88-HDSK hard disks can be either
+  MOUNTED or BOOTED, and booting needs no renaming at all.
 
-  The same goes for the disks that are not CP/M at all: Altair DOS,
-  Altair Disk BASIC, Time Sharing BASIC and the minidisks.  Mounting
-  shows no files, because there is no CP/M directory in them to read.
-  Boot them instead.
+  The disks that are not CP/M at all can only be booted: Altair DOS,
+  Altair Disk BASIC, Time Sharing BASIC, Hard Disk BASIC and the
+  minidisks.  Mounting one shows no files, because there is no CP/M
+  directory in it to read.  That is correct, not a fault.
 
 IMSAI 8080esp / z80pack images are 256,256-byte 8\" single-density disks
 and are all the IBM 3740 layout:
@@ -425,16 +422,39 @@ mod tests {
         }
     }
 
-    /// A claim that stopped being true is worse than no claim.  These floppies
-    /// boot now, and this file is where someone holding one looks first.
+    /// A claim that stopped being true is worse than no claim.  Altair floppies
+    /// boot *and* mount now, and this file is where someone holding one looks
+    /// first.
+    ///
+    /// This test was itself stale twice over, which is the lesson in it. It
+    /// pinned two exact spellings — `"NOT supported\nyet"` and `"are NOT
+    /// supported"` — and so sat green while the readme said "Mounting one is
+    /// still not supported" two lines away in a third wording. And it *required*
+    /// the phrase "BOOT rather than mount", which was true when only booting
+    /// worked and became the stale claim itself once `altair8` mounted. A guard
+    /// on the claim, not on the sentence: search case-insensitively, and require
+    /// that the format token is offered for renaming like every other mountable
+    /// format.
     #[test]
-    fn test_readme_does_not_still_call_altair_floppies_unsupported() {
+    fn test_readme_does_not_call_altair_floppies_unmountable() {
         let text = images_readme();
+        let flat = text.to_ascii_lowercase().replace('\n', " ");
+        for claim in ["not supported", "unsupported", "cannot be mounted", "refused rather than"] {
+            assert!(
+                !flat.contains(claim),
+                "the readme still disclaims a format that works: {claim:?}"
+            );
+        }
+        // The positive half: an operator has to be told the token to rename to,
+        // exactly as for every other mountable format.
         assert!(
-            !text.contains("NOT supported\nyet") && !text.contains("are NOT supported"),
-            "the readme still says Altair floppies are unsupported; they boot"
+            text.contains("altair8_"),
+            "the readme must offer the altair8 rename, since these mount now"
         );
-        assert!(text.contains("BOOT rather than mount"), "and it must say what to do instead");
+        assert!(
+            crate::cpm::image::format::by_token("altair8").is_some(),
+            "and this test is only meaningful while altair8 really is mountable"
+        );
     }
 
     /// The readme must state the read-only rule, since that is the single
