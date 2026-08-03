@@ -1409,7 +1409,9 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                     Contrast with the floppy: the 88-DCDD manual on altairclone
                     is the <em>assembly</em> documentation and says on its first
                     page that the Theory of Operation is not in it. This one has
-                    the interface.
+                    the interface. The floppy's equivalent was eventually found
+                    elsewhere &mdash; see <em>The floppy's register table, found
+                    after the fact</em> below.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">It boots on its own</h3>
@@ -1868,6 +1870,25 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     real and the meanings are absent, and the head-positioning
                     parts of that diagnostic will not behave like the real board.
                 </p>
+                <div class="callout callout-info">
+                    <p>
+                        <strong>Do not &ldquo;fix&rdquo; the store by reversing
+                        its bits.</strong> The errata note above &mdash; that bit
+                        order is reversed between the controller's internal
+                        user-data pins and the way the Altair sees them, user bit
+                        0 being Altair bit 7 &mdash; is a real property of the
+                        hardware and is <em>exactly the wrong thing to apply
+                        here</em>. It sits between the pins and the Altair, so it
+                        applies on the way in and again on the way out: a write
+                        followed by a read is reversed twice, and the Altair sees
+                        the byte it wrote. Adding a reversal to Set Byte or Read
+                        Status would break the one thing this store is for. The
+                        inversion on IV 17&ndash;19 is a different matter, and a
+                        real one &mdash; but it belongs to what those latches
+                        <em>mean</em> to the drive, which is the part deliberately
+                        not modelled.
+                    </p>
+                </div>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Format, and what a formatted surface holds</h3>
                 <p>
@@ -1939,6 +1960,99 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     run against both HDSK03 and HDSK04. Mutation-checked &mdash;
                     disabling the Write Sector decode fails it.
                 </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The floppy's register table, found after the fact</h3>
+                <p>
+                    The 88-DCDD was brought up without its register
+                    documentation: the manual on altairclone is the assembly
+                    guide and says on its first page that the Theory of Operation
+                    is elsewhere, so every status and control bit here was
+                    established by watching real guests. The document does exist.
+                    It is <strong><em>Altair 88-DCDD Disk Drive System</em></strong>
+                    on deramp.com &mdash; 171 pages, and unlike the altairclone
+                    scan it <strong>has an OCR text layer</strong>, so it is
+                    searchable. The part that matters is the appendix
+                    <strong>&ldquo;ALTAIR DISK CONTROLLER I/O INFORMATION&rdquo;</strong>,
+                    which gives all three registers bit by bit.
+                </p>
+                <p>
+                    <strong>It confirms the emulated controller exactly.</strong>
+                    Every bit we had inferred is where the manual puts it, and
+                    none is missing except two that carry no emulation meaning:
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Bit</th><th>Status (IN, port 10&#8323;)</th><th>Control (OUT, port 11&#8323;)</th></tr></thead>
+                    <tbody>
+                        <tr><td>D0</td><td>ENWD — enter new write data</td><td>Step IN</td></tr>
+                        <tr><td>D1</td><td>Move Head — head movement allowed</td><td>Step OUT</td></tr>
+                        <tr><td>D2</td><td>HS — head status; also enables the sector channel</td><td>Head Load</td></tr>
+                        <tr><td>D3</td><td>not used</td><td>Head Unload</td></tr>
+                        <tr><td>D4</td><td>not used</td><td>Interrupt Enable</td></tr>
+                        <tr><td>D5</td><td>INTE — interrupt enabled</td><td>Interrupt Disable</td></tr>
+                        <tr><td>D6</td><td>TRACK 0</td><td><strong>HCS — head current switch</strong></td></tr>
+                        <tr><td>D7</td><td>NRDA — new read data available</td><td>Write Enable</td></tr>
+                    </tbody>
+                </table>
+                <p class="dim-text">
+                    Status is <strong>inverted</strong> — &ldquo;True condition: 0,
+                    False: 1&rdquo; — and all-false when the drive is not enabled
+                    or holds no disk, which is what an empty unit answering
+                    nothing really means. Sector position: D0 is Sector True,
+                    true when <em>zero</em>, and the sector number sits above it.
+                    Both of those had been inferred correctly.
+                </p>
+                <p>
+                    Two things in the table are <strong>not modelled</strong>, and
+                    now that the source is in hand they can be stated rather than
+                    left as unknowns:
+                </p>
+                <ul>
+                    <li><strong>HCS, control D6.</strong> &ldquo;Must be true when
+                        outputting a write instruction with the head on tracks
+                        43&ndash;76. This reduces head current and optimizes
+                        resolution on inner tracks.&rdquo; It is an analogue
+                        property of a real head; there is nothing for an emulator
+                        to do with it, and a guest that sets it is not affected by
+                        our ignoring it.</li>
+                    <li><strong>Interrupt delivery.</strong> Control D4/D5 enable
+                        and disable disk interrupts and status D5 reports the
+                        state &mdash; we track the flag and report it faithfully,
+                        but we never raise an interrupt, because nothing here has
+                        an interrupt path. Software that enables disk interrupts
+                        and then waits for one would hang. None of the 24 images
+                        that boot does so; they all poll. Worth knowing before
+                        adding a 25th.</li>
+                </ul>
+                <p class="dim-text">
+                    The same document also confirms the sector length from the
+                    other end: &ldquo;MAX. no. of data bytes per sector 137
+                    (including SYNC)&rdquo;, and that the 138th byte written must
+                    be zero. And the disks are &ldquo;hard Sectored (32 Sector
+                    holes, 1 index hole) &hellip; not IBM compatible&rdquo;, which
+                    is the sentence that explains why no IBM-format reasoning ever
+                    applied to them.
+                </p>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The measured sector format is confirmed too, by a
+                        source we never used.</strong> retrocmp.de's Altair floppy
+                        page states the format for both regions, and it agrees
+                        with what was recovered from the disks byte for byte:
+                        system tracks keep the checksum of bytes 3&ndash;130 at
+                        132; data tracks keep the checksum of <em>2&ndash;3 and
+                        5&ndash;134</em> at byte 4, which is exactly the
+                        &ldquo;data plus header bytes 2, 3, 5 and 6&rdquo; formula
+                        measured here. Better still, it gives the skew in closed
+                        form &mdash; <code>skewed sector = (sector &times; 17) MOD
+                        32</code> &mdash; where this project derived a table from
+                        the sector IDs on the disks. The two are the same map:
+                        17&times;17 = 289, and 289 MOD 32 = 1, so the function is
+                        its own inverse, which is why reading it as
+                        position&rarr;ID or ID&rarr;position gave the same answer.
+                        A measurement standing up to an independent source it was
+                        not derived from is the best outcome available here.
+                    </p>
+                </div>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>
