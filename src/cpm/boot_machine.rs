@@ -1971,7 +1971,10 @@ mod tests {
             return;
         };
         let mut m = BootMachine::new();
-        m.insert(0, std::fs::read(&path).unwrap(), true).expect("an 88-DCDD image");
+        // Read-only unless asked, like every other path here.  `CPM_BOOT_RW=1`
+        // is what lets this workbench prove a *write*.
+        let ro = std::env::var_os("CPM_BOOT_RW").is_none();
+        m.insert(0, std::fs::read(&path).unwrap(), ro).expect("a bootable image");
         // Further drives, `,`-separated, filling units 1 upwards.  `blank:<n>`
         // for an unformatted one; an empty slot leaves that unit empty, so
         // `,,x.dsk` puts a disk in unit 3 and nothing in 1 or 2.
@@ -2008,10 +2011,10 @@ mod tests {
             println!("--- typed {key:?} ---\n{}", type_at(&mut m, &mut cpu, keys.as_bytes(), 2_000_000_000));
         }
         if let Ok(dump) = std::env::var("CPM_DUMP") {
-            match m.take_dirty().into_iter().find(|(d, _)| *d == 1) {
+            match m.take_dirty().into_iter().next() {
                 Some((_, bytes)) => {
                     std::fs::write(&dump, &bytes).unwrap();
-                    println!("(wrote drive B: to {dump}, {} bytes)", bytes.len());
+                    println!("(wrote a dirty drive to {dump}, {} bytes)", bytes.len());
                 }
                 None => println!("(the guest wrote nothing to B:)"),
             }

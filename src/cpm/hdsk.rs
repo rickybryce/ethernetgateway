@@ -144,9 +144,30 @@ impl Command {
         if word & 0x8000 != 0 {
             return Command::SetByte;
         }
+        // Bit 12 is the direction — 1 reads, 0 writes — in all four transfer
+        // commands.
+        //
+        // **This is a deviation from the manual, arrived at by observation.**
+        // §3-4 says Write Sector is Read Sector "except that bit 13 must be
+        // zero rather than one", which would make it `0001`. The CP/M that
+        // shipped on this hardware issues `0010` instead, and while the manual
+        // was followed those eight commands per save were decoded here as
+        // unrecognised: the guest filled a buffer, never committed it, and the
+        // file it saved silently failed to appear.
+        //
+        // Taking `0010` is not just what the disk does, it is also the more
+        // coherent reading — bit 12 then means the same thing for sectors as it
+        // demonstrably does for buffers, where the manual and the hardware agree
+        // that 1 reads and 0 writes. But the manual is not being dismissed:
+        // this is one observation of one CP/M implementation, the errata for
+        // this section already corrects other bit assignments, and it is
+        // possible the two bits are simply numbered the other way round
+        // somewhere in the chain. Recorded as a deviation, in
+        // `web/diskreference.html`, so the next person meets the evidence
+        // rather than a verdict.
         match (word >> 12) & 0x07 {
             0b000 => Command::Seek,
-            0b001 => Command::WriteSector,
+            0b010 => Command::WriteSector,
             0b011 => Command::ReadSector,
             0b100 => Command::WriteBuffer,
             0b101 => Command::ReadBuffer,
@@ -275,6 +296,9 @@ impl Hdsk {
         self.status = 0;
         let unit = ((word >> 10) & 0x03) as u8;
         self.selected = unit;
+        if std::env::var_os("CPM_HDSK_TRACE").is_some() {
+            eprintln!("hdsk cmd {:04x} -> {:?} unit {unit}", word, Command::of(word));
+        }
 
         match Command::of(word) {
             Command::Seek => {
@@ -309,13 +333,22 @@ impl Hdsk {
                     self.ready = true;
                     return HostRequest::None;
                 }
-                // The machine moves the bytes; the controller says where.  It
-                // is not finished until that has happened, so Ready stays low.
-                self.ready = false;
                 self.pending_buffer = buffer;
                 if writing {
+                    // A write completes here. The machine performs it the
+                    // instant this returns, before the guest can execute
+                    // another instruction, so there is nothing for it to wait
+                    // on — and *leaving* Ready low was a real bug: nothing
+                    // raised it again, because only a read is completed by
+                    // `buffer_loaded`. The guest asked for a sector to be
+                    // written, never saw the command finish, and the file it
+                    // was saving silently did not appear.
+                    self.ready = true;
                     HostRequest::Write { drive: unit, offset, len: SECTOR_LEN }
                 } else {
+                    // A read is not finished until the machine has supplied the
+                    // bytes, which it does through `buffer_loaded`.
+                    self.ready = false;
                     HostRequest::Read { drive: unit, offset, len: SECTOR_LEN }
                 }
             }
@@ -627,12 +660,16 @@ mod tests {
         }
         assert!(ready(&mut h));
         // Write sector 2, head 0, buffer 0: type 001.
-        let req = command(&mut h, 0x1000 | 2);
+        let req = command(&mut h, 0x2000 | 2);
         assert_eq!(
             req,
             HostRequest::Write { drive: 0, offset: 2 * SECTOR_LEN as u64, len: SECTOR_LEN }
         );
         assert_eq!(&h.buffer(0).unwrap()[..4], &[1, 2, 3, 4]);
+        // And the command must *complete*. Leaving Ready low here meant the
+        // guest waited for a write it had already been given, and a file it
+        // saved silently never appeared on the disk.
+        assert!(ready(&mut h), "a write sector has to report finished");
     }
 
     /// A drive that is not there and a sector that is not on the platter are
@@ -659,7 +696,7 @@ mod tests {
         let mut h = Hdsk::new();
         h.insert(0, IMAGE_LEN, true).unwrap();
         let _ = h.port_in(port::STATUS);
-        let req = command(&mut h, 0x1000);
+        let req = command(&mut h, 0x2000);
         assert_eq!(req, HostRequest::None, "nothing is written");
         assert_eq!(h.port_in(port::STATUS).0 & error::WRITE_PROTECT, error::WRITE_PROTECT);
     }

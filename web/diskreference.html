@@ -1329,7 +1329,11 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
 
                 <div class="callout callout-info">
                     <p>
-                        <strong>Status: it boots.</strong> An Altair hard disk
+                        <strong>Status: it boots and reads; writing is not
+                        finished.</strong> A saved file's data and directory
+                        sectors do reach the platter in plausible places, but the
+                        guest's own <code>DIR</code> does not list it afterwards
+                        &mdash; one step still to find. Read-only use is solid. An Altair hard disk
                         runs its own CP/M off a 4.9&nbsp;MB image —
                         <code>63K CP/M 2.2b ver 1.5 / For MITS 88-HDSK</code>,
                         then an <code>A&gt;</code> prompt, <code>DIR</code>
@@ -1644,6 +1648,54 @@ in   161                            ; clears ready, returns the error byte
                     space, which needs the whole 4.9&nbsp;MB addressed correctly
                     rather than just cylinder zero.
                 </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">A deviation from the manual, on the write bit</h3>
+                <p>
+                    Recorded as a <em>deviation</em> rather than a verdict,
+                    because it rests on one observation of one CP/M
+                    implementation.
+                </p>
+                <p>
+                    &sect;3-4 says Write Sector is Read Sector &ldquo;except that
+                    <strong>bit 13</strong> must be zero rather than one&rdquo;,
+                    which makes the command nibble <code>0001</code>. Read Sector
+                    is <code>0011</code>, so on that reading bit 13 is the
+                    direction bit. But the CP/M that shipped on this hardware
+                    issues <code>0010</code> for a write &mdash; observed
+                    directly, eight times per <code>SAVE</code>. While the manual
+                    was followed those commands were decoded here as
+                    unrecognised, and the symptom was silent: the guest filled a
+                    buffer, never committed it, and the file simply did not
+                    appear.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Command</th><th>Manual</th><th>Observed</th></tr></thead>
+                    <tbody>
+                        <tr><td>Read Sector</td><td><code>0011</code></td><td><code>0011</code> &mdash; agrees</td></tr>
+                        <tr><td>Write Sector</td><td><code>0001</code></td><td><strong><code>0010</code></strong></td></tr>
+                        <tr><td>Read Buffer</td><td><code>0101</code></td><td><code>0101</code> &mdash; agrees</td></tr>
+                        <tr><td>Write Buffer</td><td><code>0100</code></td><td><code>0100</code> &mdash; agrees</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Taking <code>0010</code> also makes the set internally
+                    consistent: <strong>bit 12</strong> then means direction for
+                    sectors exactly as the manual and the hardware already agree
+                    it does for buffers. That is a reason to prefer it, not proof.
+                </p>
+                <div class="callout callout-info">
+                    <p>
+                        <strong>Why this is not filed as &ldquo;the manual is
+                        wrong&rdquo;.</strong> It is one implementation's
+                        behaviour, the errata for this very section already
+                        corrects several other bit assignments, and it is
+                        entirely possible the two bits are numbered the other way
+                        round somewhere in the chain between the 8X300 firmware,
+                        the 4PIO and the prose. The honest statement is that the
+                        hardware's own software does this, so we do too. Anyone
+                        with a second driver to compare against should compare.
+                    </p>
+                </div>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>
