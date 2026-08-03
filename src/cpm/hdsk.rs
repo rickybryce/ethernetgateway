@@ -275,7 +275,11 @@ pub struct Hdsk {
     /// Status.
     ///
     /// 256 of them, which is the range the diagnostic on these disks allows
-    /// (`MAXIV equ 0FFh`), addressed by the low byte of either command.
+    /// (`MAXIV equ 0FFh`), addressed by the low byte of either command. Table 3-B
+    /// says which of those the board really has: "0-255 addr used 1-7, 17-22,
+    /// 34-37". Holding all 256 is harmless and keeps the store a plain array —
+    /// a guest writing an unused address gets it back, where the board would
+    /// give it nothing, and no software here does that.
     ///
     /// **What this models and what it does not.** A write is remembered and a
     /// read returns it, which is exactly what the IV byte *test* in that
@@ -283,12 +287,21 @@ pub struct Hdsk {
     /// a model of the 8X300's own registers: on the real board some of these
     /// are inputs reflecting drive state, and its own source says so — "the IV
     /// Byte on the Disk Data Card is an input, so this test..." — while others
-    /// drive the head positioner directly (IV 18 and 19 are the cylinder
-    /// latches, and the source notes the cylinder bits are inverted). Nothing
-    /// here knows which is which, because the manual we have does not say, and
-    /// guessing at hardware semantics is how the sector layout went wrong for
-    /// four hypotheses. So: the addressable store is real, the meanings are
-    /// not, and no guest OS here needs them — seeking goes through Seek.
+    /// drive the head positioner directly. Errata 88-HDSK-ME02 is specific: IV
+    /// bytes 17, 18 and 19 "all invert the data", so selecting cylinder 0 means
+    /// writing 255. Nothing here knows which address is which kind, and guessing
+    /// at hardware semantics is how the sector layout went wrong for four
+    /// hypotheses. So: the addressable store is real, the meanings are not, and
+    /// no guest OS here needs them — seeking goes through Seek.
+    ///
+    /// **The reversed bit order in that errata must not be applied here.** It
+    /// says the user data bits are reversed "from the way they appear to the
+    /// Altair via the Set Byte and Read Status commands", user bit 0 being Altair
+    /// bit 7. That transformation sits between the pins and the Altair, so it
+    /// applies going in and again coming out: a write followed by a read is
+    /// reversed twice and the Altair sees the byte it wrote. Adding a reversal to
+    /// either command would break the round trip, which is the only thing this
+    /// store is for.
     iv: [u8; IV_BYTES],
     /// A Set Byte waiting for its data byte, with the address it will go to.
     ///
@@ -397,8 +410,16 @@ impl Hdsk {
         self.ack = true;
         self.status = 0;
         // The board has now done something, so the power-on error byte is no
-        // longer what a status read should find.
-        self.fresh = false;
+        // longer what a status read should find — but only if it *recognised*
+        // the command. Table 3-C, the manual's own 4PIO initialisation
+        // sequence, includes `OUT 163,255`, which arrives here as a command word
+        // with nibble `F` and is decoded as unknown. Clearing the flag on that
+        // would hand a guest a zero error byte where the real board still reads
+        // all-ones, because a PIA direction write is not a controller command
+        // and the 8X300 has not run one.
+        if Command::of(word) != Command::Unknown {
+            self.fresh = false;
+        }
         let unit = ((word >> 10) & 0x03) as u8;
         self.selected = unit;
         if std::env::var_os("CPM_HDSK_TRACE").is_some() {
@@ -459,10 +480,22 @@ impl Hdsk {
             }
             Command::ReadBuffer | Command::WriteBuffer => {
                 let raw = (word & 0xFF) as usize;
-                // "Note that a value of 0 in the transfer length implies a
-                // transfer of 256 bytes" — and a length of one is written as 0
-                // elsewhere in the same section, so this is the one place the
-                // manual is genuinely ambiguous. 0 means the whole buffer.
+                // The one place the manual contradicts itself, and both
+                // halves are quoted here so the next reader does not have to go
+                // and find them. §3-4 on Read Buffer: "the transfer length 0
+                // through 255 (transfer length = n-1; n=# of databytes)", which
+                // makes a stored 0 mean *one* byte. Then, two paragraphs later
+                // on Write Buffer: "Note that a value of 0 in the transfer
+                // length implies a transfer of 256 bytes."
+                //
+                // The second reading is the one the hardware must have: it is the
+                // ordinary behaviour of a counter loaded with 0 and counted to
+                // wrap, and it is what the CP/M BIOS on these disks relies on —
+                // it asks for a whole sector with a length of 0, and the files it
+                // reads come back byte-exact against the guest's own PCPUT. A
+                // partial transfer is unexercised by any software here, so if the
+                // `n-1` reading is right for non-zero lengths, nothing we have
+                // would notice.
                 let len = if raw == 0 { SECTOR_LEN } else { raw };
                 let buffer = ((word >> 8) & 0x03) as usize;
                 let writing = Command::of(word) == Command::WriteBuffer;
@@ -487,13 +520,28 @@ impl Hdsk {
                 HostRequest::None
             }
             Command::ReadStatus => {
-                // "Note that no IV Bytes can be read without the Disk Interface
-                // Card present and the Ready line on that card active, because
-                // the Datakeeper Read Status command insists that the selected
-                // Unit be ready before it will return status." — the diagnostic
-                // on these disks, which is also the only software here that
-                // issues this command. So an absent drive is refused rather
-                // than answered with a byte.
+                // Two witnesses agree that an unready unit gets no status. The
+                // diagnostic on these disks: "the Datakeeper Read Status command
+                // insists that the selected Unit be ready before it will return
+                // status". And errata 88-HDSK-ME02: "The Read Status command
+                // will not complete if the selected Unit is not Ready."
+                //
+                // **We deviate on purpose, in the forgiving direction.** The
+                // hardware does not *complete* — Ready never rises and the
+                // caller falls out through its own timeout, which is why
+                // `READIV` on the disk carries a one-second one. We complete and
+                // set NOT_READY instead. The guest reaches the same conclusion
+                // from the error byte, without a wait that this emulator would
+                // report as a stalled controller.
+                //
+                // Not modelled, and specified too loosely to guess at: the same
+                // errata says Read Status "rewrites 7 bits in IV Byte H (Address
+                // 17)" — user bits 4-7 from the command's unit bits, user bits
+                // 1-3 always 011b, user bit 0 left alone. How two unit bits
+                // become four is not stated, and inventing a mapping is how the
+                // sector layout went wrong four times. A guest that writes IV 17,
+                // reads status, and reads IV 17 back will see what it wrote here
+                // and something else on real hardware.
                 let addr = (word & 0xFF) as usize;
                 if !self.units.get(unit as usize).is_some_and(|u| u.present) {
                     self.status |= error::NOT_READY;
@@ -1150,6 +1198,36 @@ mod tests {
         // And on a board nobody has commanded, the errata's answer still holds.
         let mut fresh = board();
         assert_eq!(fresh.port_in(port::STATUS).0, 0xFF);
+    }
+
+    /// The manual's own 4PIO initialisation must not consume the power-on error
+    /// byte.
+    ///
+    /// Table 3-C tells a driver to set the port directions with, among others,
+    /// `OUT 163,255` — which arrives at the command port and decodes as nibble
+    /// `F`, an unrecognised command. Treating that as "the board has done
+    /// something" handed the guest a zero error byte where the real board still
+    /// reads all-ones: the 8X300 has not run a command, and a PIA direction
+    /// write is not one. Errata ME03's all-ones is the signature a driver may use
+    /// to decide a controller is there at all.
+    #[test]
+    fn test_the_documented_4pio_init_does_not_consume_the_power_on_byte() {
+        let mut h = board();
+        // The parts of Table 3-C that reach this controller at all: the command
+        // port and the data port. (The rest address the PIA control registers,
+        // which are not ours to model.)
+        h.port_out(port::DATA_OUT, 255);
+        h.port_out(port::COMMAND, 255);
+        assert_eq!(
+            h.port_in(port::STATUS).0,
+            0xFF,
+            "after the documented init, the error byte still reads all-ones"
+        );
+
+        // A *recognised* command does consume it, which is the other half.
+        let mut h = board();
+        command(&mut h, 0); // seek unit 0 to cylinder 0
+        assert_eq!(h.port_in(port::STATUS).0, 0x00, "a real command reports its own result");
     }
 
     /// Images in circulation carry a few bytes past the last sector. Demanding
