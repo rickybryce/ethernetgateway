@@ -1620,6 +1620,57 @@ in   161                            ; clears ready, returns the error byte
                     the class of thing that cost a day on the floppy.
                 </p>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The volume label says where the boot program is</h3>
+                <p>
+                    The loader source above names sector 7, and hard-coding that
+                    booted <strong>two of the four</strong> hard-disk images. The
+                    other two &mdash; the Disk BASIC pair &mdash; have nothing
+                    but zeros in sector 7, so a fixed sector could never have
+                    served them. The answer was in sector 0 all along. It is a
+                    <strong>volume label</strong>, and two little-endian words
+                    inside it record where that disk's boot program lives:
+                    <code>0x28</code> is its first sector and <code>0x2A</code>
+                    is how many sectors it occupies.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Image</th><th>Label text</th><th>[0x28] sector</th><th>[0x2A] count</th><th>First bytes there</th></tr></thead>
+                    <tbody>
+                        <tr><td>HDSK03, HDSK04</td><td><code>63k CP/M 2.2b</code></td><td>7</td><td>1</td><td><code>31 00 D7 F3</code> &mdash; <code>LXI SP,0D700h</code> then <code>DI</code></td></tr>
+                        <tr><td>HDSK01</td><td><code>300-5-A HDSK BASIC</code></td><td>24</td><td>124</td><td><code>F3 C3 40 00</code> &mdash; <code>DI</code> then <code>JMP 0040h</code></td></tr>
+                        <tr><td>HDSK02</td><td><code>300-5-A HDSK BASIC</code></td><td>24</td><td>122</td><td><code>F3 C3 92 75</code> &mdash; <code>DI</code> then <code>JMP 7592h</code></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Three things make this a reading of the disk rather than a
+                    guess. The CP/M entry agrees with what the loader source on
+                    that same disk says of itself. The <em>count</em> is not
+                    decorative &mdash; BASIC is 124 sectors where CP/M is one, and
+                    loading a fixed 256 bytes of BASIC gets nowhere. And the two
+                    BASIC counts <em>differ from each other</em> (124 against
+                    122) while sharing a label, which no constant can express.
+                </p>
+                <p>
+                    So <code>Controller::boot_program</code> is handed the image
+                    and returns <em>(offset, length, load address)</em> read out
+                    of it. All four hard disks boot from one code path: the CP/M
+                    pair to <code>A&gt;</code>, the BASIC pair to
+                    <code>MEMORY SIZE?</code> &mdash; and HDSK01 names itself
+                    <em>ALTAIR HARD DISK BASIC VERSION 300-5-F [16MAY79]</em>,
+                    which is a sign-on no wrong answer produces.
+                </p>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The general lesson, twice over now.</strong> The
+                        floppy work found the layout <em>on the disk</em> (the
+                        skew table in its own boot tracks); this found the boot
+                        location <em>on the disk</em> too. Before deducing a
+                        constant from one example, check whether the medium
+                        already states it &mdash; these systems had to boot media
+                        they were not built around, so they tend to write down
+                        what varies.
+                    </p>
+                </div>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">What booting it took</h3>
                 <p>
                     Very little, once the disk had been asked. The PROM's job is
@@ -1697,6 +1748,43 @@ in   161                            ; clears ready, returns the error byte
                     </p>
                 </div>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Proving the write path needs <em>two</em> sessions</h3>
+                <p>
+                    Two real bugs sat in Write Sector, and both were found by
+                    watching the guest rather than by reading the code: the
+                    command decode had the wrong nibble (see above), and Write
+                    Sector never set its <em>ready</em> flag, so a guest that
+                    waited for the write to finish waited forever.
+                </p>
+                <p>
+                    The gate that now holds them down deliberately boots
+                    <strong>twice</strong>. One session proves almost nothing: the
+                    guest can write to entirely the wrong sector and still see its
+                    own file afterwards, because it reads the directory back from
+                    the same wrong place. So the test saves a file, takes the
+                    bytes as they would reach the host's <code>.dsk</code>, and
+                    boots a <em>fresh</em> machine on nothing but those bytes. For
+                    the file to appear then, the directory sector, the data blocks
+                    and the allocation bitmap all have to have landed where this
+                    disk's own BIOS goes looking.
+                </p>
+                <p>
+                    It checks free space too, and does it as a <em>before and
+                    after</em> reading rather than against a number. That matters:
+                    these images ship with very different amounts free &mdash;
+                    3744&nbsp;k on HDSK03, 1060&nbsp;k on HDSK04 &mdash; so a
+                    constant threshold silently passes on one disk whether the
+                    write happened or not. A directory entry whose blocks were
+                    never claimed is the shape of corruption that only surfaces on
+                    the <em>next</em> file written, which is far too late to
+                    diagnose.
+                </p>
+                <p class="dim-text">
+                    Gate: <code>test_a_file_written_in_a_booted_hard_disk_survives_a_reboot</code>,
+                    run against both HDSK03 and HDSK04. Mutation-checked &mdash;
+                    disabling the Write Sector decode fails it.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>
                     <li><strong>IV bytes 17, 18 and 19 invert their data.</strong>
@@ -1762,13 +1850,34 @@ in   161                            ; clears ready, returns the error byte
                                 format.</td>
                         </tr>
                         <tr>
-                            <td>Controllers for 88-HDSK, Tarbell and Cromemco</td>
-                            <td>Planned, in that order. The 88-HDSK host interface is now written
-                                up &mdash; see <a href="#hdsk">above</a> &mdash; but the controller
-                                is not built, and `BootMachine` still hardwires the 88-DCDD at ports
-                                08&ndash;0Ah, so it needs a set-of-controllers refactor first. The
-                                Tarbell and Cromemco single-density disks already <em>mount</em>, so
-                                a controller adds booting rather than access.</td>
+                            <td>Controllers for Tarbell and Cromemco</td>
+                            <td><strong>The 88-HDSK is done</strong> &mdash; built, booting all four
+                                hard-disk images, and reading and writing verified against the disk's
+                                own operating system. The set-of-controllers refactor it needed is
+                                done with it, so <code>BootMachine</code> no longer hardwires the
+                                88-DCDD and a further board costs only its own
+                                <code>Controller</code> impl. Tarbell (6 images) and Cromemco (3)
+                                remain; both already <em>mount</em>, so a controller adds booting
+                                rather than access, and they are the whole of the 9 images the boot
+                                survey currently declines to try.</td>
+                        </tr>
+                        <tr>
+                            <td>88-HDSK corners with no disk to exercise them</td>
+                            <td>Three, all reasoned rather than run, because nothing in the image
+                                sets asks for them: <em>Status Check</em> is not implemented (no
+                                guest issues it); <em>Set Byte</em> is accepted but the IV bytes it
+                                writes are not modelled; and the head count is fixed at 2, which is
+                                what the Datakeeper had. Multiple hard-disk units are likewise
+                                untested &mdash; stock Altair CP/M only reaches four drives at all.</td>
+                        </tr>
+                        <tr>
+                            <td>Boot coverage as it stands</td>
+                            <td><strong>24 of the 33 images boot</strong> &mdash; every one in the
+                                <code>DISK*</code> and <code>HDSK*</code> families that has a boot
+                                sector. Of the rest, <code>DISK0D</code> is genuinely data and not a
+                                system disk, and the other 9 are the Tarbell and Cromemco images
+                                above. Between them these reach CP/M 2.2, CP/M 3.0, Altair DOS, Disk
+                                Extended BASIC, Time Sharing BASIC and Hard Disk BASIC.</td>
                         </tr>
                     </tbody>
                 </table>

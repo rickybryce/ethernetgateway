@@ -68,8 +68,14 @@ pub const CYLINDERS: u16 = 406;
 pub const IMAGE_LEN: u64 =
     CYLINDERS as u64 * HEADS as u64 * SECTORS as u64 * SECTOR_LEN as u64;
 
-/// The sector holding the first-stage boot program HDBL loads to address zero.
-pub const BOOT_SECTOR: usize = 7;
+/// Bytes of the volume label in sector 0 that we read.
+const LABEL_LEN: usize = 0x2C;
+
+/// Offset in the label of the boot program's first sector, little-endian.
+const LABEL_BOOT_SECTOR: usize = 0x28;
+
+/// Offset in the label of how many sectors that program occupies.
+const LABEL_BOOT_COUNT: usize = 0x2A;
 
 /// Data buffers in the controller's own memory, 256 bytes each.
 const BUFFERS: usize = 4;
@@ -512,14 +518,28 @@ impl Controller for Hdsk {
         Some(&self.buffers[self.pending_buffer])
     }
 
-    fn boot_program(&self) -> Option<(u64, u16)> {
-        // Cylinder 0, head 0, sector 7 — found by looking rather than assumed.
-        // That sector opens `31 00 D7 F3`: `LXI SP,0D700h` then `DI`, which is
-        // the `start:` of the boot loader whose own source is on the same disk,
-        // and D700h is the CCPBASE that source computes for a 63 K system.
-        // A few bytes later it does `DB FF` — `IN 0FFh` — reading the front
-        // panel to choose a platter, exactly as its comments describe.
-        Some((BOOT_SECTOR as u64 * SECTOR_LEN as u64, 0x0000))
+    fn boot_program(&self, image: &[u8]) -> Option<(u64, usize, u16)> {
+        // Sector 0 of every one of these disks is a volume label, and it says
+        // where the boot program is rather than the location being fixed.  That
+        // was found by comparing the four hard-disk images: the CP/M pair name
+        // sector 7, which is where the loader really is — its `31 00 D7` is the
+        // `LXI SP,0D700h` that the loader source on the same disk computes for a
+        // 63 K system — and the two Disk BASIC images name sector 24, where
+        // their own `F3 C3` (`DI`, then a jump) sits and where the CP/M disks
+        // have nothing but zeros.  A fixed sector 7 would boot half of them.
+        let label = image.get(..LABEL_LEN)?;
+        let sector = u16::from_le_bytes([label[LABEL_BOOT_SECTOR], label[LABEL_BOOT_SECTOR + 1]]);
+        let count = u16::from_le_bytes([label[LABEL_BOOT_COUNT], label[LABEL_BOOT_COUNT + 1]]);
+        // A count of zero would mean loading nothing and jumping into it.
+        if sector == 0 || count == 0 {
+            return None;
+        }
+        let offset = sector as u64 * SECTOR_LEN as u64;
+        let len = count as usize * SECTOR_LEN;
+        // Both stages of every disk here are loaded at zero, which is what the
+        // CP/M loader's own source says of itself: "the hard disk bootloader ROM
+        // (HDBL) loads this program into memory at address zero".
+        Some((offset, len, 0x0000))
     }
 
     fn stuck_polls(&self) -> u32 {

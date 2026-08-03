@@ -363,22 +363,22 @@ impl BootMachine {
         // Only the floppy has a bootstrap; see `Controller::as_dcdd`.
         // A board whose PROM simply reads one sector and jumps says so; the
         // floppy's does not, and keeps its own sequence below.
-        if let Some((offset, load_at)) = controllers[which].boot_program() {
-            let m = disks
-                .get(drive as usize)
-                .and_then(|x| x.as_ref())
-                .ok_or(BootError::NoDisk(drive))?;
+        let m = disks
+            .get(drive as usize)
+            .and_then(|x| x.as_ref())
+            .ok_or(BootError::NoDisk(drive))?;
+        if let Some((offset, len, load_at)) = controllers[which].boot_program(&m.bytes) {
             let at = offset as usize;
-            let sector = m
+            let program = m
                 .bytes
-                .get(at..at + 256)
-                .ok_or_else(|| BootError::Unreadable("the boot sector is past the end".into()))?;
-            if sector.iter().all(|&b| b == 0 || b == 0xE5) {
+                .get(at..at + len)
+                .ok_or_else(|| BootError::Unreadable("the boot program runs past the end".into()))?;
+            if program.iter().all(|&b| b == 0 || b == 0xE5) {
                 return Err(BootError::NotBootable);
             }
             let start = load_at as usize;
-            let end = (start + sector.len()).min(mem.len());
-            mem[start..end].copy_from_slice(&sector[..end - start]);
+            let end = (start + program.len()).min(mem.len());
+            mem[start..end].copy_from_slice(&program[..end - start]);
             cpu.registers().set_pc(load_at);
             return Ok(());
         }
@@ -1042,6 +1042,17 @@ mod tests {
     }
 
     #[cfg(test)]
+    /// The "Space: 3744k" figure out of a CP/M `STAT` line.
+    ///
+    /// Its own function so the before and after readings are parsed by exactly
+    /// the same code — a comparison between two different parsers proves
+    /// nothing about the disk.
+    fn free_k(stat: &str) -> Option<u32> {
+        let tail = stat.split("Space:").nth(1)?;
+        let digits: String = tail.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    }
+
     fn printable(bytes: &[u8]) -> String {
         bytes
             .iter()
@@ -1728,6 +1739,82 @@ mod tests {
         let stat = type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000);
         println!("--- STAT ---\n{stat}");
         assert!(stat.contains("Space:"), "no free space reported: {stat:?}");
+    }
+
+    /// Write a file inside a booted hard disk, then boot the result and find it
+    /// still there.
+    ///
+    /// The read path had a strong oracle already — a sign-on the guest's own
+    /// loader produces, and a `DIR` its own BIOS answers. This is the same trick
+    /// pointed at the write path, and it needs to be *two* sessions to mean
+    /// anything. One session proves only that the controller's buffer can be
+    /// read back out of itself, which it could do while writing to entirely the
+    /// wrong sector; the guest would still see its own directory because it is
+    /// reading back the same wrong place. Coming up in a *second* boot, from
+    /// bytes that went out to a file and came back, is what pins the addressing:
+    /// the directory sector, the data blocks and the allocation bitmap all have
+    /// to have landed where this disk's own BIOS goes looking for them.
+    ///
+    /// `SAVE` rather than `PIP` deliberately — it is one command with no
+    /// end-of-file to feed, so nothing about the test depends on the console.
+    ///
+    /// Ignored: set `CPM_HDSK_IMAGE` to an 88-HDSK CP/M image (HDSK03/HDSK04).
+    #[test]
+    #[ignore]
+    fn test_a_file_written_in_a_booted_hard_disk_survives_a_reboot() {
+        let Ok(path) = std::env::var("CPM_HDSK_IMAGE") else {
+            eprintln!("set CPM_HDSK_IMAGE to an 88-HDSK CP/M image to run this");
+            return;
+        };
+        let original = std::fs::read(&path).unwrap();
+
+        // Session one: save two pages under a name nothing on the disk uses.
+        let mut m = BootMachine::new();
+        m.insert(0, original.clone(), false).expect("the hard-disk controller takes it");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let _ = run_until_quiet(&mut m, &mut cpu, 200_000_000);
+
+        // Free space *before* anything is written.  An absolute figure would be
+        // no test at all: these images ship with wildly different amounts free
+        // (3744k on one, 1060k on another), so any constant threshold passes on
+        // one disk without the write having happened at all.
+        let before = free_k(&type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000))
+            .expect("STAT reports free space before the write");
+
+        let saved = type_at(&mut m, &mut cpu, b"SAVE 2 ZZTEST.COM\r", 400_000_000);
+        println!("--- SAVE ---\n{saved}");
+        let listed = type_at(&mut m, &mut cpu, b"STAT ZZTEST.COM\r", 400_000_000);
+        println!("--- STAT in session one ---\n{listed}");
+        assert!(listed.to_ascii_uppercase().contains("ZZTEST"), "the save did not take: {listed:?}");
+
+        // The bytes as they would reach the host's `.dsk` file.
+        let after = m.take_dirty().into_iter().next().expect("the guest dirtied the disk").1;
+        assert_eq!(after.len(), original.len(), "the image changed size");
+        assert_ne!(after, original, "nothing was written");
+
+        // Session two: a fresh machine, a fresh CPU, and only those bytes.
+        let mut m2 = BootMachine::new();
+        m2.insert(0, after, true).unwrap();
+        let mut cpu2 = BootMachine::new_cpu();
+        m2.boot(&mut cpu2, 0).expect("the written image still boots");
+        let signon = printable(&run_until_quiet(&mut m2, &mut cpu2, 200_000_000));
+        assert!(signon.contains("CP/M"), "the written image lost its loader: {signon:?}");
+
+        let dir = type_at(&mut m2, &mut cpu2, b"DIR ZZTEST.COM\r", 400_000_000);
+        println!("--- DIR in session two ---\n{dir}");
+        assert!(dir.to_ascii_uppercase().contains("ZZTEST"), "the file did not survive: {dir:?}");
+
+        // And the allocation bitmap moved with it — a directory entry alone
+        // could be there with the blocks still marked free, which is the shape
+        // of corruption that only shows up on the *next* file written.
+        let stat = type_at(&mut m2, &mut cpu2, b"STAT\r", 400_000_000);
+        println!("--- STAT in session two ---\n{stat}");
+        let after_free = free_k(&stat).expect("STAT reports free space after the reboot");
+        assert!(
+            after_free < before,
+            "free space went {before}k -> {after_free}k, so the blocks were never claimed: {stat:?}"
+        );
     }
 
     /// Boot every image in a folder and print what each one says.
