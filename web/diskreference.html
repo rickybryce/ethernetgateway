@@ -1976,9 +1976,9 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     which gives all three registers bit by bit.
                 </p>
                 <p>
-                    <strong>It confirms the emulated controller exactly.</strong>
-                    Every bit we had inferred is where the manual puts it, and
-                    none is missing except two that carry no emulation meaning:
+                    <strong>Every bit we had inferred is where the manual puts
+                    it</strong>, and none is missing except two that carry no
+                    emulation meaning. The register map was right:
                 </p>
                 <table class="data-table">
                     <thead><tr><th>Bit</th><th>Status (IN, port 10&#8323;)</th><th>Control (OUT, port 11&#8323;)</th></tr></thead>
@@ -2000,6 +2000,43 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     nothing really means. Sector position: D0 is Sector True,
                     true when <em>zero</em>, and the sector number sits above it.
                     Both of those had been inferred correctly.
+                </p>
+                <p>
+                    <strong>Reading the whole appendix rather than the bit table
+                    found three real divergences</strong> &mdash; all in one
+                    place, the select port's D7, and every one of them a sentence
+                    that is easy to skip:
+                </p>
+                <ul>
+                    <li><strong>D7 clears disk control, and D0&ndash;D5 are
+                        &ldquo;don't care&rdquo;.</strong> We were reading the
+                        low bits anyway, so a guest deselecting drive 2 reset
+                        drive <em>0</em>'s mechanism and left drive 2 with its
+                        head still down &mdash; a drive that then looked ready to
+                        read without ever being told to load its head.</li>
+                    <li><strong>&ldquo;Interrupt Circuit also disabled by
+                        clearing disk control.&rdquo;</strong> That sentence is
+                        under <em>control D5</em>, not in the select port's own
+                        paragraph, and we had missed it: status D5 went on
+                        reporting interrupts enabled after the control had been
+                        cleared.</li>
+                    <li><strong>A write in progress is finished, not
+                        dropped.</strong> &ldquo;Once Write is enabled, it holds
+                        the head loaded for the required time&rdquo;, and the
+                        write circuit &ldquo;will continue writing the last byte
+                        outputted to the end of that sector&rdquo;. We discarded
+                        it, silently losing a sector the guest believed it had
+                        written &mdash; the same fault as a write abandoned when
+                        the head steps, which this controller had already been
+                        fixed for once.</li>
+                </ul>
+                <p class="dim-text">
+                    The interrupt flag also moved from the drive to the
+                    controller, where the manual puts it: held per drive,
+                    selecting another drive appeared to change the setting, which
+                    no real board does. None of this was reachable by the 24
+                    images that boot &mdash; which is the point of reading the
+                    document even after the thing works.
                 </p>
                 <p>
                     Two things in the table are <strong>not modelled</strong>, and

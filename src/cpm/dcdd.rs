@@ -135,7 +135,6 @@ struct Drive {
     track: u8,
     sector: u8,
     head_loaded: bool,
-    interrupts: bool,
     /// Set between "begin write" and the end of the sector.
     writing: bool,
     /// Where the sector being written belongs — captured when the write
@@ -168,7 +167,6 @@ impl Default for Drive {
             track: 0,
             sector: 0,
             head_loaded: false,
-            interrupts: false,
             writing: false,
             write_at: None,
             byte: None,
@@ -200,6 +198,18 @@ pub struct Dcdd {
     selected: Option<u8>,
     /// The rotation flag — see the module comment.
     sector_true: bool,
+    /// Whether disk interrupts are enabled.
+    ///
+    /// On the **controller**, not on a drive, because that is where the manual
+    /// puts it: control D4/D5 enable and disable "the interrupt circuit", and
+    /// clearing disk control disables it. Held per drive, selecting another
+    /// drive appeared to change the setting, which no real board does.
+    ///
+    /// Nothing raises an interrupt here — there is no interrupt path in this
+    /// machine — so this is reported through status D5 and otherwise inert.
+    /// Software that enables disk interrupts and waits for one would hang; none
+    /// of the images that boot does, they all poll.
+    interrupts: bool,
     /// Counts position-register reads since the sector last changed, so a
     /// guest stuck waiting on a sector that never arrives can be spotted.
     polls_on_sector: u32,
@@ -217,6 +227,7 @@ impl Dcdd {
             drives: std::array::from_fn(|_| Drive::default()),
             selected: None,
             sector_true: false,
+            interrupts: false,
             polls_on_sector: 0,
         }
     }
@@ -293,7 +304,7 @@ impl Dcdd {
                         s |= status::ENWD;
                     }
                 }
-                if d.interrupts {
+                if self.interrupts {
                     s |= status::INT_ENABLED;
                 }
                 // On real hardware this bit reports that the head-load delay
@@ -412,24 +423,43 @@ impl Dcdd {
 
     /// Drive select, port 08h.
     fn select(&mut self, value: u8) -> Request {
-        let drive = value & 0x0F;
-        if drive as usize >= MAX_DRIVES {
-            return Request::None;
-        }
+        let mut request = Request::None;
         if value & 0x80 != 0 {
-            // Deselect: the disk stays in, the mechanism resets.
-            if let Some(d) = self.drives.get_mut(drive as usize) {
-                d.head_loaded = false;
-                d.writing = false;
-                d.byte = None;
+            // D7 "clears disk control", and the manual is explicit that
+            // **D0-D5 are don't care** when it is set. So this affects the drive
+            // that *was* selected — reading the low bits here meant a guest
+            // deselecting drive 2 reset drive 0's mechanism and left drive 2
+            // with its head still down.
+            if let Some(sel) = self.selected {
+                // A write already in progress is finished, not dropped: "once
+                // Write is enabled, it holds the head loaded for the required
+                // time", and the write circuit "will continue writing the last
+                // byte outputted to the end of that sector". Discarding it here
+                // silently lost a sector the guest believed it had written —
+                // the same fault, in a different place, as a write abandoned
+                // when the head steps.
+                request = self.finish_write(sel);
+                if let Some(d) = self.drives.get_mut(sel as usize) {
+                    d.head_loaded = false;
+                    d.writing = false;
+                    d.byte = None;
+                }
             }
+            // "Interrupt Circuit also disabled by clearing disk control" —
+            // stated under control D5, and easy to miss because it is not in the
+            // select port's own paragraph.
+            self.interrupts = false;
             self.selected = None;
         } else {
+            let drive = value & 0x0F;
+            if drive as usize >= MAX_DRIVES {
+                return Request::None;
+            }
             self.selected = Some(drive);
         }
         self.sector_true = false;
         self.polls_on_sector = 0;
-        Request::None
+        request
     }
 
     /// Drive control, port 09h.
@@ -448,6 +478,14 @@ impl Dcdd {
         if value & (control::STEP_IN | control::STEP_OUT | control::HEAD_UNLOAD) != 0 {
             request = self.finish_write(sel);
         }
+        // The interrupt circuit is the controller's, so it is set before the
+        // drive is borrowed.
+        if value & control::INT_ENABLE != 0 {
+            self.interrupts = true;
+        }
+        if value & control::INT_DISABLE != 0 {
+            self.interrupts = false;
+        }
         let d = &mut self.drives[sel as usize];
         if value & control::STEP_IN != 0 && d.track + 1 < tracks {
             d.track += 1;
@@ -463,12 +501,6 @@ impl Dcdd {
         if value & control::HEAD_UNLOAD != 0 {
             d.head_loaded = false;
             d.byte = None;
-        }
-        if value & control::INT_ENABLE != 0 {
-            d.interrupts = true;
-        }
-        if value & control::INT_DISABLE != 0 {
-            d.interrupts = false;
         }
         if value & control::WRITE_ENABLE != 0 {
             let read_only = d.disk.as_ref().is_some_and(|k| k.read_only);
@@ -749,6 +781,91 @@ mod tests {
             SECTORS_PER_TRACK as usize,
             "every sector must come round; saw {distinct:?}"
         );
+    }
+
+    /// D7 of the select port clears disk control, and it is the **selected**
+    /// drive that stops — the manual says D0-D5 are don't care when D7 is set.
+    ///
+    /// Reading the low bits instead meant deselecting drive 2 reset drive 0's
+    /// mechanism and left drive 2 with its head down: a drive that then looked
+    /// ready to read without ever being told to load its head again.
+    #[test]
+    fn test_clearing_disk_control_stops_the_selected_drive_not_drive_zero() {
+        let mut c = Dcdd::new();
+        c.insert(0, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
+        c.insert(2, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
+        // Load both heads, leaving drive 2 selected.
+        c.port_out(0x08, 0);
+        c.port_out(0x09, control::HEAD_LOAD);
+        c.port_out(0x08, 2);
+        c.port_out(0x09, control::HEAD_LOAD);
+        assert!(c.drives[0].head_loaded && c.drives[2].head_loaded);
+
+        // Clear disk control, with the low bits naming drive 0 — "don't care".
+        c.port_out(0x08, 0x80);
+        assert!(!c.drives[2].head_loaded, "the selected drive's head must come up");
+        assert!(c.drives[0].head_loaded, "an unselected drive is not touched by don't-care bits");
+        assert_eq!(c.selected, None, "and nothing is selected afterwards");
+    }
+
+    /// "Interrupt Circuit also disabled by clearing disk control" — stated under
+    /// control D5, not in the select port's own paragraph, which is why it was
+    /// missed.
+    #[test]
+    fn test_clearing_disk_control_disables_interrupts() {
+        let mut c = ready();
+        c.port_out(0x09, control::INT_ENABLE);
+        assert!(c.interrupts, "enabled by control D4");
+        // Status reports it, inverted like every other bit.
+        assert_eq!(c.port_in(0x08).0 & status::INT_ENABLED, 0, "INTE reads true (0)");
+
+        c.port_out(0x08, 0x80);
+        assert!(!c.interrupts, "clearing disk control must disable the interrupt circuit");
+    }
+
+    /// The interrupt circuit is the controller's, not a drive's: selecting
+    /// another drive must not appear to change the setting, because no real
+    /// board behaves that way.
+    #[test]
+    fn test_the_interrupt_circuit_is_not_per_drive() {
+        let mut c = Dcdd::new();
+        c.insert(0, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
+        c.insert(1, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
+        c.port_out(0x08, 0);
+        c.port_out(0x09, control::HEAD_LOAD | control::INT_ENABLE);
+        assert_eq!(c.port_in(0x08).0 & status::INT_ENABLED, 0, "true on drive 0");
+
+        c.port_out(0x08, 1);
+        c.port_out(0x09, control::HEAD_LOAD);
+        assert_eq!(
+            c.port_in(0x08).0 & status::INT_ENABLED,
+            0,
+            "still true after selecting another drive"
+        );
+    }
+
+    /// A write in progress when disk control is cleared is *finished*, not
+    /// dropped.
+    ///
+    /// "Once Write is enabled, it holds the head loaded for the required time",
+    /// and the write circuit "will continue writing the last byte outputted to
+    /// the end of that sector". Discarding it lost a sector the guest believed
+    /// it had written — the same fault as a write abandoned when the head steps,
+    /// which this controller already handles.
+    #[test]
+    fn test_a_write_is_committed_when_disk_control_is_cleared() {
+        let mut c = ready();
+        // Position on a sector, then start a write and put a byte in.
+        for _ in 0..4 {
+            c.port_in(0x09);
+        }
+        c.port_out(0x09, control::WRITE_ENABLE);
+        c.port_out(0x0A, 0xAB);
+
+        match c.port_out(0x08, 0x80) {
+            Request::Write { drive, .. } => assert_eq!(drive, 0),
+            other => panic!("the pending sector must be handed back, got {other:?}"),
+        }
     }
 
     /// Each sector is reported once positioned and once not.
