@@ -96,6 +96,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents how the emulated 88-DCDD controller works — the three ports, the
   rotational sector position and why it had to be built first, the cold start
   and why the payload address is not a guess.
+- **Altair hard disks boot.** A 4.9 MB `HDSK*.DSK` now runs its own CP/M on an
+  emulated MITS 88-HDSK "Datakeeper" controller — `63K CP/M 2.2b ver 1.5 / For
+  MITS 88-HDSK`, an `A>` prompt, `DIR` listing all 48 files and `STAT`
+  reporting 3744k free.
+
+  The board is nothing like the floppy controller and that shaped the design.
+  The 88-DCDD is a bare board polled through a rotating sector counter; the
+  Datakeeper is an intelligent controller with its own processor and four
+  256-byte buffers reached through an 88-4PIO, so a sector takes *two*
+  commands — platter to buffer, then buffer to the Altair. The booted machine
+  now holds a set of controllers rather than one board, each claiming its own
+  ports and its own media size, and the seam between them is a byte range
+  rather than a track and a sector, because neither board's vocabulary would
+  survive being imposed on the other.
+
+  Written from the published manual and its errata, cross-checked against
+  observed behaviour — the same clean-room posture as Punter, HBIOS and EGT80.
+  Three things came only from the errata sheets, and each is now a test: every
+  bit of the error byte reads as 1 on the first read after power-on; a transfer
+  length of 0 means 256 bytes, not none; and reading the error byte is what
+  clears Controller Ready, which the manual's own sample routine never does and
+  is described in the errata as nonfunctional because of it.
+
+  The disk turned out to document itself. HDSK03 carries the assembler source
+  of its own boot loader in plain ASCII, and it settles what the manual leaves
+  ambiguous: CP/M starts at sector 2, fits entirely in cylinder zero, and is
+  loaded by a first-stage program the PROM puts at address zero. Sector 7 is
+  that program — its opening `31 00 D7` is `LXI SP,0D700h`, and a few bytes
+  later `DB FF` reads the front-panel sense switches to choose a platter,
+  exactly as its own comments describe.
 - **A booted disk now gets all your mounted images**, each on the controller
   unit its drive letter names — B: is unit 1, C: is unit 2, F: is unit 5. So you
   can mount several disks, boot one, and copy between them with the guest's own

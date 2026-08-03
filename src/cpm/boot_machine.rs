@@ -361,6 +361,27 @@ impl BootMachine {
             .flatten()
             .ok_or(BootError::NoDisk(drive))?;
         // Only the floppy has a bootstrap; see `Controller::as_dcdd`.
+        // A board whose PROM simply reads one sector and jumps says so; the
+        // floppy's does not, and keeps its own sequence below.
+        if let Some((offset, load_at)) = controllers[which].boot_program() {
+            let m = disks
+                .get(drive as usize)
+                .and_then(|x| x.as_ref())
+                .ok_or(BootError::NoDisk(drive))?;
+            let at = offset as usize;
+            let sector = m
+                .bytes
+                .get(at..at + 256)
+                .ok_or_else(|| BootError::Unreadable("the boot sector is past the end".into()))?;
+            if sector.iter().all(|&b| b == 0 || b == 0xE5) {
+                return Err(BootError::NotBootable);
+            }
+            let start = load_at as usize;
+            let end = (start + sector.len()).min(mem.len());
+            mem[start..end].copy_from_slice(&sector[..end - start]);
+            cpu.registers().set_pc(load_at);
+            return Ok(());
+        }
         let dcdd = controllers[which].as_dcdd().ok_or(BootError::NoBootstrap)?;
         // Every chunk with the address it belongs at.  The bootstrap stores
         // more than one, and keeping only the last — or ignoring the address —
@@ -1663,6 +1684,50 @@ mod tests {
             "{} bytes in through EGT80's XMODEM, onto the disk, and back out again",
             payload.len()
         );
+    }
+
+    /// The Altair hard disk boots its own CP/M, off a 4.9 MB image, through a
+    /// controller built from the published manual.
+    ///
+    /// The strong oracle again: a sign-on cannot be produced by a plausible
+    /// wrong answer. Reaching it means the 4PIO handshake, the command word
+    /// layout, the two-step buffer transfer, the sector addressing and the
+    /// first-stage boot program are all right together — and `DIR` afterwards
+    /// means the guest's own BIOS agrees about where its files are.
+    ///
+    /// Ignored: set `CPM_HDSK_IMAGE` to an Altair 88-HDSK CP/M image
+    /// (HDSK03.DSK or HDSK04.DSK in the Altair-Duino set).
+    #[test]
+    #[ignore]
+    fn test_an_altair_hard_disk_boots_and_lists_its_files() {
+        let Ok(path) = std::env::var("CPM_HDSK_IMAGE") else {
+            eprintln!("set CPM_HDSK_IMAGE to an 88-HDSK CP/M image to run this");
+            return;
+        };
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() as u64, crate::cpm::hdsk::IMAGE_LEN, "not a 4.9 MB hard disk");
+
+        let mut m = BootMachine::new();
+        m.insert(0, bytes, true).expect("the hard-disk controller takes it");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- sign-on ---\n{signon}");
+        assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
+        assert!(signon.contains("88-HDSK"), "not the hard-disk system: {signon:?}");
+
+        // Its own filesystem, answering.  The sign-on alone only proves the
+        // loader ran; this proves the BIOS can still find sectors afterwards.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.to_ascii_uppercase().contains("PIP"), "no directory: {dir:?}");
+
+        // And free space, which needs the whole 4.9 MB addressed correctly
+        // rather than just cylinder zero.
+        let stat = type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000);
+        println!("--- STAT ---\n{stat}");
+        assert!(stat.contains("Space:"), "no free space reported: {stat:?}");
     }
 
     /// Boot every image in a folder and print what each one says.

@@ -1329,12 +1329,14 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
 
                 <div class="callout callout-info">
                     <p>
-                        <strong>Status: the controller is built and unit-tested
-                        against the manual; the bootstrap is not written yet.</strong>
-                        An <code>HDSK*.DSK</code> is now recognised, accepted
-                        into a drive and served by the 88-HDSK board, but
-                        booting one still reports that nothing here knows the
-                        sequence its PROM would run. This section exists so
+                        <strong>Status: it boots.</strong> An Altair hard disk
+                        runs its own CP/M off a 4.9&nbsp;MB image —
+                        <code>63K CP/M 2.2b ver 1.5 / For MITS 88-HDSK</code>,
+                        then an <code>A&gt;</code> prompt, <code>DIR</code>
+                        listing all 48 files and <code>STAT</code> reporting
+                        3744k free. HDSK03 and HDSK04 both. The two non-CP/M
+                        hard disks (Disk BASIC and the Accounting system) do not,
+                        which is expected — they are not booted the same way. This section exists so
                         the reading does not have to be done twice. Nothing in
                         the gateway speaks this protocol yet; `HDSK*.DSK` images
                         still <a href="#others">mount</a> as <code>altairhd</code>
@@ -1612,6 +1614,35 @@ in   161                            ; clears ready, returns the error byte
                     platter. If A11 is up, boot is from the fixed platter.&rdquo;</em>
                     The switches decide which platter the machine boots, exactly
                     the class of thing that cost a day on the floppy.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What booting it took</h3>
+                <p>
+                    Very little, once the disk had been asked. The PROM's job is
+                    just <em>read one sector and jump</em>, so the emulated
+                    HDBL copies cylinder 0 head 0 <strong>sector 7</strong> to
+                    address <code>0000</code> and sets the program counter
+                    there. Everything after that is the disk's own code driving
+                    the controller.
+                </p>
+                <p>
+                    Which is what makes the sign-on such a strong result: it
+                    cannot be produced by a plausible wrong answer. The 4PIO
+                    handshake, the command word layout, the two-step buffer
+                    transfer and the cylinder/head/sector arithmetic all have to
+                    be right together before a single byte of CP/M reaches
+                    memory. The confirmation came before the text did — page
+                    zero held <code>JMP ED03</code> and <code>JMP DF06</code>,
+                    which are exactly the BIOS and BDOS entries the loader's own
+                    source computes from <code>CCPBASE = D700h</code>.
+                </p>
+                <p class="dim-text">
+                    Gate: <code>test_an_altair_hard_disk_boots_and_lists_its_files</code>.
+                    It requires the sign-on, a <code>DIR</code> that lists files
+                    — the sign-on alone only proves the loader ran, not that the
+                    BIOS can still find sectors — and a <code>STAT</code> free
+                    space, which needs the whole 4.9&nbsp;MB addressed correctly
+                    rather than just cylinder zero.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>

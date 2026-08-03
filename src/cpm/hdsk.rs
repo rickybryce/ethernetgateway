@@ -68,6 +68,9 @@ pub const CYLINDERS: u16 = 406;
 pub const IMAGE_LEN: u64 =
     CYLINDERS as u64 * HEADS as u64 * SECTORS as u64 * SECTOR_LEN as u64;
 
+/// The sector holding the first-stage boot program HDBL loads to address zero.
+pub const BOOT_SECTOR: usize = 7;
+
 /// Data buffers in the controller's own memory, 256 bytes each.
 const BUFFERS: usize = 4;
 
@@ -474,6 +477,16 @@ impl Controller for Hdsk {
 
     fn buffer(&self, _drive: u8) -> Option<&[u8]> {
         Some(&self.buffers[self.pending_buffer])
+    }
+
+    fn boot_program(&self) -> Option<(u64, u16)> {
+        // Cylinder 0, head 0, sector 7 — found by looking rather than assumed.
+        // That sector opens `31 00 D7 F3`: `LXI SP,0D700h` then `DI`, which is
+        // the `start:` of the boot loader whose own source is on the same disk,
+        // and D700h is the CCPBASE that source computes for a 63 K system.
+        // A few bytes later it does `DB FF` — `IN 0FFh` — reading the front
+        // panel to choose a platter, exactly as its comments describe.
+        Some((BOOT_SECTOR as u64 * SECTOR_LEN as u64, 0x0000))
     }
 
     fn stuck_polls(&self) -> u32 {

@@ -100,6 +100,23 @@ pub trait Controller: Send {
         None
     }
 
+    /// Where this controller's first-stage boot program lives, and where its
+    /// PROM would put it: `(byte offset in the image, load address)`.
+    ///
+    /// `None` for a board whose cold start is more than "read one sector and
+    /// jump" — the 88-DCDD's is, because its PROM drives the port state machine
+    /// through a rotating sector counter, and that stays in
+    /// [`crate::cpm::boot`] behind [`Controller::as_dcdd`].
+    ///
+    /// The 88-HDSK's really is that simple, and the disk says so itself: its
+    /// boot loader source, carried in plain ASCII on HDSK03, records that "the
+    /// hard disk bootloader ROM (HDBL) loads this program into memory at
+    /// address zero", and that program then loads CP/M through the controller
+    /// on its own.
+    fn boot_program(&self) -> Option<(u64, u16)> {
+        None
+    }
+
     /// How many times a guest has polled for something that never arrived.
     ///
     /// Every controller here has *some* wait a guest can sit in forever — a
