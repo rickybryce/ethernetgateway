@@ -1523,7 +1523,7 @@ in   161                            ; clears ready, returns the error byte
                     set.
                 </p>
 
-                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The eight commands</h3>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The nine commands</h3>
                 <p>
                     Each is 16 bits, sent as <strong>low byte to 167 first, then
                     high byte to 163</strong> &mdash; and writing the high byte
@@ -1542,6 +1542,7 @@ in   161                            ; clears ready, returns the error byte
                         <tr><td>Read buffer</td><td><code>CRDBUF 50h</code></td><td>0&ndash;7 length, 8&ndash;9 buffer</td></tr>
                         <tr><td>Read status</td><td><code>CRSTAT 60h</code></td><td>10&ndash;11 unit, plus an IV byte address 0&ndash;255 in the low byte</td></tr>
                         <tr><td>Set byte</td><td><code>CSETIV 80h</code></td><td>an IV byte address in the low byte; the data follows at 167</td></tr>
+                        <tr><td>Read unformatted sector</td><td><code>CRUSEC A0h</code></td><td>as read sector, without checking the header &mdash; also the write-protect probe</td></tr>
                         <tr><td>Format</td><td><code>CFORMT C0h</code></td><td>unit in high-byte bits 2&ndash;3; low byte 7&ndash;6 platter, 5 side</td></tr>
                         <tr><td>Initialize</td><td><code>CINIT E0h</code></td><td>&mdash;</td></tr>
                     </tbody>
@@ -1553,7 +1554,7 @@ in   161                            ; clears ready, returns the error byte
                     HDSK08&ndash;0B a controller diagnostic with <code>IR</code>/<code>IW</code>
                     commands for reading and writing IV bytes and a platter formatter.
                     It states the command set outright, which is how this table came
-                    to have eight rows. The manual has <em>seven</em>: &ldquo;There
+                    to have nine rows. The manual has <em>seven</em>: &ldquo;There
                     are seven <strong>currently</strong> defined commands which may
                     be issued to the Datakeeper Controller&rdquo; &mdash; and that
                     word is doing real work, because <code>CFORMT</code> and
@@ -2139,7 +2140,9 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         are now quoted from their sources.</li>
                 </ul>
                 <p>
-                    Three findings, one of them a fix:
+                    Three findings from the document itself, one of them a fix.
+                    (Three more came later from running the diagnostic the disks
+                    carry &mdash; see <em>ADEXER</em> below.)
                 </p>
                 <ul>
                     <li><strong>The manual's own 4PIO initialisation was consuming
@@ -2198,6 +2201,76 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     settle the write-bit question outright &mdash; the first source
                     yet found that is neither the manual's prose nor MITS software.
                 </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">ADEXER: the oracle that was on the disk all along</h3>
+                <p>
+                    Four of the hard-disk images carry <strong>ADEXER</strong>, the
+                    Altair Datakeeper Exerciser &mdash; Martin Eberhard's
+                    diagnostic, version 1.14, September 2017. It was written to
+                    exercise this controller against <em>real hardware</em>, which
+                    makes it the strongest oracle available here for everything the
+                    guest operating systems never touch. A booted CP/M runs it, and
+                    it exercises exactly the corners that had been implemented from
+                    documents alone.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>ADEXER</th><th>Exercises</th><th>Result</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>IC</code></td><td>Initialize (<code>E0h</code>)</td><td>&ldquo;Resetting Controller&rdquo;</td></tr>
+                        <tr><td><code>IW 34 55</code> / <code>IR 34</code></td><td>Set Byte + Read Status round trip</td><td>&ldquo;IV Byte 34 = 55h&rdquo;</td></tr>
+                        <tr><td><code>TB</code></td><td>all four controller buffers</td><td>&ldquo;Buffers OK&rdquo;</td></tr>
+                        <tr><td><code>SK</code> / <code>SR</code></td><td>Seek, Read Sector, Read Buffer</td><td>reports the cylinder it was sent to</td></tr>
+                        <tr><td><code>SW</code> + <code>CC</code></td><td>Write Sector, read back, compare</td><td>&ldquo;Mismatches: 0&rdquo;</td></tr>
+                        <tr><td><code>SB</code></td><td>Read Unformatted Sector (<code>A0h</code>)</td><td>reads; reports write protection</td></tr>
+                        <tr><td><code>RE</code></td><td>restore through the IV positioner</td><td>heads return to cylinder 0</td></tr>
+                        <tr><td><code>FS</code></td><td>Format (<code>C0h</code>)</td><td>one surface erased, the other untouched</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    <strong>It found three things no test here could have.</strong>
+                </p>
+                <ul>
+                    <li><strong>A ninth command.</strong> ADEXER sends
+                        <code>A3xx</code>, which decoded as unrecognised. Its source
+                        names it: <code>CRUSEC equ 0A0h ;Read Unformatted Sector</code>
+                        — a read that skips the header check, which on images that
+                        hold pure sector data is simply a read. It matters more than
+                        that, though: <code>DUMYRD</code> issues one with an error
+                        mask of <code>80h</code> to <em>probe write protection</em>
+                        before writing, its comment reading &ldquo;0 if not write
+                        protected, a=80h if write protected&rdquo;. With the command
+                        unrecognised the probe saw a clear error byte, so ADEXER
+                        believed a read-only disk was writable. It now prints
+                        &ldquo;Disk is write-protected.&rdquo;</li>
+                    <li><strong>The heads had no reported position.</strong> After
+                        <code>SK 3</code>, ADEXER said <em>cylinder 511</em>. It
+                        recovers the position by reading IV bytes 18 and 19 and
+                        complementing them, and with those left as an inert store a
+                        stored zero inverts to all ones. Modelling the two of them
+                        &mdash; from `GETCYL`'s own arithmetic and the errata's
+                        inversion rule &mdash; makes it report 3, and 100, and 405.</li>
+                    <li><strong>Restore did nothing.</strong> <code>RE</code> printed
+                        &ldquo;Restoring.&rdquo; while the heads stayed put, because
+                        <code>IVICRN</code>, &ldquo;Cyl Restore (active low)&rdquo;,
+                        was being stored rather than acted on. It is a level rather
+                        than an edge, so it needs no timing guess; the cylinder
+                        <em>strobe</em> beside it does, and is left alone, because
+                        every operating system here seeks with the Seek command.</li>
+                </ul>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>And a third witness on the write bit.</strong> Traced
+                        live, ADEXER's <code>SW</code> sends
+                        <code>hdsk cmd 2003</code> &mdash; nibble <code>0010</code>,
+                        the same value the MITS CP/M BIOS uses and not the
+                        <code>0001</code> the manual describes. ADEXER is an
+                        independent implementation written forty years later by
+                        someone with the hardware in front of him. Three
+                        witnesses now agree against the manual's prose, from three
+                        different decades; what would still settle it outright is the
+                        schematic or the 8X300 firmware, both of which deramp holds.
+                    </p>
+                </div>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>
@@ -2286,11 +2359,16 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                                 Status refuses an unready unit; <em>Format</em> and
                                 <em>Initialize</em> exist at all, having previously decoded as Set
                                 Byte and silently succeeded; and per-unit head position has a test.
-                                What stays open is small and stated: the IV bytes have no hardware
-                                <em>meanings</em>, the head count is still 2 (what the Datakeeper
-                                had, and what these images are), and no guest here reaches a second
-                                hard disk to try &mdash; stock Altair CP/M only addresses four
-                                drives at all.</td>
+                                Then the diagnostic on those same disks was actually
+                                <em>run</em>, which closed most of what was left: the IV bytes that
+                                carry the head position are modelled and ADEXER reports the cylinder
+                                correctly, its restore works, and a ninth command turned up.
+                                What stays open is now small and stated: the IV bytes have no
+                                hardware meanings <em>beyond</em> the position and restore lines, the
+                                cylinder strobe is not modelled (nothing needs it), the head count is
+                                still 2 (what the Datakeeper had, and what these images are), and no
+                                guest here reaches a second hard disk to try &mdash; stock Altair
+                                CP/M only addresses four drives at all.</td>
                         </tr>
                         <tr>
                             <td>Boot coverage as it stands</td>

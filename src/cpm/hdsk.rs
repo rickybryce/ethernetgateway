@@ -80,6 +80,36 @@ const LABEL_BOOT_COUNT: usize = 0x2A;
 /// Data buffers in the controller's own memory, 256 bytes each.
 const BUFFERS: usize = 4;
 
+/// The three IV bytes whose meanings are pinned by *two* agreeing sources —
+/// errata 88-HDSK-ME02 and the equates in ADEXER's own source on these disks.
+///
+/// Everything else in the IV space stays a plain store, for the reasons on
+/// [`Hdsk::iv`]. These three are different because they are the ones a real
+/// diagnostic *reads to find out where the heads are*, and leaving them inert
+/// made ADEXER report cylinder 511 after a seek to 3 — a stored zero, inverted
+/// by the hardware rule, is all-ones.
+mod iv {
+    /// `IVH`, "Disk Control A": start/stop, extension, platter and side select,
+    /// and the four unit-select lines.
+    pub const DISK_CONTROL_A: usize = 17;
+    /// `IVI`, "Disk Control B": the active-low positioner lines, and bit 0 is
+    /// `IVIC8N`, "Cyl address bit 8 (inverted)".
+    pub const DISK_CONTROL_B: usize = 18;
+    /// `IVJ`: "Cyl address bits 7:0 (inverted)".
+    pub const CYL_LOW: usize = 19;
+
+    /// `IVIC8N` — cylinder bit 8, inverted, in [`DISK_CONTROL_B`].
+    pub const CYL_BIT8: u8 = 0x01;
+    /// `IVICRN` — "Cyl Restore (active low)". Pulled low, the positioner walks
+    /// the heads back to cylinder 0.
+    pub const CYL_RESTORE: u8 = 0x08;
+    /// `IVHSS`, start/stop, which a Read Status leaves alone.
+    pub const START_STOP: u8 = 0x80;
+    /// What Read Status forces into the platter/side/extension field:
+    /// "Extension Select low, Platter and Head select high".
+    pub const PLATTER_AND_SIDE: u8 = 0x30;
+}
+
 /// IV bytes the controller addresses, per the diagnostic's `MAXIV equ 0FFh`.
 const IV_BYTES: usize = 256;
 
@@ -155,11 +185,12 @@ pub mod error {
 ///     CRDBUF  equ 050h    ;Read Buffer          Bits 15:12 = 0101b
 ///     CRSTAT  equ 060h    ;Read Status (IV Byte)
 ///     CSETIV  equ 080h    ;Set IV Byte
+///     CRUSEC  equ 0A0h    ;Read Unformatted Sector
 ///     CFORMT  equ 0C0h    ;Format
 ///     CINIT   equ 0E0h    ;Initialize
 /// ```
 ///
-/// That is **eight** commands, not the seven the manual's table lists, and it
+/// That is **nine** commands, not the seven the manual's table lists, and it
 /// is why this decodes the whole four-bit nibble rather than testing bit 15
 /// first. Testing bit 15 first — which is what the manual's Set Byte example
 /// invites, since `80h` is the only value it shows with that bit set — folded
@@ -172,6 +203,15 @@ enum Command {
     Seek,
     /// Platter → buffer.
     ReadSector,
+    /// Platter → buffer, without checking the sector header.
+    ///
+    /// Not in the manual at all — found by tracing what ADEXER sends and then
+    /// finding `CRUSEC equ 0A0h ;Read Unformatted Sector` in its source. It is
+    /// how the diagnostic reads a sector whose header is damaged, and, more
+    /// importantly, how it *probes write protection*: `DUMYRD` issues one with an
+    /// error mask of `80h` and its own comment says the result is "0 if not write
+    /// protected, a=80h if write protected".
+    ReadUnformatted,
     /// Buffer → platter.
     WriteSector,
     /// Buffer → Altair.
@@ -223,6 +263,7 @@ impl Command {
             0x4 => Command::WriteBuffer,
             0x5 => Command::ReadBuffer,
             0x6 => Command::ReadStatus,
+            0xA => Command::ReadUnformatted,
             0x8 => Command::SetByte,
             0xC => Command::Format,
             0xE => Command::Initialize,
@@ -392,6 +433,31 @@ impl Hdsk {
         Some((track * SECTORS as u64 + sector as u64) * SECTOR_LEN as u64)
     }
 
+    /// What a Read Status of `addr` answers.
+    ///
+    /// Two of these are not storage at all but the head position, read back
+    /// **inverted**, which is how `GETCYL` in ADEXER recovers the current
+    /// cylinder: read IV 18, complement, keep bit 0 for cylinder bit 8; read
+    /// IV 19, complement, and that is the low byte. Both halves are stated twice
+    /// over — by the errata ("IV Bytes H, I, and J ... all invert the data ... to
+    /// select Cylinder Address 0 ... you would write 255") and by ADEXER's own
+    /// equates and its `cma ;cyl address bits are inverted`.
+    ///
+    /// The other bits of IV 18 are output latches for the positioner's
+    /// active-low lines, so they read back as last written.
+    fn iv_read(&self, addr: usize, unit: u8) -> u8 {
+        let cylinder = self.units.get(unit as usize).map(|u| u.cylinder).unwrap_or(0);
+        let stored = self.iv[addr % IV_BYTES];
+        match addr {
+            iv::DISK_CONTROL_B => {
+                let bit8 = ((cylinder >> 8) as u8) & iv::CYL_BIT8;
+                (stored & !iv::CYL_BIT8) | (!bit8 & iv::CYL_BIT8)
+            }
+            iv::CYL_LOW => !(cylinder as u8),
+            _ => stored,
+        }
+    }
+
     /// Bit 7 set when `flag`, and the idle counter kept.
     fn poll(&mut self, flag: bool) -> u8 {
         if flag {
@@ -437,7 +503,7 @@ impl Hdsk {
                 }
                 HostRequest::None
             }
-            Command::ReadSector | Command::WriteSector => {
+            Command::ReadSector | Command::WriteSector | Command::ReadUnformatted => {
                 let sector = (word & 0x1F) as u8;
                 let head = ((word >> 5) & 0x07) as u8;
                 let buffer = ((word >> 8) & 0x03) as usize;
@@ -458,6 +524,19 @@ impl Hdsk {
                     self.status |= error::WRITE_PROTECT;
                     self.ready = true;
                     return HostRequest::None;
+                }
+                // An unformatted read is also the write-protect probe, so it
+                // reports the line while still doing the read. Deliberately only
+                // this command and a write: reporting it on *every* read would be
+                // the more literal model of a hardware write-protect line, but
+                // these images are read-only by default and a guest that checks
+                // the whole error byte rather than masking it would then see every
+                // read fail. ADEXER masks with 7Fh on an ordinary read and 80h on
+                // this one, which is exactly the distinction being drawn here.
+                if matches!(Command::of(word), Command::ReadUnformatted)
+                    && self.units[unit as usize].read_only
+                {
+                    self.status |= error::WRITE_PROTECT;
                 }
                 self.pending_buffer = buffer;
                 if writing {
@@ -548,7 +627,22 @@ impl Hdsk {
                     self.ready = true;
                     return HostRequest::None;
                 }
-                self.status_byte = Some(self.iv[addr % IV_BYTES]);
+                // Errata ME02: "the Read Status command rewrites 7 bits in IV
+                // Byte H (Address 17). User Bits 4-7 get set according to the
+                // Unit bits in the command byte, User Bits 1:3 always get set to
+                // 011b (Extension Select low, Platter and Head select high).
+                // User Bit 0 (Start/Stop all drives) is unchanged."
+                //
+                // The errata does not say how two unit bits become four; ADEXER's
+                // equates do — `IVHUS1..IVHUS4` are one line per drive, so it is
+                // a one-hot decode. Its constants are in the Altair's own bit
+                // order, which is what this store holds, so they are used as
+                // written.
+                self.iv[iv::DISK_CONTROL_A] = (self.iv[iv::DISK_CONTROL_A]
+                    & iv::START_STOP)
+                    | iv::PLATTER_AND_SIDE
+                    | (1u8 << unit.min(3));
+                self.status_byte = Some(self.iv_read(addr, unit));
                 self.read_ready = true;
                 // **Ready and the byte come up together**, which is the one way
                 // this differs from a Read Buffer of one — and it is not a
@@ -727,6 +821,25 @@ impl Controller for Hdsk {
                 // command word.
                 if let Some(addr) = self.iv_pending.take() {
                     self.iv[addr as usize] = value;
+                    // One IV write is not storage: `IVICRN`, "Cyl Restore
+                    // (active low)", walks the heads back to cylinder 0. ADEXER's
+                    // `RE` asserts it — its own comment is "Set the strobe line
+                    // high the restore line low" — and with this inert it printed
+                    // "Restoring." while the heads stayed where they were.
+                    //
+                    // A level, not an edge, which is why this one is modelled and
+                    // the cylinder *strobe* beside it is not: a strobe is a low
+                    // pulse and its timing would have to be inferred, while every
+                    // guest operating system here seeks with the Seek command
+                    // instead. Restore needs no such guess.
+                    if addr as usize == iv::DISK_CONTROL_B && value & iv::CYL_RESTORE == 0 {
+                        let selected = self.selected;
+                        if let Some(u) = self.units.get_mut(selected as usize) {
+                            if u.present {
+                                u.cylinder = 0;
+                            }
+                        }
+                    }
                     self.ready = true;
                     return HostRequest::None;
                 }
@@ -857,6 +970,23 @@ mod tests {
 
     fn ready(h: &mut Hdsk) -> bool {
         h.port_in(port::READY).0 & 0x80 != 0
+    }
+
+    /// Read one IV byte the way `READIV` does: Read Status, then take the byte.
+    fn read_iv(h: &mut Hdsk, addr: u8) -> u8 {
+        read_iv_on_unit(h, addr, 0)
+    }
+
+    fn read_iv_on_unit(h: &mut Hdsk, addr: u8, unit: u8) -> u8 {
+        command(h, 0x6000 | (u16::from(unit) << 10) | u16::from(addr));
+        h.port_in(port::DATA_IN).0
+    }
+
+    /// Write one IV byte the way `WRITIV` does: Set Byte with the address, then
+    /// the data at the data port.
+    fn write_iv(h: &mut Hdsk, addr: u8, value: u8) {
+        command(h, 0x8000 | u16::from(addr));
+        h.port_out(port::DATA_OUT, value);
     }
 
     /// The geometry the manual states, checked against the file size the real
@@ -1228,6 +1358,110 @@ mod tests {
         let mut h = board();
         command(&mut h, 0); // seek unit 0 to cylinder 0
         assert_eq!(h.port_in(port::STATUS).0, 0x00, "a real command reports its own result");
+    }
+
+    /// Read Unformatted Sector reads like Read Sector, and doubles as the
+    /// write-protect probe.
+    ///
+    /// Found by tracing ADEXER: it sends `A3xx`, which decoded as unrecognised
+    /// here, so its `SB` command returned nothing and — worse — its `DUMYRD`
+    /// write-protect check saw a clear error byte and concluded a read-only disk
+    /// was writable. Its own comment on that routine is the specification: "0 if
+    /// not write protected, a=80h if write protected".
+    #[test]
+    fn test_read_unformatted_sector_reads_and_probes_write_protection() {
+        // Writable: it reads, and says nothing about protection.
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        let req = command(&mut h, 0xA000 | 5);
+        assert_eq!(
+            req,
+            HostRequest::Read { drive: 0, offset: 5 * SECTOR_LEN as u64, len: SECTOR_LEN },
+            "an unformatted read is still a read"
+        );
+        assert_eq!(h.port_in(port::STATUS).0 & error::WRITE_PROTECT, 0);
+
+        // Read-only: it still reads, and reports the line.
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, true).unwrap();
+        let _ = h.port_in(port::STATUS);
+        let req = command(&mut h, 0xA000 | 5);
+        assert!(matches!(req, HostRequest::Read { .. }), "the read is not refused");
+        assert_eq!(
+            h.port_in(port::STATUS).0 & error::WRITE_PROTECT,
+            error::WRITE_PROTECT,
+            "and the probe must see the protection"
+        );
+
+        // An ordinary read must NOT report it, or a guest that checks the whole
+        // error byte would see every read of a read-only disk fail.
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, true).unwrap();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 0x3000 | 5);
+        assert_eq!(h.port_in(port::STATUS).0 & error::WRITE_PROTECT, 0, "not on a plain read");
+    }
+
+    /// Read Status of IV 18 and 19 reports where the heads actually are.
+    ///
+    /// Reconstructed here exactly as `GETCYL` does it: read IV 18, complement,
+    /// keep bit 0 as cylinder bit 8; read IV 19, complement, low byte. With these
+    /// inert, ADEXER reported cylinder 511 after a seek to 3 — a stored zero,
+    /// inverted, is all ones.
+    #[test]
+    fn test_read_status_reports_the_head_position_the_way_getcyl_reads_it() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+
+        for want in [0u16, 3, 100, 300, 405] {
+            command(&mut h, want); // seek unit 0
+            let msb = read_iv(&mut h, iv::DISK_CONTROL_B as u8);
+            let low = read_iv(&mut h, iv::CYL_LOW as u8);
+            let got = (u16::from(!msb & iv::CYL_BIT8) << 8) | u16::from(!low);
+            assert_eq!(got, want, "GETCYL must recover cylinder {want}");
+        }
+    }
+
+    /// Pulling `IVICRN` low walks the heads back to cylinder 0 — ADEXER's `RE`.
+    ///
+    /// With IV writes as pure storage it printed "Restoring." and the heads stayed
+    /// where they were.
+    #[test]
+    fn test_an_iv_restore_returns_the_heads_to_cylinder_zero() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 100);
+        assert_eq!(h.units[0].cylinder, 100);
+
+        // Restore is active low, so it is *clearing* that bit that asks for it.
+        write_iv(&mut h, iv::DISK_CONTROL_B as u8, !iv::CYL_RESTORE);
+        assert_eq!(h.units[0].cylinder, 0, "the heads must come home");
+
+        // And an idle write, with restore high, moves nothing.
+        command(&mut h, 42);
+        write_iv(&mut h, iv::DISK_CONTROL_B as u8, 0xFF);
+        assert_eq!(h.units[0].cylinder, 42, "restore not asserted, so nothing happens");
+    }
+
+    /// Errata ME02: Read Status rewrites seven bits of IV byte 17 — the unit
+    /// select lines one-hot, platter and side high, extension low, start/stop
+    /// left alone.
+    #[test]
+    fn test_read_status_rewrites_the_unit_select_byte() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, false).unwrap();
+        h.insert(2, IMAGE_LEN, false).unwrap();
+        let _ = h.port_in(port::STATUS);
+
+        // Set the start/stop bit, which the rewrite must preserve.
+        write_iv(&mut h, iv::DISK_CONTROL_A as u8, 0xFF);
+
+        // A status read against unit 2.
+        let _ = read_iv_on_unit(&mut h, iv::DISK_CONTROL_A as u8, 2);
+        let v = read_iv_on_unit(&mut h, iv::DISK_CONTROL_A as u8, 2);
+        assert_eq!(v & iv::START_STOP, iv::START_STOP, "start/stop is unchanged");
+        assert_eq!(v & 0x70, iv::PLATTER_AND_SIDE, "extension low, platter and side high");
+        assert_eq!(v & 0x0F, 1 << 2, "unit 2 selects the third drive line, one-hot");
     }
 
     /// Images in circulation carry a few bytes past the last sector. Demanding
