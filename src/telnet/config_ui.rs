@@ -650,7 +650,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Cycle what CP/M runs (emulator or a disk)",
+                "  {}  Boot settings (what runs, machine)",
                 self.cyan("B")
             ))
             .await?;
@@ -715,27 +715,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "b" => {
-                    // Cycle to the next thing CP/M can run: our emulator, then
-                    // each image in turn.  A cycling key rather than a picker
-                    // because that is how every other choice on this screen
-                    // works, and because the list is usually two or three long.
-                    let base = self.cpmmount_base();
-                    let choices = crate::cpm::boot::boot_choices(&base);
-                    let idx = choices
-                        .iter()
-                        .position(|(v, _)| *v == cfg.cpm_boot_image)
-                        // A setting naming an image that is no longer there is
-                        // not in the list.  Land on the emulator next, which is
-                        // both the safe answer and the one that clears it.
-                        .unwrap_or(choices.len() - 1);
-                    let next = choices[(idx + 1) % choices.len()].0.clone();
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("cpm_boot_image", &next);
-                    })
-                    .await
-                    .ok();
-                }
+                "b" => self.cpm_boot_settings().await?,
                 "i" => {
                     // Displayed on this screen since the mount feature shipped,
                     // but only ever handled on the parent menu — so pressing it
@@ -894,6 +874,117 @@ impl TelnetSession {
                 "q" => return Ok(()),
                 _ => {
                     self.show_error("Press E, F, S, K, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    /// Boot settings, reached from the CP/M screen → `B`.  Two questions that
+    /// only matter together: what the CP/M menu item runs, and — if that is a
+    /// disk rather than our emulator — which machine the disk thinks it is
+    /// running on.
+    ///
+    /// Its own screen because the CP/M settings screen is at exactly 22 rows,
+    /// the same reason `E` opens that submenu and `L` opens the log one. It also
+    /// has room to grow, which this pair specifically will: when a second
+    /// controller claims a disk size the Tarbell already claims, *which board*
+    /// takes an ambiguous image becomes a third question on exactly this screen.
+    pub(in crate::telnet) async fn cpm_boot_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("CP/M BOOT SETTINGS"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
+            self.send_line(&format!(
+                "  Runs:      {}",
+                self.amber(&truncate_to_width(
+                    &crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image),
+                    w
+                ))
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Machine:   {}",
+                self.amber(&truncate_to_width(
+                    crate::cpm::console::machine_description(&cfg.cpm_boot_machine),
+                    w
+                ))
+            ))
+            .await?;
+            self.send_line("").await?;
+            // Said plainly, because a setting that does nothing in the current
+            // configuration is worse than no setting: the machine is hardware
+            // around a *booted* disk, and our emulator has no console to place.
+            if cfg.cpm_boot_image.is_empty() {
+                self.send_line(&format!("  {}", self.dim("The machine applies to a booted"))).await?;
+                self.send_line(&format!("  {}", self.dim("disk, not to the emulator."))).await?;
+            } else {
+                self.send_line(&format!("  {}", self.dim("A disk that loads and then goes"))).await?;
+                self.send_line(&format!("  {}", self.dim("quiet is usually looking for a"))).await?;
+                self.send_line(&format!("  {}", self.dim("console that is not there."))).await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
+            self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/boot"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "r" => {
+                    // Cycle to the next thing CP/M can run: our emulator, then
+                    // each image in turn.  A cycling key rather than a picker
+                    // because that is how every other choice in config works,
+                    // and because the list is usually two or three long.
+                    let base = self.cpmmount_base();
+                    let choices = crate::cpm::boot::boot_choices(&base);
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == cfg.cpm_boot_image)
+                        // A setting naming an image that is no longer there is
+                        // not in the list.  Land on the emulator next, which is
+                        // both the safe answer and the one that clears it.
+                        .unwrap_or(choices.len() - 1);
+                    let next = choices[(idx + 1) % choices.len()].0.clone();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_image", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "m" => {
+                    let choices = crate::cpm::console::MACHINE_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|c| c.key == cfg.cpm_boot_machine)
+                        // An unrecognised value lands on the default next, which
+                        // is both the safe answer and the one that clears it.
+                        .unwrap_or(choices.len() - 1);
+                    let next = choices[(idx + 1) % choices.len()].key.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_machine", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.send_line(&format!("  {}", self.red("Press R, M, or Q."))).await?;
+                    self.flush().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }
             }
         }

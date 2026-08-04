@@ -1318,6 +1318,30 @@ impl App {
         .on_hover_text(
             "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT80 and the CP/M prompt do not                  apply inside it.  The image is opened read-only.",
         );
+        // Which machine a BOOTED disk believes it is running on -- specifically
+        // where it finds its console.  The same `MACHINE_CHOICES` list the telnet
+        // and web screens render, so the three cannot drift apart.
+        ui.horizontal(|ui| {
+            ui.label("Booted disk's machine:");
+            egui::ComboBox::from_id_salt("cpm_boot_machine_combo")
+                .width(320.0)
+                .selected_text(crate::cpm::console::machine_description(
+                    &self.cfg.cpm_boot_machine,
+                ))
+                .show_ui(ui, |ui| {
+                    for c in crate::cpm::console::MACHINE_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_boot_machine,
+                            c.key.to_string(),
+                            c.description,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Where a BOOTED disk finds its console.  Ignored by the CP/M                  emulator, which has no console to place.  A disk that loads                  its operating system and then goes quiet is usually looking                  for a console that is not there, and will sit polling a                  keyboard port for ever.  Not autodetected: what a guest polls                  cannot tell the machine it wants from another machine's                  keyboard at the same address.",
+        );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
         ui.horizontal(|ui| {

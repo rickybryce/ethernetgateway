@@ -1019,7 +1019,7 @@ fn collect_form_updates(
         "punter_block_size", "punter_negotiation_timeout",
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
-        "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image",
+        "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -2017,6 +2017,17 @@ fn render_more_popups(cfg: &Config) -> String {
             })
             .collect()
     };
+    let cpm_machine_options: String = crate::cpm::console::MACHINE_CHOICES
+        .iter()
+        .map(|c| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                c.key,
+                if c.key == cfg.cpm_boot_machine { " selected" } else { "" },
+                html_escape(c.description),
+            )
+        })
+        .collect();
     let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
         .iter()
         .map(|c| {
@@ -2089,7 +2100,13 @@ fn render_more_popups(cfg: &Config) -> String {
         ),
         cpmboot = format_args!(
             "<span class=\"label\">CP/M runs:</span>\
-             <select name=\"cpm_boot_image\">{cpm_boot_options}</select>",
+             <select name=\"cpm_boot_image\">{cpm_boot_options}</select>\
+             <span class=\"label\">Booted disk's machine:</span>\
+             <select name=\"cpm_boot_machine\">{cpm_machine_options}</select>\
+             <span class=\"hint\">Where a booted disk finds its console. \
+             Ignored by the emulator, which has no console to place. A disk that \
+             loads and then goes quiet is usually looking for a console that is \
+             not there.</span>",
         ),
         cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
 
@@ -3234,6 +3251,31 @@ mod tests {
                 html_escape(crate::cpm::boot::BOOT_EMULATOR_LABEL)
             )),
             "the emulator must be the selected empty option by default"
+        );
+    }
+
+    /// The machine setting needs all three UIs too, and every choice has to be
+    /// offered — a select that renders only the current value looks fine and
+    /// cannot be changed.
+    #[test]
+    fn test_render_main_page_offers_every_boot_machine() {
+        let cfg = Config::default();
+        let html = render_main_page(&cfg, None);
+        assert!(html.contains("name=\"cpm_boot_machine\""), "the select must be on the page");
+        assert!(html.contains("Booted disk's machine"), "and be labelled");
+        // Iterated over the real list, so a machine added to `console.rs` cannot
+        // quietly fail to reach the web page.
+        for c in crate::cpm::console::MACHINE_CHOICES {
+            assert!(
+                html.contains(&format!("value=\"{}\"", c.key)),
+                "{} is missing from the web select",
+                c.key
+            );
+            assert!(html.contains(&html_escape(c.description)), "{} has no label", c.key);
+        }
+        assert!(
+            html.contains(&format!("value=\"{}\" selected", crate::cpm::console::DEFAULT_MACHINE)),
+            "the default machine must be the selected one on a fresh config"
         );
     }
 

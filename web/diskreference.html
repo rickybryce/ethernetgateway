@@ -552,6 +552,7 @@
                 <span class="hdr-badge">Altair 88-DCDD</span>
                 <span class="hdr-badge">IBM 3740</span>
                 <span class="hdr-badge">Altair 88-HDSK</span>
+                <span class="hdr-badge">Tarbell 1011</span>
                 <span class="hdr-badge">Measured</span>
                 <span class="hdr-badge">Controller</span>
             </div>
@@ -573,6 +574,8 @@
             <a href="#others">Other Formats</a>
             <a href="#sharing">Who Owns a Disk</a>
             <a href="#hdsk">88-HDSK Interface</a>
+            <a href="#tarbell">Tarbell 1011</a>
+            <a href="#machine">Which Machine</a>
             <a href="#open">Still Open</a>
         </nav>
 
@@ -2405,6 +2408,376 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
             <!-- ══════════════════════════════════════════════ -->
             <!-- STILL OPEN                                    -->
             <!-- ══════════════════════════════════════════════ -->
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TARBELL                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="tarbell">
+                <div class="section-title">The Tarbell 1011 Floppy Interface</div>
+                <p class="intro">The third board, and the first whose chip is shared: the Western Digital FD1771 lives in its own module because Cromemco's 4FDC and 16FDC use the same part. Build the chip once, wrap it per board &mdash; boards differ only in ports, drive select and how they wait.</p>
+
+                <p>
+                    Documentation is good here. The <em>Tarbell Floppy Disk
+                    Interface Manual</em> on bitsavers has a text layer, a real
+                    Theory of Operation, a walkthrough of the boot PROM, and
+                    &mdash; usefully &mdash; the whole FD1771 data sheet reprinted
+                    as its &sect;7-2, including the command summary, the flag
+                    summary and the Table 6 status matrix. The archive.org copy of
+                    Western Digital's own FD1771 manual returns a server error;
+                    use the Tarbell reprint.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two things unlike any earlier board</h3>
+                <p>
+                    <strong>The status register means different things depending
+                    on the command in flight.</strong> Bit 2 is Track 00 after a
+                    Type I command and Lost Data after a Type II or III; bit 6 is
+                    Write Protect or the record-type MSB. So the board has to
+                    remember which command is running and assemble status from it.
+                    A fixed status byte satisfies a driver that only tests Busy,
+                    and misleads every driver that does more.
+                </p>
+                <p>
+                    <strong>Reading port <code>FCh</code> stalls the CPU</strong>
+                    until DRQ or INTRQ &mdash; the driver's inner loop is a single
+                    <code>IN</code> with no polling around it. The manual: &ldquo;If
+                    the most significant bit is 0 &hellip; it was the INTRQ &hellip;
+                    If 1, it was the DRQ.&rdquo; We cannot stall and do not need
+                    to: nothing here takes time, so the event the driver is waiting
+                    for has already happened. Same posture as the 88-HDSK flags.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two defects only real disks could find</h3>
+                <p>
+                    <strong>A synthesised cold start must leave the board in the
+                    state the real PROM left it.</strong> The Tarbell PROM loads
+                    the boot sector with a genuine Read Sector command, so the
+                    loader begins running with the FD1771's status
+                    <em>typed as a transfer</em> and reporting no error. Copying
+                    the sector straight out of the file instead left the chip in
+                    its power-on Type I state &mdash; where bit 2 means Track 00,
+                    and the head genuinely <em>is</em> on track 0. TDISK02's loader
+                    does <code>IN F8h</code> / <code>ANI 9Dh</code>, read that bit
+                    as Lost Data, retried ten times and halted at its own
+                    <code>HLT</code>. Hence the <code>Controller::cold_started</code>
+                    hook. Generalise it: <em>whenever a bootstrap is synthesised,
+                    ask what state the real one leaves behind.</em> The 88-DCDD had
+                    needed the same thing for a different reason &mdash; its open
+                    transfer held the safe-to-move-head bit low.
+                </p>
+                <p>
+                    <strong>The drive-select latch bit is active low.</strong> The
+                    manual describes sibling pads as inverted (&ldquo;E33 &mdash;
+                    latch bit 3 inverted&rdquo;, &ldquo;E42 &mdash; latch bit 1
+                    inverted&rdquo;), so the board exposes <code>Q*</code>; and E29
+                    picks the low drive &ldquo;when E29 is low&rdquo;. The proof is
+                    on the disk: TDISK02's CP/M writes <code>F2h</code> &mdash; all
+                    latch bits high &mdash; while working perfectly with drive 0.
+                    Read it active-high and the board switches to an empty drive,
+                    so the disk signs on and then reports
+                    <code>Bdos Err On A: Bad Sector</code> for ever.
+                </p>
+
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>A 30-second pre-flight that paid for itself.</strong>
+                        This PROM loads one sector at <code>0000</code> and, if
+                        status came back clean, <code>JZ 07Dh</code> &mdash; the
+                        last three bytes of the sector it just read are a jump to
+                        the real loader. So <code>ColdStart::Program</code> needed a
+                        separate <em>entry</em> distinct from its load address.
+                        Checking for <code>C3 00 00</code> at offset 125 of the
+                        sample images &mdash; 4 of 6 have it &mdash; settled that
+                        before a line of code was written. Do that again.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Geometry</h3>
+                <p>
+                    77 tracks &times; 26 sectors &times; 128 bytes = 256,256 bytes
+                    exactly. <strong>Unframed</strong> &mdash; no sector header or
+                    trailer, unlike the 88-DCDD's 137-byte sectors &mdash; and
+                    sectors are numbered <strong>from 1</strong>. No skew table
+                    here: the guest's own BIOS owns the translation, which is the
+                    entire reason booting works where a filesystem reader
+                    struggled.
+                </p>
+                <p>
+                    Note that <code>CDISK01</code> is <em>also</em> 256,256 bytes,
+                    so the Tarbell claims it and cannot boot it &mdash; Cromemco
+                    cold-starts from its own 4&nbsp;KB ROM monitor at
+                    <code>C000</code> rather than from a sector run. Matching an
+                    image to a board by file length has run out of road; see the
+                    machine setting below.
+                </p>
+                <p>
+                    Diagnostic: <code>CPM_TARBELL_TRACE=1</code> prints every
+                    command with its drive, track and sector, and every extended
+                    command with its decoded function. That trace found both
+                    defects above.
+                </p>
+            </div>
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- THE MACHINE / CONSOLE                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="machine">
+                <div class="section-title">Which Machine &mdash; Where a Booted Disk Finds Its Console</div>
+                <p class="intro">A disk that loads its operating system perfectly and then goes silent is almost never a disk we cannot read. It is a guest printing to hardware that is not in the machine &mdash; and it will sit polling a keyboard port for ever, which looks exactly like a crash.</p>
+
+                <p>
+                    Every board above answers &ldquo;what disk is this?&rdquo;. The
+                    machine setting answers the other half: what does the guest
+                    print to, and type from? The two are genuinely separate, and
+                    the Tarbell images proved it. Three of the six load their
+                    operating system, read hundreds or thousands of sectors, and
+                    then go looking for a console somewhere we were not.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What the six Tarbell disks actually want</h3>
+                <p>
+                    Measured by scanning every <code>IN</code> and <code>OUT</code>
+                    in each disk's <em>installed system tracks</em> &mdash; not from
+                    a BIOS listing sitting in a file on the disk, which is a trap
+                    these images set: they carry several BIOS variants for
+                    different consoles, and the one you happen to read is usually
+                    not the one that was installed.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Image</th><th>What it is</th><th>Console input</th><th>Console output</th><th>State</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>TDISK01</code></td><td>CP/M 1.3</td><td><code>10h</code>/<code>11h</code></td><td>same</td><td><strong>Boots</strong> &mdash; <code>TARBELL 62K CPM V1.3 OF 8-13-77</code></td></tr>
+                        <tr><td><code>TDISK02</code></td><td>CP/M 2.2</td><td><code>10h</code>/<code>11h</code></td><td>same</td><td><strong>Boots</strong> &mdash; <code>Micro Resources 62K CP/M Ver. 2.2 of 1/15/82</code>, reads, writes, two drives</td></tr>
+                        <tr><td><code>TDISK05</code></td><td>CP/M 2.2 for VDM-1</td><td><code>04h</code>/<code>05h</code>, ready-low</td><td><code>CALL 0C019h</code> &mdash; CUTER ROM</td><td><strong>Boots</strong> &mdash; <code>Tarbell 48K CPM 2.2</code>, <code>DIR</code>, <code>STAT</code></td></tr>
+                        <tr><td><code>TDISK04</code></td><td>CP/M 1.4 for VDM-1</td><td><code>04h</code>/<code>05h</code>, ready-low</td><td>memory-mapped VDM-1 at <code>CC00</code></td><td>Takes keys; screen not painted &mdash; <strong>deferred</strong></td></tr>
+                        <tr><td><code>TDISK03</code></td><td>Comal 80</td><td><code>00h</code>/<code>01h</code></td><td><code>OUT 01h</code></td><td>Not a Tarbell disk at all &mdash; see below</td></tr>
+                        <tr><td><code>TDISK06</code></td><td>VDM-1 programs</td><td>&mdash;</td><td>&mdash;</td><td>Correctly refused: 256,256 bytes of <code>E5h</code>, a blank</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The ready bit is not a detail, and getting it
+                        backwards is worse than getting it missing.</strong> On the
+                        <code>04h</code>/<code>05h</code> board a waiting key is
+                        signalled by bit 0 being <strong>clear</strong>. TDISK04's
+                        <code>CONIN</code> is <code>IN 04h</code> /
+                        <code>ANI 01h</code> / <code>JNZ CONIN</code> &mdash; it
+                        loops while the bit is <em>set</em>. Our idle bus reads
+                        <code>FFh</code>, so with no console fitted it waits for
+                        ever, which is correct behaviour. But read the polarity as
+                        active-high, and the guest would believe a key was waiting
+                        on every single poll and consume a stream of garbage
+                        &mdash; presenting as a corrupt disk rather than as a
+                        mis-set console. An earlier note in this project's own
+                        records had recorded this board as ACIA-convention, from
+                        the wrong branch of a listing on the disk. The installed
+                        code settled it.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The selectable machines</h3>
+                <p>
+                    One config key, <code>cpm_boot_machine</code>, with its choices
+                    in one shared list (<code>src/cpm/console.rs</code>) so telnet,
+                    web and desktop cannot drift &mdash; the same arrangement
+                    <code>cpm_emu_uart</code> and the boot-image list already use.
+                    It applies only to a <em>booted</em> disk; our CP/M emulator has
+                    no console to place, because it services BDOS calls instead.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Value</th><th>Machine</th><th>Status convention</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code> &mdash; <strong>the default</strong></td><td>6850 ACIA: bit 0 RX, bit 1 TX, active high</td></tr>
+                        <tr><td><code>altair_sio</code></td><td>Altair 88-SIO, <code>00h</code>/<code>01h</code></td><td>Active low</td></tr>
+                        <tr><td><code>console_04</code></td><td>Console at <code>04h</code>/<code>05h</code></td><td>Active low &mdash; ready when bit 0 is clear</td></tr>
+                        <tr><td><code>console_04_cuter</code></td><td>As above, printing through a CUTER ROM</td><td>Active low; output is a <code>CALL</code>, not an <code>OUT</code></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    The default is not a preference &mdash; it is the machine this
+                    path has always been. Every disk that boots today boots because
+                    its console is at <code>10h</code>/<code>11h</code>, so any
+                    other default would silence a working gateway on upgrade, with
+                    no error anywhere to explain it.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Why this is a setting and never a detection</h3>
+                <p>
+                    Because guessing is the mistake this path has already made. The
+                    sector step was briefly autodetected by trying four candidates
+                    and keeping whichever printed something &mdash; and a
+                    <em>wrong</em> layout that scribbles at a console beats a right
+                    one still loading, so the wrong answer won for five disks. A
+                    console is worse, not better. TDISK04 sits on
+                    <code>IN 04h</code> for ever, but so would any program waiting
+                    on a keyboard that happens to be at <code>04h</code> on some
+                    other machine, and there is no reply we could send that tells
+                    the two apart. The operator says which machine, once, and we
+                    are simply that machine.
+                </p>
+                <p>
+                    Confirmation that the setting does something real: with
+                    <code>console_04</code> selected, TDISK01 and TDISK02
+                    <em>stop</em> booting &mdash; they are 88-2SIO machines &mdash;
+                    while TDISK05 starts. A setting that improved every disk at once
+                    would mean we had built a detector by accident.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The CUTER ROM, synthesised</h3>
+                <p>
+                    TDISK05's BIOS assembles with <code>VIDEO EQU TRUE</code> and
+                    prints with one instruction: <code>CALL 0C019h</code>, having
+                    put the character in <code>B</code> and cleared <code>A</code> to
+                    select Processor Technology CUTER's output device 0. Its own
+                    source names the address &mdash; <code>OUTADDR EQU 0C019H</code>,
+                    commented &ldquo;PUT OUTPUT ADDRESS HERE&rdquo; &mdash; and its
+                    installed system tracks contain exactly one <code>CALL</code>
+                    into <code>C0xx</code> and no <code>JMP</code> at all. So that
+                    single entry point is the whole of what the disk needs.
+                </p>
+                <p>
+                    We do not have CUTER, so the entry is <strong>synthesised</strong>
+                    &mdash; the same substitution this project already makes for boot
+                    PROMs it does not have, and documented rather than quiet. What
+                    makes it honest is that the guest cannot tell: these are real Z80
+                    instructions at the real address, doing what the routine's caller
+                    is entitled to expect. Nothing traps; nothing in the port dispatch
+                    knows it exists.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Address</th><th>Bytes</th><th>Instruction</th><th>Why</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>C019h</code></td><td><code>F5</code></td><td><code>PUSH AF</code></td><td>Its own BIOS source demands it: &ldquo;ALL REGISTERS MUST BE SAVED AND RESTORED BY YOUR VIDEO DRIVER IN ORDER TO BE COMPATIABLE WITH CPM.&rdquo;</td></tr>
+                        <tr><td><code>C01Ah</code></td><td><code>78</code></td><td><code>MOV A,B</code></td><td>CUTER takes the character in <code>B</code></td></tr>
+                        <tr><td><code>C01Bh</code></td><td><code>D3 05</code></td><td><code>OUT (05h),A</code></td><td>The machine's own console data register &mdash; taken from the selected machine, not hardcoded</td></tr>
+                        <tr><td><code>C01Dh</code></td><td><code>F1</code></td><td><code>POP AF</code></td><td>A stub that clobbered <code>A</code> would print a sign-on and then corrupt whatever the CCP was holding</td></tr>
+                        <tr><td><code>C01Eh</code></td><td><code>C9</code></td><td><code>RET</code></td><td></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    The ROM is laid down <em>after</em> the boot program, not before:
+                    a ROM is not memory a loader owns. Nothing in the sample set
+                    loads that high &mdash; TDISK05 is a 48&nbsp;KB system, so
+                    <code>C000</code> is above its memory top &mdash; but the
+                    failure this ordering prevents would present as a disk that
+                    signs on and then goes silent, which is the hardest kind of
+                    fault to attribute.
+                </p>
+                <p>
+                    The mechanism is deliberately a list of placements rather than
+                    one stub, because its next user is much larger: Cromemco's 16FDC
+                    cold-starts from a 4&nbsp;KB ROM at <code>C000</code>, and
+                    <code>CDISK03</code> calls a dozen distinct entry points in it
+                    (<code>C03E</code>, <code>C053</code>, <code>C05E</code>,
+                    <code>C077</code>, <code>C084</code>, <code>C08A</code>,
+                    <code>C0A6</code>, <code>C0AE</code>, <code>C0BB</code>,
+                    <code>C0D2</code>, <code>C0EA</code>, <code>C0EB</code>).
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK04 &mdash; the VDM-1, and why it is deferred</h3>
+                <p>
+                    TDISK04 carries the complete driver on the disk, header and all:
+                    <code>; VDM DRIVER FOR CBIOS. 9-24-77 VERSION</code>,
+                    <code>VDMB EQU 0CC00H</code>, <code>VDMP EQU 0CCH</code>,
+                    <code>VDMD EQU 0C8H</code>. The Processor Technology VDM-1 is a
+                    1976 S-100 video card &mdash; 64 characters by 16 lines,
+                    <strong>memory-mapped</strong>. A character appears by being
+                    <em>stored into memory</em> at <code>CC00</code>&ndash;<code>CFFF</code>;
+                    there is no data port at all. Port <code>C8h</code> is only its
+                    control register, selecting which line is displayed first, which
+                    is how the driver scrolls.
+                </p>
+                <p>
+                    Neither TDISK04 nor TDISK05 ever writes a console character to
+                    <em>any</em> port &mdash; verified by scanning both disks' system
+                    tracks for <code>OUT 05h</code>, <code>OUT 01h</code> and
+                    <code>OUT 11h</code>: none appear. So with the right console
+                    fitted, TDISK04 takes keystrokes perfectly and still shows
+                    nothing. Give it that console, run it, and its sign-on is sitting
+                    in screen memory:
+                </p>
+                <pre><code>--- VDM-1 screen at 0xcc00 ---
+TARBELL 48K CPM V1.4 OF 2-15-78
+VDM VERSION.
+HOW MANY DISKS?
+
+pc=0xbed3   (its CONIN loop, waiting for a key)</code></pre>
+                <p>
+                    That is a passing test
+                    (<code>test_a_vdm_guest_writes_its_signon_into_screen_memory</code>),
+                    so the remaining work is a measured gap rather than a mystery:
+                    sample the window and paint it.
+                </p>
+                <p>
+                    <strong>What makes it a real piece of work, not a fifth table
+                    entry:</strong> every console the gateway has is a byte
+                    <em>stream</em>. The VDM-1 is a grid you sample, so showing it
+                    needs cursor addressing. ANSI clients have that; a 40-column
+                    PETSCII C64 cannot show 64 columns at all, and an ASCII terminal
+                    has no cursor addressing whatsoever. A stream could be
+                    <em>derived</em> from the writes instead &mdash; the driver
+                    advances a cursor pointer, wraps at 64 and scrolls by moving the
+                    register &mdash; but that needs three heuristics to avoid
+                    garbage (the boot-time clear fills the whole window with blanks;
+                    the scroll moves no memory; the cursor cell is written as
+                    inverse video and is not output at all). Repaint is literal and
+                    cannot be wrong about the guest; derivation is an interpretation
+                    of what the guest meant. Given this page's own rule, repaint on
+                    ANSI is the answer, and the VDM-1 becomes a board that requires
+                    an ANSI terminal.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK03 &mdash; not a Tarbell disk</h3>
+                <p>
+                    Its installed system tracks say
+                    <code>64K CP/M Vers. 2.2 (Z80 CBIOS V1.2 for Z80SIM, Copyright
+                    1988-2007 by Udo Munk)</code>, and its boot sector is
+                    unambiguous:
+                </p>
+                <pre><code>c3 19 00        JMP  0019
+"BOOT: error booting"
+af              XRA  A
+d3 0a           OUT  (0Ah)     ; drive
+78 d3 0b        OUT  (0Bh)     ; track
+79 d3 0c        OUT  (0Ch)     ; sector
+7d d3 0f        OUT  (0Fh)     ; DMA address low
+7c d3 10        OUT  (10h)     ; DMA address high
+af d3 0d        OUT  (0Dh)     ; command 0 = read
+db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
+                <p>
+                    That is z80pack's <code>cpmsim</code> simulated disk I/O, and its
+                    console is at <code>00h</code>/<code>01h</code> with a
+                    convention of its own: <code>CONST: IN A,(0) / RET</code> returns
+                    the port straight to CP/M, so port 0 must read
+                    <code>FFh</code> or <code>00h</code> as a whole byte rather than
+                    a bit. It shares the 256,256-byte 8&Prime; format by coincidence,
+                    which is why the Tarbell claims it.
+                </p>
+                <p>
+                    It is <strong>DMA</strong>, which no board here is: the sector
+                    lands directly in guest memory at an address the guest latched,
+                    with no data port. Our <code>Controller</code> trait cannot
+                    express that &mdash; <code>HostRequest::Read</code> fills the
+                    controller's own buffer &mdash; so it would need a new
+                    <code>Dma</code> variant alongside <code>Fill</code>. The board
+                    itself is the simplest here by a distance: no rotation, no status
+                    typing, no wait port, no latch polarity.
+                </p>
+                <p>
+                    The reason it is <em>not</em> built is not difficulty, it is
+                    evidence. Every other board on this page has a manufacturer's
+                    manual &mdash; an independent authority that describes bits no
+                    disk here exercises. This hardware never existed, so the
+                    simulator's own source is the only specification there is, and an
+                    implementation built from it is derived work rather than
+                    clean-room. That is permissible (z80pack is MIT, and MIT into
+                    GPL-3.0-or-later is the compatible direction) but it must be
+                    labelled as derived and carry its notice; see the note in
+                    <code>about.toml</code> for where that notice has to live so a
+                    regeneration cannot delete it.
+                </p>
+            </div>
+
             <div class="section" id="open">
                 <div class="section-title">What Is Still Open</div>
 
@@ -2445,16 +2818,51 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         </tr>
                         <tr>
                             <td>Controllers for Tarbell and Cromemco</td>
-                            <td><strong>The 88-HDSK is done</strong> &mdash; built, booting
-                                <strong>all eleven</strong> hard-disk images in the sample set, and
-                                reading and writing verified against the disk's own operating system
-                                on two of them. The set-of-controllers refactor it needed is
-                                done with it, so <code>BootMachine</code> no longer hardwires the
-                                88-DCDD and a further board costs only its own
-                                <code>Controller</code> impl. Tarbell (6 images) and Cromemco (3)
-                                remain; both already <em>mount</em>, so a controller adds booting
-                                rather than access, and they are the whole of the 9 images the boot
-                                survey currently declines to try.</td>
+                            <td><strong>The Tarbell 1011 is done</strong> &mdash; see its section
+                                above. It boots, reads, writes across a reboot and copies between two
+                                drives, and its FD1771 sits in its own module ready for Cromemco,
+                                which uses the same chip. <strong>Cromemco has not been
+                                started.</strong> It is a 16FDC per <code>CDISK02</code>'s own CDOS
+                                source; it cold-starts from its own 4&nbsp;KB ROM monitor at
+                                <code>C000</code> rather than a sector run, and its control port has
+                                an auto-wait bit like Tarbell's wait port &mdash; so the no-stall
+                                posture carries over. Three further things it needs, measured from the
+                                disks: the synthesised-ROM mechanism the CUTER stub introduced (only
+                                <code>CDISK03</code> uses it, with a dozen entry points); a TU-ART
+                                console at <code>00h</code>/<code>01h</code>, which the Tarbell BIOS's
+                                own <code>TUART</code> branch says reports bit 6 RX and bit 7 TX; and
+                                <strong>bank switching</strong>, since all three disks open with
+                                <code>MVI A,1 / OUT 40h</code> and nothing here models memory
+                                management. Only <code>CDISK01</code> collides with the Tarbell on
+                                size &mdash; <code>CDISK02</code> is 625,920 bytes and
+                                <code>CDISK03</code> is 1,256,704, so those two identify themselves.
+                                Note the boot sectors contain <code>BIT 1,C</code>: these are Z80
+                                disks, which our booted machine already is.</td>
+                        </tr>
+                        <tr>
+                            <td>The Processor Technology VDM-1</td>
+                            <td><strong>Deferred deliberately, and the gap is measured rather than
+                                guessed</strong> &mdash; a passing test shows TDISK04's sign-on
+                                sitting in screen memory at <code>CC00</code> with the guest parked
+                                in its <code>CONIN</code> loop. All that remains is to sample the
+                                1&nbsp;KB window plus the <code>C8h</code> scroll register and paint
+                                the 64&times;16 grid. What makes it real work is that it is the first
+                                console here that is a <em>screen</em> rather than a byte stream, so
+                                it needs cursor addressing: fine on ANSI, impossible on ASCII, and a
+                                40-column PETSCII client cannot show 64 columns at all. It costs
+                                exactly one disk, TDISK04 &mdash; TDISK05 reaches its prompt through
+                                the CUTER stub without any VDM-1 at all, and no Cromemco disk uses one
+                                (checked: zero <code>OUT C8h</code> across all three whole images).</td>
+                        </tr>
+                        <tr>
+                            <td>A z80pack <code>cpmsim</code> controller</td>
+                            <td>Would reach <code>TDISK03</code> (Comal 80), and is the simplest board
+                                on this page &mdash; but it is the only one whose hardware never
+                                existed, so its specification is another project's source rather than
+                                a manual, and an implementation would be derived work needing an
+                                attribution notice rather than clean-room. Undecided on purpose. It
+                                also needs a <code>HostRequest::Dma</code> variant, since it writes
+                                sectors straight into guest memory with no data port.</td>
                         </tr>
                         <tr>
                             <td>88-HDSK corners &mdash; now closed, by asking the disks</td>
@@ -2486,9 +2894,12 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                                 included (the working set stops at HDSK03, and HDSK05&ndash;0B had
                                 never been tried before: seven more, all reaching
                                 <code>63K CP/M 2.2b</code>). Of the rest, <code>DISK0D</code> is
-                                genuinely data and not a system disk, and the other 9 are the Tarbell
-                                and Cromemco images above. Between them these reach CP/M 2.2, CP/M
-                                3.0, Altair DOS, Disk Extended BASIC, Time Sharing BASIC and Hard
+                                genuinely data and not a system disk. Of the Tarbell family,
+                                <strong>3 of 5</strong> now boot &mdash; TDISK01, TDISK02 and TDISK05
+                                &mdash; with TDISK06 correctly refused as a blank disk, TDISK04
+                                waiting on the VDM-1 and TDISK03 not a Tarbell disk at all. The three
+                                Cromemco images remain. Between them these reach CP/M 1.3, 1.4, 2.2
+                                and 3.0, Altair DOS, Disk Extended BASIC, Time Sharing BASIC and Hard
                                 Disk BASIC.</td>
                         </tr>
                     </tbody>

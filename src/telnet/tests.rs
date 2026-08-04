@@ -2231,6 +2231,68 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
+/// CP/M boot settings: header(3) + blank + 2 status + blank + up to 3 note
+/// lines + blank + 2 actions + blank + Back + prompt = 16.
+///
+/// This screen exists *because* the CP/M settings screen is full, so the point
+/// of counting it is to know how much room the next question has — and there is
+/// a known next question: which controller takes an image whose size two boards
+/// both claim.
+#[test]
+fn test_cpm_boot_settings_row_count() {
+    let header = 3;
+    let status = 1 + 2; // blank + Runs/Machine
+    let note = 1 + 3; // blank + the longest of the two explanations
+    let actions = 1 + 2; // blank + R, M
+    let footer = 1 + 1 + 1; // blank + Back + prompt
+    let rows = header + status + note + actions + footer;
+    assert_eq!(rows, 16, "the CP/M boot settings screen is {rows} rows");
+    assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
+}
+
+/// Every key the CP/M boot screen displays must also be one it handles and one
+/// its error hint names.  The same three-way drift the CP/M settings screen
+/// suffered twice, guarded the same way.
+#[test]
+fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
+    let src = include_str!("config_ui.rs");
+    let start = src.find("pub(in crate::telnet) async fn cpm_boot_settings").expect("the fn");
+    let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
+    let body = &src[start..end];
+
+    let hint = "Press R, M, or Q.";
+    assert!(body.contains(hint), "the error hint changed: it must list every key");
+    for key in ["R", "M"] {
+        assert!(
+            body.contains(&format!("self.cyan(\"{key}\")")),
+            "{key} must be a displayed menu item"
+        );
+        assert!(
+            body.contains(&format!("\"{}\" => ", key.to_ascii_lowercase())),
+            "{key} is displayed but never handled — pressing it would just error"
+        );
+        assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
+    }
+}
+
+/// Every machine description must fit the 40-column PETSCII screen once the
+/// `  Machine:   ` prefix is allowed for.  Iterated over the real list rather
+/// than hand-copied, so a new machine cannot be added without being measured.
+#[test]
+fn test_machine_descriptions_fit_the_petscii_boot_screen() {
+    // "  Machine:   " is 13 columns, leaving 27 of 40.  The screen truncates to
+    // 26 for PETSCII, so nothing can overflow — this asserts the truncation
+    // budget is actually big enough to say something useful, not just that it
+    // exists.
+    for c in crate::cpm::console::MACHINE_CHOICES {
+        assert!(
+            c.description.len() >= 20,
+            "{:?} is too terse to identify a machine once truncated to 26",
+            c.description
+        );
+    }
+}
+
 /// Baud rate screen: header(3) + blank + 9 options + blank + footer + prompt = 15.
 #[test]
 fn test_baud_screen_row_count() {

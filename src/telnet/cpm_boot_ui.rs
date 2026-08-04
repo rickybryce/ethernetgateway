@@ -530,6 +530,12 @@ impl TelnetSession {
         };
 
         let mut machine = BootMachine::new();
+        // Be the machine the operator chose, before anything else touches this
+        // one.  `attach_modem` below vets a modem profile against *this*
+        // machine's console ports, and `boot` lays down its monitor ROM, so both
+        // would be working from an Altair's layout if this came later.
+        let machine_key = config::get_config().cpm_boot_machine.clone();
+        machine.set_machine(&machine_key);
         // Unit 0 is the disk being booted, and it has to be: the bootstrap can
         // load a system from any unit — that was measured — but the operating
         // system it loads comes up as its own A: and reads unit 0 from then on.
@@ -621,6 +627,30 @@ impl TelnetSession {
             self.dim(if writable { "Changes are saved." } else { "Read-only." })
         ))
         .await?;
+        // Which console the guest has been given.  Said rather than left
+        // implicit, because a disk that goes quiet at this point is almost
+        // always looking at a console that is not there, and the operator's
+        // first question will be "which one did it get?".  Only when it is not
+        // the default, so an ordinary Altair boot gains no extra line.
+        if machine_key != crate::cpm::console::DEFAULT_MACHINE {
+            let c = machine.console();
+            self.send_line(&format!(
+                "  {}",
+                // 32 columns at its widest ("Console 0x04/0x05 + CUTER ROM."),
+                // so it fits 40 -- checked by hand because a runtime `format!`
+                // cannot be measured by the source scan.
+                self.dim(&format!(
+                    "Console {:#04x}/{:#04x}{}.",
+                    c.status_port,
+                    c.data_port,
+                    match c.rom {
+                        crate::cpm::console::MonitorRom::Cuter => " + CUTER ROM",
+                        crate::cpm::console::MonitorRom::None => "",
+                    }
+                ))
+            ))
+            .await?;
+        }
         // The other drives, and why any of them is missing.  How many the guest
         // can actually reach is its BIOS's decision — stock Altair CP/M knows
         // four — so this says what the hardware offers, not what will appear.

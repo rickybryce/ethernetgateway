@@ -7,6 +7,32 @@
 # licenses (MIT / BSD / Apache-2.0 / ISC / Zlib / ...) in the
 # dependency tree: their copyright notices and license text must be
 # reproduced in the distribution.
+#
+# WHAT THIS DOES NOT COVER, and what to do about it.
+#
+# cargo-about walks the *Cargo dependency tree* and nothing else.  Code that
+# arrives any other way — vendored, transcribed, or derived from a project we
+# read — is invisible to it, and `THIRD-PARTY-NOTICES.md` says at the top not
+# to edit it by hand, correctly: a regeneration would silently delete anything
+# added there.  So a hand-added notice in that file is not a fix, it is a
+# time bomb.
+#
+# Nothing in the tree needs this today.  Every emulated board here is
+# clean-room from hardware documentation and from the guests' own drivers, the
+# same posture as Punter, HBIOS and EGT80; the bundled `EGT80.COM` is ours; the
+# test fixtures are our own captures; and no disk images are distributed.
+#
+# It stops being true the moment we ship code derived from another project.
+# The live candidate is a controller for z80pack's `cpmsim` (Udo Munk, MIT):
+# that hardware never existed, so the simulator's source is the only
+# specification there is, and an implementation built from it is derived work
+# whose copyright and permission notice must travel with our binary.  MIT into
+# GPL-3.0-or-later is the compatible direction, so this is an attribution
+# obligation and not a licensing obstacle.
+#
+# When that lands, add a STATIC section to `about.hbs` — "Non-crate
+# components" — carrying the notice verbatim.  Putting it in the template is
+# what makes it survive `cargo about generate`.
 
 # Accept a license fulfilled on any target — we ship cross-platform
 # (Linux/macOS/Windows), so per-target dependencies (winapi, objc2,

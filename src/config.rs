@@ -850,6 +850,20 @@ pub struct Config {
     /// `cpm_emu_uart` do not apply inside it.  That is why this is a separate
     /// key from `cpm_mounts` and not another entry in it.
     pub cpm_boot_image: String,
+    /// Which machine a booted disk believes it is running on — specifically,
+    /// where it finds its console.
+    ///
+    /// Only meaningful alongside `cpm_boot_image`, because it describes the
+    /// hardware around a booted guest and the emulator has no console to place
+    /// (it services BDOS calls instead).  Defaults to the Altair 88-2SIO at
+    /// `10h`/`11h`, which is what this path has always been, so an upgrade
+    /// cannot silence a disk that boots today.
+    ///
+    /// It exists because a disk that loads perfectly and then sits polling a
+    /// keyboard we do not have looks identical to a disk we cannot read, and the
+    /// difference is not something to guess at — see
+    /// [`crate::cpm::console`].
+    pub cpm_boot_machine: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
     /// inside the emulator and reloaded when the modem powers up or the guest
     /// issues `ATZ` — the same arrangement the physical ports have under their
@@ -976,6 +990,7 @@ impl Default for Config {
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
             cpm_mounts: String::new(),
             cpm_boot_image: String::new(),
+            cpm_boot_machine: crate::cpm::console::DEFAULT_MACHINE.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1573,6 +1588,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
         cpm_mounts: map.get("cpm_mounts").cloned().unwrap_or_default(),
         cpm_boot_image: map.get("cpm_boot_image").cloned().unwrap_or_default(),
+        cpm_boot_machine: map
+            .get("cpm_boot_machine")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::console::DEFAULT_MACHINE.to_string()),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2312,6 +2331,24 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_boot_image", &cfg.cpm_boot_image);
     content.push_str("\
+# cpm_boot_machine: which machine a BOOTED disk (above) thinks it is running on
+#   - specifically, where it finds its console.  Ignored by the CP/M emulator,
+#   which has no console to place because it services BDOS calls instead.
+#     altair_2sio       Altair 88-2SIO at 0x10/0x11 (default; every disk that
+#                       boots today boots because its console is here)
+#     altair_sio        Altair 88-SIO at 0x00/0x01, active-low status
+#     console_04        console at 0x04/0x05, ready when the bit is CLEAR
+#     console_04_cuter  as above, but the guest prints by CALLing a Processor
+#                       Technology CUTER ROM, which we synthesise at 0xC019
+#   A disk that loads its operating system and then goes quiet is usually
+#   looking at a console that is not there, not misreading the disk - it will
+#   sit polling a keyboard port for ever.  This is NOT autodetected: what a
+#   guest polls cannot distinguish the machine it wants from another machine's
+#   keyboard at the same address, and guessing here is the same mistake as
+#   guessing a sector step.
+");
+    write_kv(&mut content, "cpm_boot_machine", &cfg.cpm_boot_machine);
+    content.push_str("\
 # The CP/M virtual modem's saved AT profile, written by AT&W from inside the
 # emulator and reloaded on power-up and on ATZ - exactly as the physical ports
 # save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
@@ -2859,6 +2896,16 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // "run the emulator".
             if value.is_empty() || crate::cpm::image::is_safe_image_name(value) {
                 cfg.cpm_boot_image = value.to_string();
+            }
+        }
+        "cpm_boot_machine" => {
+            // Only a machine we actually are.  An unrecognised value would
+            // resolve to the default console at run time anyway, but refusing it
+            // here keeps the config file honest about what the gateway is doing
+            // — the alternative is a file that says one machine and a gateway
+            // that is another.
+            if crate::cpm::console::is_valid_machine_key(value) {
+                cfg.cpm_boot_machine = value.to_string();
             }
         }
         "disable_gateway_connections" => {
@@ -3655,6 +3702,9 @@ mod tests {
         let original = Config {
             cpm_mounts: "A=altair8_games.dsk,C=ibm3740_tools.dsk".to_string(),
             cpm_boot_image: "altair8_cpm.dsk".to_string(),
+            // Deliberately not the default, so the roundtrip proves the key is
+            // written and read back rather than merely defaulting twice.
+            cpm_boot_machine: "console_04_cuter".to_string(),
             telnet_enabled: false,
             telnet_port: 1234,
             telnet_gateway_negotiate: true,

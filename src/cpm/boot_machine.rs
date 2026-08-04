@@ -31,13 +31,8 @@ use super::boot::{cold_boot, BootError};
 use super::controller::{ColdStart, Controller, HostRequest};
 use super::dcdd::{Dcdd, SECTOR_LEN};
 use super::modem_port::ModemPort;
-use super::uart::{ModemAccess, UartFamily};
+use super::uart::ModemAccess;
 use iz80::{Cpu, Machine};
-
-/// Console status port on an 88-2SIO.
-pub const CONSOLE_STATUS_PORT: u8 = 0x10;
-/// Console data port.
-pub const CONSOLE_DATA_PORT: u8 = 0x11;
 
 /// The front-panel sense switches, read on port FFh.
 pub const SENSE_SWITCH_PORT: u8 = 0xFF;
@@ -122,6 +117,15 @@ pub struct BootMachine {
     idle_status_reads: u64,
     /// What the front panel reports on port FFh.
     sense_switches: u8,
+    /// The console board this machine carries.
+    ///
+    /// A field rather than the two constants it replaced, because "where is the
+    /// console" is a property of the machine an operator chose and not of this
+    /// module. Everything that used to match on the constants now compares
+    /// against this — including [`BootMachine::reserved_port`], so a virtual-
+    /// modem profile is refused for clashing with *this* machine's console
+    /// rather than with an Altair's.
+    console: super::console::ConsoleBoard,
     /// The virtual modem, if the operator selected a port profile that can
     /// exist here.  Shared with the CP/M emulator's machine, so the rings and
     /// the status bits behave identically in both.
@@ -158,6 +162,7 @@ impl BootMachine {
             rx: std::collections::VecDeque::new(),
             idle_status_reads: 0,
             sense_switches: DEFAULT_SENSE_SWITCHES,
+            console: super::console::resolve_console(super::console::DEFAULT_MACHINE),
             modem: ModemPort::new(),
             disk_accesses: 0,
             #[cfg(test)]
@@ -214,8 +219,12 @@ impl BootMachine {
                     .into_iter()
                     .find_map(|p| self.reserved_port(p).map(|w| (p, w)))
                 {
+                    let hint = match self.suggested_modem_profile() {
+                        Some(k) => format!(" — try {k}"),
+                        None => String::new(),
+                    };
                     return ModemAttach::Unavailable(format!(
-                        "port {clash:#04x} is {what} on this machine — try altair_2sio2"
+                        "port {clash:#04x} is {what} on this machine{hint}"
                     ));
                 }
                 self.modem.set_access(access);
@@ -227,6 +236,52 @@ impl BootMachine {
     /// The virtual modem's rings, for the driver to pump between CPU batches.
     pub fn modem(&mut self) -> &mut ModemPort {
         &mut self.modem
+    }
+
+    /// Be the machine this config value names.
+    ///
+    /// Called before [`BootMachine::boot`], and before
+    /// [`BootMachine::attach_modem`] — the modem's clash check asks what this
+    /// machine's console ports are, so a machine set afterwards would have its
+    /// modem vetted against the wrong console. An unknown value resolves to the
+    /// default machine rather than to no console, so a typo in a hand-edited
+    /// config file leaves the gateway working instead of mute.
+    pub fn set_machine(&mut self, key: &str) {
+        self.console = super::console::resolve_console(key);
+    }
+
+    /// The console this machine carries.
+    pub fn console(&self) -> super::console::ConsoleBoard {
+        self.console
+    }
+
+    /// Does a disk controller answer at this port?
+    ///
+    /// Exposed so that the console choices can be *tested* against the real
+    /// boards rather than against a written-down range of ports. A list of
+    /// reserved ports in a second place is exactly what `reserved_port` stopped
+    /// being, and for the same reason.
+    #[cfg(test)]
+    pub fn owns_disk_port(&self, port: u8) -> bool {
+        self.controllers.iter().any(|c| c.owns_port(port))
+    }
+
+    /// Lay down the monitor ROM this machine's console prints through, if any.
+    ///
+    /// After the boot program is in memory, not before: a ROM is not something a
+    /// loaded program may overwrite, and a bootstrap that reached this high would
+    /// otherwise take the console with it. Nothing in the sample set does, but
+    /// the ordering costs nothing and the failure it prevents would present as a
+    /// disk that signs on and then goes silent.
+    fn place_rom(&mut self) {
+        let Some(image) = self.console.rom.image(self.console.data_port) else {
+            return;
+        };
+        for (at, bytes) in image.chunks {
+            let start = at as usize;
+            let end = (start + bytes.len()).min(self.mem.len());
+            self.mem[start..end].copy_from_slice(&bytes[..end - start]);
+        }
     }
 
 
@@ -336,7 +391,19 @@ impl BootMachine {
     }
 
     /// Cold-boot from a drive, leaving the CPU ready to run.
+    ///
+    /// Two steps, and the second one is easy to forget: the disk's own loader
+    /// goes into memory, and then the machine's monitor ROM goes in on top of it,
+    /// because a ROM is not memory the loader owns.
     pub fn boot(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
+        self.load_boot_program(cpu, drive)?;
+        self.place_rom();
+        Ok(())
+    }
+
+    /// The cold start proper: whatever this drive's controller says its PROM
+    /// would do, done.
+    fn load_boot_program(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
         let BootMachine { disks, controllers, mem, disk_controller, .. } = self;
         let disks = &*disks;
         // The controller holding *this* drive, not just any controller: drive 0
@@ -561,11 +628,46 @@ impl BootMachine {
         if self.controllers.iter().any(|c| c.owns_port(port)) {
             return Some("the disk controller");
         }
+        if port == self.console.status_port || port == self.console.data_port {
+            return Some("the console");
+        }
         match port {
-            CONSOLE_STATUS_PORT | CONSOLE_DATA_PORT => Some("the console"),
             SENSE_SWITCH_PORT => Some("the front panel"),
             _ => None,
         }
+    }
+
+    /// A virtual-modem profile that could exist on this machine, for the hint in
+    /// [`BootMachine::attach_modem`]'s refusal.
+    ///
+    /// Computed rather than written down, because the console moves now: naming
+    /// `altair_2sio2` unconditionally was right while the console was always at
+    /// `10h`/`11h`, and on a machine whose console is at `04h`/`05h` the honest
+    /// suggestion is `altair_2sio1` — the port that just became free. A refusal
+    /// that recommends something this machine would also refuse is worse than no
+    /// suggestion at all.
+    ///
+    /// **A profile of the console's own family is preferred**, and that is not
+    /// cosmetic tidiness. On an Altair the modem belongs on the *second port of
+    /// the same 88-2SIO board* — one card, two channels, which is how these
+    /// machines were really fitted — so `altair_2sio2` is the answer a person
+    /// wants, not merely a free pair of ports. Taking the first profile that
+    /// happens to fit suggested an RC2014 SIO/2 board to an Altair owner, which
+    /// would work and is still the wrong advice.
+    fn suggested_modem_profile(&self) -> Option<&'static str> {
+        let fits = |c: &&super::uart::UartChoice| {
+            let ModemAccess::Ports(u) = c.access else { return false };
+            self.reserved_port(u.status_port).is_none()
+                && self.reserved_port(u.data_port).is_none()
+        };
+        let same_family = |c: &&super::uart::UartChoice| {
+            matches!(c.access, ModemAccess::Ports(u) if u.family == self.console.family)
+        };
+        super::uart::UART_CHOICES
+            .iter()
+            .find(|c| same_family(c) && fits(c))
+            .or_else(|| super::uart::UART_CHOICES.iter().find(fits))
+            .map(|c| c.key)
     }
 }
 
@@ -607,14 +709,19 @@ impl Machine for BootMachine {
                 }
                 v
             }
-            CONSOLE_STATUS_PORT => {
+            // The console this machine carries.  Its family decides the status
+            // bits, and the polarity is not cosmetic: two of the boards here
+            // report a waiting key with a bit *clear*, and reading that
+            // backwards makes a guest claim a keypress on every poll and
+            // consume garbage — which looks like a corrupt disk, not a
+            // mis-set console.
+            p if p == self.console.status_port => {
                 self.idle_status_reads = self.idle_status_reads.saturating_add(1);
-                // The 88-2SIO is an ACIA: bit 0 receive-full, bit 1
-                // transmit-ready.  Transmit is always ready — our "wire" is a
-                // buffer, so there is nothing to be busy about.
-                UartFamily::Acia.status(!self.rx.is_empty(), true, true)
+                // Transmit is always ready — our "wire" is a buffer, so there is
+                // nothing to be busy about.
+                self.console.family.status(!self.rx.is_empty(), true, true)
             }
-            CONSOLE_DATA_PORT => {
+            p if p == self.console.data_port => {
                 self.idle_status_reads = 0;
                 self.rx.pop_front().unwrap_or(0)
             }
@@ -647,7 +754,12 @@ impl Machine for BootMachine {
                 self.service(req, ctrl);
                 self.idle_status_reads = 0;
             }
-            CONSOLE_DATA_PORT => {
+            // The console's data register, written.  On the boards whose driver
+            // only ever *reads* these two ports — the `04h`/`05h` machines print
+            // through a monitor ROM instead — this is where the ROM stub's own
+            // `OUT` lands, which is precisely how a synthesised CUTER reaches a
+            // real terminal without anything in this dispatch knowing it exists.
+            p if p == self.console.data_port => {
                 self.tx.push(value & 0x7F);
                 self.idle_status_reads = 0;
             }
@@ -664,6 +776,17 @@ impl Machine for BootMachine {
 mod tests {
     use super::*;
     use crate::cpm::dcdd::{geometry_for, Geometry};
+
+    /// The Altair 88-2SIO console's ports, spelled out rather than imported.
+    ///
+    /// Deliberately literal. These used to be constants the machine itself read,
+    /// and now the machine gets its console from
+    /// [`crate::cpm::console::MACHINE_CHOICES`] — so if these were an import, the
+    /// assertions below would compare the default machine against itself and pass
+    /// no matter what it changed to. Written out, they pin the one thing that must
+    /// never move: every disk that boots today boots because its console is here.
+    const CONSOLE_STATUS_PORT: u8 = 0x10;
+    const CONSOLE_DATA_PORT: u8 = 0x11;
 
     /// The EGT80 binary, for the gates that put it on a disk and then check what
     /// came back. Module-level so the helper that writes it and the assertions
@@ -760,6 +883,158 @@ mod tests {
         }
         fn stuck_polls(&self) -> u32 {
             0
+        }
+    }
+
+    /// The monitor ROM must be in memory once the disk has booted, and it must
+    /// be *code* that a guest can call.
+    ///
+    /// Placed after the loader, not before: a ROM is not memory a boot program
+    /// owns. Nothing in the sample set loads that high, but the failure it
+    /// prevents would present as a disk that signs on and then goes silent,
+    /// which is the hardest kind of fault to attribute.
+    #[test]
+    fn test_a_rom_console_machine_has_its_rom_in_memory_after_boot() {
+        let mut img = image(Geometry::EIGHT_INCH);
+        img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
+        let mut m = BootMachine::new();
+        m.set_machine("console_04_cuter");
+        m.insert(0, img, true).unwrap();
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        // PUSH AF / MOV A,B / OUT (05h),A / POP AF / RET at CUTER's OUTADDR.
+        let rom: Vec<u8> = (0..6).map(|i| m.peek(crate::cpm::console::CUTER_CHAR_OUT + i)).collect();
+        assert_eq!(rom, vec![0xF5, 0x78, 0xD3, 0x05, 0xF1, 0xC9], "the CUTER stub is not in memory");
+
+        // And it really runs: call it with a character in B, as the guest does,
+        // and the byte must come out of the console with every register intact.
+        cpu.registers().set8(iz80::Reg8::B, b'Q');
+        cpu.registers().set_a(0x5A);
+        cpu.registers().set_pc(crate::cpm::console::CUTER_CHAR_OUT);
+        for _ in 0..5 {
+            cpu.execute_instruction(&mut m);
+        }
+        assert_eq!(m.take_output(), b"Q".to_vec(), "the stub did not print through the console");
+        assert_eq!(cpu.registers().a(), 0x5A, "the stub clobbered A, which its caller forbids");
+    }
+
+    /// A machine with a port console must place nothing at all. Six stray bytes
+    /// at `C019` would be invisible on a 48K guest and land in the middle of a
+    /// 64K one's memory.
+    #[test]
+    fn test_a_port_console_machine_places_no_rom() {
+        let mut img = image(Geometry::EIGHT_INCH);
+        img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
+        let mut m = BootMachine::new();
+        m.insert(0, img, true).unwrap();
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        for i in 0..6 {
+            assert_eq!(
+                m.peek(crate::cpm::console::CUTER_CHAR_OUT + i),
+                0,
+                "an Altair machine must leave C019 alone"
+            );
+        }
+    }
+
+    /// A fresh machine is the Altair it always was, and the setting moves it.
+    ///
+    /// The first half matters more than the second: every disk that boots today
+    /// boots because its console is at `10h`/`11h`, so a default that drifted
+    /// would silence a working gateway on upgrade with no error anywhere.
+    #[test]
+    fn test_the_console_defaults_to_the_altair_and_the_setting_moves_it() {
+        let mut m = BootMachine::new();
+        assert_eq!(m.console().status_port, CONSOLE_STATUS_PORT);
+        assert_eq!(m.console().data_port, CONSOLE_DATA_PORT);
+
+        m.set_machine("console_04");
+        assert_eq!(m.console().status_port, 0x04);
+        assert_eq!(m.console().data_port, 0x05);
+        // And the dispatch follows it, both ways round: the new ports work...
+        m.send_key(b'Z');
+        assert_ne!(m.port_in(0x04) & 0x01, 0x01, "a key is waiting (active low)");
+        assert_eq!(m.port_in(0x05), b'Z');
+        m.port_out(0x05, b'!');
+        assert_eq!(m.take_output(), b"!".to_vec());
+        // ...and the Altair's ports are no longer the console. 0x11 now falls
+        // through to the modem/idle-bus path, so nothing is echoed to the user.
+        m.port_out(0x11, b'X');
+        assert!(m.take_output().is_empty(), "0x11 is not this machine's console");
+    }
+
+    /// An unrecognised setting must leave a working console rather than none.
+    /// The likeliest way here is a typo in a hand-edited config file, and a
+    /// gateway that boots to permanent silence is a bad answer to a typo.
+    #[test]
+    fn test_an_unknown_machine_still_has_a_console() {
+        let mut m = BootMachine::new();
+        m.set_machine("no-such-machine");
+        assert_eq!(m.console().status_port, CONSOLE_STATUS_PORT);
+        m.port_out(CONSOLE_DATA_PORT as u16, b'k');
+        assert_eq!(m.take_output(), b"k".to_vec());
+    }
+
+    /// The modem's clash check must ask *this* machine's console, not an
+    /// Altair's — and its hint must name a profile this machine would accept.
+    ///
+    /// Both halves were bugs waiting to happen when the console became a
+    /// setting: `altair_2sio1` at `10h`/`11h` is the console on a default
+    /// machine and free on a `04h`/`05h` one, so a fixed answer is wrong for
+    /// one of them, and a refusal that suggests something also refused is worse
+    /// than saying nothing.
+    #[test]
+    fn test_the_modem_clash_check_follows_the_machine() {
+        // Default machine: 0x10/0x11 IS the console, so that profile is refused.
+        let mut m = BootMachine::new();
+        let refused = m.attach_modem(crate::cpm::resolve_access("altair_2sio1"));
+        let ModemAttach::Unavailable(why) = &refused else {
+            panic!("altair_2sio1 must clash with an Altair console, got {refused:?}");
+        };
+        assert!(why.contains("the console"), "{why}");
+        assert!(!why.contains("altair_2sio1"), "must not suggest the profile it just refused");
+
+        // Same profile, machine with its console at 0x04/0x05: now it fits.
+        let mut m = BootMachine::new();
+        m.set_machine("console_04");
+        assert_eq!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio1")),
+            ModemAttach::Ports(0x10, 0x11),
+            "0x10/0x11 is free once the console moves off it"
+        );
+
+        // A modem attached elsewhere must not shadow the console. The port
+        // dispatch offers the console first, but a machine whose console moved
+        // is exactly where that ordering could go wrong unnoticed.
+        let mut m = BootMachine::new();
+        m.set_machine("console_04");
+        assert!(matches!(
+            m.attach_modem(crate::cpm::resolve_access("rc2014_1b")),
+            ModemAttach::Ports(0x82, 0x83)
+        ));
+        m.send_key(b'y');
+        assert_eq!(m.port_in(0x05), b'y', "the console still answers with a modem fitted");
+    }
+
+    /// The suggestion in a refusal must be a profile this machine really would
+    /// accept. Computed, not written down — the console moves now.
+    #[test]
+    fn test_the_modem_hint_names_a_profile_that_would_work() {
+        for key in ["altair_2sio", "altair_sio", "console_04", "console_04_cuter"] {
+            let mut m = BootMachine::new();
+            m.set_machine(key);
+            let Some(hint) = m.suggested_modem_profile() else {
+                panic!("{key}: no profile at all fits this machine");
+            };
+            // The hint must survive the very check that produced it.
+            let mut m2 = BootMachine::new();
+            m2.set_machine(key);
+            assert!(
+                matches!(m2.attach_modem(crate::cpm::resolve_access(hint)), ModemAttach::Ports(..)),
+                "{key}: suggested {hint}, which this machine then refuses"
+            );
         }
     }
 
@@ -2304,6 +2579,13 @@ mod tests {
             };
             let _ = medium;
             let mut m = BootMachine::new();
+            // The survey is the one place that sees a bring-up move as a whole,
+            // so it has to be able to survey a *machine* and not just a disk:
+            // three of the Tarbell disks differ from the Altair only in where
+            // their console is.
+            if let Ok(k) = std::env::var("CPM_BOOT_MACHINE") {
+                m.set_machine(&k);
+            }
             m.insert(0, bytes, true).unwrap();
             let mut cpu = BootMachine::new_cpu();
             if let Err(e) = m.boot(&mut cpu, 0) {
@@ -2336,6 +2618,125 @@ mod tests {
         assert!(spoke > 0, "no image in {dir} said anything");
     }
 
+    /// **A guest that prints through a monitor ROM reaches its prompt and takes
+    /// commands.**
+    ///
+    /// The gate for the synthesised CUTER entry, and it is the strong kind: not
+    /// "did a plausible string appear" but "did the disk's own operating system
+    /// sign on, accept a command, and run a program off the disk to produce the
+    /// right answer". Every part has to work for that — the Tarbell board, the
+    /// `04h`/`05h` console's active-low status, the ROM stub's register
+    /// discipline, and the console data port accepting the stub's `OUT`.
+    ///
+    /// TDISK05 is the case. Its BIOS assembles with `VIDEO EQU TRUE` and prints
+    /// with one `CALL 0C019h`, having put the character in `B` and cleared `A` to
+    /// select CUTER's output device 0. Its system tracks contain that single call
+    /// into `C0xx` and no other, so the stub is the whole of what it needs.
+    ///
+    /// Ignored: set `CPM_CUTER_IMAGE` to TDISK05.DSK.
+    #[test]
+    #[ignore]
+    fn test_a_rom_console_guest_signs_on_and_runs_a_command() {
+        let Ok(path) = std::env::var("CPM_CUTER_IMAGE") else {
+            eprintln!("set CPM_CUTER_IMAGE to run this");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.set_machine("console_04_cuter");
+        m.insert(0, std::fs::read(&path).unwrap(), true).expect("a bootable image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{signon}");
+        assert!(
+            signon.contains("Tarbell 48K CPM 2.2"),
+            "the guest never signed on through the ROM; it printed: {signon:?}"
+        );
+        assert!(signon.contains("A>"), "it signed on but never reached its prompt: {signon:?}");
+
+        // A command, so this cannot pass on a sign-on alone. `DIR` is the CCP's
+        // own, and it has to read the directory off the disk to answer.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "DIR listed no programs: {dir:?}");
+
+        // And a transient: `STAT` is a `.COM` file the CCP has to find, load and
+        // run, which exercises far more of the guest than the CCP alone.
+        let stat = type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000);
+        println!("--- STAT ---\n{stat}");
+        assert!(
+            stat.contains("Bytes Remaining") || stat.contains("R/W") || stat.contains("R/O"),
+            "STAT did not run or said nothing recognisable: {stat:?}"
+        );
+    }
+
+    /// A VDM-1 guest is not mute because it failed — it is painting a screen we
+    /// do not show yet.
+    ///
+    /// This exists so the deferred VDM-1 work is a *measured* gap rather than a
+    /// mystery for whoever picks it up. TDISK04's CP/M assembles with
+    /// `VDM EQU TRUE` and prints by storing bytes into the Processor Technology
+    /// VDM-1's window at `CC00`, 64 columns by 16 lines, scrolling with the
+    /// register on port `C8`. It never writes a console character to any port —
+    /// verified by scanning its system tracks for `OUT 05h`, `OUT 01h` and
+    /// `OUT 11h`, none of which appear. So with the right console it takes
+    /// keystrokes perfectly and still shows nothing.
+    ///
+    /// Give it that console, run it, and its sign-on is sitting in screen
+    /// memory. That is the whole of what remains: sample the window and paint it.
+    ///
+    /// Ignored: set `CPM_VDM_IMAGE` to TDISK04.DSK (or another VDM-1 disk).
+    #[test]
+    #[ignore]
+    fn test_a_vdm_guest_writes_its_signon_into_screen_memory() {
+        let Ok(path) = std::env::var("CPM_VDM_IMAGE") else {
+            eprintln!("set CPM_VDM_IMAGE to run this");
+            return;
+        };
+        /// The VDM-1's screen window, and its shape.
+        const VDM_BASE: u16 = 0xCC00;
+        const VDM_COLS: usize = 64;
+        const VDM_ROWS: usize = 16;
+
+        let bytes = std::fs::read(&path).unwrap();
+        let mut m = BootMachine::new();
+        // The keyboard half of the same board. Without it the guest never gets
+        // past its first `CONIN` and never prints at all, so this test would
+        // pass an empty screen for the wrong reason.
+        m.set_machine("console_04");
+        m.insert(0, bytes, true).expect("a bootable image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        for _ in 0..20_000_000u64 {
+            cpu.execute_instruction(&mut m);
+        }
+
+        assert!(m.take_output().is_empty(), "a VDM-1 guest prints to no port at all");
+
+        let mut screen = String::new();
+        for row in 0..VDM_ROWS {
+            let line: String = (0..VDM_COLS)
+                .map(|col| {
+                    // Bit 7 is the VDM-1's own business (inverse video); the
+                    // character is the low seven bits.
+                    let b = m.peek(VDM_BASE + (row * VDM_COLS + col) as u16) & 0x7F;
+                    if (0x20..0x7F).contains(&b) { b as char } else { '.' }
+                })
+                .collect();
+            screen.push_str(line.trim_end());
+            screen.push('\n');
+        }
+        println!("--- VDM-1 screen at {VDM_BASE:#06x} ---\n{screen}");
+        println!("pc={:#06x} (its CONIN loop, waiting for a key)", cpu.registers().pc());
+
+        let want = std::env::var("CPM_VDM_EXPECT").unwrap_or_else(|_| "CP/M".into());
+        assert!(
+            screen.contains(&want),
+            "the guest never painted {want:?} into screen memory; it holds:\n{screen}"
+        );
+    }
+
     /// The end-to-end check the plan asked for: boot a real disk, run it, and
     /// see whether the guest's own operating system says anything.
     ///
@@ -2353,6 +2754,10 @@ mod tests {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut m = BootMachine::new();
+        if let Ok(k) = std::env::var("CPM_BOOT_MACHINE") {
+            m.set_machine(&k);
+            println!("(machine {k}: console {:#04x}/{:#04x})", m.console().status_port, m.console().data_port);
+        }
         m.insert(0, bytes, true).expect("an 88-DCDD image");
         let mut cpu = BootMachine::new_cpu();
         match std::env::var("CPM_BOOT_STEP").ok().and_then(|s| s.parse::<u8>().ok()) {

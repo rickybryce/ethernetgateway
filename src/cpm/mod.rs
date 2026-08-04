@@ -35,6 +35,7 @@ pub mod hbios;
 pub mod hdsk;
 pub mod boot;
 pub mod boot_machine;
+pub mod console;
 pub mod controller;
 pub mod dcdd;
 pub mod image;
