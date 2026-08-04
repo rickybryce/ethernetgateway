@@ -552,6 +552,17 @@ impl Cpm {
         self.cpu.registers().get16(rr)
     }
 
+    /// Where the guest is about to execute.
+    ///
+    /// Test-only, for diagnosing a program that stops without saying why. A CPU
+    /// conformance suite is the case that needed it: its failure action is a
+    /// silent `JMP 0000`, so the only thing distinguishing "passed quietly" from
+    /// "failed at test 14" is the address it jumped from.
+    #[cfg(test)]
+    pub fn pc(&mut self) -> u16 {
+        self.cpu.registers().pc()
+    }
+
     /// BDOS "console output" (function 2) argument: the character in `E`.
     /// A convenience wrapper so callers needn't import `iz80` register
     /// enums just to service the common console calls.
@@ -1265,6 +1276,238 @@ mod tests {
                 other => return (out, other),
             }
         }
+    }
+
+    /// The shadow-register round trip `PRELIM.COM` rejects, in isolation.
+    ///
+    /// Found by running the real exerciser (see the suite test below): PRELIM
+    /// pops known values into both register sets, pushes them back to a known
+    /// address, and compares memory. It fails at its check of the pushed `AF'`
+    /// and its failure action is a silent `JMP 0000`, so this reproduces the
+    /// same round trip in twelve bytes to say *which* instruction is wrong
+    /// rather than "a CPU suite failed".
+    ///
+    /// Not `#[ignore]`d: it needs no external file, and if it ever starts
+    /// passing that is news.
+    #[test]
+    fn test_shadow_register_round_trip() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        // AF' = 0x0402 (A'=04, F'=02), AF = 0x0806 (A=08, F=06) — the same
+        // shape of values PRELIM uses, chosen so a swapped or masked byte is
+        // obvious in the failure message.
+        const DATA: u16 = 0x0200;
+        const OUT: u16 = 0x0300;
+        let prog = [
+            0x31, 0x00, 0x02, // LXI SP,DATA
+            0xF1, //             POP AF        ; AF = 0402 (destined for shadow)
+            0x08, //             EX AF,AF'
+            0xF1, //             POP AF        ; AF = 0806
+            0x31, 0x04, 0x03, // LXI SP,OUT+4
+            0xF5, //             PUSH AF       ; main AF -> OUT+2
+            0x08, //             EX AF,AF'
+            0xF5, //             PUSH AF       ; shadow AF -> OUT
+            0x76, //             HLT
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        cpm.write_block(DATA, &[0x02, 0x04, 0x06, 0x08]);
+        let abort = AtomicBool::new(false);
+        // A HLT stops the machine; a budget bounds it either way.
+        let _ = cpm.run(200, &abort);
+        let got = cpm.read_block(OUT, 4);
+        assert_eq!(
+            got,
+            vec![0x02, 0x04, 0x06, 0x08],
+            "shadow/main AF did not round-trip through EX AF,AF' + PUSH/POP.\n\
+             expected F'=02 A'=04 F=06 A=08, got F'={:02X} A'={:02X} F={:02X} A={:02X}",
+            got[0], got[1], got[2], got[3]
+        );
+    }
+
+    /// The whole register-file push `PRELIM.COM` builds, in isolation.
+    ///
+    /// PRELIM sets `SP` to a known address, pushes `IY IX HL DE BC AF`, swaps to
+    /// the shadow set and pushes `HL' DE' BC' AF'`, then checks the twenty bytes
+    /// that lands. Against our core the block arrives **one byte higher** than it
+    /// expects — every value correct and in order, the base address off by one —
+    /// so this pins whether the fault is in the pushes themselves or in
+    /// something PRELIM does before them.
+    #[test]
+    fn test_the_register_file_pushes_where_prelim_expects() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        const TOP: u16 = 0x0400;
+        // Load every register with a distinct value, then push exactly as
+        // PRELIM does. Values ascend so a misplaced byte names itself.
+        let prog = [
+            0x31, 0x00, 0x03, //       LXI SP,0300      ; load area
+            0xF1, //                   POP AF           ; AF' <- 0402
+            0xC1, //                   POP BC           ; BC' <- 0806
+            0xD1, //                   POP DE           ; DE' <- 0C0A
+            0xE1, //                   POP HL           ; HL' <- 100E
+            0x08, 0xD9, //             EX AF,AF' / EXX  ; park them as shadow
+            0xF1, //                   POP AF           ; AF  <- 1412
+            0xC1, //                   POP BC
+            0xD1, //                   POP DE
+            0xE1, //                   POP HL
+            0xDD, 0xE1, //             POP IX
+            0xFD, 0xE1, //             POP IY
+            0x31, 0x00, 0x04, //       LXI SP,TOP
+            0xFD, 0xE5, //             PUSH IY
+            0xDD, 0xE5, //             PUSH IX
+            0xE5, 0xD5, 0xC5, 0xF5, // PUSH HL/DE/BC/AF
+            0x08, 0xD9, //             EX AF,AF' / EXX
+            0xE5, 0xD5, 0xC5, 0xF5, // PUSH HL'/DE'/BC'/AF'
+            0x76, //                   HLT
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        // 11 register pairs' worth of ascending bytes for the POPs to consume.
+        let load: Vec<u8> = (0..22).map(|i| (i as u8 + 1) * 2).collect();
+        cpm.write_block(0x0300, &load);
+        let abort = AtomicBool::new(false);
+        let _ = cpm.run(400, &abort);
+
+        // Ten pushes of two bytes each land at TOP-20 .. TOP-1.
+        let got = cpm.read_block(TOP - 20, 20);
+        let below = cpm.read_block(TOP - 21, 1);
+        assert_eq!(
+            below[0], 0,
+            "a push wrote below TOP-20 — the block is shifted, exactly what PRELIM reports"
+        );
+        assert_eq!(got.len(), 20);
+        // The last push (AF') must be the lowest pair: F' then A'.
+        assert_eq!(
+            (got[0], got[1]),
+            (0x02, 0x04),
+            "AF' did not land at the bottom of the block; got {got:02X?}"
+        );
+    }
+
+    /// **Run a real CPU conformance suite against our Z80 core.**
+    ///
+    /// Everything else here tests the *gateway*: our BDOS, our controllers, our
+    /// console. Nothing has ever tested the CPU itself, and every emulation
+    /// fault found so far was found indirectly — a disk misbehaving, a sign-on
+    /// coming back corrupted. This tests it directly, with the instruction
+    /// exercisers the 8080/Z80 world settled on:
+    ///
+    /// * `PRELIM.COM` — Frank Cringle's preliminary tests. Fast, and it fails
+    ///   loudly on anything basic being wrong. Run this first.
+    /// * `8080PRE.COM` — the 8080 equivalent.
+    /// * `CPUTEST.COM` — Diagnostics II by Supersoft. Broad, and it names the
+    ///   area that failed.
+    /// * `EXZ80DOC.COM` — the ZEXALL family, *documented* flags only. This is
+    ///   the fair one for an emulator: `EXZ80ALL` also pins the undocumented
+    ///   flag bits, which iz80 does not claim to reproduce. It compares a CRC
+    ///   per instruction group against a known-good value, so it cannot be
+    ///   satisfied by output that merely looks plausible — the exact-oracle
+    ///   property this project keeps choosing.
+    ///
+    /// The suites live on z80pack's `z80tests.dsk` and `i8080tests.dsk`. Those
+    /// are `cpmsim` disks, which share the 256,256-byte size of an IBM 3740 but
+    /// **not** its layout: their BIOS's `SECTRAN` is `HL = BC + 1`, no
+    /// translation at all, so reading one with our `ibm3740` skew table
+    /// scrambles it silently. Extract with a no-skew reader.
+    ///
+    /// Ignored, and wants a release build — `EXZ80DOC` is billions of cycles:
+    /// ```text
+    /// CPM_CPUTEST_COM=/path/EXZ80DOC.COM cargo test --release \
+    ///     --bin ethernetgateway test_cpu_conformance_suite -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_cpu_conformance_suite() {
+        use std::io::Write;
+        let Ok(path) = std::env::var("CPM_CPUTEST_COM") else {
+            eprintln!("set CPM_CPUTEST_COM to a .COM exerciser to run this");
+            return;
+        };
+        let _g = crate::cpm::image::registry::tests_lock();
+        let program = std::fs::read(&path).expect("the exerciser");
+        let mut cpm = Cpm::new();
+        cpm.load_com(&program);
+        let abort = AtomicBool::new(false);
+
+        // Streamed rather than collected, because a full ZEXALL run takes
+        // minutes and a silent test that might have hung is not something you
+        // can act on. The text is also the result: these suites report per-group
+        // pass/fail as they go.
+        let mut out = Vec::new();
+        let emit = |bytes: &[u8], out: &mut Vec<u8>| {
+            out.extend_from_slice(bytes);
+            std::io::stdout().write_all(bytes).ok();
+            std::io::stdout().flush().ok();
+        };
+        // A ring of recent PCs, for a suite whose failure action is a silent
+        // `JMP 0000`. Off unless asked for, because single-stepping a suite like
+        // ZEXALL is billions of iterations — but a *failing* suite stops early,
+        // so the trace is affordable exactly when it is needed.
+        // Set `CPM_CPUTEST_TRACE=1`.
+        let trace = std::env::var("CPM_CPUTEST_TRACE").is_ok();
+        let mut recent: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+
+        loop {
+            let step = if trace { 1 } else { 50_000_000 };
+            if trace {
+                let pc = cpm.pc();
+                if recent.len() == 24 {
+                    recent.pop_front();
+                }
+                recent.push_back(pc);
+            }
+            match cpm.run(step, &abort) {
+                Stop::Bdos(func) => match func {
+                    2 => {
+                        let c = cpm.reg8(Reg8::E);
+                        emit(&[c], &mut out);
+                        cpm.bdos_return(0);
+                    }
+                    9 => {
+                        let de = cpm.reg16(Reg16::DE);
+                        let s = cpm.read_dollar_string(de, 8192);
+                        emit(&s, &mut out);
+                        cpm.bdos_return(0);
+                    }
+                    // Console status / input. An exerciser should not ask, but
+                    // if one does, saying "no key waiting" beats hanging.
+                    11 => cpm.bdos_return(0),
+                    1 => cpm.bdos_return(b'\r'),
+                    _ => cpm.bdos_return(0),
+                },
+                Stop::BudgetExhausted => continue,
+                other => {
+                    println!("\n[stopped: {other:?}]");
+                    if trace {
+                        println!(
+                            "last PCs: {}",
+                            recent.iter().map(|p| format!("{p:04X}")).collect::<Vec<_>>().join(" ")
+                        );
+                    }
+                    // Post-mortem memory, for a suite that compares against a
+                    // block it built rather than printing what it found.
+                    // `CPM_CPUTEST_DUMP=0558:20` (hex addr, decimal len).
+                    if let Ok(spec) = std::env::var("CPM_CPUTEST_DUMP") {
+                        let (a, n) = spec.split_once(':').unwrap_or((spec.as_str(), "16"));
+                        let a = u16::from_str_radix(a.trim_start_matches("0x"), 16).unwrap_or(0);
+                        let n: usize = n.parse().unwrap_or(16);
+                        println!("mem {a:04X}: {:02X?}", cpm.read_block(a, n));
+                    }
+                    break;
+                }
+            }
+        }
+
+        let text = String::from_utf8_lossy(&out).replace('\r', "");
+        // What each suite says when a group fails. Checked as a set rather than
+        // by looking for a success banner, because the suites differ in how they
+        // announce success and agree on how they announce failure.
+        for bad in ["ERROR", "error", "FAILED", "failed", "CPU HAS FAILED"] {
+            assert!(
+                !text.contains(bad),
+                "the CPU suite reported {bad:?} — our core is wrong somewhere.\n{text}"
+            );
+        }
+        assert!(!text.trim().is_empty(), "the exerciser printed nothing at all");
     }
 
     #[test]
