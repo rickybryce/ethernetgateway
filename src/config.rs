@@ -4708,6 +4708,34 @@ mod tests {
     /// it, and a name that could never be opened has no business reaching the
     /// config file.
     #[test]
+    fn test_apply_config_key_cpm_boot_machine() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.cpm_boot_machine,
+            crate::cpm::console::DEFAULT_MACHINE,
+            "a fresh config is the machine this path has always been"
+        );
+
+        // Every machine in the shared list must be settable — iterated rather
+        // than typed out, so a new one cannot be added without being accepted
+        // here.
+        for c in crate::cpm::console::MACHINE_CHOICES {
+            apply_config_key(&mut cfg, "cpm_boot_machine", c.key);
+            assert_eq!(cfg.cpm_boot_machine, c.key);
+        }
+
+        // Anything else is refused, leaving the value alone. The web form is the
+        // reason this matters: the value arrives shaped by whoever posted it, and
+        // a config file that names a machine we are not is worse than one that
+        // names the default.
+        cfg.cpm_boot_machine = "console_04".to_string();
+        for bad in ["", "bogus", "ALTAIR_2SIO", "console_04 ", "altair"] {
+            apply_config_key(&mut cfg, "cpm_boot_machine", bad);
+            assert_eq!(cfg.cpm_boot_machine, "console_04", "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
     fn test_apply_config_key_cpm_boot_image() {
         let mut cfg = Config::default();
         assert_eq!(cfg.cpm_boot_image, "", "the emulator by default");

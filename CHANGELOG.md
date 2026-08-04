@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tarbell 1011 floppy disks boot.** A third emulated disk controller, and the
+  first whose chip is shared — the Western Digital FD1771 lives in its own
+  module because Cromemco's 4FDC and 16FDC use the same part. `TDISK01` reaches
+  `TARBELL 62K CPM V1.3 OF 8-13-77` and `TDISK02` reaches
+  `Micro Resources 62K CP/M Ver. 2.2 of 1/15/82`, with `DIR`, `STAT`, a file
+  that survives a reboot, and `PIP` between two drives. Unlike the Altair
+  boards the FD1771's status register means different things depending on the
+  command in flight, so the board remembers which command is running and
+  assembles status from it.
+- **A booted disk's machine is selectable, and two more disks come up.** The
+  new `cpm_boot_machine` key says where a booted disk finds its console: the
+  Altair 88-2SIO at `10h`/`11h` (the default, and what every disk that booted
+  before this used), the 88-SIO at `00h`/`01h`, a board at `04h`/`05h` whose
+  status is active low, or that same board printing through a Processor
+  Technology **CUTER** monitor ROM, which the gateway synthesises at `C019`.
+  That last one brings `TDISK05` to `Tarbell 48K CPM 2.2`, an `A>` prompt,
+  `DIR`, `STAT` and a file written with `PIP` that survives a reboot. A disk
+  that loads its operating system and then goes silent is usually looking for a
+  console that is not there, and this is the setting for it — deliberately a
+  setting and never a detection, because what a guest polls cannot distinguish
+  the machine it wants from another machine's keyboard at the same address.
 - **Boot a disk image.** A `.dsk` can now be cold-booted on an emulated MITS
   88-DCDD controller, and the disk's own operating system takes the whole
   machine — 64 KB, the controller, an 88-2SIO console and the front-panel sense

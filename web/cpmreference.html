@@ -677,6 +677,7 @@
                         <tr><td><code>cpm_emu_max_minstr</code></td><td><code>2000</code></td><td>Instruction ceiling in <em>millions</em> before a running program is stopped. The runaway guard.</td></tr>
                         <tr><td><code>cpm_mounts</code></td><td><em>(empty)</em></td><td>Images mounted on drives, as <code>A=name.dsk,C=other.dsk</code>. Bare filenames inside <code>CPM/images</code>. See <a href="#disks">Disk Images</a>.</td></tr>
                         <tr><td><code>cpm_boot_image</code></td><td><em>(empty)</em></td><td>What the CP/M menu item runs: empty = the CP/M emulator, or a bare filename in <code>CPM/images</code> to cold-boot that disk. See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_boot_machine</code></td><td><code>altair_2sio</code></td><td>Which machine a <em>booted</em> disk thinks it is on &mdash; specifically where it finds its console. Ignored by the emulator, which has no console to place. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
                         <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
                         <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>
@@ -908,6 +909,42 @@ altairhd_cobol.dsk</code></pre>
                     The setting is <code>cpm_boot_image</code>: empty (the default) runs the CP/M
                     emulator, a bare filename in <code>CPM/images</code> boots that disk.
                 </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Which machine &mdash; where the disk finds its console</h3>
+                <p>
+                    A booted disk brings its own operating system, and that operating system was
+                    written for a particular machine. Most of these disks expect the Altair's
+                    88-2SIO console at <code>10h</code>/<code>11h</code>, which is the default and
+                    what every disk that boots today uses. Some do not, and the symptom is
+                    distinctive: <strong>the disk loads, reads its sectors, and then goes
+                    completely quiet</strong>, because it is printing to hardware that is not in the
+                    machine and polling a keyboard port that will never answer.
+                </p>
+                <p>
+                    <code>cpm_boot_machine</code> picks the machine. It is on the same screens as
+                    <strong>CP/M runs</strong> above &mdash; on telnet, the CP/M settings screen's
+                    <strong>B</strong> now opens a Boot Settings screen holding both.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Value</th><th>Console</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code></td><td>The default. Every disk that boots today boots because of it.</td></tr>
+                        <tr><td><code>altair_sio</code></td><td>Altair 88-SIO, <code>00h</code>/<code>01h</code></td><td>Active-low status.</td></tr>
+                        <tr><td><code>console_04</code></td><td><code>04h</code>/<code>05h</code></td><td>Ready when the status bit is <em>clear</em>.</td></tr>
+                        <tr><td><code>console_04_cuter</code></td><td><code>04h</code>/<code>05h</code> in, ROM out</td><td>The guest prints by calling a Processor Technology CUTER ROM, which we synthesise at <code>C019</code>. Reaches <code>Tarbell 48K CPM 2.2</code>.</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>This is not autodetected, on purpose.</strong> What a guest polls
+                        cannot distinguish the machine it wants from another machine's keyboard at
+                        the same address. Worse, guessing the status <em>polarity</em> wrong does
+                        not produce a quiet machine &mdash; it produces one that believes a key is
+                        waiting on every poll and consumes a stream of garbage, which looks like a
+                        corrupt disk rather than a mis-set console. Say which machine; the gateway
+                        will be it.
+                    </p>
+                </div>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">The other drives</h3>
                 <p>

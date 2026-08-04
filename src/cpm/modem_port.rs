@@ -57,6 +57,17 @@ impl ModemPort {
         self.access = access;
     }
 
+    /// Has a modem been wired to ports on this machine?
+    ///
+    /// Exists so that a machine can *assert* the ordering its own correctness
+    /// depends on rather than only documenting it: a booted machine vets a modem
+    /// profile against its console's ports, so choosing the console afterwards
+    /// would vet against the wrong ones and leave a modem silently shadowed by
+    /// the console in the port dispatch.
+    pub fn is_attached(&self) -> bool {
+        !matches!(self.access, ModemAccess::Off)
+    }
+
     /// Set the carrier (DCD) state the status register reflects.
     pub fn set_carrier(&mut self, carrier: bool) {
         self.carrier = carrier;

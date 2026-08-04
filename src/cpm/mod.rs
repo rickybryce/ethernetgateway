@@ -1278,6 +1278,13 @@ mod tests {
         }
     }
 
+    // NOTE: `test_cpu_conformance_suite` below has one known open failure that
+    // is deliberately *not* worked around here — see the commit that added it.
+    // PRELIM.COM's register-file check lands its pushed block one byte high; the
+    // extraction, the loaded image and the push sequence itself are all ruled
+    // out, and the next step is an SP-logged instruction trace. Do not "fix" it
+    // by loosening the assertions.
+
     /// The shadow-register round trip `PRELIM.COM` rejects, in isolation.
     ///
     /// Found by running the real exerciser (see the suite test below): PRELIM

@@ -247,6 +247,18 @@ impl BootMachine {
     /// default machine rather than to no console, so a typo in a hand-edited
     /// config file leaves the gateway working instead of mute.
     pub fn set_machine(&mut self, key: &str) {
+        // Asserted, not merely documented. The ordering is a real correctness
+        // requirement — `attach_modem` refuses a profile that lands on *this*
+        // machine's console, and the port dispatch offers the console first — so
+        // choosing the console after a modem is attached would leave the modem
+        // silently shadowed, present in the config and mute in the machine. A
+        // rule written only in a doc comment is the shape of defect this
+        // codebase has produced three times; this one fails a test instead.
+        debug_assert!(
+            !self.modem.is_attached(),
+            "set_machine must come before attach_modem: the modem was vetted \
+             against a different console's ports"
+        );
         self.console = super::console::resolve_console(key);
     }
 
@@ -1016,6 +1028,27 @@ mod tests {
         ));
         m.send_key(b'y');
         assert_eq!(m.port_in(0x05), b'y', "the console still answers with a modem fitted");
+    }
+
+    /// Choosing the machine after attaching a modem is a programming error, and
+    /// it fails rather than producing a mute modem.
+    ///
+    /// The failure it prevents is invisible: the config says a modem is on
+    /// `0x10/0x11`, `attach_modem` accepted it against the old console, and then
+    /// the console moves onto those ports and wins in the dispatch. Guarded by
+    /// `debug_assert!`, so this test is what makes the guard real.
+    #[test]
+    #[should_panic(expected = "set_machine must come before attach_modem")]
+    fn test_choosing_the_machine_after_the_modem_is_refused() {
+        let mut m = BootMachine::new();
+        m.set_machine("console_04");
+        assert!(matches!(
+            m.attach_modem(crate::cpm::resolve_access("altair_2sio1")),
+            ModemAttach::Ports(0x10, 0x11)
+        ));
+        // 0x10/0x11 is the console on this machine, so the modem accepted above
+        // would now be shadowed. Must not be allowed to happen quietly.
+        m.set_machine("altair_2sio");
     }
 
     /// The suggestion in a refusal must be a profile this machine really would
@@ -2669,6 +2702,71 @@ mod tests {
             stat.contains("Bytes Remaining") || stat.contains("R/W") || stat.contains("R/O"),
             "STAT did not run or said nothing recognisable: {stat:?}"
         );
+    }
+
+    /// **A ROM-console guest writes a file, and the rewritten image boots
+    /// again.**
+    ///
+    /// The completeness gate for a machine whose console is a monitor ROM, and
+    /// the reason it is separate from the sign-on test: signing on proves the
+    /// console, and nothing more. This drives a whole session — create a file
+    /// with the guest's own utility, hand the image back, boot the *result* on a
+    /// fresh machine and read the directory — so the console, the Tarbell
+    /// controller's write path, the image write-back and the ROM placement on the
+    /// second boot all have to work together.
+    ///
+    /// The ROM placement is the part worth having a test for. It happens after
+    /// the boot program is loaded, on *every* boot, so a second boot of a
+    /// rewritten image is exactly where a one-shot placement would show up — and
+    /// it would present as a disk that worked once and then went silent.
+    ///
+    /// Ignored: set `CPM_CUTER_IMAGE` to TDISK05.DSK.
+    #[test]
+    #[ignore]
+    fn test_a_rom_console_guest_writes_a_file_that_survives_a_reboot() {
+        let Ok(path) = std::env::var("CPM_CUTER_IMAGE") else {
+            eprintln!("set CPM_CUTER_IMAGE to run this");
+            return;
+        };
+        let original = std::fs::read(&path).unwrap();
+
+        let mut m = BootMachine::new();
+        m.set_machine("console_04_cuter");
+        // Writable this time — the whole point.
+        m.insert(0, original.clone(), false).expect("a bootable image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        assert!(signon.contains("A>"), "never reached its prompt: {signon:?}");
+
+        // `PIP` copies a file the disk already has to a new name, so the guest
+        // allocates blocks and writes a directory entry using its own BIOS.
+        let pip = type_at(&mut m, &mut cpu, b"PIP NEWFILE.TXT=SYSGEN.TXT\r", 400_000_000);
+        println!("--- PIP ---\n{pip}");
+        let dir = type_at(&mut m, &mut cpu, b"DIR NEWFILE.TXT\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("NEWFILE"), "the guest did not create the file: {dir:?}");
+
+        // The image as the guest left it.
+        let written = m.take_dirty().into_iter().find(|(u, _)| *u == 0).map(|(_, b)| b);
+        let written = written.expect("the guest wrote to the image");
+        assert_ne!(written, original, "the image came back unchanged");
+        assert_eq!(written.len(), original.len(), "the image changed size");
+
+        // Boot what the guest wrote, on a brand-new machine.
+        let mut m2 = BootMachine::new();
+        m2.set_machine("console_04_cuter");
+        m2.insert(0, written, true).expect("the rewritten image is still a disk");
+        let mut cpu2 = BootMachine::new_cpu();
+        m2.boot(&mut cpu2, 0).expect("the rewritten image still boots");
+        let signon2 = printable(&run_until_quiet(&mut m2, &mut cpu2, 60_000_000));
+        assert!(
+            signon2.contains("Tarbell 48K CPM 2.2"),
+            "the rewritten image did not sign on: {signon2:?}"
+        );
+        let dir2 = type_at(&mut m2, &mut cpu2, b"DIR NEWFILE.TXT\r", 400_000_000);
+        println!("--- DIR after reboot ---\n{dir2}");
+        assert!(dir2.contains("NEWFILE"), "the file did not survive the reboot: {dir2:?}");
     }
 
     /// A VDM-1 guest is not mute because it failed — it is painting a screen we
