@@ -979,7 +979,7 @@ impl Controller for Hdsk {
         // Both stages of every disk here are loaded at zero, which is what the
         // CP/M loader's own source says of itself: "the hard disk bootloader ROM
         // (HDBL) loads this program into memory at address zero".
-        ColdStart::Program { offset, len, load: 0x0000 }
+        ColdStart::Program { offset, len, load: 0x0000, entry: 0x0000 }
     }
 
     fn stuck_polls(&self) -> u32 {
@@ -1641,7 +1641,12 @@ mod tests {
         image[LABEL_BOOT_COUNT] = 1;
         assert_eq!(
             h.cold_start(&image),
-            ColdStart::Program { offset: 7 * SECTOR_LEN as u64, len: SECTOR_LEN, load: 0 },
+            ColdStart::Program {
+                offset: 7 * SECTOR_LEN as u64,
+                len: SECTOR_LEN,
+                load: 0,
+                entry: 0,
+            },
             "sector 7, one sector, at zero — the CP/M pair's own label"
         );
         assert_eq!(h.cold_start(&[]), ColdStart::NoProgram, "and no label at all");

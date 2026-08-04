@@ -71,8 +71,16 @@ pub enum ColdStart {
     /// rotating sector counter, which stays in [`crate::cpm::boot`] behind
     /// [`Controller::as_dcdd`].
     Own,
-    /// Load `len` bytes from `offset` at `load`, and enter there.
-    Program { offset: u64, len: usize, load: u16 },
+    /// Load `len` bytes from `offset` at `load`, and enter at `entry`.
+    ///
+    /// The two addresses are separate because a real bootstrap PROM does not have
+    /// to enter what it loaded at the front. Both Altair boards do — their sectors
+    /// begin with executable code — but the Tarbell's 32-byte PROM loads one
+    /// 128-byte sector at `0000` and then, if the status came back clean,
+    /// `JZ 07DH`: the last three bytes of the sector it just read are a jump to
+    /// the real loader. Folding the two together would have quietly entered such
+    /// a disk at its data.
+    Program { offset: u64, len: usize, load: u16, entry: u16 },
     /// This board loads a program the disk names, and this disk names none.
     NoProgram,
 }
@@ -173,6 +181,28 @@ pub trait Controller: Send {
     fn cold_start(&self, _image: &[u8]) -> ColdStart {
         ColdStart::Own
     }
+
+    /// Leave the board as its own bootstrap PROM would have left it.
+    ///
+    /// Called once after [`Controller::cold_start`] has been honoured, before the
+    /// guest's first instruction. It exists because a *synthesised* cold start
+    /// skips the work the real PROM did, and some of that work is state the loaded
+    /// program then reads.
+    ///
+    /// The Tarbell is the case that proved it. Its PROM loads the boot sector with
+    /// a real Read Sector command, so the loader starts running with the FD1771's
+    /// status register **typed as a Type II command** and reporting no error. Our
+    /// bootstrap copies the sector straight out of the file, leaving the chip in
+    /// its power-on Type I state — where bit 2 means Track 00 rather than Lost
+    /// Data, and the head genuinely is on track 0. TDISK02's loader checks status
+    /// with `ANI 9D`, read that bit as Lost Data, retried ten times and halted.
+    ///
+    /// The 88-DCDD needed the same thing for a different reason and does it inside
+    /// its own bootstrap: leaving the transfer open held the safe-to-move-head bit
+    /// low, so the guest hung on its first seek. That is this hook's job, made
+    /// explicit for the boards whose cold start is a sector run rather than a
+    /// sequence of port writes.
+    fn cold_started(&mut self, _drive: u8) {}
 
     /// How many times a guest has polled for something that never arrived.
     ///

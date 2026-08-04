@@ -147,7 +147,11 @@ impl BootMachine {
             // gained here by making an operator say so: each claims its own
             // ports and its own media size, and a machine with no hard disk in
             // a drive is simply a controller nobody talks to.
-            controllers: vec![Box::new(Dcdd::new()), Box::new(super::hdsk::Hdsk::new())],
+            controllers: vec![
+                Box::new(Dcdd::new()),
+                Box::new(super::hdsk::Hdsk::new()),
+                Box::new(super::tarbell::Tarbell::new()),
+            ],
             disk_controller: (0..16).map(|_| None).collect(),
             disks: (0..16).map(|_| None).collect(),
             tx: Vec::new(),
@@ -352,7 +356,7 @@ impl BootMachine {
             .and_then(|x| x.as_ref())
             .ok_or(BootError::NoDisk(drive))?;
         match controllers[which].cold_start(&m.bytes) {
-            ColdStart::Program { offset, len, load } => {
+            ColdStart::Program { offset, len, load, entry } => {
                 let at = offset as usize;
                 let program = m.bytes.get(at..at + len).ok_or_else(|| {
                     BootError::Unreadable("the boot program runs past the end".into())
@@ -368,7 +372,12 @@ impl BootMachine {
                 let start = load as usize;
                 let end = (start + program.len()).min(mem.len());
                 mem[start..end].copy_from_slice(&program[..end - start]);
-                cpu.registers().set_pc(load);
+                cpu.registers().set_pc(entry);
+                // Leave the board as its own PROM would have — see
+                // `Controller::cold_started`. A synthesised load skips the real
+                // read, and the state that read leaves behind is state the loader
+                // is entitled to find.
+                controllers[which].cold_started(drive);
                 return Ok(());
             }
             // The controller loads a program the disk names, and this disk names
@@ -996,9 +1005,22 @@ mod tests {
     /// then reports the second's error as though no board wanted the disk.
     #[test]
     fn test_what_each_board_accepts_is_what_it_will_insert() {
-        let boards: Vec<Box<dyn Controller>> =
-            vec![Box::new(Dcdd::new()), Box::new(crate::cpm::hdsk::Hdsk::new())];
-        for board in &boards {
+        // Built from a factory list so that adding a board means adding one line
+        // here, not remembering to extend two places — `insert` mutates, so each
+        // size needs a fresh board and the list has to be constructible twice.
+        type Factory = fn() -> Box<dyn Controller>;
+        let factories: &[Factory] = &[
+            || Box::new(Dcdd::new()),
+            || Box::new(crate::cpm::hdsk::Hdsk::new()),
+            || Box::new(crate::cpm::tarbell::Tarbell::new()),
+        ];
+        assert_eq!(
+            factories.len(),
+            BootMachine::new().controllers.len(),
+            "every controller the machine carries must be covered here"
+        );
+        for make in factories {
+            let board = make();
             let mut sizes = vec![0u64, 1, 137, 256, 256_256, 1_000_000];
             for m in board.media() {
                 sizes.extend([
@@ -1013,12 +1035,7 @@ mod tests {
                 let claimed = board.accepts(size).is_some();
                 // A fresh board each time: `insert` mutates, and a drive that
                 // already holds a disk is a different question.
-                let mut fresh: Box<dyn Controller> = if board.name() == Dcdd::new().name() {
-                    Box::new(Dcdd::new())
-                } else {
-                    Box::new(crate::cpm::hdsk::Hdsk::new())
-                };
-                let taken = fresh.insert(0, size, true).is_ok();
+                let taken = make().insert(0, size, true).is_ok();
                 assert_eq!(
                     claimed,
                     taken,
@@ -2170,6 +2187,92 @@ mod tests {
         let dir = type_at(&mut m2, &mut cpu2, b"DIR\r", 400_000_000);
         println!("--- DIR ---\n{dir}");
         assert!(dir.contains("COM"), "the data tracks did not survive: {dir:?}");
+    }
+
+    /// A Tarbell disk boots, lists its files, and a file written in it survives a
+    /// reboot.
+    ///
+    /// The acceptance test for the whole board, and it boots **twice** on purpose
+    /// for the same reason the hard disk's does: one session proves almost
+    /// nothing, because a guest can write to the wrong sector and still find its
+    /// file afterwards by reading the directory back from the same wrong place.
+    /// The second boot starts from bytes that left the machine.
+    ///
+    /// Everything the board does is on the path: the PROM's synthesised load and
+    /// its entry at 7Dh, the FD1771's Type I seeks and Type II transfers, the
+    /// status register typed per command, the WAIT port, the drive latch, and the
+    /// sector arithmetic — a mistake in any of them ends in `Bdos Err` rather than
+    /// a directory.
+    ///
+    /// Ignored: set `CPM_TARBELL_IMAGE` to a Tarbell CP/M image with space on it.
+    #[test]
+    #[ignore]
+    fn test_a_file_written_in_a_booted_tarbell_disk_survives_a_reboot() {
+        let Ok(path) = std::env::var("CPM_TARBELL_IMAGE") else {
+            eprintln!("set CPM_TARBELL_IMAGE to a Tarbell CP/M image");
+            return;
+        };
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(
+            original.len() as u64,
+            crate::cpm::tarbell::IMAGE_LEN,
+            "not a Tarbell image"
+        );
+
+        // ---- session one: sign on, list, and write ------------------------
+        let mut m = BootMachine::new();
+        m.insert(0, original.clone(), false).expect("the Tarbell controller takes it");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{banner}");
+        assert!(banner.contains("CP/M") || banner.contains("CPM"), "no sign-on: {banner:?}");
+
+        // The guest's own directory: this is its filesystem answering, through
+        // its own BIOS, and it is what a wrong sector mapping fails.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "the guest's own DIR listed nothing: {dir:?}");
+
+        // Free space before and after, never a threshold: a fixed number would
+        // pass vacuously on a disk that happened to start below it.
+        let before = free_k(&type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000))
+            .expect("STAT reports free space");
+        let saved = type_at(&mut m, &mut cpu, b"SAVE 2 ZZTARB.COM\r", 400_000_000);
+        println!("--- SAVE ---\n{saved}");
+        let listed = type_at(&mut m, &mut cpu, b"STAT ZZTARB.COM\r", 400_000_000);
+        println!("--- STAT ZZTARB.COM ---\n{listed}");
+        assert!(
+            listed.to_ascii_uppercase().contains("ZZTARB"),
+            "the guest cannot see the file it just wrote: {listed:?}"
+        );
+
+        let after = m.take_dirty().into_iter().next().expect("the guest dirtied the disk").1;
+        assert_ne!(after, original, "the image really changed");
+
+        // ---- session two: from the bytes that came out --------------------
+        let mut m2 = BootMachine::new();
+        m2.insert(0, after, false).expect("still a Tarbell image");
+        let mut cpu2 = BootMachine::new_cpu();
+        m2.boot(&mut cpu2, 0).expect("the written image still boots");
+        let banner2 = printable(&run_until_quiet(&mut m2, &mut cpu2, 60_000_000));
+        assert!(
+            banner2.contains("CP/M") || banner2.contains("CPM"),
+            "no sign-on second time: {banner2:?}"
+        );
+
+        let dir2 = type_at(&mut m2, &mut cpu2, b"DIR ZZTARB.COM\r", 400_000_000);
+        println!("--- DIR ZZTARB.COM, session two ---\n{dir2}");
+        assert!(
+            dir2.to_ascii_uppercase().contains("ZZTARB"),
+            "the file did not survive the reboot: {dir2:?}"
+        );
+        let stat2 = type_at(&mut m2, &mut cpu2, b"STAT\r", 400_000_000);
+        let after_free = free_k(&stat2).expect("STAT reports free space after the reboot");
+        assert!(
+            after_free < before,
+            "free space went {before}k -> {after_free}k, so the blocks were never claimed"
+        );
     }
 
     /// Boot every image in a folder and print what each one says.
