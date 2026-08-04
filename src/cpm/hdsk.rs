@@ -226,48 +226,72 @@ enum Command {
     Format,
     /// Reset the controller. The one command, with Set Byte, that does not
     /// need a ready drive.
+    ///
+    /// Also what every command word the other seven groups do not claim decodes
+    /// as, because the firmware's index is three bits wide and its table has
+    /// eight entries: group 7 is the reset, and nothing falls off the end.
     Initialize,
-    /// Anything the board would not recognise.
-    Unknown,
 }
 
 impl Command {
     fn of(word: u16) -> Command {
-        // Bit 12 is the direction — 1 reads, 0 writes — in all four transfer
-        // commands.
+        // **This is the firmware's own decode.** The 8X300 disassembly (deramp,
+        // `88-HDSK 8X300.pdf`, with the original engineer's annotations) shows the
+        // command loop take *three* bits and index a jump table:
         //
-        // **Write Sector is a deviation from the manual.** §3-4 says it is Read
-        // Sector "except that bit 13 must be zero rather than one", which would
-        // make it `0001`. It is `0010`, and there are now two independent
-        // witnesses to that. The first was observation: the CP/M that shipped on
-        // this hardware issues `0010`, and while the manual was followed those
-        // eight commands per save decoded here as unrecognised — the guest
-        // filled a buffer, never committed it, and the file it saved silently
-        // failed to appear. The second is documentary and stronger: the 88-HDSK
-        // source on the disks themselves says `CWRSEC equ 020h`, commented
-        // "same bit fields as CRDSECT". That is the people who wrote this
-        // hardware's software, not an inference of ours.
+        // ```text
+        //     0019: MOVE LB.IV RR 5 L 3 --> AUX   ; command bits 15:13
+        //     0024: XEC  AUX + 0025               ; execute one of eight JMPs
+        //     0025: JMP 002D   seek
+        //     0026: JMP 0042   write sector / read sector      <- one entry
+        //     0027: JMP 004D   write buffer / read buffer      <- one entry
+        //     0028: JMP 0072   read status
+        //     0029: JMP 007E   set byte
+        //     002A: JMP 0088   (read unformatted sector)
+        //     002B: JMP 0091   (format)
+        //     002C: JMP 0000   reset controller (used for HOME)
+        // ```
         //
-        // `0010` is also the more coherent reading — bit 12 then means the same
-        // thing for sectors as it demonstrably does for buffers, where the
-        // manual and the hardware agree that 1 reads and 0 writes. The manual
-        // still is not being called wrong: the errata for this section already
-        // corrects other bit assignments, and the two bits may simply be
-        // numbered the other way round somewhere in the chain. The evidence is
-        // laid out in `web/diskreference.html` so the next person meets it
-        // rather than a verdict.
-        match (word >> 12) & 0x0F {
-            0x0 => Command::Seek,
-            0x2 => Command::WriteSector,
-            0x3 => Command::ReadSector,
-            0x4 => Command::WriteBuffer,
-            0x5 => Command::ReadBuffer,
-            0x6 => Command::ReadStatus,
-            0xA => Command::ReadUnformatted,
-            0x8 => Command::SetByte,
-            0xC => Command::Format,
-            0xE => Command::Initialize,
-            _ => Command::Unknown,
+        // Three consequences, and each of them corrects something here:
+        //
+        // 1. **The manual is wrong about the write bit, and this says why.** §3-4
+        //    has Write Sector differing from Read Sector in *bit 13* — but bit 13
+        //    is part of the three-bit group index, and it is 1 for both sector
+        //    commands, so it cannot be the direction. The direction is **bit 12**,
+        //    which the firmware tests explicitly in the buffer routine at 0053,
+        //    annotated by hand "Read/WRITE?": `AND AUX AND R01 RR 4 --> R01`,
+        //    where R01 holds command bits 12:8, so bit 4 of it is bit 12. Four
+        //    witnesses now agree — the MITS BIOS, the disks' `CWRSEC equ 020h`,
+        //    ADEXER's live `2003`, and the controller's own code — and this last
+        //    one is the mechanism rather than another observation.
+        // 2. **There is no unrecognised command.** Three bits index eight
+        //    entries, exhaustively, so every 16-bit word is *some* command. This
+        //    used to decode on four bits against a list of ten exact values, which
+        //    was stricter than the board: `70xx` is a Read Status to the real
+        //    controller and was nothing here.
+        // 3. Bit 12 is a **don't care** outside the two transfer groups, exactly
+        //    as it is spare in the manual's own tables for those commands.
+        match (word >> 13) & 0x07 {
+            0 => Command::Seek,
+            1 => {
+                if word & 0x1000 != 0 {
+                    Command::ReadSector
+                } else {
+                    Command::WriteSector
+                }
+            }
+            2 => {
+                if word & 0x1000 != 0 {
+                    Command::ReadBuffer
+                } else {
+                    Command::WriteBuffer
+                }
+            }
+            3 => Command::ReadStatus,
+            4 => Command::SetByte,
+            5 => Command::ReadUnformatted,
+            6 => Command::Format,
+            _ => Command::Initialize,
         }
     }
 }
@@ -475,17 +499,17 @@ impl Hdsk {
         // does — the errata measures microseconds and says not to spin on it.
         self.ack = true;
         self.status = 0;
-        // The board has now done something, so the power-on error byte is no
-        // longer what a status read should find — but only if it *recognised*
-        // the command. Table 3-C, the manual's own 4PIO initialisation
-        // sequence, includes `OUT 163,255`, which arrives here as a command word
-        // with nibble `F` and is decoded as unknown. Clearing the flag on that
-        // would hand a guest a zero error byte where the real board still reads
-        // all-ones, because a PIA direction write is not a controller command
-        // and the 8X300 has not run one.
-        if Command::of(word) != Command::Unknown {
-            self.fresh = false;
-        }
+        // The board has now run a command, so the power-on error byte is no
+        // longer what a status read should find.
+        //
+        // This briefly had an exception for "unrecognised" commands, to keep the
+        // errata's all-ones answer alive through the 4PIO initialisation in
+        // Table 3-C — which includes `OUT 163,255`. The firmware says there is no
+        // such thing as unrecognised: `FF00` is group 7, the controller reset. So
+        // that sequence really does reset the board, the reset really does write
+        // the error byte, and the exception was protecting a behaviour the
+        // hardware does not have.
+        self.fresh = false;
         let unit = ((word >> 10) & 0x03) as u8;
         self.selected = unit;
         if std::env::var_os("CPM_HDSK_TRACE").is_some() {
@@ -689,6 +713,15 @@ impl Hdsk {
                 // the strided fill — the controller does its own address
                 // arithmetic, as every other command here does, and the machine
                 // only copies bytes.
+                //
+                // The heads finish at cylinder 0. The firmware's format entry
+                // opens with the pair of writes its annotator marked "seek track
+                // 0" and "cyl restore" before it formats anything, which makes
+                // sense of a command that then works its way outward across the
+                // whole surface.
+                if let Some(u) = self.units.get_mut(unit as usize) {
+                    u.cylinder = 0;
+                }
                 self.ready = true;
                 HostRequest::Fill {
                     drive: unit,
@@ -704,20 +737,23 @@ impl Hdsk {
                 // errata's error table exempts from needing a ready drive, so
                 // it must not report one missing: an empty machine being
                 // initialised is not a fault.
+                //
+                // **It also brings the heads home.** The firmware's group-7 entry
+                // jumps to 0000, and the first thing the code there does is the
+                // sequence its annotator labelled "CYL. RESTORE" — which is why
+                // the same annotation calls this entry "reset controller (used for
+                // HOME)". A driver that resets the board and then reads without
+                // seeking is entitled to be at cylinder 0.
+                for u in self.units.iter_mut() {
+                    if u.present {
+                        u.cylinder = 0;
+                    }
+                }
                 self.transfer = None;
                 self.status_byte = None;
                 self.iv_pending = None;
                 self.read_ready = false;
                 self.write_ready = false;
-                self.ready = true;
-                HostRequest::None
-            }
-            Command::Unknown => {
-                // Completed rather than left hanging, and with the error byte
-                // clear, because the errata's table has no illegal-command bit
-                // to report — there is nothing truthful to say in it. The
-                // command is logged under `CPM_HDSK_TRACE` above, which is
-                // where an unrecognised one becomes visible.
                 self.ready = true;
                 HostRequest::None
             }
@@ -1330,36 +1366,6 @@ mod tests {
         assert_eq!(fresh.port_in(port::STATUS).0, 0xFF);
     }
 
-    /// The manual's own 4PIO initialisation must not consume the power-on error
-    /// byte.
-    ///
-    /// Table 3-C tells a driver to set the port directions with, among others,
-    /// `OUT 163,255` — which arrives at the command port and decodes as nibble
-    /// `F`, an unrecognised command. Treating that as "the board has done
-    /// something" handed the guest a zero error byte where the real board still
-    /// reads all-ones: the 8X300 has not run a command, and a PIA direction
-    /// write is not one. Errata ME03's all-ones is the signature a driver may use
-    /// to decide a controller is there at all.
-    #[test]
-    fn test_the_documented_4pio_init_does_not_consume_the_power_on_byte() {
-        let mut h = board();
-        // The parts of Table 3-C that reach this controller at all: the command
-        // port and the data port. (The rest address the PIA control registers,
-        // which are not ours to model.)
-        h.port_out(port::DATA_OUT, 255);
-        h.port_out(port::COMMAND, 255);
-        assert_eq!(
-            h.port_in(port::STATUS).0,
-            0xFF,
-            "after the documented init, the error byte still reads all-ones"
-        );
-
-        // A *recognised* command does consume it, which is the other half.
-        let mut h = board();
-        command(&mut h, 0); // seek unit 0 to cylinder 0
-        assert_eq!(h.port_in(port::STATUS).0, 0x00, "a real command reports its own result");
-    }
-
     /// Read Unformatted Sector reads like Read Sector, and doubles as the
     /// write-protect probe.
     ///
@@ -1367,10 +1373,11 @@ mod tests {
     /// here, so its `SB` command returned nothing and — worse — its `DUMYRD`
     /// write-protect check saw a clear error byte and concluded a read-only disk
     /// was writable. Its own comment on that routine is the specification: "0 if
-    /// not write protected, a=80h if write protected".
+    /// not write protected, a=80h if write protected". The firmware confirms the
+    /// shape: group 5 sets a mode register and jumps straight into the sector
+    /// routine at 0043.
     #[test]
     fn test_read_unformatted_sector_reads_and_probes_write_protection() {
-        // Writable: it reads, and says nothing about protection.
         let mut h = board();
         let _ = h.port_in(port::STATUS);
         let req = command(&mut h, 0xA000 | 5);
@@ -1381,7 +1388,6 @@ mod tests {
         );
         assert_eq!(h.port_in(port::STATUS).0 & error::WRITE_PROTECT, 0);
 
-        // Read-only: it still reads, and reports the line.
         let mut h = Hdsk::new();
         h.insert(0, IMAGE_LEN, true).unwrap();
         let _ = h.port_in(port::STATUS);
@@ -1407,7 +1413,8 @@ mod tests {
     /// Reconstructed here exactly as `GETCYL` does it: read IV 18, complement,
     /// keep bit 0 as cylinder bit 8; read IV 19, complement, low byte. With these
     /// inert, ADEXER reported cylinder 511 after a seek to 3 — a stored zero,
-    /// inverted, is all ones.
+    /// inverted, is all ones. The firmware inverts the cylinder on its way out to
+    /// the positioner too, at 002F/0031, annotated "INVERT CYL. ADDRESS".
     #[test]
     fn test_read_status_reports_the_head_position_the_way_getcyl_reads_it() {
         let mut h = board();
@@ -1456,12 +1463,123 @@ mod tests {
         // Set the start/stop bit, which the rewrite must preserve.
         write_iv(&mut h, iv::DISK_CONTROL_A as u8, 0xFF);
 
-        // A status read against unit 2.
         let _ = read_iv_on_unit(&mut h, iv::DISK_CONTROL_A as u8, 2);
         let v = read_iv_on_unit(&mut h, iv::DISK_CONTROL_A as u8, 2);
         assert_eq!(v & iv::START_STOP, iv::START_STOP, "start/stop is unchanged");
         assert_eq!(v & 0x70, iv::PLATTER_AND_SIDE, "extension low, platter and side high");
         assert_eq!(v & 0x0F, 1 << 2, "unit 2 selects the third drive line, one-hot");
+    }
+
+    /// The command index is **three bits**, and its table is exhaustive.
+    ///
+    /// Taken from the firmware, which does `MOVE LB.IV RR 5 L 3 --> AUX` and then
+    /// `XEC AUX + 0025` into eight `JMP`s. Two things follow that a four-bit
+    /// decode got wrong: bit 12 is a **don't care** outside the two transfer
+    /// groups, and **nothing is unrecognised** — every word is some command.
+    #[test]
+    fn test_the_command_index_is_three_bits_and_bit_twelve_is_spare() {
+        for (high, want, why) in [
+            (0x00u8, Command::Seek, "CSEEK"),
+            (0x10, Command::Seek, "group 0 with bit 12 spare"),
+            (0x60, Command::ReadStatus, "CRSTAT"),
+            (0x70, Command::ReadStatus, "group 3 with bit 12 spare"),
+            (0x80, Command::SetByte, "CSETIV"),
+            (0x90, Command::SetByte, "group 4 with bit 12 spare"),
+            (0xA0, Command::ReadUnformatted, "CRUSEC"),
+            (0xB0, Command::ReadUnformatted, "group 5 with bit 12 spare"),
+            (0xC0, Command::Format, "CFORMT"),
+            (0xD0, Command::Format, "group 6 with bit 12 spare"),
+            (0xE0, Command::Initialize, "CINIT"),
+            (0xF0, Command::Initialize, "group 7 with bit 12 spare"),
+        ] {
+            let word = u16::from(high) << 8;
+            assert_eq!(Command::of(word), want, "{why} ({word:#06x})");
+        }
+    }
+
+    /// The direction is **bit 12**, and bit 13 cannot be it.
+    ///
+    /// The manual says Write Sector differs from Read Sector in bit 13. The
+    /// firmware's three-bit group index *contains* bit 13, and it is 1 for both
+    /// sector commands — so the claim is impossible on its own terms. The
+    /// firmware tests bit 12, in the buffer routine its annotator marked
+    /// "Read/WRITE?".
+    #[test]
+    fn test_the_direction_bit_is_twelve_and_bit_thirteen_selects_the_group() {
+        // Both sector commands sit in group 1, so bit 13 is set in both.
+        assert_eq!((0x2000u16 >> 13) & 7, 1, "write sector is group 1");
+        assert_eq!((0x3000u16 >> 13) & 7, 1, "read sector is group 1");
+        assert_ne!(0x2000u16 & 0x2000, 0, "and bit 13 is set in the write");
+        assert_ne!(0x3000u16 & 0x2000, 0, "and in the read");
+
+        // Only bit 12 tells them apart — for sectors and for buffers alike.
+        for (write, read) in [(0x2000u16, 0x3000u16), (0x4000, 0x5000)] {
+            assert_eq!(write ^ read, 0x1000, "the pair differs in bit 12 alone");
+            assert!(matches!(
+                (Command::of(write), Command::of(read)),
+                (Command::WriteSector, Command::ReadSector)
+                    | (Command::WriteBuffer, Command::ReadBuffer)
+            ));
+        }
+    }
+
+    /// The manual's own 4PIO initialisation issues a controller reset.
+    ///
+    /// Table 3-C tells a driver to set the port directions with, among others,
+    /// `OUT 163,255` — and `FF00` is group 7, which the firmware's table sends to
+    /// the reset entry at 0000. So the documented init really does reset the
+    /// board. This test exists because the opposite was briefly implemented here:
+    /// `FF00` was treated as unrecognised in order to keep errata ME03's
+    /// power-on all-ones alive through the init, which was protecting a behaviour
+    /// the hardware does not have.
+    #[test]
+    fn test_the_documented_4pio_init_resets_the_controller() {
+        let mut h = board();
+        // Put the heads somewhere and start a transfer, so the reset is visible.
+        command(&mut h, 100);
+        command(&mut h, 0x4000);
+        assert!(h.port_in(port::WRITE_READY).0 & 0x80 != 0, "a transfer is open");
+
+        // The init sequence's command-port write.
+        h.port_out(port::DATA_OUT, 255);
+        h.port_out(port::COMMAND, 255);
+
+        assert_eq!(h.units[0].cylinder, 0, "a reset brings the heads home");
+        assert_eq!(h.port_in(port::WRITE_READY).0 & 0x80, 0, "and abandons the transfer");
+        assert!(ready(&mut h));
+    }
+
+    /// Initialize brings the heads home — the firmware's group-7 entry jumps to
+    /// 0000, whose opening sequence its annotator labelled "CYL. RESTORE", and
+    /// the same note calls the entry "reset controller (used for HOME)".
+    #[test]
+    fn test_initialize_brings_the_heads_home() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, false).unwrap();
+        h.insert(1, IMAGE_LEN, false).unwrap();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 100);
+        command(&mut h, (1 << 10) | 42);
+        assert_eq!((h.units[0].cylinder, h.units[1].cylinder), (100, 42));
+
+        command(&mut h, 0xE000);
+        assert_eq!(
+            (h.units[0].cylinder, h.units[1].cylinder),
+            (0, 0),
+            "a controller reset restores every drive it has"
+        );
+    }
+
+    /// And a format leaves them there too: the firmware's format entry opens with
+    /// the writes marked "seek track 0" and "cyl restore" before it formats.
+    #[test]
+    fn test_a_format_leaves_the_heads_at_cylinder_zero() {
+        let mut h = board();
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 200);
+        assert_eq!(h.units[0].cylinder, 200);
+        command(&mut h, 0xC000);
+        assert_eq!(h.units[0].cylinder, 0, "a format starts by homing the heads");
     }
 
     /// Images in circulation carry a few bytes past the last sector. Demanding

@@ -1793,8 +1793,9 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                 </p>
                 <div class="callout callout-info">
                     <p>
-                        <strong>Why this is still not filed as &ldquo;the manual
-                        is wrong&rdquo;.</strong> Two witnesses agreeing is a much
+                        <strong>Written before the firmware was found; see
+                        &ldquo;The firmware settles the write bit&rdquo; below for
+                        the answer.</strong> Two witnesses agreeing is a much
                         stronger position than one, but they are witnesses to the
                         same thing: what MITS-lineage <em>software</em> sends. The
                         errata for this very section already corrects several other
@@ -1804,9 +1805,9 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         &mdash; in which case the manual is right about the pin and
                         wrong only about the numbering. The honest statement is
                         that the hardware's own software does this, so we do too.
-                        What would settle it is a schematic or a second,
-                        unrelated driver &mdash; and anyone holding one should
-                        compare.
+                        What would settle it is a schematic or the controller's own
+                        firmware &mdash; and both turned up; the firmware decided
+                        it, and the schematic explains why it could not have.
                     </p>
                 </div>
 
@@ -2271,6 +2272,112 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         schematic or the 8X300 firmware, both of which deramp holds.
                     </p>
                 </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The firmware settles the write bit</h3>
+                <p>
+                    deramp holds the Datakeeper's own <strong>8X300 firmware</strong>
+                    — 512 words of it as hex, and an 11-page disassembly carrying
+                    the original engineer's handwritten annotations. That is the end
+                    of the argument, because the Datakeeper has <em>no hardware
+                    command decoder</em>: the 8X300 reads the command word off the
+                    IV bus and dispatches it in software. The firmware is the
+                    decoder, so the firmware is the authority.
+                </p>
+                <p>
+                    It takes <strong>three</strong> bits and indexes a jump table:
+                </p>
+                <pre><code>0019: MOVE LB.IV RR 5 L 3 --> AUX   ; command bits 15:13
+0024: XEC  AUX + 0025               ; execute one of eight JMPs
+0025: JMP 002D   seek
+0026: JMP 0042   write sector / read sector      &lt;- ONE entry
+0027: JMP 004D   write buffer / read buffer      &lt;- ONE entry
+0028: JMP 0072   read status
+0029: JMP 007E   set byte
+002A: JMP 0088   (read unformatted sector)
+002B: JMP 0091   (format)
+002C: JMP 0000   reset controller (used for HOME)</code></pre>
+                <p>
+                    <strong>&sect;3-4 cannot be right as written.</strong> It says
+                    Write Sector is Read Sector &ldquo;except that bit 13 must be
+                    zero rather than one&rdquo; — but bit 13 is part of that
+                    three-bit index, and it is <em>1 for both</em> sector commands,
+                    which is precisely why they share one table entry. A bit the
+                    dispatcher has already consumed cannot also be the direction.
+                </p>
+                <p>
+                    The real direction bit is named in the firmware, in the buffer
+                    routine, and the annotator wrote &ldquo;Read/WRITE?&rdquo;
+                    beside it:
+                </p>
+                <pre><code>0053: AND  AUX AND R01 RR 4 --> R01     ; R01 holds command bits 12:8,
+0055: NZT  R01,0064                    ; so bit 4 of it is bit 12
+0056: ...  write                       ; falls through when bit 12 = 0
+0064: ...  read buffer                 ; jumps here when bit 12 = 1</code></pre>
+                <p>
+                    So <strong>bit 12 is the direction, for sectors and buffers
+                    alike</strong>, which is exactly the &ldquo;more coherent
+                    reading&rdquo; this project adopted from observation long before
+                    the firmware turned up. Four witnesses now agree — the MITS CP/M
+                    BIOS, the disks' <code>CWRSEC equ 020h</code>, ADEXER's traced
+                    <code>2003</code>, and the controller's own code — and only the
+                    last of them is a <em>mechanism</em> rather than another
+                    observation of software.
+                </p>
+                <div class="callout callout-info">
+                    <p>
+                        <strong>So is the manual wrong?</strong> About <em>which
+                        bit</em>, yes, and now we can say why rather than only that
+                        it disagrees with everything else: bit 13 is a group
+                        selector. That is a narrow, mechanical correction to one
+                        sentence in &sect;3-4, of the same kind its own errata
+                        sheets make elsewhere. It is worth keeping the distinction
+                        in view, though — every other statement in that section
+                        held up under audit, and the sentence is wrong in the way a
+                        transposed digit is wrong, not in the way a misunderstood
+                        design is.
+                    </p>
+                </div>
+                <p>
+                    Two more corrections came out of the same eleven pages, both
+                    verified afterwards by running ADEXER:
+                </p>
+                <ul>
+                    <li><strong>There is no unrecognised command.</strong> Three
+                        bits index eight entries exhaustively, so every 16-bit word
+                        is <em>some</em> command, and bit 12 is a plain don't-care
+                        outside the two transfer groups. This had been decoding four
+                        bits against a list of ten exact values — stricter than the
+                        board, which would take <code>70xx</code> as a Read Status
+                        where we took it as nothing.
+                        <br>
+                        It also retired a &ldquo;fix&rdquo; made a few hours
+                        earlier. The manual's 4PIO initialisation includes
+                        <code>OUT 163,255</code>, and that had been special-cased as
+                        an unrecognised command so it would not consume errata
+                        ME03's power-on all-ones. <code>FF00</code> is group 7: the
+                        documented init really does reset the controller, and the
+                        special case was protecting a behaviour the hardware does
+                        not have.</li>
+                    <li><strong>Initialize and Format both bring the heads
+                        home.</strong> Group 7 jumps to 0000, whose opening
+                        sequence is annotated &ldquo;CYL. RESTORE&rdquo; — which is
+                        why the same hand labelled that entry &ldquo;reset
+                        controller (used for HOME)&rdquo;. The format entry at 0091
+                        opens with the same pair of writes, marked &ldquo;seek track
+                        0&rdquo; and &ldquo;cyl restore&rdquo;. Neither did anything
+                        to the head position here. ADEXER now confirms both:
+                        <code>SK 100</code> then <code>IC</code> reports cylinder 0,
+                        and so does a format.</li>
+                </ul>
+                <p class="dim-text">
+                    The schematics (Figure 4-9, two sheets for the processor card
+                    alone) corroborate rather than decide, for the reason above —
+                    but one note on sheet 1 is worth having in plain sight:
+                    <strong>&ldquo;IV0-IV7 BUS LINES ACTIVE LOW&rdquo;</strong>.
+                    That is the electrical reason the errata has to warn that IV
+                    bytes 17-19 invert their data and that the user bits arrive
+                    reversed, and it is why writing 255 selects cylinder 0.
+                </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Traps the errata flag</h3>
                 <ul>
