@@ -2085,6 +2085,93 @@ mod tests {
         );
     }
 
+    /// A guest writes another disk's **system tracks**, and the result boots.
+    ///
+    /// This is the last write path on the floppy that nothing else reached. The
+    /// two framing regions keep their sector checksums differently — tracks 0-5
+    /// put the sum of the 128 data bytes at byte 132, tracks 6-76 put the sum of
+    /// the data *plus* header bytes 2, 3, 5 and 6 at byte 4 — and every other
+    /// test writes files, which live in the second region. `SYSGEN` writes the
+    /// first.
+    ///
+    /// The oracle is as strong as this project gets: the guest writes the system
+    /// with its own utility through our controller, and then that image is booted
+    /// and has to sign on. A wrong checksum, a wrong offset, or a sector
+    /// committed to the wrong track all fail it, and each of those has happened
+    /// here at least once.
+    ///
+    /// Ignored:
+    ///   `CPM_TOOL_IMAGE=...DISK01.DSK`   boots, carries SYSGEN
+    ///   `CPM_DATA_IMAGE=...DISK05.DSK`   a different CP/M, whose system is replaced
+    #[test]
+    #[ignore]
+    fn test_a_system_track_written_by_a_guest_still_boots() {
+        let (Ok(tool), Ok(data)) = (
+            std::env::var("CPM_TOOL_IMAGE"),
+            std::env::var("CPM_DATA_IMAGE"),
+        ) else {
+            eprintln!("set CPM_TOOL_IMAGE (has SYSGEN) and CPM_DATA_IMAGE to run this");
+            return;
+        };
+
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&tool).unwrap(), true).expect("an 88-DCDD tool image");
+        m.insert(1, std::fs::read(&data).unwrap(), false).expect("an 88-DCDD data image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        assert!(banner.contains("CP/M"), "no sign-on: {banner:?}");
+
+        // SYSGEN reads the system off A: and writes it to B:, one prompt at a
+        // time. Its own words are checked, because "Function complete" is the
+        // only thing that distinguishes a write from a polite refusal.
+        let out = type_at(&mut m, &mut cpu, b"SYSGEN\r", 200_000_000);
+        assert!(out.contains("Source drive"), "SYSGEN did not start: {out:?}");
+        let out = type_at(&mut m, &mut cpu, b"A", 200_000_000);
+        assert!(out.contains("Source on A"), "{out:?}");
+        let read = type_at(&mut m, &mut cpu, b"\r", 400_000_000);
+        assert!(read.contains("Function complete"), "the read failed: {read:?}");
+        let out = type_at(&mut m, &mut cpu, b"B", 200_000_000);
+        assert!(out.contains("Destination on B"), "{out:?}");
+        let wrote = type_at(&mut m, &mut cpu, b"\r", 400_000_000);
+        assert!(wrote.contains("Function complete"), "the write failed: {wrote:?}");
+
+        let written = m
+            .take_dirty()
+            .into_iter()
+            .find(|(unit, _)| *unit == 1)
+            .expect("unit 1 was written")
+            .1;
+
+        // The checksums of the region that was just written, checked here rather
+        // than trusted: this is the formula for tracks 0-5, and it is not the one
+        // the rest of the disk uses.
+        for track in 0..6u8 {
+            for sector in 0..32u8 {
+                let off = Geometry::EIGHT_INCH.offset(track, sector) as usize;
+                let s = &written[off..off + SECTOR_LEN];
+                let sum = s[3..131].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+                assert_eq!(s[132], sum, "track {track} sector {sector} checksum");
+            }
+        }
+
+        // And the acceptance test: the disk the guest wrote must boot on its own.
+        let mut m2 = BootMachine::new();
+        m2.insert(0, written, true).expect("still an 88-DCDD image");
+        let mut cpu2 = BootMachine::new_cpu();
+        m2.boot(&mut cpu2, 0).expect("the guest-written system boots");
+        let banner2 = printable(&run_until_quiet(&mut m2, &mut cpu2, 60_000_000));
+        println!("--- sign-on from the guest-written system ---\n{banner2}");
+        assert!(banner2.contains("CP/M"), "no sign-on after SYSGEN: {banner2:?}");
+
+        // Its own files must still be there — SYSGEN writes the system tracks and
+        // nothing else, so a directory that came back empty would mean we had
+        // written over the data region.
+        let dir = type_at(&mut m2, &mut cpu2, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "the data tracks did not survive: {dir:?}");
+    }
+
     /// Boot every image in a folder and print what each one says.
     ///
     /// The survey behind the single-disk test: one run tells you which
