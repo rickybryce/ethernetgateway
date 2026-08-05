@@ -90,10 +90,16 @@ pub fn creatable_formats() -> Vec<(&'static str, &'static str)> {
 /// Create a new blank, formatted image in the images folder.
 ///
 /// The filename is built rather than taken: `<token>_<name>.dsk`, so a created
-/// image always carries the format prefix that makes it mountable read-write.
-/// Letting the caller supply the whole filename would make it possible to
-/// create `mydisk.dsk`, which then mounts read-only by the sniffing rule and
-/// looks like a bug.
+/// image always says outright what format it is.
+///
+/// That mattered more when a name without a prefix meant a read-only mount; a
+/// blank we made ourselves would have come back unwritable, which looks like a
+/// bug. It now mounts read-write either way — a freshly formatted directory is
+/// consistent, which is exactly what
+/// [`identify::directory_is_consistent`] checks — so the prefix is no longer
+/// load-bearing here. It is kept because a disk whose name states its format is
+/// a kindness to whoever finds it later, and because building the name is what
+/// stops a caller inventing one that collides.
 ///
 /// Refuses to overwrite. Creating a disk is the one operation here that has an
 /// obvious destructive spelling — "make me a fresh disk called BACKUP" — and

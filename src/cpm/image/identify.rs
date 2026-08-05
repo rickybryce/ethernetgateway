@@ -201,6 +201,25 @@ pub fn looks_like_directory(record: &[u8; 128]) -> bool {
     live > 0
 }
 
+/// Is every entry in this directory erased — a freshly *formatted* disk?
+///
+/// **Only `E5` counts here**, and that is the point. Elsewhere an all-zero entry
+/// is treated as free too, because populated directories do contain them, but a
+/// directory that is zero from end to end is not evidence of a formatted disk —
+/// it is evidence of a file nobody has written to. `E5` is what a format writes,
+/// deliberately, and it is the only thing that says "this disk was formatted and
+/// is empty" rather than "these bytes have never meant anything".
+///
+/// The distinction earns its keep: it admits our own `blank_image()` output while
+/// still refusing a 256,256-byte file of zeros, which could be anything.
+///
+/// Deliberately demands the *whole* directory. One erased record proves nothing —
+/// a file of padding has plenty — but a directory erased from end to end at
+/// exactly the offsets this format computes is a blank disk of this format.
+pub fn is_erased_directory(dir: &[u8]) -> bool {
+    !dir.is_empty() && dir.iter().all(|&b| b == 0xE5)
+}
+
 /// Does the whole directory hold together as a CP/M filesystem of this format?
 ///
 /// This is what lets an unlabelled image be *written* to, and it is a different
@@ -305,10 +324,17 @@ where
     F: FnMut(&Format) -> Option<Vec<u8>>,
 {
     // --- named ----------------------------------------------------------
-    if let Some(token) = token_of(filename) {
-        let Some(format) = by_token(token) else {
-            return Err(Unknown::NoSuchFormat(token.to_string()));
-        };
+    //
+    // Only an *understood* token takes this path. An unrecognised one falls
+    // through to inspection rather than refusing the disk, and that is a
+    // deliberate change: `token_of` calls anything before the first underscore a
+    // token, so `TDISK03_comal.dsk` or `my_backup.dsk` — perfectly ordinary
+    // names — used to be rejected outright with "no format called 'TDISK03'".
+    // Outright rejection is worse than read-only: the disk cannot be used at
+    // all, and the user did nothing wrong. If inspection also fails we report
+    // the token confusion, because by then it is the likelier explanation.
+    let named = token_of(filename).map(|t| (t, by_token(t)));
+    if let Some((_, Some(format))) = named {
         let need = format.min_bytes();
         if size < need {
             return Err(Unknown::WrongSize {
@@ -328,8 +354,14 @@ where
         .iter()
         .filter(|f| f.exact_size == Some(size))
         .collect();
+    // An unrecognised token becomes the explanation only when inspection has
+    // nothing better to offer.
+    let unknown_token = || match named {
+        Some((t, None)) => Some(Unknown::NoSuchFormat(t.to_string())),
+        _ => None,
+    };
     if by_size.is_empty() {
-        return Err(Unknown::NoMatchingFormat { size });
+        return Err(unknown_token().unwrap_or(Unknown::NoMatchingFormat { size }));
     }
     let names: Vec<&'static str> = by_size.iter().map(|f| f.token).collect();
 
@@ -345,14 +377,24 @@ where
         }
         let mut first = [0u8; 128];
         first.copy_from_slice(&dir[..128]);
-        if !looks_like_directory(&first) {
+        // A directory with nothing live in it is *also* a CP/M directory — it is
+        // a freshly formatted disk, and refusing one as "not a CP/M disk" is
+        // wrong. `looks_like_directory` cannot say so on its own, because a
+        // single erased record is equally consistent with a file full of padding;
+        // requiring the *whole* directory to be erased is what makes it evidence.
+        //
+        // Found by testing our own `blank_image()` against our own identifier:
+        // a blank we created could not be mounted unless its filename carried a
+        // prefix, which `create_blank_image` happens to always add. Rename it and
+        // it became unusable.
+        if !looks_like_directory(&first) && !is_erased_directory(&dir) {
             continue;
         }
         matching.push((f, directory_is_consistent(&dir, f)));
     }
 
     match matching.len() {
-        0 => Err(Unknown::NoDirectory { candidates: names }),
+        0 => Err(unknown_token().unwrap_or(Unknown::NoDirectory { candidates: names })),
         1 => {
             let (format, consistent) = matching[0];
             Ok(Identified {
@@ -575,6 +617,145 @@ mod tests {
             }
         }
         assert!(writable > 0, "no image in {dir} was identified well enough to write to");
+    }
+
+    /// **A disk with more than 255 blocks uses 16-bit allocation entries, and
+    /// the halves must not be swapped.**
+    ///
+    /// `altairhd` is such a disk — 1215 blocks — and getting the endianness
+    /// wrong would not merely fail the check: it would pass for small block
+    /// numbers (whose high byte is zero) and quietly mis-read large ones, which
+    /// is the shape of fault that corrupts a hard disk rather than refusing it.
+    /// Asserted deliberately rather than left to the all-formats test above,
+    /// where the wide path was only being exercised by accident.
+    #[test]
+    fn test_wide_allocation_entries_are_little_endian() {
+        let fmt = by_token("altairhd").unwrap();
+        let blocks = fmt.data_records() / (fmt.blocksize / 128).max(1);
+        assert!(blocks > 255, "altairhd must be a 16-bit-allocation disk to test this");
+
+        // Block 0x0102 = 258, written low byte first. Read big-endian it would
+        // be 0x0201 = 513 — also in range, so only the *value* distinguishes
+        // them, which is why this is checked at all.
+        let mut dir = vec![0xE5u8; fmt.maxdir as usize * 32];
+        let e = &mut dir[..32];
+        e[0] = 0;
+        e[1..12].copy_from_slice(b"BIG     DAT");
+        e[12] = 0;
+        e[15] = 1; // one record: needs one block
+        e[16..32].fill(0);
+        e[16] = 0x02;
+        e[17] = 0x01;
+        assert_eq!(directory_is_consistent(&dir, fmt), Ok(()), "258 is a legal block");
+
+        // Now a block number that is only out of range when read correctly:
+        // 0xFFFF little-endian is 65535, far past 1215. Read as two 8-bit
+        // entries it would be 255 and 255 — the second a duplicate, so that
+        // reading would also fail, but for the wrong reason. Use a value whose
+        // low byte alone is legal to make the distinction sharp.
+        let mut dir2 = vec![0xE5u8; fmt.maxdir as usize * 32];
+        let e = &mut dir2[..32];
+        e[0] = 0;
+        e[1..12].copy_from_slice(b"BAD     DAT");
+        e[12] = 0;
+        e[15] = 1;
+        e[16..32].fill(0);
+        e[16] = 0x10; // 16 on its own: perfectly legal as an 8-bit block
+        e[17] = 0x40; // makes it 0x4010 = 16400, far off the end
+        assert_eq!(
+            directory_is_consistent(&dir2, fmt),
+            Err("an allocation block off the end of the disk"),
+            "the high byte must be read, not ignored"
+        );
+    }
+
+    /// **An ordinary filename with an underscore must not disqualify a disk.**
+    ///
+    /// Found by this file's own test suite tripping over it: `token_of` calls
+    /// anything before the first underscore a format token, so `my_backup.dsk`
+    /// and `TDISK03_comal.dsk` were rejected outright — "no format called
+    /// 'TDISK03'" — and the disk could not be used at all. That is a worse
+    /// outcome than read-only for a user who did nothing wrong, and it is exactly
+    /// the case that matters: people drop files in the folder under whatever name
+    /// they already have.
+    #[test]
+    fn test_an_unrecognised_prefix_falls_through_to_inspection() {
+        let fmt = by_token("ibm3740").unwrap();
+        for name in ["TDISK03_comal.dsk", "my_backup.dsk", "cpm22_2.dsk"] {
+            let id = identify(name, fmt.min_bytes(), |f| {
+                (f.token == "ibm3740").then(|| consistent_dir(f))
+            })
+            .unwrap_or_else(|e| panic!("{name} must not be refused for its name: {e}"));
+            assert_eq!(id.format.token, "ibm3740", "{name}");
+            assert_eq!(id.confidence, Confidence::Verified, "{name}");
+        }
+    }
+
+    /// But when inspection has nothing to offer either, an unrecognised prefix is
+    /// still the most useful thing to say — the user probably did mean a token.
+    #[test]
+    fn test_an_unrecognised_prefix_is_still_reported_when_inspection_fails() {
+        let err = identify("nosuch_disk.dsk", 256_256, |_| None).unwrap_err();
+        assert_eq!(err, Unknown::NoSuchFormat("nosuch".to_string()));
+        // And a size nothing matches reports the token rather than the size,
+        // for the same reason.
+        let err = identify("nosuch_disk.dsk", 12_345, |_| None).unwrap_err();
+        assert_eq!(err, Unknown::NoSuchFormat("nosuch".to_string()));
+    }
+
+    /// **A blank we make ourselves must verify, unnamed.**
+    ///
+    /// Driven from the real `blank_image()` bytes rather than a hand-built
+    /// directory, because the claim being checked is about the two features
+    /// agreeing: whatever "format a new disk" writes has to be something
+    /// "identify an unnamed disk" then trusts. A hand-built directory would only
+    /// prove the checker consistent with my idea of a blank.
+    #[test]
+    fn test_a_blank_we_created_verifies_without_a_prefix() {
+        for f in FORMATS {
+            let Some(bytes) = f.blank_image() else { continue };
+            let size = bytes.len() as u64;
+            let id = identify("blank.dsk", size, |fmt| {
+                let mut dir = Vec::new();
+                for rec in 0..fmt.dir_records() {
+                    let off = fmt.data_record_offset(rec)? as usize;
+                    dir.extend_from_slice(bytes.get(off..off + 128)?);
+                }
+                (!dir.is_empty()).then_some(dir)
+            });
+            match id {
+                Ok(id) => {
+                    assert_eq!(id.format.token, f.token, "{}", f.token);
+                    assert_eq!(
+                        id.confidence,
+                        Confidence::Verified,
+                        "{}: a blank we formatted must be trusted",
+                        f.token
+                    );
+                    assert!(!id.force_read_only(), "{}: and writable", f.token);
+                }
+                // An entirely erased directory has no live entry, so the coarse
+                // gate can legitimately refuse it — in which case the two
+                // features do NOT agree and that is worth knowing explicitly
+                // rather than discovering when somebody formats a disk.
+                Err(e) => panic!("{}: a blank we created was refused: {e}", f.token),
+            }
+        }
+    }
+
+    /// `E5` means formatted-and-empty; `00` means never written. Only the first
+    /// is evidence of a blank CP/M disk, and conflating them would let any file
+    /// of zeros the right size be mounted read-write.
+    #[test]
+    fn test_only_e5_counts_as_a_formatted_blank() {
+        assert!(is_erased_directory(&[0xE5u8; 2048]));
+        assert!(!is_erased_directory(&[0x00u8; 2048]), "zeros are not a format");
+        assert!(!is_erased_directory(&[]), "nothing is not a blank disk");
+        // One live entry and the rest erased is not "erased" — it is a disk with
+        // a file on it, which takes the ordinary path.
+        let mut d = [0xE5u8; 2048];
+        d[0] = 0;
+        assert!(!is_erased_directory(&d));
     }
 
     /// A blank formatted disk must be writable. Refusing to write to an empty
