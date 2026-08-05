@@ -191,7 +191,22 @@ refused.
 
 Not all of these are the same disk, and the gateway tells them apart by
 size alone — so a truncated or badly padded file may be refused even though
-it looks fine.
+it looks fine.  Two of them are the SAME size: 256,256 bytes is a Tarbell
+1011 floppy to one controller and a z80pack 8\" disk to another, and no
+inspection can settle which, because both are raw 26-sector tracks.
+
+THE MACHINE MATTERS, AND IT IS A SEPARATE SETTING.  A booted disk brings its
+own operating system, and that system was written for a particular machine —
+so it expects its console, and its disk controller, at particular ports.
+cpm_boot_machine says which machine to be.  Most of these disks want the
+default (an Altair 88-2SIO console at 0x10/0x11); a z80pack disk wants
+cpm_boot_machine = z80pack, which also swaps the Altair disk controllers for
+z80pack's own.
+
+The symptom of getting it wrong is distinctive and worth knowing, because it
+looks like a broken disk: the disk LOADS, reads its sectors, and then goes
+completely quiet.  It is printing to hardware that is not in the machine and
+polling a keyboard that will never answer.  Nothing is wrong with the image.
 
 
 WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO

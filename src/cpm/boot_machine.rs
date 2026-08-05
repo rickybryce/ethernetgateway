@@ -874,12 +874,17 @@ impl Machine for BootMachine {
                         // feeds the CCP an endless stream of NULs. Say so instead,
                         // and let `step` make the guest wait.
                         //
-                        // A blocked read is also this machine's *idle* signal, and
-                        // it has to be: the driver paces on `idle_status_reads`,
-                        // and a guest with a blocking console never reads the
-                        // status register at all — so without this a session would
-                        // sit at a prompt burning a whole core, replaying one `IN`
-                        // millions of times a second.
+                        // Counted as an idle console read, because that is what it
+                        // is: a guest with a blocking console never touches the
+                        // status register, so without this `idle_status_reads`
+                        // would report such a guest as busy for ever.
+                        //
+                        // This is *not* what paces a live session — the driver
+                        // paces on printed output, keystrokes, modem bytes and
+                        // disk accesses, none of which a blocked guest produces,
+                        // so it naps correctly either way (asserted in
+                        // `test_a_blocked_guest_looks_idle_to_the_driver`). This
+                        // keeps the diagnostic honest, nothing more.
                         if self.console.blocking {
                             self.console_blocked = true;
                             self.idle_status_reads = self.idle_status_reads.saturating_add(1);
@@ -2920,6 +2925,51 @@ mod tests {
         let dir2 = type_at(&mut m2, &mut cpu2, b"DIR NEWFILE.TXT\r", 400_000_000);
         println!("--- DIR after reboot ---\n{dir2}");
         assert!(dir2.contains("NEWFILE"), "the file did not survive the reboot: {dir2:?}");
+    }
+
+    /// A guest blocked on a console read must look **idle** to the driver, or a
+    /// session sitting at its prompt costs a core.
+    ///
+    /// This is asserted rather than reasoned about because the reasoning was
+    /// wrong once: a comment here claimed the driver paces on
+    /// `idle_status_reads`, and it does not — it paces on printed output,
+    /// keystrokes, modem traffic and disk accesses. A blocked guest happens to
+    /// produce none of those, which is *why* it naps. That is a property worth
+    /// pinning, since it is the difference between an idle session at 0% and one
+    /// at 100%, and nothing else would catch it changing.
+    #[test]
+    fn test_a_blocked_guest_looks_idle_to_the_driver() {
+        // A tiny program that does what z80pack's CBIOS does: read the console
+        // data port and loop. On a blocking console it never gets past the read.
+        let mut img = vec![0u8; 256_256];
+        // IN A,(01h) / JP 0000
+        img[..5].copy_from_slice(&[0xDB, 0x01, 0xC3, 0x00, 0x00]);
+        let mut m = BootMachine::new();
+        m.set_machine("z80pack");
+        m.insert(0, img, true).expect("a cpmsim image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let disks_before = m.disk_accesses();
+        for _ in 0..10_000 {
+            m.step(&mut cpu);
+        }
+        // The three signals the driver actually watches must all say "nothing
+        // happened", which is what makes it nap.
+        assert!(m.take_output().is_empty(), "a blocked guest prints nothing");
+        assert_eq!(m.disk_accesses(), disks_before, "and touches no disk");
+        assert_eq!(m.modem().rx_len(), 0, "and moves no modem bytes");
+        // It is genuinely stuck on the read rather than having run away: the PC
+        // is back at the `IN` every time.
+        assert_eq!(cpu.registers().pc(), 0x0000, "the read is being replayed in place");
+        // And the diagnostic counter reflects it, which is the other half.
+        assert!(m.idle_status_reads() > 0, "a blocked read counts as an idle console read");
+
+        // Give it a key and it must move on immediately — a guard that only
+        // proved it blocks would be satisfied by a machine that never unblocks.
+        m.send_key(b'X');
+        m.step(&mut cpu);
+        assert_ne!(cpu.registers().pc(), 0x0000, "a waiting key must let the read complete");
     }
 
     /// **A z80pack `cpmsim` disk boots, takes commands, and runs its software.**

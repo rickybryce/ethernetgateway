@@ -78,14 +78,23 @@ const HARD_SECTORS: u32 = 128;
 /// What went wrong with the last transfer, in the original's own numbering.
 ///
 /// Kept as its numbers rather than an enum of our own because a guest reads them
-/// and TDISK03's BIOS tests for zero. Only the ones reachable here are used: we
-/// have no `lseek` to fail (4) and no host `read`/`write` to fail (5, 6), because
-/// the image is in memory.
+/// and TDISK03's BIOS tests for zero.
+///
+/// Our image is in memory, so there is no host `lseek`/`read`/`write` to fail —
+/// but 4, 5 and 6 are still reachable, and skipping them was a bug. The
+/// original's bounds checks are inclusive of the last track and sector (`>` not
+/// `>=`) and let sector 0 through, and it discovers both at the file operation:
+/// a negative seek reports 4, and a short read or write reports 5 or 6. Those are
+/// the answers a guest is entitled to, so `command` produces them from arithmetic
+/// instead of from a failed syscall.
 mod status {
     pub const OK: u8 = 0;
     pub const NO_DISK: u8 = 1;
     pub const BAD_TRACK: u8 = 2;
     pub const BAD_SECTOR: u8 = 3;
+    pub const SEEK_FAILED: u8 = 4;
+    pub const READ_FAILED: u8 = 5;
+    pub const WRITE_FAILED: u8 = 6;
     pub const BAD_COMMAND: u8 = 7;
 }
 
@@ -181,7 +190,28 @@ impl Z80pack {
             self.status = status::BAD_SECTOR;
             return HostRequest::None;
         }
+        // Sector **zero**, which the original's own checks let through: sectors
+        // are 1-based, so its `sector - 1` goes negative, its `lseek` fails, and
+        // it reports "seek failed". Ours would underflow a `u64` instead —
+        // a panic in a debug build, a wild offset in a release one — and a guest
+        // reaches it with nothing more exotic than `OUT (0Ch),0` before a
+        // command. Report what the original reports.
+        if self.sector == 0 {
+            self.status = status::SEEK_FAILED;
+            return HostRequest::None;
+        }
         let offset = geom.offset(self.track, self.sector);
+        // The last track and the last sector are *inclusive* in the checks above,
+        // because the original compares with `>` rather than `>=` — which means
+        // track 77 of a 77-track disk (tracks are numbered from 0) is accepted
+        // and addresses one sector past the medium. The original discovers that
+        // at its `read`/`write` and reports an I/O error; without this we would
+        // hand the guest an erased sector and call it success, or accept a write
+        // that goes nowhere. Faithful *and* bounded.
+        if offset + SECTOR_LEN as u64 > geom.image_len() {
+            self.status = if cmd == 1 { status::WRITE_FAILED } else { status::READ_FAILED };
+            return HostRequest::None;
+        }
         match cmd {
             0 => {
                 self.status = status::OK;
@@ -452,15 +482,24 @@ mod tests {
         assert_eq!(c.port_out(0x0D, 0), HostRequest::None);
         assert_eq!(c.port_in(0x0E).0, status::NO_DISK);
 
-        // Past the last track. 77 is accepted (the original compares with `>`),
-        // so 78 is the first refusal.
+        // Past the last track, in two stages that must stay distinguishable.
+        // The original's track check compares with `>`, so track 77 of a
+        // 77-track disk passes it — and is then caught addressing one sector
+        // past the medium, which the original reports as an I/O error rather
+        // than a bad track. Track 78 is the first the track check itself
+        // refuses.
         c.port_out(0x0A, 0);
         c.port_out(0x0B, 77);
         c.port_out(0x0C, 1);
-        assert!(matches!(c.port_out(0x0D, 0), HostRequest::Dma { .. }), "track 77 is allowed");
+        assert_eq!(c.port_out(0x0D, 0), HostRequest::None);
+        assert_eq!(
+            c.port_in(0x0E).0,
+            status::READ_FAILED,
+            "track 77 passes the track check and fails on the medium's end"
+        );
         c.port_out(0x0B, 78);
         assert_eq!(c.port_out(0x0D, 0), HostRequest::None);
-        assert_eq!(c.port_in(0x0E).0, status::BAD_TRACK);
+        assert_eq!(c.port_in(0x0E).0, status::BAD_TRACK, "and 78 is a bad track");
 
         // Past the last sector, 26 being allowed for the same reason.
         c.port_out(0x0B, 0);
@@ -474,6 +513,72 @@ mod tests {
         c.port_out(0x0C, 1);
         assert_eq!(c.port_out(0x0D, 2), HostRequest::None);
         assert_eq!(c.port_in(0x0E).0, status::BAD_COMMAND);
+    }
+
+    /// **Sector zero must not be able to reach the arithmetic.**
+    ///
+    /// Sectors are 1-based, so `sector - 1` on zero underflows — a panic in a
+    /// debug build, a wild offset in a release one. A guest reaches it with
+    /// `OUT (0Ch),0` before a command, which is nothing exotic. The original
+    /// lets its own checks pass and finds out at its `lseek`, reporting 4, so
+    /// that is what we report.
+    #[test]
+    fn test_sector_zero_is_refused_rather_than_underflowing() {
+        let mut c = with_floppy();
+        c.port_out(0x0B, 0);
+        c.port_out(0x0C, 0);
+        c.port_out(0x11, 0);
+        assert_eq!(c.port_out(0x0D, 0), HostRequest::None, "must not produce a transfer");
+        assert_eq!(c.port_in(0x0E).0, status::SEEK_FAILED);
+        // And on a write, which takes the same path.
+        assert_eq!(c.port_out(0x0D, 1), HostRequest::None);
+        assert_eq!(c.port_in(0x0E).0, status::SEEK_FAILED);
+        // Sector 1 at the same track is fine, so nothing broader was broken.
+        c.port_out(0x0C, 1);
+        assert!(matches!(c.port_out(0x0D, 0), HostRequest::Dma { offset: 0, .. }));
+    }
+
+    /// The last track is *inclusive* in the original's checks, so it addresses
+    /// one sector past the medium — and that must be an I/O error rather than a
+    /// silent success handing back an erased sector.
+    #[test]
+    fn test_a_transfer_past_the_end_of_the_medium_is_an_error() {
+        let mut c = with_floppy();
+        // Track 77 of a 77-track disk: tracks run 0..=76, so this is past it,
+        // and the track check above deliberately allows it.
+        c.port_out(0x0B, 77);
+        c.port_out(0x0C, 1);
+        assert_eq!(c.port_out(0x0D, 0), HostRequest::None);
+        assert_eq!(c.port_in(0x0E).0, status::READ_FAILED, "a read past the end");
+        assert_eq!(c.port_out(0x0D, 1), HostRequest::None);
+        assert_eq!(c.port_in(0x0E).0, status::WRITE_FAILED, "a write past the end");
+
+        // The genuinely last sector still works.
+        c.port_out(0x0B, 76);
+        c.port_out(0x0C, 26);
+        assert!(
+            matches!(c.port_out(0x0D, 0), HostRequest::Dma { offset, .. } if offset == 256_256 - 128)
+        );
+        assert_eq!(c.port_in(0x0E).0, status::OK);
+    }
+
+    /// The same, on the large medium: 255 tracks numbered 0..=254.
+    #[test]
+    fn test_the_large_medium_is_bounded_too() {
+        let mut c = Z80pack::new();
+        c.insert(0, 4_177_920, false).unwrap();
+        c.port_out(0x0B, 255);
+        c.port_out(0x0C, 1);
+        c.port_out(0x11, 0);
+        assert_eq!(c.port_out(0x0D, 0), HostRequest::None);
+        assert_eq!(c.port_in(0x0E).0, status::READ_FAILED);
+        // Its real last sector: track 254, sector 128.
+        c.port_out(0x0B, 254);
+        c.port_out(0x0C, 128);
+        assert!(matches!(
+            c.port_out(0x0D, 0),
+            HostRequest::Dma { offset, .. } if offset == 4_177_920 - 128
+        ));
     }
 
     /// The ports it claims, and — the point of the board list — the ones it
