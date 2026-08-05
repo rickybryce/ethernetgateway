@@ -2017,17 +2017,20 @@ fn render_more_popups(cfg: &Config) -> String {
             })
             .collect()
     };
-    let cpm_machine_options: String = crate::cpm::console::MACHINE_CHOICES
-        .iter()
-        .map(|c| {
-            format!(
-                "<option value=\"{}\"{}>{}</option>",
-                c.key,
-                if c.key == cfg.cpm_boot_machine { " selected" } else { "" },
-                html_escape(c.description),
-            )
-        })
-        .collect();
+    let cpm_machine_options: String = std::iter::once((
+        crate::cpm::console::AUTO_MACHINE,
+        crate::cpm::console::machine_label(crate::cpm::console::AUTO_MACHINE),
+    ))
+    .chain(crate::cpm::console::MACHINE_CHOICES.iter().map(|c| (c.key, c.description)))
+    .map(|(key, label)| {
+        format!(
+            "<option value=\"{}\"{}>{}</option>",
+            key,
+            if key == cfg.cpm_boot_machine { " selected" } else { "" },
+            html_escape(label),
+        )
+    })
+    .collect();
     let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
         .iter()
         .map(|c| {
@@ -3273,9 +3276,19 @@ mod tests {
             );
             assert!(html.contains(&html_escape(c.description)), "{} has no label", c.key);
         }
+        // `auto` is offered and is what a fresh config selects.
         assert!(
-            html.contains(&format!("value=\"{}\" selected", crate::cpm::console::DEFAULT_MACHINE)),
-            "the default machine must be the selected one on a fresh config"
+            html.contains(&format!(
+                "value=\"{}\" selected",
+                crate::cpm::console::AUTO_MACHINE
+            )),
+            "detection must be the selected option on a fresh config"
+        );
+        assert!(
+            html.contains(&html_escape(crate::cpm::console::machine_label(
+                crate::cpm::console::AUTO_MACHINE
+            ))),
+            "and be labelled"
         );
     }
 

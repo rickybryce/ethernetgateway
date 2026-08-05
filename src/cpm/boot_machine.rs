@@ -651,6 +651,17 @@ impl BootMachine {
         all_controllers().iter().flat_map(|c| c.media()).collect()
     }
 
+    /// Can the machine `key` names carry an image this size at all?
+    ///
+    /// Asked by `detect::machine_for` so that an unclear detection does not land
+    /// on a machine which would refuse the disk outright.
+    pub fn machine_accepts(key: &str, image_len: u64) -> bool {
+        super::console::resolve_machine(key)
+            .boards
+            .iter()
+            .any(|b| boards_to_controller(*b).accepts(image_len).is_some())
+    }
+
     /// Which controller answers at this port, if any.
     fn controller_for(&self, port: u8) -> Option<usize> {
         self.controllers.iter().position(|c| c.owns_port(port))
@@ -2774,10 +2785,20 @@ mod tests {
             // so it has to be able to survey a *machine* and not just a disk:
             // three of the Tarbell disks differ from the Altair only in where
             // their console is.
-            if let Ok(k) = std::env::var("CPM_BOOT_MACHINE") {
-                m.set_machine(&k);
+            // `auto` here too, so the survey shows what an operator who set
+            // nothing at all would get.
+            let configured = std::env::var("CPM_BOOT_MACHINE")
+                .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
+            let (key, _why) = crate::cpm::detect::machine_for(&configured, &bytes);
+            m.set_machine(&key);
+            // Reported rather than unwrapped: a machine that cannot carry this
+            // size is a legitimate outcome (a z80pack tool disk under the Altair
+            // boards, say), and panicking here killed the survey partway and hid
+            // every disk after it -- which read as a boot regression.
+            if let Err(e) = m.insert(0, bytes, true) {
+                println!("  skipped  {name}  ({e})");
+                continue;
             }
-            m.insert(0, bytes, true).unwrap();
             let mut cpu = BootMachine::new_cpu();
             if let Err(e) = m.boot(&mut cpu, 0) {
                 println!("  refused  {name}: {e}");

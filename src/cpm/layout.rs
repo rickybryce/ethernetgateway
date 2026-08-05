@@ -207,10 +207,12 @@ inspection can settle which, because both are raw 26-sector tracks.
 THE MACHINE MATTERS, AND IT IS A SEPARATE SETTING.  A booted disk brings its
 own operating system, and that system was written for a particular machine —
 so it expects its console, and its disk controller, at particular ports.
-cpm_boot_machine says which machine to be.  Most of these disks want the
-default (an Altair 88-2SIO console at 0x10/0x11); a z80pack disk wants
-cpm_boot_machine = z80pack, which also swaps the Altair disk controllers for
-z80pack's own.
+cpm_boot_machine says which machine to be, and it DEFAULTS TO auto: the disk
+is asked.  A boot loader has to drive its own controller's registers, so the
+image states which machine it is for, and that is read rather than guessed.
+When a disk does not say plainly the Altair default stands, and the boot
+screen tells you which of the two happened.  Setting a machine explicitly
+always overrides it.
 
 The symptom of getting it wrong is distinctive and worth knowing, because it
 looks like a broken disk: the disk LOADS, reads its sectors, and then goes

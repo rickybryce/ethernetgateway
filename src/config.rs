@@ -990,7 +990,7 @@ impl Default for Config {
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
             cpm_mounts: String::new(),
             cpm_boot_image: String::new(),
-            cpm_boot_machine: crate::cpm::console::DEFAULT_MACHINE.to_string(),
+            cpm_boot_machine: crate::cpm::console::AUTO_MACHINE.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1588,10 +1588,13 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
         cpm_mounts: map.get("cpm_mounts").cloned().unwrap_or_default(),
         cpm_boot_image: map.get("cpm_boot_image").cloned().unwrap_or_default(),
+        // Missing means `auto`: a config written before this key existed gets
+        // detection, which for every disk that booted then resolves to the
+        // machine it already used -- proved in `test_detect_every_real_image`.
         cpm_boot_machine: map
             .get("cpm_boot_machine")
             .cloned()
-            .unwrap_or_else(|| crate::cpm::console::DEFAULT_MACHINE.to_string()),
+            .unwrap_or_else(|| crate::cpm::console::AUTO_MACHINE.to_string()),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2338,18 +2341,24 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # cpm_boot_machine: which machine a BOOTED disk (above) thinks it is running on
 #   - specifically, where it finds its console.  Ignored by the CP/M emulator,
 #   which has no console to place because it services BDOS calls instead.
-#     altair_2sio       Altair 88-2SIO at 0x10/0x11 (default; every disk that
-#                       boots today boots because its console is here)
+#     auto              DEFAULT - work it out from the disk.  A boot loader has
+#                       to drive its own controller's registers, so the image
+#                       says which; when it does not say plainly the Altair
+#                       default stands, and the boot screen tells you which
+#                       happened.  Never names a machine a disk does not work on.
+#     altair_2sio       Altair 88-2SIO at 0x10/0x11 (what `auto` falls back to;
+#                       every Altair disk boots because its console is here)
 #     altair_sio        Altair 88-SIO at 0x00/0x01, active-low status
 #     console_04        console at 0x04/0x05, ready when the bit is CLEAR
 #     console_04_cuter  as above, but the guest prints by CALLing a Processor
 #                       Technology CUTER ROM, which we synthesise at 0xC019
 #   A disk that loads its operating system and then goes quiet is usually
 #   looking at a console that is not there, not misreading the disk - it will
-#   sit polling a keyboard port for ever.  This is NOT autodetected: what a
-#   guest polls cannot distinguish the machine it wants from another machine's
-#   keyboard at the same address, and guessing here is the same mistake as
-#   guessing a sector step.
+#   sit polling a keyboard port for ever.  `auto` reads a DECLARATION rather
+#   than guessing: the ports the disk's own boot code drives.  It deliberately
+#   does not try to pick a console for MITS disks, because those choose theirs
+#   from the front-panel sense switches at run time and their BIOS carries
+#   drivers for consoles they never use.
 ");
     write_kv(&mut content, "cpm_boot_machine", &cfg.cpm_boot_machine);
     content.push_str("\
@@ -4716,9 +4725,14 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(
             cfg.cpm_boot_machine,
-            crate::cpm::console::DEFAULT_MACHINE,
-            "a fresh config is the machine this path has always been"
+            crate::cpm::console::AUTO_MACHINE,
+            "a fresh config detects the machine from the disk"
         );
+        // `auto` is a policy rather than a machine, so it is not in the choice
+        // list and has to be accepted explicitly.
+        apply_config_key(&mut cfg, "cpm_boot_machine", "altair_sio");
+        apply_config_key(&mut cfg, "cpm_boot_machine", crate::cpm::console::AUTO_MACHINE);
+        assert_eq!(cfg.cpm_boot_machine, crate::cpm::console::AUTO_MACHINE);
 
         // Every machine in the shared list must be settable — iterated rather
         // than typed out, so a new one cannot be added without being accepted

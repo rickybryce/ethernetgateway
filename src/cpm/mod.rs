@@ -38,6 +38,7 @@ pub mod boot_machine;
 pub mod console;
 pub mod controller;
 pub mod dcdd;
+pub mod detect;
 pub mod image;
 pub mod layout;
 mod machine;

@@ -948,7 +948,8 @@ altairhd_cobol.dsk</code></pre>
                 <table class="data-table">
                     <thead><tr><th>Value</th><th>Console</th><th>Notes</th></tr></thead>
                     <tbody>
-                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code></td><td>The default. Every disk that boots today boots because of it.</td></tr>
+                        <tr><td><code>auto</code></td><td>&mdash;</td><td><strong>The default.</strong> Read from the disk's own boot code, falling back to <code>altair_2sio</code> when the disk does not say plainly.</td></tr>
+                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code></td><td>What <code>auto</code> falls back to. Every Altair disk boots because of it.</td></tr>
                         <tr><td><code>altair_sio</code></td><td>Altair 88-SIO, <code>00h</code>/<code>01h</code></td><td>Active-low status.</td></tr>
                         <tr><td><code>console_04</code></td><td><code>04h</code>/<code>05h</code></td><td>Ready when the status bit is <em>clear</em>.</td></tr>
                         <tr><td><code>console_04_cuter</code></td><td><code>04h</code>/<code>05h</code> in, ROM out</td><td>The guest prints by calling a Processor Technology CUTER ROM, which we synthesise at <code>C019</code>. Reaches <code>Tarbell 48K CPM 2.2</code>.</td></tr>
@@ -966,13 +967,22 @@ altairhd_cobol.dsk</code></pre>
                 </p>
                 <div class="callout callout-warn">
                     <p>
-                        <strong>This is not autodetected, on purpose.</strong> What a guest polls
-                        cannot distinguish the machine it wants from another machine's keyboard at
-                        the same address. Worse, guessing the status <em>polarity</em> wrong does
-                        not produce a quiet machine &mdash; it produces one that believes a key is
-                        waiting on every poll and consumes a stream of garbage, which looks like a
-                        corrupt disk rather than a mis-set console. Say which machine; the gateway
-                        will be it.
+                        <strong><code>auto</code> reads a declaration; it does not guess.</strong>
+                        A boot loader must drive its own disk controller's registers, so those
+                        <code>IN</code> and <code>OUT</code> operands are in the image, put there by
+                        whoever built the disk &mdash; the same class of evidence as the 88-HDSK
+                        volume label or a disk's own DPB. Only ports belonging to exactly one board
+                        count, and if the evidence does not name one machine, your setting stands.
+                    </p>
+                    <p>
+                        It deliberately will <em>not</em> pick a console for the Altair boards, and
+                        a real disk is why. MITS software chooses its console from the front-panel
+                        sense switches at run time, so its BIOS carries drivers for the 88-SIO, the
+                        88-2SIO, the 4PIO and the ACR all at once; scanning finds consoles the disk
+                        will never use. <code>DISK0E</code> was detected as <code>altair_sio</code>
+                        on that evidence and went silent, having booted perfectly on the default.
+                        Naming a wrong machine breaks a disk that worked, so detection is restricted
+                        to what it can actually prove.
                     </p>
                 </div>
 

@@ -912,7 +912,7 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  Machine:   {}",
                 self.amber(&truncate_to_width(
-                    crate::cpm::console::machine_description(&cfg.cpm_boot_machine),
+                    crate::cpm::console::machine_label(&cfg.cpm_boot_machine),
                     w
                 ))
             ))
@@ -966,14 +966,17 @@ impl TelnetSession {
                     .ok();
                 }
                 "m" => {
-                    let choices = crate::cpm::console::MACHINE_CHOICES;
-                    let idx = choices
+                    // `auto` first, then each machine -- the same order every UI
+                    // shows, and the same order the web select is built in.
+                    let mut keys = vec![crate::cpm::console::AUTO_MACHINE];
+                    keys.extend(crate::cpm::console::MACHINE_CHOICES.iter().map(|c| c.key));
+                    let idx = keys
                         .iter()
-                        .position(|c| c.key == cfg.cpm_boot_machine)
-                        // An unrecognised value lands on the default next, which
-                        // is both the safe answer and the one that clears it.
-                        .unwrap_or(choices.len() - 1);
-                    let next = choices[(idx + 1) % choices.len()].key.to_string();
+                        .position(|k| *k == cfg.cpm_boot_machine)
+                        // An unrecognised value lands on `auto` next, which is
+                        // both the safe answer and the one that clears it.
+                        .unwrap_or(keys.len() - 1);
+                    let next = keys[(idx + 1) % keys.len()].to_string();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("cpm_boot_machine", &next);
                     })

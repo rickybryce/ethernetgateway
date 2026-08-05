@@ -534,7 +534,14 @@ impl TelnetSession {
         // one.  `attach_modem` below vets a modem profile against *this*
         // machine's console ports, and `boot` lays down its monitor ROM, so both
         // would be working from an Altair's layout if this came later.
-        let machine_key = config::get_config().cpm_boot_machine.clone();
+        //
+        // `auto` asks the disk.  A boot loader has to drive its own controller's
+        // registers and a BIOS has to read its own console's, so the image says
+        // which machine it is for; when it does not say plainly we stay the
+        // default rather than guess.  See `cpm::detect`.
+        let configured = config::get_config().cpm_boot_machine.clone();
+        let (machine_key, detected_note) =
+            crate::cpm::detect::machine_for(&configured, &bytes);
         machine.set_machine(&machine_key);
         // Unit 0 is the disk being booted, and it has to be: the bootstrap can
         // load a system from any unit — that was measured — but the operating
@@ -632,6 +639,13 @@ impl TelnetSession {
         // always looking at a console that is not there, and the operator's
         // first question will be "which one did it get?".  Only when it is not
         // the default, so an ordinary Altair boot gains no extra line.
+        // What detection concluded, when it was asked. Said even if it landed on
+        // the default, because "this disk did not say which machine it wants" is
+        // the single most useful thing to know about a disk that then goes quiet.
+        if let Some(note) = &detected_note {
+            let width = if self.terminal_type == TerminalType::Petscii { 38 } else { 76 };
+            self.send_line(&format!("  {}", self.dim(&truncate_to_width(note, width)))).await?;
+        }
         if machine_key != crate::cpm::console::DEFAULT_MACHINE {
             let c = machine.console();
             self.send_line(&format!(

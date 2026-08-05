@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A disk you drop in the images folder just works, unrenamed.** Two halves,
+  both driven by the same idea: read what the disk says about itself instead of
+  requiring the operator to say it.
+  - **Mounting.** An image needed a format prefix in its filename to be
+    writable; without one it mounted read-only. That was stricter than the
+    evidence — no two supported formats are the same size, so a size names a
+    format outright. An unnamed image is now mounted **read-write** when its
+    whole CP/M directory holds together (every allocation block inside the disk,
+    no block claimed twice, record counts matching the blocks claimed), and
+    read-only *with the reason* when it does not. That distinction matters: a
+    UCSD p-System disk is also 256,256 bytes, and so is a Cromemco CDOS one —
+    both are correctly refused, as are the Altair Disk Extended BASIC images.
+    A prefix is now an override, not a requirement. Two further fixes came out
+    of it: an ordinary filename containing an underscore (`my_backup.dsk`) was
+    being rejected outright as naming an unknown format, and a blank disk the
+    gateway formats itself was refused as "not a CP/M disk".
+  - **Booting.** `cpm_boot_machine` now defaults to **`auto`**, which reads the
+    ports the disk's own boot loader drives — the same class of evidence as the
+    88-HDSK volume label. Four of the five real Tarbell disks and all nine
+    bootable z80pack library disks now reach a prompt with nothing configured.
+    It reads a declaration rather than guessing: only ports belonging to exactly
+    one board count, and when the evidence does not name one machine the
+    operator's setting stands. It deliberately will **not** choose a console for
+    the Altair boards, because MITS software picks its console from the
+    front-panel sense switches at run time and its BIOS carries drivers for
+    consoles it never uses — `DISK0E` was detected wrongly on that evidence and
+    went silent, so detection is limited to what it can actually prove.
 - **z80pack `cpmsim` disks boot, including MP/M and UCSD p-System.** A fourth
   disk device, and the first that is not hardware: it is the interface Udo Munk
   invented for z80pack's `cpmsim`, so unlike every other board here there is no

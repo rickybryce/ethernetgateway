@@ -1325,10 +1325,16 @@ impl App {
             ui.label("Booted disk's machine:");
             egui::ComboBox::from_id_salt("cpm_boot_machine_combo")
                 .width(320.0)
-                .selected_text(crate::cpm::console::machine_description(
+                .selected_text(crate::cpm::console::machine_label(
                     &self.cfg.cpm_boot_machine,
                 ))
                 .show_ui(ui, |ui| {
+                    let auto = crate::cpm::console::AUTO_MACHINE;
+                    ui.selectable_value(
+                        &mut self.cfg.cpm_boot_machine,
+                        auto.to_string(),
+                        crate::cpm::console::machine_label(auto),
+                    );
                     for c in crate::cpm::console::MACHINE_CHOICES {
                         ui.selectable_value(
                             &mut self.cfg.cpm_boot_machine,

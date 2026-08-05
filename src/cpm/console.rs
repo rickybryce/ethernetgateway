@@ -241,7 +241,16 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
     },
 ];
 
-/// The default machine.
+/// What `cpm_boot_machine` holds to mean "work it out from the disk".
+///
+/// A *policy*, not a machine, which is why it is not in [`MACHINE_CHOICES`]: it
+/// has no console and no boards of its own. The boot path reads the image, asks
+/// [`super::detect::detect_machine`], and falls back to [`DEFAULT_MACHINE`] when
+/// the disk does not say plainly.
+pub const AUTO_MACHINE: &str = "auto";
+
+/// The machine used when `auto` cannot tell, and the one an explicit setting is
+/// compared against.
 ///
 /// The 88-2SIO at `10h`/`11h` — which is not a preference, it is the machine
 /// this path has always been. Every disk that boots today boots because its
@@ -250,9 +259,17 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
 /// before the key existed.
 pub const DEFAULT_MACHINE: &str = "altair_2sio";
 
-/// Is `key` a recognised machine value?
+/// Is `key` a recognised machine value?  `auto` counts.
 pub fn is_valid_machine_key(key: &str) -> bool {
-    MACHINE_CHOICES.iter().any(|c| c.key == key)
+    key == AUTO_MACHINE || MACHINE_CHOICES.iter().any(|c| c.key == key)
+}
+
+/// The label for a config value, including the policy value.
+pub fn machine_label(key: &str) -> &'static str {
+    if key == AUTO_MACHINE {
+        return "Detect from the disk (recommended)";
+    }
+    machine_description(key)
 }
 
 /// Resolve a config value to the machine it names.
