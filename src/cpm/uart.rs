@@ -45,7 +45,23 @@ pub enum UartFamily {
     /// Motorola 6850 ACIA: bit0 = RDRF (RX), bit1 = TDRE (TX ready).
     Acia,
     /// Altair 88-SIO: active-low (bit0 set = RX not ready, bit7 clear = TX ready).
+    ///
+    /// A *convention*, not a part number. The board at `04h`/`05h` on the
+    /// VDM-1 Tarbell machines is not an 88-SIO but reports readiness the same
+    /// way, and giving it its own identical variant would be a second copy of
+    /// the same four lines.
     Sio88,
+    /// The whole byte is the answer: `0xFF` when a character is waiting, `0x00`
+    /// when not — no bit masking at all.
+    ///
+    /// z80pack's `cpmsim` console. Its CBIOS is `CONST: IN A,(0) / RET`, handing
+    /// the port straight back to CP/M, which tests the byte for non-zero. So the
+    /// port has to *be* CP/M's answer rather than encode it in a bit, and a
+    /// bit-based family here would report "a key is waiting" on every poll.
+    ///
+    /// Carries no transmit or carrier bit, because nothing asks: that CBIOS's
+    /// `CONOUT` is `LD A,C / OUT (1),A / RET`, with no status poll at all.
+    WholeByte,
 }
 
 impl UartFamily {
@@ -81,6 +97,16 @@ impl UartFamily {
             // (transmit-not-ready when the ring is full) holds for 88-SIO.
             UartFamily::Sio88 => {
                 (if rx_ready { 0x00 } else { 0x01 }) | (if tx_ready { 0x00 } else { 0x80 })
+            }
+            // CP/M's own convention, straight through: 0xFF means "a character
+            // is waiting".  `tx_ready` and `carrier` have nowhere to go, and
+            // nothing that uses this family asks for them.
+            UartFamily::WholeByte => {
+                if rx_ready {
+                    0xFF
+                } else {
+                    0x00
+                }
             }
         }
     }

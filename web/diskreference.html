@@ -2727,7 +2727,22 @@ pc=0xbed3   (its CONIN loop, waiting for a key)</code></pre>
                     an ANSI terminal.
                 </p>
 
-                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK03 &mdash; not a Tarbell disk</h3>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK03 &mdash; not a Tarbell disk, and now its own machine</h3>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>Built.</strong> The section below describes what this
+                        disk turned out to be; the device is now emulated as
+                        <code>src/cpm/z80pack.rs</code>, selected by the
+                        <code>z80pack</code> machine. TDISK03 reaches Comal 80's
+                        <code>A&gt;</code> and lists its programs, and nine disks in
+                        z80pack's own <code>cpmsim</code> library boot too &mdash;
+                        CP/M 1.3, 1.4, a 1975 build, 2.2, 3.0, <strong>MP/M</strong>
+                        and <strong>UCSD p-System IV</strong>. It is the one device
+                        here that is <em>derived</em> rather than clean-room, for the
+                        reason given at the end of this section, and it carries its
+                        notice in <code>THIRD-PARTY-NOTICES.md</code>.
+                    </p>
+                </div>
                 <p>
                     Its installed system tracks say
                     <code>64K CP/M Vers. 2.2 (Z80 CBIOS V1.2 for Z80SIM, Copyright
@@ -2764,17 +2779,50 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                     typing, no wait port, no latch polarity.
                 </p>
                 <p>
-                    The reason it is <em>not</em> built is not difficulty, it is
-                    evidence. Every other board on this page has a manufacturer's
-                    manual &mdash; an independent authority that describes bits no
-                    disk here exercises. This hardware never existed, so the
-                    simulator's own source is the only specification there is, and an
-                    implementation built from it is derived work rather than
-                    clean-room. That is permissible (z80pack is MIT, and MIT into
-                    GPL-3.0-or-later is the compatible direction) but it must be
-                    labelled as derived and carry its notice; see the note in
-                    <code>about.toml</code> for where that notice has to live so a
-                    regeneration cannot delete it.
+                    It is the one device here that is <strong>derived rather than
+                    clean-room</strong>, and the reason is evidence, not
+                    convenience. Every other board on this page has a manufacturer's
+                    manual &mdash; an independent authority describing bits no disk
+                    here exercises. This hardware never existed, so the simulator's
+                    own source is the only specification there is, and an
+                    implementation built from it is derived work. That is
+                    permissible (z80pack is MIT; MIT into GPL-3.0-or-later is the
+                    compatible direction) but it must be <em>labelled</em> as derived
+                    and carry its notice. It does: a static &ldquo;Non-crate
+                    components&rdquo; section in <code>about.hbs</code>, which is
+                    where such a notice has to live because
+                    <code>THIRD-PARTY-NOTICES.md</code> is generated from the Cargo
+                    dependency tree and a notice added to the output would be
+                    deleted by the next regeneration.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two things the machine needed for it</h3>
+                <p>
+                    <strong>A DMA request.</strong> Every other board fills its own
+                    buffer and lets the guest clock bytes out through a data
+                    register. This one has no data register: the guest latches a
+                    memory address, writes the command register, and the sector
+                    appears in its memory. So <code>HostRequest</code> gained a
+                    <code>Dma</code> variant &mdash; the only one that names an
+                    address in the <em>guest's</em> address space.
+                </p>
+                <p>
+                    <strong>A console that blocks.</strong> Its CBIOS is
+                    <code>CONIN: IN A,(1) / RET</code>, with no status poll at all
+                    &mdash; it relies on the port to stall the processor until a
+                    character arrives, which is a design only a simulator can have.
+                    Answer such a read anyway and the CCP takes the byte as a
+                    keystroke: TDISK03 signed on perfectly and then printed NULs
+                    without end. We cannot stall a CPU, so the guest waits the other
+                    way round &mdash; if an instruction read an empty console, the
+                    program counter goes back to where it started and the read
+                    happens again. That is sound only because the instruction is a
+                    bare <code>IN</code>, which has no effect but the read; a block
+                    input (<code>INI</code>, <code>INIR</code>) would already have
+                    moved <code>HL</code> and <code>B</code>. A blocked read is also
+                    this machine's <em>idle</em> signal, and has to be: the driver
+                    paces on console-status polls, and this guest never makes one, so
+                    without that a session would sit at its prompt burning a core.
                 </p>
             </div>
 
@@ -2856,13 +2904,14 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                         </tr>
                         <tr>
                             <td>A z80pack <code>cpmsim</code> controller</td>
-                            <td>Would reach <code>TDISK03</code> (Comal 80), and is the simplest board
-                                on this page &mdash; but it is the only one whose hardware never
-                                existed, so its specification is another project's source rather than
-                                a manual, and an implementation would be derived work needing an
-                                attribution notice rather than clean-room. Undecided on purpose. It
-                                also needs a <code>HostRequest::Dma</code> variant, since it writes
-                                sectors straight into guest memory with no data port.</td>
+                            <td><strong>Done</strong> &mdash; see the section above. It reaches
+                                <code>TDISK03</code> (Comal 80) plus nine disks in z80pack's own
+                                library, including MP/M and UCSD p-System IV. Two of its media are
+                                supported (the 241K 8&Prime; and the 4 MB large disk); the library's
+                                two large images are tool disks rather than system disks, so they
+                                mount as a second drive rather than booting. It is the only device
+                                here that is derived rather than clean-room, and the only one whose
+                                machine carries a different <em>set</em> of boards.</td>
                         </tr>
                         <tr>
                             <td>88-HDSK corners &mdash; now closed, by asking the disks</td>

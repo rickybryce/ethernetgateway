@@ -46,6 +46,19 @@ pub enum HostRequest {
     Read { drive: u8, offset: u64, len: usize },
     /// Write the controller's buffer for `drive` back at `offset`.
     Write { drive: u8, offset: u64, len: usize },
+    /// Move `len` bytes directly between the image and *guest memory*.
+    ///
+    /// The odd one out, and it has to be. Every other request here moves bytes
+    /// between the image and the controller's own buffer, and the guest then
+    /// clocks them through a data register — that is what a data register is
+    /// for. z80pack's `cpmsim` device has no data register at all: the guest
+    /// latches a memory address, writes the command register, and the sector
+    /// appears in its memory. So this variant names an address in the guest's
+    /// address space, which no other one does.
+    ///
+    /// `to_memory` gives the direction: `true` reads the image into memory,
+    /// `false` writes memory back to the image.
+    Dma { drive: u8, offset: u64, len: usize, addr: u16, to_memory: bool },
     /// Set `count` runs of `chunk` bytes, `stride` apart, to `byte`.
     ///
     /// What a format is: one whole recording surface erased. It is strided

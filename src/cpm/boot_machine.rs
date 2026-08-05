@@ -34,6 +34,43 @@ use super::modem_port::ModemPort;
 use super::uart::ModemAccess;
 use iz80::{Cpu, Machine};
 
+/// The live controller a board name stands for.
+///
+/// The one place that turns [`super::console::Board`] into hardware, so a new
+/// board is a `Controller` impl plus one arm here — and so the machine list can
+/// stay a `const` while controllers are live objects with latched registers.
+fn boards_to_controller(board: super::console::Board) -> Box<dyn Controller> {
+    use super::console::Board;
+    match board {
+        Board::Dcdd => Box::new(Dcdd::new()),
+        Board::Hdsk => Box::new(super::hdsk::Hdsk::new()),
+        Board::Tarbell => Box::new(super::tarbell::Tarbell::new()),
+        Board::Z80pack => Box::new(super::z80pack::Z80pack::new()),
+    }
+}
+
+/// Every board any machine here can carry, for the questions that are about the
+/// gateway rather than about one machine.
+///
+/// [`BootMachine::medium_for`] and [`BootMachine::bootable_media`] answer "could
+/// this file be booted *at all*", which is a different question from "does the
+/// currently configured machine carry it" — the boot picker and the generated
+/// readme both want the former. Built from the machine list rather than written
+/// out, so a board reachable from no machine cannot claim to be bootable.
+fn all_controllers() -> Vec<Box<dyn Controller>> {
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for m in super::console::MACHINE_CHOICES {
+        for b in m.boards {
+            if !seen.contains(b) {
+                seen.push(*b);
+                out.push(boards_to_controller(*b));
+            }
+        }
+    }
+    out
+}
+
 /// The front-panel sense switches, read on port FFh.
 pub const SENSE_SWITCH_PORT: u8 = 0xFF;
 
@@ -117,6 +154,12 @@ pub struct BootMachine {
     idle_status_reads: u64,
     /// What the front panel reports on port FFh.
     sense_switches: u8,
+    /// Set when the guest read the console data register with nothing waiting,
+    /// on a machine whose console *blocks* rather than being polled.
+    ///
+    /// See [`BootMachine::step`], which is the only correct way to run this
+    /// machine's CPU.
+    console_blocked: bool,
     /// The console board this machine carries.
     ///
     /// A field rather than the two constants it replaced, because "where is the
@@ -146,22 +189,22 @@ impl BootMachine {
     pub fn new() -> BootMachine {
         BootMachine {
             mem: vec![0; 0x10000],
-            // Both boards, always.  A real Altair either had the hard disk
-            // controller plugged in or it did not, but there is nothing to be
-            // gained here by making an operator say so: each claims its own
-            // ports and its own media size, and a machine with no hard disk in
-            // a drive is simply a controller nobody talks to.
-            controllers: vec![
-                Box::new(Dcdd::new()),
-                Box::new(super::hdsk::Hdsk::new()),
-                Box::new(super::tarbell::Tarbell::new()),
-            ],
+            // The default machine's boards.  Which boards a machine carries is
+            // the machine's business now (see `set_machine`), because z80pack's
+            // device claims ports the Altair boards and the 88-2SIO console use
+            // — so "all of them, always" stopped being a coherent machine.
+            controllers: super::console::resolve_machine(super::console::DEFAULT_MACHINE)
+                .boards
+                .iter()
+                .map(|b| boards_to_controller(*b))
+                .collect(),
             disk_controller: (0..16).map(|_| None).collect(),
             disks: (0..16).map(|_| None).collect(),
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
             idle_status_reads: 0,
             sense_switches: DEFAULT_SENSE_SWITCHES,
+            console_blocked: false,
             console: super::console::resolve_console(super::console::DEFAULT_MACHINE),
             modem: ModemPort::new(),
             disk_accesses: 0,
@@ -259,12 +302,53 @@ impl BootMachine {
             "set_machine must come before attach_modem: the modem was vetted \
              against a different console's ports"
         );
-        self.console = super::console::resolve_console(key);
+        // And before any disk goes in, for the same class of reason: `insert`
+        // offers an image to each controller in turn and records which one took
+        // it, so replacing the controllers afterwards would leave `disk_controller`
+        // pointing at boards that no longer exist.
+        debug_assert!(
+            self.disks.iter().all(|d| d.is_none()),
+            "set_machine must come before insert: the disks were matched against \
+             a different machine's controllers"
+        );
+        let machine = super::console::resolve_machine(key);
+        self.console = machine.console;
+        self.controllers = machine.boards.iter().map(|b| boards_to_controller(*b)).collect();
     }
 
     /// The console this machine carries.
     pub fn console(&self) -> super::console::ConsoleBoard {
         self.console
+    }
+
+    /// Execute one instruction. **Use this rather than
+    /// `cpu.execute_instruction(machine)`.**
+    ///
+    /// It exists for one thing: a console that *blocks*. The Altair boards are
+    /// polled — the guest reads a status register until a key is ready and only
+    /// then reads the data register — so nothing has to wait. z80pack's console
+    /// is not: its CBIOS reads the data port unconditionally and relies on the
+    /// port itself to stall the processor until a character arrives. Hand such a
+    /// guest a zero and its CCP treats it as a keystroke, forever; TDISK03 signs
+    /// on beautifully and then prints NULs without end.
+    ///
+    /// We cannot stall a CPU, so the guest waits the other way: if the
+    /// instruction read an empty console, the program counter goes back to where
+    /// it started and the read happens again next time. A blocked guest re-runs
+    /// one `IN` until a byte is there, which is what the hardware does.
+    ///
+    /// **This is only sound because the instruction is a bare `IN`,** which has
+    /// no effect but the read. A block-input instruction (`INI`, `INIR`) would
+    /// have already moved `HL` and `B`, and replaying it would corrupt them. No
+    /// CBIOS here uses one for the console, and if one ever does, this needs to
+    /// hold the byte back rather than replay the instruction.
+    pub fn step(&mut self, cpu: &mut Cpu) {
+        let before = cpu.registers().pc();
+        cpu.execute_instruction(self);
+        if self.console_blocked {
+            self.console_blocked = false;
+            cpu.registers().set_pc(before);
+        }
     }
 
     /// Does a disk controller answer at this port?
@@ -549,10 +633,11 @@ impl BootMachine {
     /// and so a new controller becomes bootable everywhere by existing, rather
     /// than by being added to three lists.
     pub fn medium_for(image_len: u64) -> Option<&'static str> {
-        BootMachine::new()
-            .controllers
-            .iter()
-            .find_map(|c| c.accepts(image_len))
+        // Every board, not the default machine's — "can this be booted" must not
+        // depend on which machine happens to be configured, or a z80pack disk
+        // would be missing from the boot picker until the operator had already
+        // switched machines to see it.
+        all_controllers().iter().find_map(|c| c.accepts(image_len))
     }
 
     /// Every medium a booted machine here can carry, board by board.
@@ -563,7 +648,7 @@ impl BootMachine {
     /// operators that only 88-DCDD floppies boot for as long as the hard disk
     /// had been booting them.
     pub fn bootable_media() -> Vec<super::controller::Medium> {
-        BootMachine::new().controllers.iter().flat_map(|c| c.media()).collect()
+        all_controllers().iter().flat_map(|c| c.media()).collect()
     }
 
     /// Which controller answers at this port, if any.
@@ -603,6 +688,48 @@ impl BootMachine {
                     if let Some(dst) = m.bytes.get_mut(off..off + len) {
                         dst.copy_from_slice(&buf[..len]);
                         m.dirty = true;
+                    }
+                }
+            }
+            // A transfer straight between the image and guest memory. The
+            // controller never sees the bytes, which is the whole point: it has
+            // no data register for them to pass through.
+            HostRequest::Dma { drive, offset, len, addr, to_memory } => {
+                if to_memory {
+                    let bytes = self
+                        .disks
+                        .get(drive as usize)
+                        .and_then(|x| x.as_ref())
+                        .and_then(|m| {
+                            let off = offset as usize;
+                            m.bytes.get(off..off + len).map(|b| b.to_vec())
+                        })
+                        // Past the end of the image gives the guest an erased
+                        // sector, the same posture as the other read paths: a
+                        // real drive returns *something* from unformatted media
+                        // and the guest's own error handling is better placed to
+                        // react than we are.
+                        .unwrap_or_else(|| vec![0xE5; len]);
+                    for (i, b) in bytes.iter().enumerate() {
+                        // Wrapping, because the guest's address is sixteen bits
+                        // and a transfer that runs off the top of memory wraps
+                        // on real hardware rather than faulting.
+                        let at = addr.wrapping_add(i as u16) as usize;
+                        self.mem[at] = *b;
+                    }
+                } else {
+                    let bytes: Vec<u8> = (0..len)
+                        .map(|i| self.mem[addr.wrapping_add(i as u16) as usize])
+                        .collect();
+                    if let Some(m) = self.disks.get_mut(drive as usize).and_then(|x| x.as_mut()) {
+                        if m.read_only {
+                            return;
+                        }
+                        let off = offset as usize;
+                        if let Some(dst) = m.bytes.get_mut(off..off + len) {
+                            dst.copy_from_slice(&bytes);
+                            m.dirty = true;
+                        }
                     }
                 }
             }
@@ -734,8 +861,34 @@ impl Machine for BootMachine {
                 self.console.family.status(!self.rx.is_empty(), true, true)
             }
             p if p == self.console.data_port => {
-                self.idle_status_reads = 0;
-                self.rx.pop_front().unwrap_or(0)
+                match self.rx.pop_front() {
+                    Some(b) => {
+                        self.idle_status_reads = 0;
+                        b
+                    }
+                    None => {
+                        // Nothing waiting. On a polled console the guest checked
+                        // status first and would not be here, so zero is a fine
+                        // answer. On a *blocking* one it never checks — z80pack's
+                        // CBIOS is `CONIN: IN A,(1) / RET` — and handing back zero
+                        // feeds the CCP an endless stream of NULs. Say so instead,
+                        // and let `step` make the guest wait.
+                        //
+                        // A blocked read is also this machine's *idle* signal, and
+                        // it has to be: the driver paces on `idle_status_reads`,
+                        // and a guest with a blocking console never reads the
+                        // status register at all — so without this a session would
+                        // sit at a prompt burning a whole core, replaying one `IN`
+                        // millions of times a second.
+                        if self.console.blocking {
+                            self.console_blocked = true;
+                            self.idle_status_reads = self.idle_status_reads.saturating_add(1);
+                        } else {
+                            self.idle_status_reads = 0;
+                        }
+                        0
+                    }
+                }
             }
             // The front panel. Input only on real hardware, and the reason
             // every MITS operating system can find its console.
@@ -925,7 +1078,7 @@ mod tests {
         cpu.registers().set_a(0x5A);
         cpu.registers().set_pc(crate::cpm::console::CUTER_CHAR_OUT);
         for _ in 0..5 {
-            cpu.execute_instruction(&mut m);
+            m.step(&mut cpu);
         }
         assert_eq!(m.take_output(), b"Q".to_vec(), "the stub did not print through the console");
         assert_eq!(cpu.registers().a(), 0x5A, "the stub clobbered A, which its caller forbids");
@@ -1613,7 +1766,7 @@ mod tests {
         let mut out = Vec::new();
         let mut quiet: u64 = 0;
         for _ in 0..budget {
-            cpu.execute_instruction(m);
+            m.step(cpu);
             let o = m.take_output();
             if o.is_empty() {
                 quiet += 1;
@@ -1781,7 +1934,7 @@ mod tests {
         let mut eot_sent = false;
 
         for _ in 0..budget {
-            cpu.execute_instruction(m);
+            m.step(cpu);
             console.extend(m.take_output());
 
             // Whatever the guest wrote at its UART is the receiver talking.
@@ -1861,7 +2014,7 @@ mod tests {
         let mut prompted = 0u64;
 
         for i in 0..budget {
-            cpu.execute_instruction(m);
+            m.step(cpu);
             console.extend(m.take_output());
             wire.extend(m.modem().drain_tx());
 
@@ -2627,7 +2780,7 @@ mod tests {
             }
             let mut out = m.take_output();
             for _ in 0..20_000_000u64 {
-                cpu.execute_instruction(&mut m);
+                m.step(&mut cpu);
                 out.extend(m.take_output());
                 if out.len() > 120 {
                     break;
@@ -2769,6 +2922,51 @@ mod tests {
         assert!(dir2.contains("NEWFILE"), "the file did not survive the reboot: {dir2:?}");
     }
 
+    /// **A z80pack `cpmsim` disk boots, takes commands, and runs its software.**
+    ///
+    /// The gate for the fourth disk device and for the two machine features it
+    /// needed: a DMA transfer straight into guest memory, and a console that
+    /// *blocks*. Both are exercised on every keystroke here, and both fail
+    /// visibly — a broken DMA gives no sign-on at all, and a console that answers
+    /// a blocking read gives an endless stream of NULs after the prompt.
+    ///
+    /// TDISK03 is the case: Comal 80, on a disk whose system tracks say
+    /// `Z80 CBIOS V1.2 for Z80SIM`. It is not a Tarbell disk at all, despite
+    /// living with them and sharing their size.
+    ///
+    /// Ignored: set `CPM_Z80PACK_IMAGE` to TDISK03.DSK or a `cpmsim` library disk.
+    #[test]
+    #[ignore]
+    fn test_a_z80pack_disk_boots_and_takes_commands() {
+        let Ok(path) = std::env::var("CPM_Z80PACK_IMAGE") else {
+            eprintln!("set CPM_Z80PACK_IMAGE to run this");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.set_machine("z80pack");
+        m.insert(0, std::fs::read(&path).unwrap(), true).expect("a cpmsim image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{signon}");
+        assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
+        assert!(signon.contains("A>"), "no prompt: {signon:?}");
+        // The failure this catches is specific and was real: a console that
+        // answers a blocking read hands the CCP a NUL per instruction, so the
+        // prompt is followed by thousands of them.
+        let nuls = signon.matches('\0').count();
+        assert!(nuls == 0, "the console answered a blocking read: {nuls} NULs after the prompt");
+
+        // A command, so this cannot pass on a sign-on alone. Every keystroke
+        // goes through the blocking-read replay, and `DIR` reads the directory
+        // through the DMA path.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "DIR listed no programs: {dir:?}");
+        assert!(dir.contains("A>"), "DIR never returned to the prompt: {dir:?}");
+    }
+
     /// A VDM-1 guest is not mute because it failed — it is painting a screen we
     /// do not show yet.
     ///
@@ -2807,7 +3005,7 @@ mod tests {
         let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
         for _ in 0..20_000_000u64 {
-            cpu.execute_instruction(&mut m);
+            m.step(&mut cpu);
         }
 
         assert!(m.take_output().is_empty(), "a VDM-1 guest prints to no port at all");
@@ -2889,13 +3087,13 @@ mod tests {
             let mut trace = Vec::new();
             for _ in 0..400u64 {
                 trace.push(cpu.registers().pc());
-                cpu.execute_instruction(&mut m);
+                m.step(&mut cpu);
             }
             println!("first PCs: {:04x?}", &trace[..60.min(trace.len())]);
         }
         let mut out = Vec::new();
         for _ in 0..20_000_000u64 {
-            cpu.execute_instruction(&mut m);
+            m.step(&mut cpu);
             out.extend(m.take_output());
             if out.len() > 400 {
                 break;

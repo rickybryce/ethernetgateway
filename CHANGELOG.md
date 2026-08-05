@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **z80pack `cpmsim` disks boot, including MP/M and UCSD p-System.** A fourth
+  disk device, and the first that is not hardware: it is the interface Udo Munk
+  invented for z80pack's `cpmsim`, so unlike every other board here there is no
+  manufacturer's manual and the simulator's source is the only specification
+  that exists. `src/cpm/z80pack.rs` is therefore **derived work rather than
+  clean-room**, labelled as such, with z80pack's MIT notice carried in
+  `THIRD-PARTY-NOTICES.md`. Reaches `TDISK03` (Comal 80) and nine disks in
+  z80pack's own library: CP/M 1.3, 1.4, a 1975 build, 2.2, 62K-HD, **CP/M 3.0**,
+  **MP/M** and **UCSD p-System IV.0**.
+  - The machine now picks its **disk controllers** as well as its console,
+    because this device answers on `0Ah`–`11h` — which contains both the
+    88-DCDD's data register and the 88-2SIO console — and a machine answers disk
+    controllers before its console. It is also what settles a size two boards
+    both claim: 256,256 bytes is an IBM 3740 to the Tarbell and an 8" SSSD to
+    `cpmsim`, and before this the Tarbell took every `cpmsim` disk and could not
+    boot one.
+  - It is a **DMA** device, with no data register at all — the guest latches an
+    address and the sector appears in its memory — so `HostRequest` gained a
+    `Dma` variant, the only one that names an address in the guest's own address
+    space.
+  - Its console **blocks**: the CBIOS reads the data port with no status poll and
+    relies on the port to stall the processor. Answering such a read anyway hands
+    the CCP a keystroke per instruction, which is exactly what happened — a
+    perfect sign-on followed by NULs without end. A blocked guest now re-runs its
+    read instead, and that also became the machine's idle signal, since a guest
+    with a blocking console never polls console status.
 - **Tarbell 1011 floppy disks boot.** A third emulated disk controller, and the
   first whose chip is shared — the Western Digital FD1771 lives in its own
   module because Cromemco's 4FDC and 16FDC use the same part. `TDISK01` reaches

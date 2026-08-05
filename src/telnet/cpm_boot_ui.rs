@@ -765,7 +765,10 @@ impl TelnetSession {
         let mut last_key = tokio::time::Instant::now();
 
         loop {
-            cpu.execute_instruction(machine);
+            // `step`, not `execute_instruction`: a blocking console needs the
+            // guest to re-run its read rather than be handed a byte that is not
+            // there.  See `BootMachine::step`.
+            machine.step(cpu);
             executed += 1;
 
             if executed.is_multiple_of(KEY_POLL_INTERVAL) {

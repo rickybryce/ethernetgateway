@@ -28,6 +28,10 @@ cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
 - 1 crate(s) under **SIL Open Font License 1.1** (OFL-1.1)
 - 1 crate(s) under **Ubuntu Font Licence v1.0** (Ubuntu-font-1.0)
 
+It also carries one **non-crate** component, which `cargo-about` cannot see and
+which is therefore recorded as static text in the template — see
+[Non-crate components](#non-crate-components) at the end.
+
 ---
 
 ## Apache License 2.0 (Apache-2.0)
@@ -10583,3 +10587,56 @@ the following restrictions:
 
 ---
 
+## Non-crate components
+
+Everything above is generated from the Cargo dependency tree. This section is
+**static text in `about.hbs`** and is deliberately not generated: `cargo-about`
+walks Cargo dependencies and nothing else, so a notice added directly to
+`THIRD-PARTY-NOTICES.md` would be deleted by the next regeneration. Anything
+that arrives another way — vendored, transcribed, or derived from a project we
+read — has to be recorded here to survive.
+
+### z80pack — MIT License (MIT)
+
+`src/cpm/z80pack.rs` emulates the disk device of **z80pack**'s `cpmsim` machine
+and is **derived from** its source (`cpmsim/srcsim/simio.c`), not written
+clean-room from documentation.
+
+That is a deliberate exception to how every other emulated device in this
+project was built. The MITS 88-DCDD, the MITS 88-HDSK and the Tarbell 1011 are
+real hardware with manufacturers' manuals, so those were written from the
+documentation and from the guests' own drivers, with other implementations used
+only as cross-checks. z80pack's device is not hardware and never was — it is a
+simulator's invented interface — so its source is the only specification that
+exists, and an implementation built from it is derived work whose notice must
+travel with our binary. MIT into GPL-3.0-or-later is the compatible direction,
+so this is an attribution obligation rather than a licensing obstacle.
+
+Upstream: <https://github.com/udo-munk/z80pack>
+
+```
+Copyright (c) 1987-2024 Udo Munk
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+```
+
+---

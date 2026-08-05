@@ -932,8 +932,18 @@ altairhd_cobol.dsk</code></pre>
                         <tr><td><code>altair_sio</code></td><td>Altair 88-SIO, <code>00h</code>/<code>01h</code></td><td>Active-low status.</td></tr>
                         <tr><td><code>console_04</code></td><td><code>04h</code>/<code>05h</code></td><td>Ready when the status bit is <em>clear</em>.</td></tr>
                         <tr><td><code>console_04_cuter</code></td><td><code>04h</code>/<code>05h</code> in, ROM out</td><td>The guest prints by calling a Processor Technology CUTER ROM, which we synthesise at <code>C019</code>. Reaches <code>Tarbell 48K CPM 2.2</code>.</td></tr>
+                        <tr><td><code>z80pack</code></td><td><code>00h</code>/<code>01h</code>, whole-byte</td><td>A different machine entirely, with z80pack's <code>cpmsim</code> disk device instead of the Altair boards. Reaches CP/M 1.3, 1.4, 2.2 and 3.0, <strong>MP/M</strong> and <strong>UCSD p-System IV</strong>.</td></tr>
                     </tbody>
                 </table>
+                <p>
+                    <strong>The machine picks the disk controllers too, not just the console.</strong>
+                    That is not tidiness: z80pack's device answers on <code>0Ah</code>&ndash;<code>11h</code>,
+                    which contains both the 88-DCDD's data register and the 88-2SIO console, and a
+                    machine answers disk controllers before its console. Put those boards together
+                    and every Altair disk would go silent with its console being answered by a disk
+                    controller. It is also what settles a size two boards both claim &mdash; 256,256
+                    bytes is an IBM 3740 to the Tarbell and an 8&Prime; SSSD to <code>cpmsim</code>.
+                </p>
                 <div class="callout callout-warn">
                     <p>
                         <strong>This is not autodetected, on purpose.</strong> What a guest polls

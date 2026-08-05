@@ -17,22 +17,22 @@
 # added there.  So a hand-added notice in that file is not a fix, it is a
 # time bomb.
 #
-# Nothing in the tree needs this today.  Every emulated board here is
-# clean-room from hardware documentation and from the guests' own drivers, the
-# same posture as Punter, HBIOS and EGT80; the bundled `EGT80.COM` is ours; the
-# test fixtures are our own captures; and no disk images are distributed.
-#
-# It stops being true the moment we ship code derived from another project.
-# The live candidate is a controller for z80pack's `cpmsim` (Udo Munk, MIT):
-# that hardware never existed, so the simulator's source is the only
-# specification there is, and an implementation built from it is derived work
-# whose copyright and permission notice must travel with our binary.  MIT into
-# GPL-3.0-or-later is the compatible direction, so this is an attribution
+# There is exactly one such component today, and it IS handled: `src/cpm/
+# z80pack.rs` is derived from z80pack's `cpmsim` source (Udo Munk, MIT) rather
+# than written clean-room, because that device is a simulator's invented
+# interface and its source is the only specification that exists.  MIT into
+# GPL-3.0-or-later is the compatible direction, so it is an attribution
 # obligation and not a licensing obstacle.
 #
-# When that lands, add a STATIC section to `about.hbs` — "Non-crate
-# components" — carrying the notice verbatim.  Putting it in the template is
-# what makes it survive `cargo about generate`.
+# Its notice lives in a STATIC "Non-crate components" section of `about.hbs`.
+# That placement is the whole trick: putting it in the template is what makes it
+# survive `cargo about generate`.  Add any future one there too, and never to
+# the generated file.
+#
+# Everything else remains clean-room from hardware documentation and the guests'
+# own drivers — the same posture as Punter, HBIOS and EGT80.  The bundled
+# `EGT80.COM` is ours, the test fixtures are our own captures, and no disk
+# images are distributed.
 
 # Accept a license fulfilled on any target — we ship cross-platform
 # (Linux/macOS/Windows), so per-target dependencies (winapi, objc2,

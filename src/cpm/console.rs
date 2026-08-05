@@ -124,10 +124,44 @@ pub struct ConsoleBoard {
     pub family: UartFamily,
     /// A monitor ROM the guest prints through instead of the data port.
     pub rom: MonitorRom,
+    /// Does reading the data register with nothing waiting *stall the CPU*?
+    ///
+    /// False for every real board here: they are polled, so a guest reads status
+    /// until a key is ready and only then reads data. True for z80pack's, whose
+    /// CBIOS reads the data port unconditionally and relies on the port to block
+    /// — a design only a simulator can have, and one that produces an endless
+    /// stream of NULs if the port answers anyway. See [`super::boot_machine::BootMachine::step`].
+    pub blocking: bool,
 }
 
-/// One selectable machine: the config value, a description for the UIs, and the
-/// console the guest will find.
+/// A disk controller a machine can carry.
+///
+/// Names rather than instances, because [`MACHINE_CHOICES`] is a `const` and a
+/// controller is a live object with latched registers. `BootMachine` maps these
+/// to the real thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Board {
+    /// MITS 88-DCDD 8" floppy, ports `08h`–`0Ah`.
+    Dcdd,
+    /// MITS 88-HDSK "Datakeeper" hard disk, ports `A0h`–`A7h`.
+    Hdsk,
+    /// Tarbell 1011 floppy interface, ports `F8h`–`FCh`.
+    Tarbell,
+    /// z80pack `cpmsim`'s simulated disk device, ports `0Ah`–`11h`.
+    Z80pack,
+}
+
+/// The boards an Altair-shaped machine carries.
+///
+/// All three at once, and that is deliberate: a real Altair either had the hard
+/// disk controller plugged in or it did not, but each claims its own ports and
+/// its own media sizes, so a machine with no hard disk in a drive is simply a
+/// controller nobody talks to. The Tarbell is here for the same reason — its
+/// `F8h`–`FCh` collide with nothing.
+const ALTAIR_BOARDS: &[Board] = &[Board::Dcdd, Board::Hdsk, Board::Tarbell];
+
+/// One selectable machine: the config value, a description for the UIs, the
+/// console the guest will find, and the disk controllers it carries.
 ///
 /// Named for the *machine* and not for the console alone, even though today
 /// every entry differs only in its console. That is deliberate and it is not
@@ -144,10 +178,25 @@ pub struct MachineChoice {
     /// One-line description shown next to the selection in every UI.
     pub description: &'static str,
     pub console: ConsoleBoard,
+    /// The disk controllers this machine has.
+    ///
+    /// Not a formality. z80pack's device claims `0Ah`–`11h`, which contains the
+    /// 88-DCDD's data register *and* the 88-2SIO console — and the machine's port
+    /// dispatch offers controllers before the console. Put those boards in one
+    /// machine and every Altair disk goes silent, because its console is being
+    /// answered by a disk controller. Only a machine that carries one set or the
+    /// other is coherent, so the machine says which.
+    ///
+    /// It is also what resolves a size two boards both claim. 256,256 bytes is an
+    /// IBM 3740 to the Tarbell and an 8" SSSD to z80pack, and
+    /// `Controller::accepts` hands an image to the first board that recognises
+    /// the length — so before this, the Tarbell took every `cpmsim` disk and
+    /// could not boot one.
+    pub boards: &'static [Board],
 }
 
 const fn board(status_port: u8, data_port: u8, family: UartFamily) -> ConsoleBoard {
-    ConsoleBoard { status_port, data_port, family, rom: MonitorRom::None }
+    ConsoleBoard { status_port, data_port, family, rom: MonitorRom::None, blocking: false }
 }
 
 /// Every selectable machine, in UI display order. Single source of truth for
@@ -159,11 +208,13 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
         key: "altair_2sio",
         description: "Altair 88-2SIO console - 0x10 / 0x11",
         console: board(0x10, 0x11, UartFamily::Acia),
+        boards: ALTAIR_BOARDS,
     },
     MachineChoice {
         key: "altair_sio",
         description: "Altair 88-SIO console - 0x00 / 0x01",
         console: board(0x00, 0x01, UartFamily::Sio88),
+        boards: ALTAIR_BOARDS,
     },
     MachineChoice {
         key: "console_04",
@@ -172,11 +223,21 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
         // rather than by eye, because a 42-column label got through last time.
         description: "Console at 0x04 / 0x05, ready-low",
         console: board(0x04, 0x05, UartFamily::Sio88),
+        boards: ALTAIR_BOARDS,
     },
     MachineChoice {
         key: "console_04_cuter",
         description: "As 0x04 / 0x05, printing via CUTER ROM",
         console: ConsoleBoard { rom: MonitorRom::Cuter, ..board(0x04, 0x05, UartFamily::Sio88) },
+        boards: ALTAIR_BOARDS,
+    },
+    MachineChoice {
+        key: "z80pack",
+        description: "z80pack cpmsim - console 0x00 / 0x01",
+        console: ConsoleBoard { blocking: true, ..board(0x00, 0x01, UartFamily::WholeByte) },
+        // Its own device only. See `MachineChoice::boards` — these ports
+        // overlap the Altair boards', so the two cannot share a machine.
+        boards: &[Board::Z80pack],
     },
 ];
 
@@ -194,16 +255,21 @@ pub fn is_valid_machine_key(key: &str) -> bool {
     MACHINE_CHOICES.iter().any(|c| c.key == key)
 }
 
-/// Resolve a config value to the console a guest will find. An unknown key
-/// yields the default machine's console rather than no console at all: a
-/// mistyped setting should leave the gateway working, not mute.
-pub fn resolve_console(key: &str) -> ConsoleBoard {
+/// Resolve a config value to the machine it names.
+///
+/// An unknown key yields the default machine rather than nothing: a mistyped
+/// setting should leave the gateway working, not mute and diskless.
+pub fn resolve_machine(key: &str) -> &'static MachineChoice {
     MACHINE_CHOICES
         .iter()
         .find(|c| c.key == key)
         .or_else(|| MACHINE_CHOICES.iter().find(|c| c.key == DEFAULT_MACHINE))
-        .map(|c| c.console)
         .expect("the default machine is in the list")
+}
+
+/// Just the console of the machine a config value names.
+pub fn resolve_console(key: &str) -> ConsoleBoard {
+    resolve_machine(key).console
 }
 
 /// The description for a config value, for a UI to show the current setting.
@@ -302,20 +368,55 @@ mod tests {
         }
     }
 
-    /// No machine may put its console on a port the disk controllers own, or the
-    /// guest's console and its disk would answer each other's reads. Checked
-    /// against the real boards rather than a written-down range.
+    /// No machine may put its console on a port **its own** boards claim.
+    ///
+    /// Per-machine, and that distinction is the whole point: z80pack's device
+    /// covers `0Ah`–`11h`, which contains the 88-2SIO console at `10h`/`11h`. So
+    /// a check against one fixed set of boards would either wrongly condemn the
+    /// Altair machines or wrongly pass the z80pack one. Each machine is only
+    /// required to be coherent with itself — the port dispatch answers
+    /// controllers before the console, so an overlap inside one machine means a
+    /// disk controller replying to console reads, and a guest that goes silent.
     #[test]
-    fn test_no_console_lands_on_a_controller_port() {
-        let m = super::super::boot_machine::BootMachine::new();
+    fn test_no_console_lands_on_its_own_machines_controller_port() {
         for c in MACHINE_CHOICES {
+            let mut m = super::super::boot_machine::BootMachine::new();
+            m.set_machine(c.key);
             for port in [c.console.status_port, c.console.data_port] {
                 assert!(
                     !m.owns_disk_port(port),
-                    "{}: port {port:#04x} belongs to a disk controller",
+                    "{}: port {port:#04x} belongs to one of its own disk controllers",
                     c.key
                 );
             }
+        }
+    }
+
+    /// The collision that makes z80pack a machine of its own, asserted so nobody
+    /// "simplifies" the board lists back into one set.
+    #[test]
+    fn test_the_z80pack_device_would_shadow_an_altair_console() {
+        let mut m = super::super::boot_machine::BootMachine::new();
+        m.set_machine("z80pack");
+        let altair = resolve_console("altair_2sio");
+        assert!(
+            m.owns_disk_port(altair.status_port) && m.owns_disk_port(altair.data_port),
+            "if this ever stops being true, the machines could share a board list"
+        );
+        // And the reverse: an Altair machine's boards cover the z80pack device's
+        // drive-select register.
+        let mut m2 = super::super::boot_machine::BootMachine::new();
+        m2.set_machine("altair_2sio");
+        assert!(m2.owns_disk_port(0x0A), "the 88-DCDD's data port is z80pack's drive select");
+    }
+
+    /// Every machine must carry at least one disk controller, or it can boot
+    /// nothing at all — a machine with an empty board list would present as
+    /// "that image is not a disk this machine can carry" for every disk.
+    #[test]
+    fn test_every_machine_carries_a_controller() {
+        for c in MACHINE_CHOICES {
+            assert!(!c.boards.is_empty(), "{} carries no disk controller", c.key);
         }
     }
 }
