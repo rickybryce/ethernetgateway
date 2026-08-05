@@ -1206,7 +1206,15 @@ mod tests {
     /// `0x10/0x11`, `attach_modem` accepted it against the old console, and then
     /// the console moves onto those ports and wins in the dispatch. Guarded by
     /// `debug_assert!`, so this test is what makes the guard real.
+    ///
+    /// **Debug builds only, and deliberately.** A `debug_assert!` is compiled out
+    /// in release, so a `#[should_panic]` test for one *fails* under
+    /// `cargo test --release` — which is exactly how this was found, since CI runs
+    /// the debug suite and never saw it. The alternative, promoting the guard to a
+    /// real `assert!`, would put a panic path into a live session to catch a
+    /// programming error that cannot survive one debug test run.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "set_machine must come before attach_modem")]
     fn test_choosing_the_machine_after_the_modem_is_refused() {
         let mut m = BootMachine::new();
@@ -2946,6 +2954,21 @@ mod tests {
         let dir2 = type_at(&mut m2, &mut cpu2, b"DIR NEWFILE.TXT\r", 400_000_000);
         println!("--- DIR after reboot ---\n{dir2}");
         assert!(dir2.contains("NEWFILE"), "the file did not survive the reboot: {dir2:?}");
+    }
+
+    /// The DMA path indexes memory raw, and this is why that is safe.
+    ///
+    /// `HostRequest::Dma` walks `self.mem[addr.wrapping_add(i) as usize]` with no
+    /// bounds check, which is sound only because the address is a `u16` and the
+    /// memory is exactly 64 KB. Written down as a test because the safety of that
+    /// code is invisible at the point of use — someone shrinking `mem`, or
+    /// widening an address, would turn a wrap into a panic on a guest's disk read.
+    #[test]
+    fn test_memory_is_exactly_the_sixteen_bit_address_space() {
+        let m = BootMachine::new();
+        assert_eq!(m.mem.len(), 0x1_0000, "the DMA path relies on this");
+        // The extremes a wrapping u16 can reach, both in range.
+        assert_eq!(u16::MAX as usize, m.mem.len() - 1);
     }
 
     /// A guest blocked on a console read must look **idle** to the driver, or a

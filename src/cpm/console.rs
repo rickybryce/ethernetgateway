@@ -315,6 +315,30 @@ mod tests {
         assert_eq!(MACHINE_CHOICES[0].key, DEFAULT_MACHINE, "and it is offered first");
     }
 
+    /// `auto` must never be *shown* as though it were a machine.
+    ///
+    /// `resolve_machine("auto")` deliberately falls back to the default so no
+    /// caller can be handed nothing — which means a UI that labelled it with
+    /// `machine_description` would tell the operator their setting was
+    /// `altair_2sio` when it is actually detection. `machine_label` is the one
+    /// that must be used for display, and this is what keeps the two apart.
+    #[test]
+    fn test_auto_is_labelled_as_detection_not_as_a_machine() {
+        assert_ne!(
+            machine_label(AUTO_MACHINE),
+            machine_description(AUTO_MACHINE),
+            "auto must not be displayed as the machine it falls back to"
+        );
+        assert!(machine_label(AUTO_MACHINE).to_lowercase().contains("detect"));
+        assert!(is_valid_machine_key(AUTO_MACHINE), "and it must be a settable value");
+        assert!(
+            !MACHINE_CHOICES.iter().any(|c| c.key == AUTO_MACHINE),
+            "auto is a policy, not a machine, so it must not be in the list"
+        );
+        // Resolving it still yields a working machine rather than nothing.
+        assert_eq!(resolve_console(AUTO_MACHINE), resolve_console(DEFAULT_MACHINE));
+    }
+
     /// An unknown key must leave the gateway working rather than mute. A typo in
     /// a hand-edited config file is the likeliest way to reach this.
     #[test]

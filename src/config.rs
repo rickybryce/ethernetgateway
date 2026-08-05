@@ -4733,6 +4733,35 @@ mod tests {
         apply_config_key(&mut cfg, "cpm_boot_machine", "altair_sio");
         apply_config_key(&mut cfg, "cpm_boot_machine", crate::cpm::console::AUTO_MACHINE);
         assert_eq!(cfg.cpm_boot_machine, crate::cpm::console::AUTO_MACHINE);
+        // And it survives being written out and read back, which is what an
+        // upgrade does on its first save.  A default that could not round-trip
+        // would silently become something else.
+        let dir = std::env::temp_dir().join("egw_test_auto_machine_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("auto.conf");
+        let path = file.to_str().unwrap();
+        write_config_file(path, &cfg).unwrap();
+        let back = read_config_file(path);
+        assert_eq!(
+            back.cpm_boot_machine,
+            crate::cpm::console::AUTO_MACHINE,
+            "the default must survive a save/load cycle"
+        );
+        // A config file with the key ABSENT must also mean detection: that is an
+        // upgrade from a version before the key existed.
+        let text = std::fs::read_to_string(path).unwrap();
+        let stripped: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("cpm_boot_machine"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(path, stripped).unwrap();
+        assert_eq!(
+            read_config_file(path).cpm_boot_machine,
+            crate::cpm::console::AUTO_MACHINE,
+            "a config written before this key existed must get detection"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
 
         // Every machine in the shared list must be settable — iterated rather
         // than typed out, so a new one cannot be added without being accepted
