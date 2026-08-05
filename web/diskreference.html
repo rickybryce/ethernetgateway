@@ -575,6 +575,7 @@
             <a href="#sharing">Who Owns a Disk</a>
             <a href="#hdsk">88-HDSK Interface</a>
             <a href="#tarbell">Tarbell 1011</a>
+            <a href="#cromemco">Cromemco 4FDC/16FDC</a>
             <a href="#machine">Which Machine</a>
             <a href="#open">Still Open</a>
         </nav>
@@ -2503,17 +2504,254 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                 </p>
                 <p>
                     Note that <code>CDISK01</code> is <em>also</em> 256,256 bytes,
-                    so the Tarbell claims it and cannot boot it &mdash; Cromemco
-                    cold-starts from its own 4&nbsp;KB ROM monitor at
-                    <code>C000</code> rather than from a sector run. Matching an
-                    image to a board by file length has run out of road; see the
-                    machine setting below.
+                    so the Tarbell claims it and cannot boot it. Matching an image
+                    to a board by file length has run out of road; see the machine
+                    setting below. (This paragraph used to add that Cromemco
+                    cold-starts from a 4&nbsp;KB ROM monitor rather than a sector
+                    run. It does not &mdash; see the
+                    <a href="#cromemco">next section</a>, where that prediction is
+                    one of three the disks refuted.)
                 </p>
                 <p>
                     Diagnostic: <code>CPM_TARBELL_TRACE=1</code> prints every
                     command with its drive, track and sector, and every extended
                     command with its decoded function. That trace found both
                     defects above.
+                </p>
+            </div>
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CROMEMCO 4FDC / 16FDC                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="cromemco">
+                <div class="section-title">The Cromemco 4FDC / 16FDC</div>
+                <p class="intro">The fourth board, and the one that paid off the FD1771 module: the chip was already built and tested, so this board is ports, drive select, geometry and density. All three sample disks boot, sign on and take a command &mdash; and they run three <em>different</em> operating systems, which is the strongest thing a board here can be said to do.</p>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Three predictions this page made about this board
+                        were wrong, and they were wrong in the same direction.</strong>
+                        Before it was written, the open-questions table said the
+                        Cromemco would need a 4&nbsp;KB ROM monitor at
+                        <code>C000</code> to cold-start from, the synthesised-ROM
+                        mechanism the CUTER stub introduced, and
+                        <strong>bank switching</strong> &mdash; because all three
+                        boot sectors open with <code>MVI A,1 / OUT 40h</code> and
+                        nothing here models memory management. None of the three
+                        was needed. The disks load a boot sector like every other
+                        board, and that <code>OUT 40h</code> is what
+                        <em>removes</em> the ROM: <code>CDISK03</code> then loads
+                        its operating system across <code>B380h</code>&ndash;<code>CCFFh</code>,
+                        straight through <code>C000h</code>, which no ROM could
+                        survive. We never map one in, so the write has nothing to
+                        undo and port <code>40h</code> is left to the machine's
+                        unclaimed-port handling. Each prediction came from reading
+                        a <em>listing</em> on a disk rather than the code that
+                        actually runs &mdash; the identical mistake that recorded
+                        the Tarbell's console polarity backwards one section ago.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The register interface</h3>
+                <p>
+                    Measured from the three <code>CDISK*</code> images' own code:
+                    the boot sector each carries, and the driver inside the
+                    operating system it loads. What a working driver does to a
+                    register is that register's definition as far as anything we
+                    have to satisfy is concerned. Published Cromemco documentation
+                    is a cross-check, never the transcription source.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Port</th><th>Direction</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>30h</code>&ndash;<code>33h</code></td><td>both</td><td>The FD1771's own four registers &mdash; command/status, track, sector, data.</td></tr>
+                        <tr><td><code>34h</code></td><td>OUT</td><td>Disk control. Bits 0&ndash;3 drive select, <strong>one-hot</strong>; bit 6 double density; bit 7 enable the auto-wait.</td></tr>
+                        <tr><td><code>34h</code></td><td>IN</td><td>Disk status. Bit 0 INTRQ, bit 1 DRQ, bit 5 motor up to speed. <strong>Bit 2 must read clear.</strong></td></tr>
+                        <tr><td><code>04h</code></td><td>OUT</td><td>Auxiliary latch. Bit 1 is side select, and <strong>set selects side 0</strong>.</td></tr>
+                        <tr><td><code>04h</code></td><td>IN</td><td>Drive status. Bit 6 is a not-ready line and must read clear. <strong>Not a read-back of the latch.</strong></td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Three of those entries are stated as &ldquo;must read
+                    clear&rdquo; rather than by meaning, and that is deliberate:
+                    each is a measurement of what happens when it is
+                    <em>set</em>, which is all the disks establish.
+                    <code>CDISK01</code>'s seek wait is <code>IN A,(34h)</code> /
+                    <code>BIT 2,A</code> / <code>JR NZ,&lt;give up&gt;</code>, so a
+                    set bit 2 abandons every seek the driver makes; its drive wait
+                    spins on <code>IN A,(04h)</code> / <code>AND 40h</code> with no
+                    way out, so a set bit 6 hangs it. That last one is also what
+                    proves <code>04h</code> is a status input and not a read-back
+                    &mdash; the driver writes values with bit 6 set and then waits
+                    for bit 6 to clear, which could never happen if a read returned
+                    what was written.
+                </p>
+                <p>
+                    <strong>Drive select is one-hot</strong>, deduced rather than
+                    assumed: every boot sector writes <code>31h</code> while
+                    reading the disk it was booted from, which is drive 0. Read the
+                    low nibble as a binary drive number and <code>31h</code> names
+                    drive <strong>1</strong>, which is empty &mdash; nothing would
+                    boot at all.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Where the boot sector goes, and how that was settled</h3>
+                <p>
+                    <strong><code>0080h</code></strong>, entered at
+                    <code>0080h</code> &mdash; not <code>0000h</code>, where every
+                    other board here loads. Nothing in the sector announces this,
+                    so it was established sideways. Each of the three loaders reads
+                    two absolute bytes, <code>LD A,(00FCh)</code> and
+                    <code>LD A,(00FAh)</code>, and compares each with
+                    <code>44h</code> &mdash; ASCII <code>D</code>. Load the sector
+                    at <code>0080h</code> and those two addresses land on its own
+                    bytes at sector offsets <code>7Ch</code> and <code>7Ah</code>,
+                    which on the two 8&Prime; disks read <code>LGSSDD</code> and
+                    <code>LGDSDD</code>: LarGe, Single/Double Sided, Double
+                    Density. The flags then match all three disks' documented
+                    formats exactly. Load the sector anywhere else and both reads
+                    land on memory the loader never wrote.
+                </p>
+                <p>
+                    Two further things fall into place at that address and nowhere
+                    else: the loader's own restart target resolves to the front of
+                    the sector, and <code>CDISK01</code>'s exit branch resolves to
+                    <code>0100h</code>, where it has just loaded its operating
+                    system. <code>0080h</code> is also the CP/M default DMA
+                    address, which is presumably why the ROM used it.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two densities on one disk</h3>
+                <p>
+                    Track 0 of a Cromemco double-density floppy is recorded
+                    <strong>single</strong>-density, so that a single-density boot
+                    ROM can read it at all; everything after it is double-density.
+                    The loaders say so directly &mdash; each reads one track, and
+                    only then does <code>SET 6,D</code>, setting the density bit in
+                    the value it writes to the control port from then on.
+                </p>
+                <p>
+                    The arithmetic agrees exactly, which is what makes this
+                    measured rather than reasoned:
+                    3,328 + 76 &times; 8,192 = 625,920, the length of
+                    <code>CDISK02</code>; and 3,328 + 153 &times; 8,192 = 1,256,704,
+                    the length of <code>CDISK03</code>. Both directories then begin
+                    at 11,520 &mdash; the third track &mdash; which is where two
+                    reserved tracks put them. A sector is <strong>512 bytes, 16 to
+                    a track</strong> on those tracks: <code>CDISK03</code>'s BIOS
+                    says so in its SETSEC, which stores the CP/M record number and
+                    then does <code>SRL A</code> twice, and four 128-byte records
+                    to a sector is a 512-byte sector.
+                </p>
+                <p>
+                    The control port's density bit is <strong>latched but not
+                    obeyed</strong>. On real hardware, selecting the wrong data
+                    separator means the ID fields cannot be read at all; here the
+                    <em>medium</em> is authoritative, because the geometry table
+                    knows which tracks of which disk are recorded which way. A
+                    driver that asks for the wrong one is answered correctly rather
+                    than with an error &mdash; more forgiving than the board and
+                    never less, the same direction the Tarbell's WAIT port and the
+                    88-HDSK's status flags chose.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">A read that had already answered</h3>
+                <p>
+                    The one real defect in the board itself, and it needed a real
+                    disk to find. These loaders read <strong>a whole track with a
+                    single command</strong>, and a multiple-record transfer fetches
+                    its next sector on the read that <em>empties</em> the previous
+                    one. That read has therefore already handed the guest a byte
+                    &mdash; the last of the sector that just finished &mdash; and
+                    the machine must not answer it again.
+                </p>
+                <p>
+                    It did. The fetch and the re-read were the same code path as an
+                    ordinary sector fill, so the machine discarded that last byte
+                    and returned the first byte of the <em>next</em> sector instead:
+                    exactly one byte lost in every 128. That loads an operating
+                    system which is almost right and does nothing. The fix is a
+                    separate <code>HostRequest::ReadAhead</code> rather than a flag
+                    on the existing one, so that the two situations cannot be
+                    conflated again by accident &mdash; they are the same work and
+                    a different obligation.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The TU-ART console, and a console that was too fast</h3>
+                <p>
+                    These machines find their console at <code>00h</code>/<code>01h</code>
+                    on a Cromemco TU-ART: <strong>bit 6 RX available, bit 7 TX
+                    ready</strong>, both active-high. No existing convention here
+                    puts either bit in those positions, so it is a UART family of
+                    its own &mdash; and it was measured from two of the three disks
+                    independently. <code>CDISK03</code>'s CP/M BIOS is
+                    <code>CONOUT: IN A,(00h) / AND 80h / JR Z,&lt;again&gt; / LD A,C /
+                    OUT (01h),A</code>; <code>CDISK01</code>'s CDOS is
+                    <code>CONST: IN A,(00h) / AND 40h / RET Z</code>.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Then the console turned out to be too fast, and
+                        every board here shared the fault.</strong> CDOS 2.58 reads
+                        the data register <em>twice</em> per character &mdash; a
+                        lookahead that on a real serial line finds the wire still
+                        empty and costs nothing. Our console was a queue handed over
+                        as fast as the guest could ask for it, so the second read
+                        found the next keystroke every time and threw it away.
+                        <code>DIR</code> arrived as <code>DR</code>; a burst of
+                        <code>ABCDEFGH</code> came out as <code>ACEG</code>. Every
+                        other character, with the queue drained &mdash; which is
+                        what proves it is two reads rather than a lost byte.
+                    </p>
+                    <p>
+                        A <em>person typing</em> never provokes it, so this survives
+                        any amount of interactive use. <strong>Pasting a command
+                        does</strong>, and so does anything that drives a guest from
+                        a script. The console now models a character time: a
+                        received byte is not readable until roughly a character's
+                        worth of instructions has passed, which is the only clock
+                        this machine has. The regression guard drives the ports
+                        directly rather than a disk, so it holds for every machine
+                        and needs no image.
+                    </p>
+                </div>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Geometry, and what boots</h3>
+                <p>
+                    Three media, and no two are the same length, so a file names its
+                    own geometry:
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Bytes</th><th>Layout</th><th>Sample</th></tr></thead>
+                    <tbody>
+                        <tr><td>256,256</td><td>77 cyl &times; 1 side &times; 26 &times; 128, single density throughout</td><td><code>CDISK01</code> &mdash; CDOS 2.58</td></tr>
+                        <tr><td>625,920</td><td>77 cyl &times; 1 side; track 0 26&times;128, then 16&times;512</td><td><code>CDISK02</code> &mdash; MICAH 64K CP/M 2.2</td></tr>
+                        <tr><td>1,256,704</td><td>77 cyl &times; 2 sides; track 0 26&times;128, then 16&times;512</td><td><code>CDISK03</code> &mdash; ITC 56K CP/M 2.2</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Sides are interleaved <strong>by cylinder</strong>, not by half
+                    the disk: cylinder 1 side 0 is the third track in the file, and
+                    cylinder 0 side 1 is the second. That is the order the loaders
+                    read in, alternating the side bit between steps. Getting it
+                    wrong reads a plausible-looking wrong track rather than failing.
+                    A single-sided disk ignores the side bit entirely, whatever the
+                    latch says &mdash; the alternative is every track landing at
+                    double its real offset.
+                </p>
+                <p>
+                    <code>CDISK01</code> is the one that matters for identification:
+                    at 256,256 bytes it is indistinguishable by size from a Tarbell
+                    disk <em>and</em> a z80pack disk, so only its boot loader's own
+                    registers can name it. They do &mdash; all three disks are
+                    detected as <code>cromemco</code> with nothing configured.
+                </p>
+                <p>
+                    Diagnostic: <code>CPM_CROMEMCO_TRACE=1</code> prints every
+                    command with its drive, cylinder, side and sector, plus the
+                    control register decoded &mdash; including the guest's own view
+                    of the density, which the medium overrides, so a disagreement is
+                    exactly what a bring-up trace needs to show.
                 </p>
             </div>
 
@@ -2587,18 +2825,24 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                 <table class="data-table">
                     <thead><tr><th>Value</th><th>Machine</th><th>Status convention</th></tr></thead>
                     <tbody>
-                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code> &mdash; <strong>the default</strong></td><td>6850 ACIA: bit 0 RX, bit 1 TX, active high</td></tr>
+                        <tr><td><code>auto</code></td><td><strong>The default.</strong> Read the board out of the disk's own boot code; fall back to <code>altair_2sio</code></td><td>Whatever the machine it picks uses</td></tr>
+                        <tr><td><code>altair_2sio</code></td><td>Altair 88-2SIO, <code>10h</code>/<code>11h</code> &mdash; <strong>what <code>auto</code> falls back to</strong></td><td>6850 ACIA: bit 0 RX, bit 1 TX, active high</td></tr>
                         <tr><td><code>altair_sio</code></td><td>Altair 88-SIO, <code>00h</code>/<code>01h</code></td><td>Active low</td></tr>
                         <tr><td><code>console_04</code></td><td>Console at <code>04h</code>/<code>05h</code></td><td>Active low &mdash; ready when bit 0 is clear</td></tr>
                         <tr><td><code>console_04_cuter</code></td><td>As above, printing through a CUTER ROM</td><td>Active low; output is a <code>CALL</code>, not an <code>OUT</code></td></tr>
+                        <tr><td><code>z80pack</code></td><td>z80pack <code>cpmsim</code> &mdash; console at <code>00h</code>/<code>01h</code>, and its own disk device in place of the Altair boards</td><td>Whole-byte: <code>FFh</code> means a character is waiting</td></tr>
+                        <tr><td><code>cromemco</code></td><td>Cromemco TU-ART at <code>00h</code>/<code>01h</code>, with the <a href="#cromemco">4FDC/16FDC</a> in place of the Altair boards</td><td>Bit 6 RX, bit 7 TX, active high</td></tr>
                     </tbody>
                 </table>
                 <p>
-                    The default is not a preference &mdash; it is the machine this
-                    path has always been. Every disk that boots today boots because
-                    its console is at <code>10h</code>/<code>11h</code>, so any
-                    other default would silence a working gateway on upgrade, with
-                    no error anywhere to explain it.
+                    The <em>fallback</em> is not a preference &mdash; it is the
+                    machine this path has always been. Every Altair disk that boots
+                    does so because its console is at <code>10h</code>/<code>11h</code>,
+                    so any other fallback would silence a working gateway on
+                    upgrade, with no error anywhere to explain it. That is also why
+                    <code>auto</code> may only ever <em>add</em> to what boots: it
+                    keeps the fallback whenever the disk does not say plainly, and
+                    the boot screen reports which of the two happened.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Why this is a setting and never a detection</h3>
@@ -2664,14 +2908,20 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     fault to attribute.
                 </p>
                 <p>
-                    The mechanism is deliberately a list of placements rather than
-                    one stub, because its next user is much larger: Cromemco's 16FDC
-                    cold-starts from a 4&nbsp;KB ROM at <code>C000</code>, and
-                    <code>CDISK03</code> calls a dozen distinct entry points in it
-                    (<code>C03E</code>, <code>C053</code>, <code>C05E</code>,
-                    <code>C077</code>, <code>C084</code>, <code>C08A</code>,
-                    <code>C0A6</code>, <code>C0AE</code>, <code>C0BB</code>,
-                    <code>C0D2</code>, <code>C0EA</code>, <code>C0EB</code>).
+                    The mechanism is a list of placements rather than one stub,
+                    which is still the right shape but no longer for the reason
+                    given here. <strong>This paragraph used to say its next user
+                    would be Cromemco's 16FDC</strong>, cold-starting from a
+                    4&nbsp;KB ROM at <code>C000</code> with a dozen distinct entry
+                    points called by <code>CDISK03</code>. That was wrong, and
+                    instructively so: <code>CDISK03</code> loads its operating
+                    system across <code>B380h</code>&ndash;<code>CCFFh</code>, so
+                    every one of those <code>C0xx</code> addresses is inside code
+                    the disk has just loaded itself, and there is no ROM in the
+                    address space by the time any of them is called. The
+                    <a href="#cromemco">Cromemco board</a> needs no synthesised ROM
+                    at all. The entry points were read out of a listing; what the
+                    machine runs was never checked against them.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK04 &mdash; the VDM-1, and why it is deferred</h3>
@@ -2866,26 +3116,21 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                         </tr>
                         <tr>
                             <td>Controllers for Tarbell and Cromemco</td>
-                            <td><strong>The Tarbell 1011 is done</strong> &mdash; see its section
-                                above. It boots, reads, writes across a reboot and copies between two
-                                drives, and its FD1771 sits in its own module ready for Cromemco,
-                                which uses the same chip. <strong>Cromemco has not been
-                                started.</strong> It is a 16FDC per <code>CDISK02</code>'s own CDOS
-                                source; it cold-starts from its own 4&nbsp;KB ROM monitor at
-                                <code>C000</code> rather than a sector run, and its control port has
-                                an auto-wait bit like Tarbell's wait port &mdash; so the no-stall
-                                posture carries over. Three further things it needs, measured from the
-                                disks: the synthesised-ROM mechanism the CUTER stub introduced (only
-                                <code>CDISK03</code> uses it, with a dozen entry points); a TU-ART
-                                console at <code>00h</code>/<code>01h</code>, which the Tarbell BIOS's
-                                own <code>TUART</code> branch says reports bit 6 RX and bit 7 TX; and
-                                <strong>bank switching</strong>, since all three disks open with
-                                <code>MVI A,1 / OUT 40h</code> and nothing here models memory
-                                management. Only <code>CDISK01</code> collides with the Tarbell on
-                                size &mdash; <code>CDISK02</code> is 625,920 bytes and
-                                <code>CDISK03</code> is 1,256,704, so those two identify themselves.
-                                Note the boot sectors contain <code>BIT 1,C</code>: these are Z80
-                                disks, which our booted machine already is.</td>
+                            <td><strong>Both are done</strong> &mdash; see their sections above. The
+                                Tarbell 1011 boots, reads, writes across a reboot and copies between
+                                two drives, and its FD1771 sits in its own module, which is what made
+                                the Cromemco 4FDC/16FDC mostly ports and geometry. All three
+                                <code>CDISK*</code> images now boot, sign on and take a command, on
+                                three different operating systems &mdash; CDOS 2.58, MICAH 64K CP/M
+                                and ITC's CP/M. The auto-wait bit did carry the no-stall posture over
+                                as expected. <strong>Three other predictions recorded here were
+                                wrong</strong> &mdash; no ROM monitor at <code>C000</code>, no
+                                synthesised-ROM mechanism and no bank switching were needed; the
+                                boot-sector load address is <code>0080h</code>; and what the board
+                                actually required instead was 512-byte sectors, mixed density on one
+                                disk, and a fix to multiple-record transfers. The refutations are
+                                written up in the section, because how they were arrived at is the
+                                reusable part.</td>
                         </tr>
                         <tr>
                             <td>The Processor Technology VDM-1</td>
@@ -2936,20 +3181,24 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                         </tr>
                         <tr>
                             <td>Boot coverage as it stands</td>
-                            <td>Every image in the <code>DISK*</code> and <code>HDSK*</code>
-                                families that has a boot sector &mdash; <strong>24 of the 33</strong>
-                                in the working set, and separately <strong>all eleven</strong>
-                                <code>HDSK*</code> images once the removable backup volume is
-                                included (the working set stops at HDSK03, and HDSK05&ndash;0B had
-                                never been tried before: seven more, all reaching
-                                <code>63K CP/M 2.2b</code>). Of the rest, <code>DISK0D</code> is
-                                genuinely data and not a system disk. Of the Tarbell family,
-                                <strong>3 of 5</strong> now boot &mdash; TDISK01, TDISK02 and TDISK05
-                                &mdash; with TDISK06 correctly refused as a blank disk, TDISK04
-                                waiting on the VDM-1 and TDISK03 not a Tarbell disk at all. The three
-                                Cromemco images remain. Between them these reach CP/M 1.3, 1.4, 2.2
-                                and 3.0, Altair DOS, Disk Extended BASIC, Time Sharing BASIC and Hard
-                                Disk BASIC.</td>
+                            <td><strong>29 of the 34</strong> images in the working set boot and sign
+                                on <em>with nothing configured</em> &mdash; the machine setting
+                                defaults to <code>auto</code> and the disk names its own board. By
+                                family: 19 of 22 <code>DISK*</code>; all 3 <code>HDSK*</code> here,
+                                and separately <strong>all eleven</strong> once the removable backup
+                                volume is included (the working set stops at HDSK03; HDSK05&ndash;0B
+                                had never been tried before and all reach
+                                <code>63K CP/M 2.2b</code>); <strong>4 of 6</strong>
+                                <code>TDISK*</code>; and <strong>all 3</strong> <code>CDISK*</code>.
+                                Separately, 9 of the disks in z80pack's own library boot.
+                                The five that do not are each accounted for:
+                                <code>DISK0D</code> and <code>TDISK06</code> are correctly refused
+                                (data, and a blank), <code>TDISK04</code> waits on the VDM-1, and
+                                <code>DISK0B</code> and <code>DISK0F</code> load and then go quiet
+                                for reasons not yet established &mdash; the one genuinely open item
+                                in this row. Between them these reach CP/M 1.3, 1.4, 1975, 2.2 and
+                                3.0, MP/M, UCSD p-System IV, CDOS, Altair DOS, Disk Extended BASIC,
+                                Time Sharing BASIC and Hard Disk BASIC.</td>
                         </tr>
                     </tbody>
                 </table>

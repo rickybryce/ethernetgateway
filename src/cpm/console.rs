@@ -149,6 +149,8 @@ pub enum Board {
     Tarbell,
     /// z80pack `cpmsim`'s simulated disk device, ports `0Ah`–`11h`.
     Z80pack,
+    /// Cromemco 4FDC/16FDC floppy controller, ports `30h`–`34h` plus `04h`.
+    Cromemco,
 }
 
 /// The boards an Altair-shaped machine carries.
@@ -238,6 +240,19 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
         // Its own device only. See `MachineChoice::boards` — these ports
         // overlap the Altair boards', so the two cannot share a machine.
         boards: &[Board::Z80pack],
+    },
+    MachineChoice {
+        key: "cromemco",
+        description: "Cromemco TU-ART console - 0x00 / 0x01",
+        console: board(0x00, 0x01, UartFamily::Tuart),
+        // Its own board only. Not because of a port collision — the 16FDC's
+        // `30h`–`34h` and `04h` clash with nothing the Altair machines carry —
+        // but because 256,256 bytes is a Cromemco single-density floppy *and* a
+        // Tarbell disk *and* a z80pack disk, and `Controller::accepts` hands an
+        // image to the first board that recognises the length. A machine that
+        // carried both would give every Cromemco disk of that size to the
+        // Tarbell, which is exactly the failure the z80pack device had.
+        boards: &[Board::Cromemco],
     },
 ];
 

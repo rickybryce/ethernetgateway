@@ -77,6 +77,10 @@ fn distinctive_ports(board: Board) -> &'static [u8] {
         Board::Hdsk => &[0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7],
         Board::Tarbell => &[0xF8, 0xF9, 0xFA, 0xFB, 0xFC],
         Board::Z80pack => &[0x0B, 0x0C, 0x0D, 0x0E],
+        // The 16FDC's four chip registers and its control port. Its auxiliary
+        // latch at `04h` is deliberately left out: `04h`/`05h` is also the
+        // console of the VDM-1 Tarbell machines, so it fails rule one.
+        Board::Cromemco => &[0x30, 0x31, 0x32, 0x33, 0x34],
     }
 }
 
@@ -163,7 +167,8 @@ pub fn detect_machine(image: &[u8]) -> Detected {
 
     // Which board's registers does the loader drive? More than one answer means
     // the image is not telling us anything we can act on.
-    let boards: Vec<Board> = [Board::Dcdd, Board::Hdsk, Board::Tarbell, Board::Z80pack]
+    let boards: Vec<Board> =
+        [Board::Dcdd, Board::Hdsk, Board::Tarbell, Board::Z80pack, Board::Cromemco]
         .into_iter()
         .filter(|b| distinctive_ports(*b).iter().any(|p| touched(*p)))
         .collect();
@@ -374,6 +379,13 @@ mod tests {
             ("mpm-1.dsk", "z80pack"),
             ("ucsd-iv-1.dsk", "z80pack"),
             ("cpm13.dsk", "z80pack"),
+            // All three Cromemco disks reach a prompt and take a `DIR` on this
+            // machine. CDISK01 is the one that matters most here: it is 256,256
+            // bytes, so a size can never choose it — only its boot loader's
+            // registers can.
+            ("CDISK01.DSK", "cromemco"),
+            ("CDISK02.DSK", "cromemco"),
+            ("CDISK03.DSK", "cromemco"),
         ];
         let mut names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()

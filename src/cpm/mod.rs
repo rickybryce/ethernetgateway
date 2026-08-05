@@ -46,6 +46,7 @@ pub mod modem_port;
 pub mod tarbell;
 pub mod uart;
 pub mod wd1771;
+pub mod cromemco;
 pub mod z80pack;
 
 pub use fcb::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE};

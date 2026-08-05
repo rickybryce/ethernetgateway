@@ -34,6 +34,22 @@ use super::modem_port::ModemPort;
 use super::uart::ModemAccess;
 use iz80::{Cpu, Machine};
 
+/// How long a received character takes to come down the line, in instructions.
+///
+/// A real console is a serial line: characters are spaced by a character time,
+/// and software written for one is entitled to assume that reading the data
+/// register twice in quick succession cannot produce two different keystrokes.
+/// CDOS 2.58 assumes exactly that — see [`BootMachine::rx_ready`] for the
+/// measurement.
+///
+/// The value only has to exceed the few instructions between a guest's two
+/// reads, and it costs nothing: even a long pasted line is a few hundred
+/// thousand instructions, against the tens of millions a single `DIR` takes.
+/// 2,000 is around a character time at 9,600 baud on a machine of this speed,
+/// and a probe showed 1,000 already sufficient — so this is that with margin
+/// rather than a figure tuned until one disk passed.
+const RX_CHARACTER_TIME: u32 = 2_000;
+
 /// The live controller a board name stands for.
 ///
 /// The one place that turns [`super::console::Board`] into hardware, so a new
@@ -46,6 +62,7 @@ fn boards_to_controller(board: super::console::Board) -> Box<dyn Controller> {
         Board::Hdsk => Box::new(super::hdsk::Hdsk::new()),
         Board::Tarbell => Box::new(super::tarbell::Tarbell::new()),
         Board::Z80pack => Box::new(super::z80pack::Z80pack::new()),
+        Board::Cromemco => Box::new(super::cromemco::Cromemco::new()),
     }
 }
 
@@ -147,6 +164,13 @@ pub struct BootMachine {
     tx: Vec<u8>,
     /// Bytes waiting for the guest to read.
     rx: std::collections::VecDeque<u8>,
+    /// Instructions left before the next received character has "arrived".
+    ///
+    /// See [`BootMachine::rx_ready`]. Counted in instructions rather than in
+    /// anything finer because that is the only clock this machine has, and the
+    /// quantity being modelled — a character time — only has to be long enough
+    /// that a guest's lookahead finds the line empty.
+    rx_hold: u32,
     /// Reads of the console status register since the last one that reported
     /// anything. A guest waiting forever on a key is normal; a guest waiting
     /// forever on a *disk* is not, and the two are told apart by this and
@@ -202,6 +226,7 @@ impl BootMachine {
             disks: (0..16).map(|_| None).collect(),
             tx: Vec::new(),
             rx: std::collections::VecDeque::new(),
+            rx_hold: 0,
             idle_status_reads: 0,
             sense_switches: DEFAULT_SENSE_SWITCHES,
             console_blocked: false,
@@ -344,11 +369,32 @@ impl BootMachine {
     /// hold the byte back rather than replay the instruction.
     pub fn step(&mut self, cpu: &mut Cpu) {
         let before = cpu.registers().pc();
+        self.rx_hold = self.rx_hold.saturating_sub(1);
         cpu.execute_instruction(self);
         if self.console_blocked {
             self.console_blocked = false;
             cpu.registers().set_pc(before);
         }
+    }
+
+    /// Is a received character available to the guest *yet*?
+    ///
+    /// Not the same question as "is one queued". A real console arrives down a
+    /// serial line one character at a time with a character time between them,
+    /// and a queue handed over as fast as the guest can read it is a machine no
+    /// software was written for.
+    ///
+    /// **This is a measured defect, not a refinement.** CDOS 2.58 reads the data
+    /// register twice per character — a lookahead that on real hardware finds
+    /// the line still empty and costs nothing. Given a queue that refills
+    /// instantly it finds a character every time and throws it away, so `DIR`
+    /// arrived as `DR` and a burst of `ABCDEFGH` came out as `ACEG`: exactly
+    /// every other one, with the queue drained, which is what proves it is two
+    /// reads and not a lost byte. A person typing never provokes it. **Pasting a
+    /// command does**, which is why this is worth fixing rather than pacing the
+    /// tests.
+    fn rx_ready(&self) -> bool {
+        !self.rx.is_empty() && self.rx_hold == 0
     }
 
     /// Does a disk controller answer at this port?
@@ -671,7 +717,10 @@ impl BootMachine {
     fn service(&mut self, req: HostRequest, ctrl: usize) {
         match req {
             HostRequest::None => {}
-            HostRequest::Read { drive, offset, len } => {
+            // Identical work; they differ only in whether the port read that
+            // caused it still owes the guest an answer. See `HostRequest`.
+            HostRequest::Read { drive, offset, len }
+            | HostRequest::ReadAhead { drive, offset, len } => {
                 let bytes = self
                     .disks
                     .get(drive as usize)
@@ -869,12 +918,17 @@ impl Machine for BootMachine {
                 self.idle_status_reads = self.idle_status_reads.saturating_add(1);
                 // Transmit is always ready — our "wire" is a buffer, so there is
                 // nothing to be busy about.
-                self.console.family.status(!self.rx.is_empty(), true, true)
+                self.console.family.status(self.rx_ready(), true, true)
             }
             p if p == self.console.data_port => {
-                match self.rx.pop_front() {
+                // `rx_ready`, not "is the queue non-empty" — see its comment.
+                // A character still inside its character time has not arrived
+                // yet, and handing it over early is how a guest's lookahead
+                // swallows every other keystroke.
+                match self.rx_ready().then(|| self.rx.pop_front()).flatten() {
                     Some(b) => {
                         self.idle_status_reads = 0;
+                        self.rx_hold = RX_CHARACTER_TIME;
                         b
                     }
                     None => {
@@ -1390,7 +1444,11 @@ mod tests {
         assert_eq!(m.rx.len(), KEY_QUEUE_CAP, "the queue stops growing");
         // And the bytes kept are the *earliest*, so a guest that starts reading
         // sees the beginning of what was typed rather than an arbitrary window.
+        // A character time between the two reads because the console models a
+        // serial line, not a byte queue — reading straight back would find the
+        // line still empty, which is the whole point of `rx_ready`.
         assert_eq!(m.port_in(CONSOLE_DATA_PORT as u16), 0);
+        pass_a_character_time(&mut m);
         assert_eq!(m.port_in(CONSOLE_DATA_PORT as u16), 1);
     }
 
@@ -3061,6 +3119,113 @@ mod tests {
         assert!(dir.contains("A>"), "DIR never returned to the prompt: {dir:?}");
     }
 
+    /// Two keystrokes sent together must not both be readable at once.
+    ///
+    /// The regression guard for a measured defect. CDOS 2.58 reads the console
+    /// data register twice per character — harmless on a serial line, where the
+    /// second read finds nothing — so a console that hands over its whole queue
+    /// as fast as the guest can ask swallows every other keystroke. `DIR` became
+    /// `DR`; a burst of `ABCDEFGH` came back as `ACEG`.
+    ///
+    /// Driven through the ports rather than through a disk, so it holds for
+    /// every machine and needs no image. See [`BootMachine::rx_ready`].
+    #[test]
+    fn test_a_second_keystroke_does_not_arrive_before_its_character_time() {
+        let mut m = BootMachine::new();
+        m.set_machine("cromemco");
+        let status = m.console.status_port;
+        let data = m.console.data_port;
+        let ready = |m: &mut BootMachine| m.port_in(status as u16) & 0x40 != 0;
+
+        m.send_key(b'A');
+        m.send_key(b'B');
+        assert!(ready(&mut m), "the first one is there straight away");
+        assert_eq!(m.port_in(data as u16), b'A');
+        assert!(!ready(&mut m), "and the second has not come down the line yet");
+        // The lookahead read CDOS makes at this exact moment must find nothing,
+        // not the next keystroke.
+        assert_eq!(m.port_in(data as u16), 0, "a lookahead must not consume B");
+
+        pass_a_character_time(&mut m);
+        assert!(ready(&mut m), "after a character time it has arrived");
+        assert_eq!(m.port_in(data as u16), b'B', "and it is still B, not lost");
+    }
+
+    /// Let one character time pass on the console's line.
+    ///
+    /// Time passes here by *running the CPU*, because instructions are the only
+    /// clock this machine has — see [`RX_CHARACTER_TIME`]. A freshly made
+    /// machine's memory is all zeroes, which the Z80 reads as NOPs, so a test
+    /// that has not loaded a program can advance the clock without arranging
+    /// anything for the CPU to do.
+    fn pass_a_character_time(m: &mut BootMachine) {
+        let mut cpu = BootMachine::new_cpu();
+        for _ in 0..RX_CHARACTER_TIME {
+            m.step(&mut cpu);
+        }
+    }
+
+    /// **A Cromemco disk boots, signs on and takes a command.**
+    ///
+    /// The gate for the fourth and last board on the disk-controller plan, and
+    /// for the two chip features it needed: sectors that are not 128 bytes, and
+    /// multiple-record transfers. Both are exercised before the sign-on appears
+    /// — the loader reads each track with a single command, and on a
+    /// double-density disk every track after the first is 16 × 512.
+    ///
+    /// It also pins the boot-sector load address. `CDISK01` enters its operating
+    /// system with a relative branch, so a sector loaded anywhere else lands in
+    /// the wrong place and this test is what says so.
+    ///
+    /// Ignored: set `CPM_CROMEMCO_IMAGE` to CDISK01/02/03.DSK. `CPM_CROMEMCO_EXPECT`
+    /// overrides the string looked for in the sign-on.
+    #[test]
+    #[ignore]
+    fn test_a_cromemco_disk_boots_and_takes_commands() {
+        let Ok(path) = std::env::var("CPM_CROMEMCO_IMAGE") else {
+            eprintln!("set CPM_CROMEMCO_IMAGE to run this");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.set_machine("cromemco");
+        m.insert(0, std::fs::read(&path).unwrap(), true).expect("a Cromemco image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- sign-on ---\n{signon}");
+        println!("pc={:#06x} stuck_polls={}", cpu.registers().pc(), m.stuck_polls());
+        // Deliberately not a brand name. The three sample disks carry three
+        // different operating systems — CDOS 2.58, MICAH 64k CP/M and ITC's
+        // CP/M — and a gate that named one of them would only ever guard one
+        // disk. `CPM_CROMEMCO_EXPECT` is there for pinning a specific image.
+        let want = std::env::var("CPM_CROMEMCO_EXPECT").ok();
+        match &want {
+            Some(w) => assert!(signon.contains(w), "no sign-on containing {w:?}: {signon:?}"),
+            None => assert!(
+                signon.len() > 20,
+                "the disk printed nothing worth calling a sign-on: {signon:?}"
+            ),
+        }
+
+        // The real gate. A sign-on comes off the system tracks the loader
+        // already read, so it can pass on a driver that never works again;
+        // `DIR` is the first thing that goes back to the disk through the
+        // guest's *own* BIOS, at a track the boot never touched.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "DIR listed no programs: {dir:?}");
+        // `DIR` is four keystrokes delivered at once, which is also the whole of
+        // what a paste is. CDOS reads the data register twice per character, so
+        // before the console modelled a character time this arrived as `DR` and
+        // the guest answered "Program not found" — a passing sign-on and a
+        // console that cannot be typed at. See `BootMachine::rx_ready`.
+        assert!(
+            !dir.contains("not found"),
+            "the command arrived mangled — a keystroke was swallowed: {dir:?}"
+        );
+    }
+
     /// A VDM-1 guest is not mute because it failed — it is painting a screen we
     /// do not show yet.
     ///
@@ -3120,7 +3285,13 @@ mod tests {
         println!("--- VDM-1 screen at {VDM_BASE:#06x} ---\n{screen}");
         println!("pc={:#06x} (its CONIN loop, waiting for a key)", cpu.registers().pc());
 
-        let want = std::env::var("CPM_VDM_EXPECT").unwrap_or_else(|_| "CP/M".into());
+        // `CPM`, not `CP/M`: the one disk this gate exists for signs on as
+        // `TARBELL 48K CPM V1.4 OF 2-15-78`, with no slash. The default used to
+        // be the spelling every *other* gate here looks for, which no VDM disk
+        // ever paints — so running this test the documented way failed on a
+        // guest that had worked perfectly, which is the most expensive kind of
+        // wrong a test default can be.
+        let want = std::env::var("CPM_VDM_EXPECT").unwrap_or_else(|_| "CPM".into());
         assert!(
             screen.contains(&want),
             "the guest never painted {want:?} into screen memory; it holds:\n{screen}"

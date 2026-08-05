@@ -51,6 +51,19 @@ pub enum UartFamily {
     /// way, and giving it its own identical variant would be a second copy of
     /// the same four lines.
     Sio88,
+    /// Cromemco TU-ART: bit 6 = RX available, bit 7 = TX ready (active-high).
+    ///
+    /// Measured from two of the three Cromemco disks independently, which is why
+    /// it is a family of its own rather than a reuse of one of the above — no
+    /// existing convention puts either bit here. `CDISK03`'s CP/M BIOS is
+    /// `CONOUT: IN A,(00h) / AND 80h / JR Z,<again> / LD A,C / OUT (01h),A`, and
+    /// `CDISK01`'s CDOS is `CONST: IN A,(00h) / AND 40h / RET Z / LD A,FFh` with
+    /// `CONIN` then reading `01h` and masking to seven bits.
+    ///
+    /// No carrier bit: the TU-ART has modem-control lines, but nothing on these
+    /// disks reads one, and inventing a bit position for it would be a guess in
+    /// the register a console polls most.
+    Tuart,
     /// The whole byte is the answer: `0xFF` when a character is waiting, `0x00`
     /// when not — no bit masking at all.
     ///
@@ -97,6 +110,10 @@ impl UartFamily {
             // (transmit-not-ready when the ring is full) holds for 88-SIO.
             UartFamily::Sio88 => {
                 (if rx_ready { 0x00 } else { 0x01 }) | (if tx_ready { 0x00 } else { 0x80 })
+            }
+            // TU-ART: bit6 RX available, bit7 TX ready, both active-high.
+            UartFamily::Tuart => {
+                (if rx_ready { 0x40 } else { 0 }) | (if tx_ready { 0x80 } else { 0 })
             }
             // CP/M's own convention, straight through: 0xFF means "a character
             // is waiting".  `tx_ready` and `carrier` have nowhere to go, and
@@ -302,6 +319,13 @@ mod tests {
         assert_eq!(UartFamily::Sio.status(true, true, false), 0x05); // TX empty + RX avail
         assert_eq!(UartFamily::Acia.status(true, true, false), 0x03); // TDRE + RDRF
         assert_eq!(UartFamily::Sio88.status(true, true, false), 0x00); // active-low: RX ready
+        // TU-ART, from the Cromemco disks' own CONST/CONOUT.
+        assert_eq!(UartFamily::Tuart.status(false, true, false), 0x80); // TX ready only
+        assert_eq!(UartFamily::Tuart.status(true, true, false), 0xC0); // and a key waiting
+        assert_eq!(UartFamily::Tuart.status(false, false, false), 0x00, "nothing doing");
+        // The two bits a Cromemco BIOS actually masks with.
+        assert_ne!(UartFamily::Tuart.status(true, true, false) & 0x40, 0, "CDOS masks 40h");
+        assert_ne!(UartFamily::Tuart.status(false, true, false) & 0x80, 0, "CP/M masks 80h");
     }
 
     #[test]

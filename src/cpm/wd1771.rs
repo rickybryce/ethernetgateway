@@ -44,8 +44,24 @@
 //!   The one hazard is a driver that waits for something to go *away*; see
 //!   `index` below, which is why that bit alternates.
 
-/// Bytes in an IBM 3740 sector, which is what these disks hold.
+/// Bytes in an IBM 3740 sector, which is what the single-density disks hold.
+///
+/// Also the chip's power-on format, so a board that never says otherwise — the
+/// Tarbell — behaves exactly as it did before this was a variable.
 pub const SECTOR_LEN: usize = 128;
+
+/// The largest sector any board here records.
+///
+/// 512, from the Cromemco double-density disks: `CDISK02`'s 8" tracks are 8,192
+/// bytes and its BIOS divides the CP/M record number by four to reach a physical
+/// sector (`SRL A / SRL A` in its SETSEC), so four 128-byte records live in each
+/// one. A fixed buffer rather than a `Vec` because the chip is on the port path
+/// and there is no size here worth an allocation for.
+pub const MAX_SECTOR_LEN: usize = 512;
+
+/// Bytes in the ID field a Read Address returns: track, side, sector, length
+/// code, and the two CRC bytes.
+const ID_FIELD_LEN: usize = 6;
 
 /// What the chip needs the board to do with the medium.
 ///
@@ -157,6 +173,30 @@ pub struct Wd1771 {
     read_only: bool,
     tracks: u8,
 
+    /// Bytes in a sector of the track under the head, and how many there are.
+    ///
+    /// A field rather than a constant because the Cromemco board changes both
+    /// **within one disk**: track 0 of a double-density Cromemco floppy is
+    /// recorded single-density at 26 × 128 so that a single-density boot PROM can
+    /// read it, and every track after it is 16 × 512. The chip has no opinion
+    /// about which — on real hardware the sector length comes off the ID field
+    /// and the count is however many the track was formatted with — so the board
+    /// states it, per track, before it issues a command.
+    sector_len: usize,
+    sectors_per_track: usize,
+    /// Which side of the disk the board has selected, for the ID field.
+    side: u8,
+
+    /// Bytes the transfer in flight will move.
+    ///
+    /// Not the same as `sector_len`, and conflating them stalled a real boot.
+    /// Read Address transfers **six** bytes — the ID field — whatever the sector
+    /// length is, and CDOS's drive probe issues one and then waits for the
+    /// command to finish without reading a single byte of it. A Read Address
+    /// that held a 128-byte transfer open never finished, so the wait never
+    /// ended.
+    xfer_len: usize,
+
     // ---- flags ----------------------------------------------------------
     busy: bool,
     drq: bool,
@@ -170,9 +210,15 @@ pub struct Wd1771 {
     index: bool,
 
     // ---- the sector in flight -------------------------------------------
-    buffer: [u8; SECTOR_LEN],
+    buffer: [u8; MAX_SECTOR_LEN],
     pos: usize,
     moving: Move,
+    /// The `m` flag of the running Type II command: keep going after this sector.
+    ///
+    /// The Cromemco boot loader depends on it entirely — it issues one `9Ch`
+    /// (read, `m` set) per track and clocks bytes out until the chip stops, which
+    /// it does by running off the end of the track. See `advance_record`.
+    multi: bool,
 
     /// Status reads that found nothing new, for the stuck-guest detector.
     idle_polls: u32,
@@ -201,15 +247,20 @@ impl Wd1771 {
             ready: false,
             read_only: true,
             tracks: 77,
+            sector_len: SECTOR_LEN,
+            sectors_per_track: SECTORS_PER_TRACK,
+            side: 0,
+            xfer_len: SECTOR_LEN,
             busy: false,
             drq: false,
             intrq: false,
             error: 0,
             head_loaded: false,
             index: false,
-            buffer: [0; SECTOR_LEN],
+            buffer: [0; MAX_SECTOR_LEN],
             pos: 0,
             moving: Move::None,
+            multi: false,
             idle_polls: 0,
             prev_status: 0xFF,
             last_step_in: true,
@@ -222,6 +273,27 @@ impl Wd1771 {
         self.ready = ready;
         self.read_only = read_only;
         self.tracks = tracks.max(1);
+    }
+
+    /// How the track under the head is recorded: sector size and sector count.
+    ///
+    /// Called by the board before a command, because only the board knows which
+    /// track the head is on and what the medium puts there. A board that never
+    /// calls it keeps the IBM 3740 format the chip powers up with.
+    ///
+    /// Clamped rather than rejected: a sector length this chip cannot buffer
+    /// would otherwise be an out-of-bounds write on the transfer path, and the
+    /// only caller computes it from a geometry table.
+    pub fn set_format(&mut self, sector_len: usize, sectors_per_track: usize) {
+        self.sector_len = sector_len.clamp(1, MAX_SECTOR_LEN);
+        self.sectors_per_track = sectors_per_track.max(1);
+    }
+
+    /// Which surface the board has the head on, for the ID field a Read Address
+    /// returns. The chip has no side input of its own — on these boards the side
+    /// is a line the board drives, so the board is the only thing that knows.
+    pub fn set_side(&mut self, side: u8) {
+        self.side = side;
     }
 
     /// The track register, for a board's diagnostics.
@@ -250,8 +322,12 @@ impl Wd1771 {
     }
 
     /// The sector buffer, for a board answering a [`Need::Write`].
+    ///
+    /// Only the part the current format actually records — the array behind it is
+    /// sized for the largest sector any board here uses, and handing back all of
+    /// it would write 512 bytes over a 128-byte sector's four neighbours.
     pub fn sector_out(&self) -> &[u8] {
-        &self.buffer
+        &self.buffer[..self.sector_len]
     }
 
     /// Hand the chip the bytes a [`Need::Read`] asked for.
@@ -259,9 +335,10 @@ impl Wd1771 {
     /// The transfer opens here rather than when the command was issued, because
     /// until the bytes exist there is nothing to request.
     pub fn sector_loaded(&mut self, bytes: &[u8]) {
-        let n = bytes.len().min(SECTOR_LEN);
+        let n = bytes.len().min(self.sector_len);
         self.buffer[..n].copy_from_slice(&bytes[..n]);
-        self.buffer[n..].fill(0);
+        self.buffer[n..self.sector_len].fill(0);
+        self.xfer_len = self.sector_len;
         self.pos = 0;
         self.moving = Move::Reading;
         self.drq = true;
@@ -290,12 +367,56 @@ impl Wd1771 {
         // command had already finished.
         self.intrq = false;
         self.moving = Move::None;
+        self.multi = false;
         self.prev_status = 0xFF;
     }
 
+    /// Finish a record, and start the next one if `m` said to.
+    ///
+    /// The one place a multiple-record command differs from a single one, and it
+    /// is worth stating how such a command *ends*, because it is not an error
+    /// even though it reports one. There is no count: the chip steps the sector
+    /// register and keeps going until it asks for a sector the track does not
+    /// have, and the Record Not Found that follows is the normal terminating
+    /// condition. The Cromemco boot loader says so plainly — after its read it
+    /// does `IN A,(30h) / BIT 4,A / JR Z,0000h`, restarting the whole boot if
+    /// Record Not Found is **clear**. A chip that stopped cleanly at the end of a
+    /// track would send that loader back to the beginning for ever.
+    fn advance_record(&mut self) -> Need {
+        self.pos = 0;
+        self.drq = false;
+        self.moving = Move::None;
+        if !self.multi {
+            self.busy = false;
+            self.intrq = true;
+            return Need::None;
+        }
+        let next = self.sector.wrapping_add(1);
+        if next == 0 || next as usize > self.sectors_per_track {
+            self.error |= type2::RECORD_NOT_FOUND;
+            self.busy = false;
+            self.intrq = true;
+            return Need::None;
+        }
+        self.sector = next;
+        if self.cmd & 0x20 != 0 {
+            self.moving = Move::Writing;
+            self.drq = true;
+            Need::None
+        } else {
+            Need::Read { track: self.track, sector: self.sector }
+        }
+    }
+
     /// A read or write of a register, by its low-two-bits address.
-    pub fn read(&mut self, r: u8) -> u8 {
-        match r & 0x03 {
+    ///
+    /// Returns what the board must do about it, the same as [`Wd1771::write`] —
+    /// because on a multiple-record read the byte that empties one sector is also
+    /// the moment the next one has to be fetched. Before that there was nowhere
+    /// for a read to say so.
+    pub fn read(&mut self, r: u8) -> (u8, Need) {
+        let mut need = Need::None;
+        let value = match r & 0x03 {
             reg::COMMAND => {
                 // Reading the status clears the interrupt, which is the standard
                 // way a driver acknowledges completion.
@@ -312,15 +433,11 @@ impl Wd1771 {
             reg::SECTOR => self.sector,
             reg::DATA => {
                 if self.moving == Move::Reading {
-                    let b = self.buffer[self.pos.min(SECTOR_LEN - 1)];
+                    let b = self.buffer[self.pos.min(self.xfer_len - 1)];
                     self.pos += 1;
                     self.idle_polls = 0;
-                    if self.pos >= SECTOR_LEN {
-                        // Done: the command completes and asks for attention.
-                        self.moving = Move::None;
-                        self.drq = false;
-                        self.busy = false;
-                        self.intrq = true;
+                    if self.pos >= self.xfer_len {
+                        need = self.advance_record();
                     } else {
                         self.drq = true;
                     }
@@ -329,7 +446,8 @@ impl Wd1771 {
                 self.data
             }
             _ => 0xFF,
-        }
+        };
+        (value, need)
     }
 
     /// Write a register. Returns what the board must do about it, if anything.
@@ -347,15 +465,16 @@ impl Wd1771 {
             reg::DATA => {
                 self.data = value;
                 if self.moving == Move::Writing {
-                    self.buffer[self.pos.min(SECTOR_LEN - 1)] = value;
+                    self.buffer[self.pos.min(self.xfer_len - 1)] = value;
                     self.pos += 1;
                     self.idle_polls = 0;
-                    if self.pos >= SECTOR_LEN {
-                        self.moving = Move::None;
-                        self.drq = false;
-                        self.busy = false;
-                        self.intrq = true;
-                        return Need::Write { track: self.track, sector: self.sector };
+                    if self.pos >= self.xfer_len {
+                        // The sector that just filled is the one to commit, so
+                        // its number is captured before `advance_record` steps
+                        // the register on to the next one.
+                        let done = Need::Write { track: self.track, sector: self.sector };
+                        self.advance_record();
+                        return done;
                     }
                     self.drq = true;
                 }
@@ -376,6 +495,7 @@ impl Wd1771 {
             self.busy = false;
             self.drq = false;
             self.moving = Move::None;
+            self.multi = false;
             self.error = 0;
             // "i3 = 1, Immediate interrupt" — and with no condition bits set the
             // data sheet has it terminate without one.
@@ -387,6 +507,10 @@ impl Wd1771 {
         self.error = 0;
         self.intrq = false;
         self.idle_polls = 0;
+        // Cleared here rather than in the Type II arm, so that a Read Address or
+        // a seek can never inherit the previous transfer's `m` and quietly turn
+        // into a multiple-record command.
+        self.multi = false;
 
         match kind {
             Kind::One => {
@@ -458,15 +582,19 @@ impl Wd1771 {
                     self.intrq = true;
                     return Need::None;
                 }
-                if self.sector == 0 || self.sector as usize > SECTORS_PER_TRACK {
+                if self.sector == 0 || self.sector as usize > self.sectors_per_track {
                     // Nothing on the track answers to that number.
                     self.error |= type2::RECORD_NOT_FOUND;
                     self.busy = false;
                     self.intrq = true;
                     return Need::None;
                 }
+                // "m = 0, Single Record; m = 1, Multiple Record" — bit 4 of a
+                // Type II command.
+                self.multi = cmd & 0x10 != 0;
                 self.busy = true;
                 self.pos = 0;
+                self.xfer_len = self.sector_len;
                 if writing {
                     self.moving = Move::Writing;
                     self.drq = true;
@@ -489,14 +617,36 @@ impl Wd1771 {
                     // because an unframed image has no ID fields to read — but
                     // synthesised from the truth, so a driver asking "where am I"
                     // gets the right answer.
-                    let len_code = 0x00; // 128 bytes, IBM 3740
-                    let id = [self.track, 0, self.sector, len_code, 0, 0];
+                    //
+                    // The length code is the disk's, not a constant. It is how a
+                    // driver discovers the sector size of a disk it has just been
+                    // handed, which is exactly what CDOS's drive probe is doing,
+                    // and answering "128 bytes" for a 512-byte disk tells it the
+                    // wrong thing about every disk on this board.
+                    let len_code = match self.sector_len {
+                        0..=128 => 0x00,
+                        129..=256 => 0x01,
+                        257..=512 => 0x02,
+                        _ => 0x03,
+                    };
+                    let id = [self.track, self.side, self.sector, len_code, 0, 0];
                     self.buffer[..6].copy_from_slice(&id);
-                    self.buffer[6..].fill(0);
                     self.pos = 0;
+                    self.xfer_len = ID_FIELD_LEN;
                     self.moving = Move::Reading;
                     self.drq = true;
-                    self.busy = true;
+                    // **Finished, and offering its bytes at the same time.** On
+                    // the real chip the ID field goes past the head whether or
+                    // not the host collects it, and the interrupt comes at the
+                    // end of it either way — so a driver is entitled to issue
+                    // this and simply wait. CDOS's drive probe does exactly that,
+                    // reading not one of the six bytes, and a Read Address that
+                    // stayed busy until they were collected left it waiting for
+                    // ever. Nothing here takes time, so the end has already
+                    // happened; the six bytes stay available for a driver that
+                    // does want them.
+                    self.busy = false;
+                    self.intrq = true;
                     Need::None
                 } else {
                     // Read Track and Write Track. Both need the framing this
@@ -623,8 +773,8 @@ mod tests {
         let mut c = chip();
         c.write(reg::TRACK, 40);
         assert_eq!(c.write(reg::COMMAND, 0x0B), Need::None);
-        assert_eq!(c.read(reg::TRACK), 0);
-        let s = c.read(reg::COMMAND);
+        assert_eq!(c.read(reg::TRACK).0, 0);
+        let s = c.read(reg::COMMAND).0;
         assert_ne!(s & type1::TRACK_0, 0, "track 0 must be reported: {s:#04x}");
         assert_eq!(s & type1::BUSY, 0, "and the command is finished");
     }
@@ -636,14 +786,14 @@ mod tests {
         let mut c = chip();
         c.write(reg::DATA, 33);
         c.write(reg::COMMAND, 0x1B);
-        assert_eq!(c.read(reg::TRACK), 33);
-        assert_eq!(c.read(reg::COMMAND) & type1::SEEK_ERROR, 0);
+        assert_eq!(c.read(reg::TRACK).0, 33);
+        assert_eq!(c.read(reg::COMMAND).0 & type1::SEEK_ERROR, 0);
 
         // Past the end of the disk is a seek error, not a wild head.
         c.write(reg::DATA, 200);
         c.write(reg::COMMAND, 0x1B);
-        assert_eq!(c.read(reg::TRACK), 33, "the head does not move");
-        assert_ne!(c.read(reg::COMMAND) & type1::SEEK_ERROR, 0);
+        assert_eq!(c.read(reg::TRACK).0, 33, "the head does not move");
+        assert_ne!(c.read(reg::COMMAND).0 & type1::SEEK_ERROR, 0);
     }
 
     /// The step commands honour the update flag: with it clear the head moves and
@@ -652,9 +802,9 @@ mod tests {
     fn test_the_update_flag_decides_whether_the_track_register_follows() {
         let mut c = chip();
         c.write(reg::COMMAND, 0x5B); // step in, u = 1
-        assert_eq!(c.read(reg::TRACK), 1);
+        assert_eq!(c.read(reg::TRACK).0, 1);
         c.write(reg::COMMAND, 0x4B); // step in, u = 0
-        assert_eq!(c.read(reg::TRACK), 1, "the register must not follow");
+        assert_eq!(c.read(reg::TRACK).0, 1, "the register must not follow");
     }
 
     /// A read moves 128 bytes through the data register, one Data Request each,
@@ -672,12 +822,12 @@ mod tests {
         let mut got = Vec::new();
         for _ in 0..SECTOR_LEN {
             assert!(c.drq(), "a byte should be waiting");
-            got.push(c.read(reg::DATA));
+            got.push(c.read(reg::DATA).0);
         }
         assert_eq!(got, sector);
         assert!(!c.drq(), "and none after the last");
         assert!(c.intrq(), "the command completed");
-        assert_eq!(c.read(reg::COMMAND) & type2::BUSY, 0);
+        assert_eq!(c.read(reg::COMMAND).0 & type2::BUSY, 0);
         assert!(!c.intrq(), "reading the status acknowledges it");
     }
 
@@ -711,7 +861,7 @@ mod tests {
         c.write(reg::SECTOR, 1);
         assert_eq!(c.write(reg::COMMAND, 0xAC), Need::None);
         assert!(!c.drq(), "it must not ask for data it will not write");
-        assert_ne!(c.read(reg::COMMAND) & type2::WRITE_PROTECT, 0);
+        assert_ne!(c.read(reg::COMMAND).0 & type2::WRITE_PROTECT, 0);
     }
 
     /// The status register is typed by the running command. This is the whole
@@ -722,10 +872,10 @@ mod tests {
     fn test_the_status_register_is_typed_by_the_command() {
         let mut c = chip();
         c.write(reg::COMMAND, 0x0B); // restore -> Type I
-        assert_ne!(c.read(reg::COMMAND) & 0x04, 0, "bit 2 is Track 00 here");
+        assert_ne!(c.read(reg::COMMAND).0 & 0x04, 0, "bit 2 is Track 00 here");
 
         c.write(reg::COMMAND, 0xF4); // write track -> Type III, refused
-        let s = c.read(reg::COMMAND);
+        let s = c.read(reg::COMMAND).0;
         assert_ne!(s & type2::LOST_DATA, 0, "and the same bit is Lost Data here");
         assert_eq!(s & type1::HEAD_LOADED, 0, "with no head-engaged bit in this family");
     }
@@ -738,7 +888,7 @@ mod tests {
         for bad in [0u8, 27, 200] {
             c.write(reg::SECTOR, bad);
             assert_eq!(c.write(reg::COMMAND, 0x8C), Need::None, "sector {bad} must not be read");
-            assert_ne!(c.read(reg::COMMAND) & type2::RECORD_NOT_FOUND, 0, "sector {bad}");
+            assert_ne!(c.read(reg::COMMAND).0 & type2::RECORD_NOT_FOUND, 0, "sector {bad}");
         }
     }
 
@@ -749,11 +899,11 @@ mod tests {
         let mut c = Wd1771::new(); // no disk
         c.write(reg::SECTOR, 1);
         assert_eq!(c.write(reg::COMMAND, 0x8C), Need::None);
-        assert_ne!(c.read(reg::COMMAND) & type2::NOT_READY, 0);
+        assert_ne!(c.read(reg::COMMAND).0 & type2::NOT_READY, 0);
 
         c.write(reg::DATA, 5);
         c.write(reg::COMMAND, 0x1B);
-        assert_eq!(c.read(reg::TRACK), 5, "a seek happens regardless of Ready");
+        assert_eq!(c.read(reg::TRACK).0, 5, "a seek happens regardless of Ready");
     }
 
     /// Force Interrupt stops a transfer in flight, and is the one command allowed
@@ -768,7 +918,116 @@ mod tests {
 
         c.write(reg::COMMAND, 0xD0);
         assert!(!c.drq(), "the transfer is abandoned");
-        assert_eq!(c.read(reg::COMMAND) & type1::BUSY, 0);
+        assert_eq!(c.read(reg::COMMAND).0 & type1::BUSY, 0);
+    }
+
+    /// A multiple-record read runs on past the end of a sector, and the way it
+    /// *stops* is by asking for a sector that is not there.
+    ///
+    /// This is the whole basis of the Cromemco boot loader, which reads a track
+    /// with one command and then requires Record Not Found to be set — so both
+    /// halves are asserted: that it kept going, and that it ended the way that
+    /// loader tests for.
+    #[test]
+    fn test_a_multiple_record_read_runs_to_the_end_of_the_track() {
+        let mut c = chip();
+        c.set_format(128, 4); // a short track, so the end is reachable in a test
+        c.write(reg::SECTOR, 2);
+        assert_eq!(c.write(reg::COMMAND, 0x9C), Need::Read { track: 0, sector: 2 });
+
+        let mut fetched = vec![2u8];
+        for _ in 0..3 {
+            c.sector_loaded(&[0xAB; 128]);
+            let mut need = Need::None;
+            for _ in 0..128 {
+                need = c.read(reg::DATA).1;
+            }
+            match need {
+                Need::Read { sector, .. } => fetched.push(sector),
+                Need::None => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(fetched, vec![2, 3, 4], "sectors 2, 3 and 4, then off the end");
+        assert!(c.intrq(), "and the command is over");
+        let s = c.read(reg::COMMAND).0;
+        assert_ne!(
+            s & type2::RECORD_NOT_FOUND,
+            0,
+            "the loader restarts the whole boot unless this is set: {s:#04x}"
+        );
+    }
+
+    /// A single-record read of the same shape must still stop after one sector —
+    /// the `m` bit is the only difference and it must be the only difference.
+    #[test]
+    fn test_a_single_record_read_stops_after_one_sector() {
+        let mut c = chip();
+        c.set_format(128, 4);
+        c.write(reg::SECTOR, 2);
+        c.write(reg::COMMAND, 0x8C);
+        c.sector_loaded(&[0xAB; 128]);
+        let mut need = Need::None;
+        for _ in 0..128 {
+            need = c.read(reg::DATA).1;
+        }
+        assert_eq!(need, Need::None, "nothing more is wanted");
+        assert_eq!(c.read(reg::SECTOR).0, 2, "and the sector register has not moved");
+        assert_eq!(c.read(reg::COMMAND).0 & type2::RECORD_NOT_FOUND, 0, "this is not an error");
+    }
+
+    /// A 512-byte format moves 512 bytes, and `sector_out` hands back exactly
+    /// that many — not the whole buffer, which would write four neighbouring
+    /// sectors' worth of padding over a 128-byte disk.
+    #[test]
+    fn test_the_format_sets_how_many_bytes_a_sector_moves() {
+        let mut c = chip();
+        c.set_format(512, 16);
+        c.write(reg::SECTOR, 9);
+        assert_eq!(c.write(reg::COMMAND, 0x8C), Need::Read { track: 0, sector: 9 });
+        let sector: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+        c.sector_loaded(&sector);
+        let got: Vec<u8> = (0..512).map(|_| c.read(reg::DATA).0).collect();
+        assert_eq!(got, sector, "all 512 bytes");
+        assert!(c.intrq(), "and only then is it finished");
+
+        c.set_format(128, 26);
+        assert_eq!(c.sector_out().len(), 128, "and a short format hands back a short sector");
+    }
+
+    /// Sector 17 exists on a 16-sector track and not on a 26-sector one, so the
+    /// bound has to come from the format rather than from a constant.
+    #[test]
+    fn test_record_not_found_follows_the_format() {
+        let mut c = chip();
+        c.set_format(512, 16);
+        c.write(reg::SECTOR, 17);
+        assert_eq!(c.write(reg::COMMAND, 0x8C), Need::None);
+        assert_ne!(c.read(reg::COMMAND).0 & type2::RECORD_NOT_FOUND, 0);
+
+        c.set_format(128, 26);
+        c.write(reg::SECTOR, 17);
+        assert_eq!(c.write(reg::COMMAND, 0x8C), Need::Read { track: 0, sector: 17 });
+    }
+
+    /// `m` must not leak from one command into the next. A Read Address issued
+    /// after a multiple-record read would otherwise inherit it and start walking
+    /// the track.
+    #[test]
+    fn test_the_multiple_flag_does_not_survive_the_command() {
+        let mut c = chip();
+        c.set_format(128, 4);
+        c.write(reg::SECTOR, 1);
+        c.write(reg::COMMAND, 0x9C); // multiple
+        c.write(reg::COMMAND, 0xD0); // force interrupt
+        c.write(reg::SECTOR, 1);
+        c.write(reg::COMMAND, 0x8C); // single
+        c.sector_loaded(&[0; 128]);
+        let mut need = Need::None;
+        for _ in 0..128 {
+            need = c.read(reg::DATA).1;
+        }
+        assert_eq!(need, Need::None, "the single-record read must not continue");
     }
 
     /// Read Address answers with where the head actually is.
@@ -779,7 +1038,7 @@ mod tests {
         c.write(reg::COMMAND, 0x1B); // seek 12
         c.write(reg::SECTOR, 9);
         c.write(reg::COMMAND, 0xC4);
-        let id: Vec<u8> = (0..6).map(|_| c.read(reg::DATA)).collect();
+        let id: Vec<u8> = (0..6).map(|_| c.read(reg::DATA).0).collect();
         assert_eq!(id[0], 12, "track");
         assert_eq!(id[2], 9, "sector");
         assert_eq!(id[3], 0, "128 bytes, the IBM 3740 length code");

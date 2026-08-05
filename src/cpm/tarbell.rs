@@ -166,10 +166,14 @@ impl Tarbell {
     }
 
     /// Turn what the chip wants into what the machine can do.
-    fn serve(&mut self, need: Need) -> HostRequest {
+    fn serve(&mut self, need: Need, ahead: bool) -> HostRequest {
         match need {
             Need::None => HostRequest::None,
             Need::Read { track, sector } => match self.offset(track, sector) {
+                Some(offset) if ahead => {
+                    self.pending = self.selected;
+                    HostRequest::ReadAhead { drive: self.selected, offset, len: SECTOR_LEN }
+                }
                 Some(offset) => {
                     self.pending = self.selected;
                     HostRequest::Read { drive: self.selected, offset, len: SECTOR_LEN }
@@ -219,7 +223,12 @@ impl Controller for Tarbell {
         if port == PORT_WAIT {
             return (self.wait_port(), HostRequest::None);
         }
-        (self.chip.read(port & 0x03), HostRequest::None)
+        // A read can start work now: emptying a sector under a multiple-record
+        // command is what fetches the next one. The Tarbell's own PROM never
+        // issues one, but its drivers may, and dropping the request here would
+        // stall the transfer with no error anywhere.
+        let (value, need) = self.chip.read(port & 0x03);
+        (value, self.serve(need, true))
     }
 
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest {
@@ -252,7 +261,7 @@ impl Controller for Tarbell {
             }
         }
         let need = self.chip.write(port & 0x03, value);
-        self.serve(need)
+        self.serve(need, false)
     }
 
     fn media(&self) -> Vec<Medium> {

@@ -11,6 +11,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cromemco disks boot — the fourth and last board on the disk-controller
+  plan.** `src/cpm/cromemco.rs`, the 4FDC/16FDC, and the second user of the
+  FD1771 module the Tarbell put in place. All three sample images come up, take
+  a `DIR` and run three *different* operating systems: `CDOS version 02.58`,
+  `MICAH 64k CP/M version 2.2` and Intelligent Terminals Corp's `56k CP/M`. It
+  is measured from the disks' own boot sectors and drivers, the same clean-room
+  posture as every board here except the deliberately-derived z80pack device.
+  - The console is a **Cromemco TU-ART** at `00h`/`01h` — bit 6 RX, bit 7 TX,
+    active high, a convention no other console here uses — so `cpm_boot_machine`
+    gains a `cromemco` machine carrying that console and this board. All three
+    disks select it under `auto`, which matters most for `CDISK01`: at 256,256
+    bytes it is the same size as a Tarbell disk *and* a z80pack disk, so nothing
+    but its own boot loader's registers could name it.
+  - Two chip features the earlier boards never needed: **512-byte sectors**, and
+    a disk that is **two densities at once** — track 0 of a Cromemco
+    double-density floppy is recorded single-density so that a single-density
+    boot ROM can read it. The arithmetic is what confirms it: 3,328 + 76 × 8,192
+    is exactly `CDISK02`'s length, and both double-density directories then
+    begin at 11,520.
+  - **A fix to multiple-record transfers**, which these loaders need because
+    they read a whole track per command. A transfer fetches its next sector on
+    the read that *empties* the previous one — a read that has already handed
+    the guest a byte — and the machine was re-answering it, losing exactly one
+    byte in every 128 and loading an operating system that was almost right and
+    did nothing. `HostRequest::ReadAhead` now distinguishes the two.
+  - Three things this project had predicted the board would need turned out not
+    to exist: a 4 KB ROM monitor at `C000`, the synthesised-ROM mechanism the
+    CUTER stub introduced, and memory bank switching. All three came from
+    reading a listing carried on a disk rather than the code that runs; the boot
+    sectors' `OUT 40h` is what *removes* the ROM, and `CDISK03` then loads its
+    operating system straight through `C000`.
+- **The console now models a character time, on every booted machine.** CDOS
+  reads its console data register twice per character — a lookahead that on a
+  real serial line finds the wire still empty. Our console handed over its queue
+  as fast as a guest could ask, so the second read consumed the next keystroke
+  and discarded it: `DIR` arrived as `DR`, and `ABCDEFGH` as `ACEG`. A person
+  typing never provokes it; **pasting a command does**, as does anything driving
+  a guest from a script. A received byte is now unreadable until about a
+  character's worth of instructions has passed.
 - **A disk you drop in the images folder just works, unrenamed.** Two halves,
   both driven by the same idea: read what the disk says about itself instead of
   requiring the operator to say it.

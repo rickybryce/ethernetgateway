@@ -43,7 +43,26 @@ pub enum HostRequest {
     /// Nothing to do.
     None,
     /// Fill the controller's buffer for `drive` from `offset`.
+    ///
+    /// Asked *because* the guest wanted a byte the controller did not have yet,
+    /// so the port read that produced this has no answer until it is served. The
+    /// machine fills the buffer and then asks the controller again — see
+    /// [`HostRequest::ReadAhead`] for the case where it must not.
     Read { drive: u8, offset: u64, len: usize },
+    /// Fill the buffer for the **next** sector; the byte just returned is good.
+    ///
+    /// The same work as [`HostRequest::Read`] and a different situation, which is
+    /// why it is a separate variant rather than a flag nobody would set. A
+    /// multiple-record transfer fetches its next sector on the read that empties
+    /// the previous one — so that read has already answered, with the last byte
+    /// of the sector that just finished.
+    ///
+    /// Conflating the two is a real defect and it was made here: the machine's
+    /// re-read discarded that last byte and handed back the first byte of the
+    /// next sector instead, losing one byte per sector. On a Cromemco boot, whose
+    /// loader reads a whole track per command, that is one byte in every 128 —
+    /// enough to load an operating system that is almost right and does nothing.
+    ReadAhead { drive: u8, offset: u64, len: usize },
     /// Write the controller's buffer for `drive` back at `offset`.
     Write { drive: u8, offset: u64, len: usize },
     /// Move `len` bytes directly between the image and *guest memory*.
