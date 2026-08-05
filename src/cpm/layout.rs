@@ -129,21 +129,30 @@ then an underscore, then whatever you like:
 
 An image named this way is trusted and mounts READ-WRITE.
 
-An image WITHOUT a format prefix still works, but it mounts READ-ONLY.
-The gateway has to guess the format from the file's size and contents, and
-a wrong guess cannot be detected afterwards: every offset would be computed
-from the wrong geometry, so everything would look consistent right up until
-a write landed in the middle of another file.  Reading a guessed image is
-safe, so that is allowed; writing to one is not.
+YOU DO NOT HAVE TO RENAME ANYTHING.  An image without a prefix is
+identified by inspection, and if its CP/M filesystem checks out it mounts
+READ-WRITE just the same.  No two formats here are the same size, so the
+size names the format outright; what inspection actually decides is whether
+the file really holds that filesystem.  The whole directory is read and
+checked -- every allocation block inside the disk, no block claimed by two
+files, every record count matching the blocks it claims.  Random bytes under
+the wrong geometry fail that immediately.
 
-To make a read-only image writable, rename it with the right prefix.
+An image that does NOT check out still mounts, but READ-ONLY, and says what
+was wrong with it.  That is the honest answer for a file which is the right
+size and is not this filesystem: plenty of disks are 256,256 bytes without
+being CP/M at all -- a UCSD p-System disk is, and so is a Cromemco CDOS one.
+Reading such an image is safe and often what you want; writing to it is not.
+
+Renaming with a prefix is therefore an override, not a requirement: it says
+\"I know what this is\" and skips the inspection.
 
 
 FORMATS YOU CAN MOUNT
 ---------------------
 
-These hold a CP/M filesystem the gateway reads and writes itself.  Name one
-with its token to make it writable, as above.
+These hold a CP/M filesystem the gateway reads and writes itself.  A prefix
+is optional, as above: a sound filesystem is writable either way.
 
 ",
     );

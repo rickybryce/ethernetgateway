@@ -2309,9 +2309,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   A mounted drive reads and writes the CP/M filesystem inside the image
 #   instead of its folder under CPM/; the folder's files are untouched and come
 #   back when it is unmounted.  Names are bare filenames in CPM/images.  An
-#   image whose name carries no format prefix (see CPM/images/readme.txt) is
-#   identified by inspection and mounted READ-ONLY, because writing with a
-#   guessed geometry is the one mistake that cannot be detected afterwards.
+#   image needs no format prefix: no two formats here are the same size, so the
+#   size names the format and the whole CP/M directory is then checked for
+#   consistency.  If it checks out the image mounts READ-WRITE; if it does not
+#   it mounts read-only and says why, because a file of the right size that is
+#   not this filesystem (a UCSD p-System or Cromemco CDOS disk is also 256,256
+#   bytes) is the one mistake no later check could catch.  A prefix (see
+#   CPM/images/readme.txt) overrides the inspection.
 ");
     write_kv(&mut content, "cpm_mounts", &cfg.cpm_mounts);
     content.push_str("\

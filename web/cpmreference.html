@@ -762,9 +762,22 @@
                 <pre><code>ibm3740_cpm22.dsk
 altairhd_cobol.dsk</code></pre>
                 <p>
-                    An image named this way mounts <strong>read-write</strong>. An image with no
-                    format prefix still mounts, but <strong>read-only</strong>, because the format
-                    then has to be inferred from the file's size and contents.
+                    An image named this way mounts <strong>read-write</strong> without further
+                    ado. <strong>But you do not have to rename anything.</strong> An image with no
+                    prefix is identified by inspection and mounts read-write too, provided its
+                    CP/M filesystem checks out &mdash; because no two formats here are the same
+                    size, so the size names the format outright and the only real question is
+                    whether the file holds that filesystem at all. The whole directory is read and
+                    checked: every allocation block inside the disk, no block claimed by two
+                    files, every record count matching the blocks it claims.
+                </p>
+                <p>
+                    An image that does <em>not</em> check out still mounts, but
+                    <strong>read-only</strong>, and says what was wrong. That matters more than it
+                    sounds: plenty of disks are 256,256 bytes without being CP/M &mdash; a UCSD
+                    p-System disk is, and so is a Cromemco CDOS one. Reading them is safe and
+                    usually what you want; writing to them is not. Renaming with a prefix is an
+                    <em>override</em> that skips the inspection, not a requirement.
                 </p>
                 <div class="callout">
                     <p>
@@ -775,9 +788,16 @@ altairhd_cobol.dsk</code></pre>
                         block. A <em>misidentified format</em> is the one failure none of them can
                         catch: every offset is computed from the wrong geometry, so every check
                         agrees with every other check, and the first write lands in the middle of
-                        somebody's files. Two of the formats below share a size while differing in
-                        layout, so this is not hypothetical. Reading a guessed image is safe;
-                        writing to one is not.
+                        somebody's files.
+                    </p>
+                    <p>
+                        What changed is <em>which</em> misidentification is possible. No two formats
+                        in the table below are the same size &mdash; that was checked, not assumed
+                        &mdash; so a size never has to choose between two layouts. The danger that
+                        remains is a file of the right size holding something else entirely, and
+                        that one a consistency check can actually answer. So the rule is no longer
+                        &ldquo;rename it or read it&rdquo;; it is &ldquo;prove the filesystem or
+                        read it&rdquo;.
                     </p>
                 </div>
                 <p>

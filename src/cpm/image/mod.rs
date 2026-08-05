@@ -286,11 +286,20 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
     // candidate format would address it*, so the file is opened first and the
     // closure seeks per candidate.
     let mut probe = media::FileMedia::open(&path, true).map_err(|e| format!("{filename}: {e}"))?;
+    // The *whole* directory, as each candidate format would address it — not
+    // just its first record. Identification needs both: one record says "there
+    // is a directory here", and the whole of it says "and it is consistent
+    // enough to write to", which is what lets an unlabelled disk be mounted
+    // read-write instead of sending its owner off to rename the file.
     let ident = identify::identify(filename, size, |fmt| {
-        let off = fmt.data_record_offset(0)?;
-        let mut buf = [0u8; 128];
-        media::Media::read_at(&mut probe, off, &mut buf).ok()?;
-        Some(buf)
+        let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
+        for rec in 0..fmt.dir_records() {
+            let off = fmt.data_record_offset(rec)?;
+            let mut buf = [0u8; 128];
+            media::Media::read_at(&mut probe, off, &mut buf).ok()?;
+            dir.extend_from_slice(&buf);
+        }
+        (!dir.is_empty()).then_some(dir)
     })
     .map_err(|e| format!("{filename}: {e}"))?;
     drop(probe);
@@ -311,9 +320,22 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
     let reason = if !read_only {
         String::new()
     } else if ident.force_read_only() {
-        "the filename does not say which format this is, so it was identified \
-         by inspection — rename it with a format prefix to allow writing"
-            .to_string()
+        // Say what the filesystem check objected to, not just that it did.
+        // "Rename it" was the only advice this could give while identification
+        // by inspection was never trusted; now that a sound filesystem mounts
+        // read-write, a refusal means something specific was wrong, and the
+        // operator can act on the specific thing.
+        match ident.why {
+            Some(why) => format!(
+                "this image was identified by inspection and its CP/M directory \
+                 has {why} — so writing to it is not safe. If you know the format, \
+                 rename it with the prefix to override."
+            ),
+            None => "the filename does not say which format this is, so it was \
+                     identified by inspection — rename it with a format prefix to \
+                     allow writing"
+                .to_string(),
+        }
     } else if host_ro {
         "the image file is read-only on the host".to_string()
     } else {
