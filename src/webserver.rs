@@ -4323,8 +4323,18 @@ mod tests {
         use crate::cpm::image::{self, registry};
         let _g = registry::tests_lock();
         registry::tests_reset();
-        let base = std::env::temp_dir().join("egw_web_save_keeps_mounts");
-        let _ = std::fs::remove_dir_all(&base);
+        // The transfer dir and the images must be the *same* tree, because the
+        // code under test derives its base from `cfg.transfer_dir` rather than
+        // being handed one. This used to set `transfer_dir` to the parent of
+        // the images folder — the system temp dir — so the save resolved
+        // `<temp>/CPM/images`, a directory every other test that uses
+        // `temp_dir` also writes into, while the images sat somewhere else.
+        // The assertion then held only while the save happened to be a no-op,
+        // and the test failed intermittently in release, where the ordering
+        // differs. Nothing about the behaviour it pins was wrong.
+        let root = std::env::temp_dir().join("egw_web_save_keeps_mounts");
+        let _ = std::fs::remove_dir_all(&root);
+        let base = crate::cpm::layout::cpm_dir(&root.to_string_lossy());
         let images = image::images_dir(&base);
         std::fs::create_dir_all(&images).unwrap();
         let blank = crate::cpm::image::format::by_token("altair8").unwrap().blank_image().unwrap();
@@ -4351,7 +4361,7 @@ mod tests {
             fields.insert(key, val.to_string());
         }
         let cfg = Config {
-            transfer_dir: base.parent().unwrap().to_string_lossy().to_string(),
+            transfer_dir: root.to_string_lossy().to_string(),
             ..Default::default()
         };
         let (_notice, value) = apply_cpm_mount_form(&fields, &cfg);

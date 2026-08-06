@@ -303,10 +303,16 @@ where
 /// says so instead of running whatever bytes happened to be there — an 8080
 /// turned loose on text will do something, and what it does is never useful.
 ///
-/// The test is deliberately weak in one direction: it rejects only the clearly
-/// impossible. A blank or text-filled sector is refused; anything with the
-/// shape of code is allowed through, because deciding what is *really* a
-/// program is not a job a heuristic can do.
+/// The test is deliberately weak in one direction: it rejects only what cannot
+/// be a program. Three shapes are refused — a sector that is **mostly one
+/// repeated byte** (an erased sector, or a data disk's short header and then
+/// padding), one that is **entirely printable text**, and one **too short to
+/// judge**. Anything else is allowed through, because deciding what is *really*
+/// a program is not a job a heuristic can do.
+///
+/// The bias is intentional and worth keeping: refusing a disk that would have
+/// run is a fault the operator cannot work around, while letting one through
+/// only leaves the old behaviour of running it and going quiet.
 pub fn looks_bootable(payload: &[u8]) -> bool {
     if payload.len() < 8 {
         return false;
