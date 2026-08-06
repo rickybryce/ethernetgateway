@@ -377,10 +377,17 @@ pub struct Format {
     pub framing: Framing,
     /// Logical-to-physical sector translation within a data track.
     pub skew: Skew,
-    /// Exact image size in bytes, when the format has one.  Used only to
-    /// narrow down candidates when sniffing an unprefixed file; it is never
-    /// sufficient on its own, because two formats here share a size and two
-    /// more differ in layout at the same size.
+    /// Exact image size in bytes, when the format has one.  Used to narrow
+    /// down candidates when sniffing an unprefixed file.
+    ///
+    /// **No two formats here are the same size**, so a size names a format
+    /// outright rather than merely shortlisting one.  It is still not
+    /// sufficient on its own: a file can be exactly the right size and not hold
+    /// this filesystem at all — a UCSD p-System disk is 256,256 bytes, and so
+    /// is a Cromemco CDOS one — which is what the directory inspection in
+    /// `identify` decides.  (This used to say that two formats shared a size
+    /// and two more differed in layout at one size.  Neither was true, and the
+    /// same false justification had been copied into `cpmreference.html`.)
     pub exact_size: Option<u64>,
 }
 
@@ -388,6 +395,25 @@ impl Format {
     /// Bytes the image must be at least, for this format to be readable.
     pub fn min_bytes(&self) -> u64 {
         self.framing.image_bytes(self.total_records as u64)
+    }
+
+    /// The largest a file may be and still be this format.
+    ///
+    /// A trailer is real: several images in circulation carry a few bytes past
+    /// their last record, and on the boot path a size test that rejected a
+    /// 96-byte one was a genuine defect.  So the bound is not an exact match —
+    /// it allows anything short of **one whole record**, past which the file is
+    /// not this geometry with something stuck on the end, it is a different
+    /// geometry.
+    ///
+    /// This exists because naming a format is an *override*: it skips the
+    /// directory inspection and mounts read-write.  Without an upper bound the
+    /// only check was that the file was big *enough*, so a 625,920-byte
+    /// Cromemco double-density image named `ibm3740_*.dsk` was accepted and
+    /// read as a 256,256-byte single-density one — writable, with its directory
+    /// landing in the middle of a data track.
+    pub fn max_bytes(&self) -> u64 {
+        self.min_bytes() + self.framing.image_bytes(1) - 1
     }
 
     /// Byte offset of a logical record within the data area, applying skew.

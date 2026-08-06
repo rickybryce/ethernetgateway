@@ -136,10 +136,19 @@ impl std::fmt::Display for Unknown {
                 f,
                 "named as {token} but that format is {expected} bytes and this file is {actual}"
             ),
+            // Deliberately does NOT suggest renaming. A prefix says which
+            // layout to use, not how big the file is, so it cannot help a size
+            // nothing here mounts — and it used to be actively harmful advice:
+            // taking it turned this refusal into a trusted read-write mount of
+            // the wrong geometry, which is what `Format::max_bytes` now stops.
+            // The genuinely useful remedy is the other one, because a disk we
+            // cannot mount is often still bootable — every Cromemco
+            // double-density image is exactly that.
             Unknown::NoMatchingFormat { size } => write!(
                 f,
-                "no known format is {size} bytes — rename it with a format prefix, \
-                 e.g. ibm3740_mydisk.dsk (see readme.txt)"
+                "no known format is {size} bytes — nothing here mounts a disk \
+                 that size, and renaming cannot change that. It may still be \
+                 bootable: try the boot picker (see readme.txt)"
             ),
             Unknown::NoDirectory { candidates } => write!(
                 f,
@@ -336,7 +345,17 @@ where
     let named = token_of(filename).map(|t| (t, by_token(t)));
     if let Some((_, Some(format))) = named {
         let need = format.min_bytes();
-        if size < need {
+        // Both ends. Too small was always refused; too *large* was not, and a
+        // name is the one path that mounts read-write without inspecting
+        // anything — so the only guard was that the file was big enough. A
+        // Cromemco double-density image renamed `ibm3740_*.dsk` is 625,920
+        // bytes against the 256,256 that format needs, and was accepted: read
+        // as single density, directory landing mid-track, and writable.
+        //
+        // The gateway used to *recommend* exactly that, too — the refusal for
+        // an unknown size said "rename it with a format prefix". See
+        // `Unknown::NoMatchingFormat`.
+        if size < need || size > format.max_bytes() {
             return Err(Unknown::WrongSize {
                 token: format.token,
                 expected: need,
@@ -806,11 +825,79 @@ mod tests {
         }
     }
 
+    /// A file far **larger** than its named format is refused too, and that half
+    /// was missing.
+    ///
+    /// Naming a format skips the directory inspection and mounts read-write, so
+    /// the size check is the only thing standing between a mis-named file and a
+    /// trusted mount of the wrong geometry. The real numbers: a Cromemco
+    /// double-density image is 625,920 bytes and `ibm3740` needs 256,256, so
+    /// "big enough" was satisfied more than twice over. It mounted, writable,
+    /// reading a double-density disk as a single-density one — and the refusal
+    /// message for its size used to *recommend* that very rename.
+    #[test]
+    fn test_a_file_much_larger_than_its_named_format_is_refused() {
+        for (name, size) in [
+            ("ibm3740_cdisk02.dsk", 625_920u64),  // Cromemco 8" SSDD
+            ("ibm3740_cdisk03.dsk", 1_256_704),   // Cromemco 8" DSDD
+            ("altair8_hard.dsk", 4_988_928),      // a hard disk named as a floppy
+        ] {
+            match identify(name, size, |_| None) {
+                Err(Unknown::WrongSize { actual, .. }) => assert_eq!(actual, size),
+                other => panic!("{name} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    /// But a genuine trailer still mounts, which is why the bound is one record
+    /// rather than an exact match.
+    ///
+    /// Images in circulation carry a few bytes past their last record, and on
+    /// the boot path a size test that rejected a 96-byte trailer was a real
+    /// defect. Anything a whole record or more over is a different geometry.
+    #[test]
+    fn test_a_short_trailer_is_still_the_same_disk() {
+        for f in FORMATS {
+            let base = f.min_bytes();
+            let record = f.max_bytes() - base + 1;
+            for extra in [0, 96.min(record - 1), record - 1] {
+                let name = format!("{}_trailered.dsk", f.token);
+                assert!(
+                    identify(&name, base + extra, |_| None).is_ok(),
+                    "{}: a {extra}-byte trailer must still be this disk",
+                    f.token
+                );
+            }
+            let name = format!("{}_toolong.dsk", f.token);
+            assert!(
+                identify(&name, base + record, |_| None).is_err(),
+                "{}: a whole extra record is a different geometry",
+                f.token
+            );
+        }
+    }
+
+    /// A size nothing mounts is refused, and the message must **not** offer a
+    /// rename as the way out.
+    ///
+    /// This test used to require the opposite — it asserted the message
+    /// contained `ibm3740_`, "suggest the convention" — and so it held the
+    /// harmful advice in place. A prefix names the layout, not the size, so it
+    /// cannot help a file no format is the size of; what it *can* do is skip
+    /// the inspection and mount the wrong geometry read-write, which is
+    /// precisely what a Cromemco double-density image renamed `ibm3740_*` did.
+    /// The honest remedy is the other one: such a disk often still boots.
     #[test]
     fn test_no_format_of_that_size() {
         let err = identify("mystery.dsk", 12_345, |_| None).unwrap_err();
         assert_eq!(err, Unknown::NoMatchingFormat { size: 12_345 });
-        assert!(err.to_string().contains("ibm3740_"), "suggest the convention");
+        let msg = err.to_string();
+        assert!(msg.contains("12345"), "say what size it is: {msg:?}");
+        assert!(
+            !msg.contains("ibm3740_") && !msg.contains("prefix,"),
+            "must not recommend a rename that cannot help and can hurt: {msg:?}"
+        );
+        assert!(msg.contains("boot"), "point at the remedy that exists: {msg:?}");
     }
 
     /// A file the right size that is not a CP/M disk at all — the minidisk and
