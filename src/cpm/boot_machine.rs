@@ -3957,4 +3957,96 @@ mod tests {
              does something the survey has not seen: BS={bs:02X?} DEL={del:02X?}"
         );
     }
+
+    /// **What a booted guest can reach of what we mounted for it — measured on
+    /// both kinds of boot.**
+    ///
+    /// The gateway inserts every mounted image at the unit its drive letter
+    /// names, and then it is the *guest's own BIOS* that decides whether such a
+    /// drive exists. Those are two different questions and they have two
+    /// different answers here, which is why this test runs both cases:
+    ///
+    /// * **Floppy boot** (`DISK01` = MITS CP/M 2.2, `DISK05` at unit 1) — works.
+    ///   `DIR B:` lists the mounted disk's files.
+    /// * **Hard disk boot** (`HDSK03` = "63K CP/M 2.2b ver 1.5, For MITS
+    ///   88-HDSK") — cannot. `STAT` reports `A: R/W, Space: 3744k` and *nothing
+    ///   else*: that BIOS carries exactly one drive, the whole 4.9 MB platter,
+    ///   so there is no B: to select and `DIR B:` answers `Bdos Err On B: Bad
+    ///   Sector`. Putting a second hard disk at unit 1 changes nothing — proved
+    ///   by the control below, which gets byte-identical output with the unit
+    ///   left empty.
+    ///
+    /// **Do not "fix" the hard-disk case by patching the guest's BIOS.** The
+    /// disk being right about its own hardware is the premise of booting. The
+    /// way in and out of a booted hard disk is the virtual modem and the disk's
+    /// own `PCGET`/`PCPUT` — see
+    /// [`test_pcget_pulls_egt80_in_over_the_virtual_modem`].
+    ///
+    /// Ignored: set `CPM_FLOPPY_BOOT`/`CPM_FLOPPY_MOUNT` to two CP/M floppies
+    /// and `CPM_HD_BOOT` to an 88-HDSK CP/M image.
+    #[test]
+    #[ignore]
+    fn test_what_a_booted_guest_reaches_of_its_mounts() {
+        /// Boot `boot`, optionally put `second` at unit 1, and run `cmd`.
+        fn boot_with(boot: &str, second: Option<&str>, cmd: &[u8]) -> String {
+            let bytes = std::fs::read(boot).unwrap();
+            let (machine, _why) =
+                crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+            let mut m = BootMachine::new();
+            m.set_machine(&machine);
+            m.insert(0, bytes, true).expect("the boot image");
+            if let Some(p) = second {
+                // Reported, not unwrapped: whether this machine's boards take
+                // the disk at all is part of what the test is measuring.
+                if let Err(e) = m.insert(1, std::fs::read(p).unwrap(), true) {
+                    return format!("<unit 1 refused: {e}>");
+                }
+            }
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).expect("boots");
+            assert!(
+                !run_until_quiet(&mut m, &mut cpu, 200_000_000).is_empty(),
+                "{boot} never signed on"
+            );
+            type_at(&mut m, &mut cpu, cmd, 400_000_000)
+        }
+
+        if let (Ok(boot), Ok(mount)) =
+            (std::env::var("CPM_FLOPPY_BOOT"), std::env::var("CPM_FLOPPY_MOUNT"))
+        {
+            let dir = boot_with(&boot, Some(&mount), b"DIR B:\r");
+            println!("--- floppy boot, floppy at unit 1 ---\n{dir}");
+            assert!(
+                dir.contains("B: "),
+                "a floppy-booted CP/M must reach a mounted floppy at B:, got {dir:?}"
+            );
+        } else {
+            eprintln!("set CPM_FLOPPY_BOOT and CPM_FLOPPY_MOUNT for the floppy case");
+        }
+
+        let Ok(hd) = std::env::var("CPM_HD_BOOT") else {
+            eprintln!("set CPM_HD_BOOT for the hard-disk case");
+            return;
+        };
+        let stat = boot_with(&hd, None, b"STAT\r");
+        println!("--- hard disk boot, STAT ---\n{stat}");
+        assert!(stat.contains("A:"), "the boot drive must be there: {stat:?}");
+        assert!(
+            !stat.contains("B:"),
+            "this BIOS was measured to carry exactly one drive; if it now has a \
+             second, the advice in the docs about hard-disk boots is stale: {stat:?}"
+        );
+
+        // The control that makes the claim mean something: whatever the guest
+        // does for B:, it does identically with a disk in unit 1 and without
+        // one — so it is not looking there, and no mounting change could help.
+        let empty = boot_with(&hd, None, b"DIR B:\r");
+        let filled = boot_with(&hd, Some(&hd), b"DIR B:\r");
+        println!("--- hard disk boot, DIR B: ---\nempty:  {empty}\nfilled: {filled}");
+        assert_eq!(
+            empty, filled,
+            "a disk at unit 1 changed what the guest sees, so this BIOS does \
+             reach it after all and the hard-disk advice needs rewriting"
+        );
+    }
 }
