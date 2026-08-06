@@ -277,12 +277,12 @@ impl Format {
 /// format and a 5.25" one of the period is 40 tracks, so those two are placed by
 /// their own geometry and the first is not placed at all.
 ///
-/// **The labels are abbreviated because a screen says so.** The boot picker
-/// prints `"  {:>7} {label}"` on a 40-column PETSCII terminal, which leaves
-/// exactly 30 characters — and `Cromemco 8" double-sided double-density floppy`
-/// is 45. Spelling them out cost the fit test rather than the reader, so these
-/// use the period abbreviations the neighbouring `z80pack 8" SSSD, 241K` already
-/// does. `web/diskreference.html` spells each one out.
+/// **The labels are abbreviated because a screen says so** — see
+/// `bootable_size_lines`, which owns that budget and the test that enforces it.
+/// Spelling these out (`Cromemco 8" double-sided double-density floppy`) overran
+/// it, so they use the period abbreviations the neighbouring
+/// `z80pack 8" SSSD, 241K` already does. `web/diskreference.html` spells each
+/// one out in full.
 const FORMATS: &[Format] = &[
     Format {
         bytes: 256_256,
@@ -425,9 +425,16 @@ impl Cromemco {
             Some((offset, len)) if ahead => HostRequest::ReadAhead { drive, offset, len },
             Some((offset, len)) => HostRequest::Read { drive, offset, len },
             // Nothing on the medium answers to that address. The chip bounds the
-            // sector against the track's own count, so reaching here means the
-            // cylinder is off the disk — a seek error the guest will see in the
-            // status register rather than a silent read of the wrong bytes.
+            // sector against the track's own count and the seek against the
+            // cylinder count, so this is not reachable from a guest today; it
+            // exists so that a future geometry whose two halves disagree fails by
+            // *not moving data* rather than by reading the wrong bytes.
+            //
+            // Deliberately not dressed up as an error: nothing here sets a status
+            // bit, so a guest that did reach it would poll a busy chip until the
+            // stuck-poll detector noticed. That is the honest description, and a
+            // worse outcome than a seek error — which is exactly why the two
+            // bounds above are the things to keep correct.
             None => HostRequest::None,
         }
     }

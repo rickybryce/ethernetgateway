@@ -7335,6 +7335,22 @@ fn test_bootable_size_lines_fit_petscii_and_name_every_medium() {
             line.chars().count(),
         );
     }
+
+    // And the screen they sit on must still fit, which is the half a width
+    // check cannot see. This list grows every time a board lands — three lines
+    // arrived with the Cromemco alone — and it is printed in full on the
+    // "nothing here can boot" screen, whose other ten lines are fixed:
+    // separator, title, separator, blank, the notice, blank, two lines of
+    // explanation, blank, and the prompt. A board that pushed this over the
+    // budget would scroll the title off a 40-column client, and nothing else
+    // here would notice.
+    const FIXED_ROWS: usize = 10;
+    assert!(
+        FIXED_ROWS + lines.len() <= 22,
+        "the no-bootable-images screen is {} rows, exceeds 22 — {} media now",
+        FIXED_ROWS + lines.len(),
+        lines.len(),
+    );
     for m in &media {
         assert!(
             lines.iter().any(|l| l.contains(m.label)),

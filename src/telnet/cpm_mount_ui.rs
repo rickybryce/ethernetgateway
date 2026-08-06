@@ -203,11 +203,18 @@ impl TelnetSession {
     /// disks had been booting. That is the *fourth* place the same list had been
     /// written down; the readme and the manual were the others.
     ///
-    /// Kept inside PETSCII's 40 columns, which is why the label column is
-    /// narrow and the size is not comma-grouped: 2 indent + 7 size + 1 + 28
-    /// label = 38. Extracted so the width can be measured rather than argued
-    /// about, since a runtime `format!` is invisible to the source-scanning
-    /// layout tests.
+    /// Kept inside PETSCII's 40 columns, which is why the size is not
+    /// comma-grouped: 2 indent + 7 size + 1 separator leaves **30 characters
+    /// for a `Medium::label`**. Extracted so the width can be measured rather
+    /// than argued about, since a runtime `format!` is invisible to the
+    /// source-scanning layout tests.
+    ///
+    /// That budget, and the row count of the screen this prints on, are both
+    /// checked in one place — `test_bootable_size_lines_fit_petscii_and_name_every_medium`,
+    /// which iterates every board's media. Deliberately not restated at each
+    /// board: a limit written down in six modules is a limit enforced in none,
+    /// and the labels that overran it were written by someone reading a
+    /// neighbouring board rather than this line.
     pub(in crate::telnet) fn bootable_size_lines() -> Vec<String> {
         crate::cpm::boot_machine::BootMachine::bootable_media()
             .into_iter()

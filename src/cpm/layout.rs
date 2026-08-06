@@ -124,9 +124,17 @@ NAMING: PUT THE FORMAT IN THE FILENAME
 Name an image  <format>_<anything>.dsk  — the format token comes first,
 then an underscore, then whatever you like:
 
-    ibm3740_cpm22.dsk
-    altairhd_cobol.dsk
-
+",
+    );
+    // One example per mountable format, from the same table the section below
+    // lists.  Written out by hand, this block offered two of the three tokens
+    // for as long as `altair8` had been mountable — and the test that guards
+    // this named the missing one, so the readme and its test each knew half.
+    for f in FORMATS {
+        s.push_str(&format!("    {}_<what-it-holds>.dsk\n", f.token));
+    }
+    s.push_str(
+        "
 An image named this way is trusted and mounts READ-WRITE.
 
 YOU DO NOT HAVE TO RENAME ANYTHING.  An image without a prefix is
@@ -198,11 +206,13 @@ does CP/M 3.0.  Mounting any of them shows nothing, which is correct — they
 are not CP/M filesystems.  A programs disk (data, with no boot sector) is
 refused.
 
-Not all of these are the same disk, and the gateway tells them apart by
-size alone — so a truncated or badly padded file may be refused even though
-it looks fine.  Two of them are the SAME size: 256,256 bytes is a Tarbell
-1011 floppy to one controller and a z80pack 8\" disk to another, and no
-inspection can settle which, because both are raw 26-sector tracks.
+Not all of these are the same disk, and a size that no board claims is
+refused — so a truncated or badly padded file may be refused even though it
+looks fine.  Three boards claim 256,256 bytes: it is a Tarbell 1011 floppy,
+a z80pack 8\" disk and a Cromemco single-density floppy, all raw 26-sector
+tracks that look alike from outside.  What settles it is not the file but
+the boot loader inside it, which has to drive its own controller's
+registers — see the machine setting below.
 
 THE MACHINE MATTERS, AND IT IS A SEPARATE SETTING.  A booted disk brings its
 own operating system, and that system was written for a particular machine —
@@ -220,8 +230,8 @@ completely quiet.  It is printing to hardware that is not in the machine and
 polling a keyboard that will never answer.  Nothing is wrong with the image.
 
 
-WHERE TO GET IMAGES, AND WHAT TO RENAME THEM TO
------------------------------------------------
+WHERE TO GET IMAGES
+-------------------
 
 The gateway ships no disk images.  They are not ours to distribute; the
 collections below are maintained by other people, under their own terms,
@@ -231,13 +241,15 @@ and are worth getting from the source.
     https://github.com/udo-munk/z80pack
     The IMSAI 8080 disk library is in  imsaisim/disks/library  and is the
     best starting point: about twenty 8\" single-density disks holding
-    CP/M 2.2, CP/M 3, IMDOS, BASICs, comms tools and graphics demos.
-    Every one of them is the ibm3740 layout this gateway reads.
+    CP/M 1.3 through 3.0, MP/M, IMDOS, BASICs, comms tools and demos.
+    All are 256,256 bytes; the CP/M ones are the ibm3740 layout this
+    gateway reads, and the rest (UCSD p-System) boot but do not mount.
 
   Altair 8800 Simulator - David Hansel
     https://github.com/dhansel/Altair8800
     The  disks  folder holds the MITS Altair, Tarbell and Cromemco
-    collections.  The 256,256-byte disks (TDISKnn, CDISK01) are ibm3740.
+    collections.  All of them boot.  For mounting, the TDISKnn disks
+    are ibm3740; the CDISKnn ones are Cromemco and boot only.
 
   Altair-Duino-Disks - J.P. McNeely
     https://github.com/jpmcneely/AltairDuino-Disks
@@ -251,38 +263,36 @@ disks:
   http://www.retroarchive.org/cpm/
   http://cpmarchives.classiccmp.org/
 
-Rename copies as below.  Sizes are the reliable guide.
+DROP THEM IN AS THEY COME.  Every collection above is named after the
+emulated controller a disk belonged to, which says nothing about its
+layout — and none of that matters any more.  Copy the files into the
+images folder under whatever names they arrived with, and the gateway
+works out what each one is.
 
-ALTAIR-DUINO / ALTAIR 8800 SIMULATOR disks come named after the emulated
-controller they belonged to, which says nothing about their layout.  Map
-them by their SIZE:
+  BOOTING needs no renaming, and never did.
+  MOUNTING inspects the filesystem, and a sound one is writable.
 
-  CDISK01.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
-  DISKnn.DSK    337,568 bytes  ->  altair8_<what-it-holds>.dsk
-  HDSKnn.DSK  4,988,928 bytes  ->  altairhd_<what-it-holds>.dsk
-  TDISKnn.DSK   256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
+Renaming is only worth doing for two reasons.  One is that you want a
+name you can read, in which case put the prefix on so the gateway does
+not have to guess: ibm3740_wordstar.dsk .  The other is that a disk you
+are sure about was refused, and you want to overrule that.
 
-  So a 256,256-byte disk holding WordStar becomes
-  ibm3740_wordstar.dsk .
+  BE CAREFUL WITH THE SECOND ONE.  A prefix SKIPS the inspection, so it
+  turns a read-only refusal into a writable mount — including when the
+  refusal was right.  CDISK01.DSK is exactly that trap: it is 256,256
+  bytes, so it looks like an ibm3740 disk, but it holds CROMEMCO CDOS
+  and not a CP/M filesystem at all.  Naming it ibm3740_ would let the
+  gateway write CP/M structures over a filesystem it cannot read.  It
+  boots perfectly as it stands.
 
-  The Altair 88-DCDD floppies and the 88-HDSK hard disks can be either
-  MOUNTED or BOOTED, and booting needs no renaming at all.
+Disks that are not CP/M can only be booted, and that is correct rather
+than a fault — mounting one shows no files because there is no CP/M
+directory in it to read.  In the collections above that means Altair
+DOS, Altair Disk Extended BASIC, Time Sharing BASIC, Hard Disk BASIC,
+the minidisks, the UCSD p-System disks and Cromemco CDOS.
 
-  The disks that are not CP/M at all can only be booted: Altair DOS,
-  Altair Disk BASIC, Time Sharing BASIC, Hard Disk BASIC and the
-  minidisks.  Mounting one shows no files, because there is no CP/M
-  directory in it to read.  That is correct, not a fault.
-
-IMSAI 8080esp / z80pack images are 256,256-byte 8\" single-density disks
-and are all the IBM 3740 layout:
-
-  anything.dsk  256,256 bytes  ->  ibm3740_<what-it-holds>.dsk
-
-  The UCSD p-System disks in that collection are not CP/M either, and
-  behave the same way as the Altair ones above.
-
-Sizes are the reliable guide, and the mount screen tells you if a name
-does not match the file.
+The mount screen always says which way a disk was taken, and when it is
+read-only it says what was wrong.
 
 
 NOTES
@@ -471,16 +481,22 @@ mod tests {
                 "the readme still disclaims a format that works: {claim:?}"
             );
         }
-        // The positive half: an operator has to be told the token to rename to,
-        // exactly as for every other mountable format.
-        assert!(
-            text.contains("altair8_"),
-            "the readme must offer the altair8 rename, since these mount now"
-        );
-        assert!(
-            crate::cpm::image::format::by_token("altair8").is_some(),
-            "and this test is only meaningful while altair8 really is mountable"
-        );
+        // The positive half: an operator has to be told the token to name a
+        // disk with, for *every* mountable format.
+        //
+        // This used to name `altair8` alone, and so went stale a third time —
+        // in the other direction. The readme's example block was hand-written
+        // and offered two of the three tokens; the test knew the third. Between
+        // them they covered everything and neither was the source. Both now come
+        // off `FORMATS`, so a new mountable format is documented or this fails.
+        assert!(!FORMATS.is_empty(), "this test is vacuous with no formats");
+        for f in FORMATS {
+            assert!(
+                text.contains(&format!("{}_", f.token)),
+                "the readme must offer the {} rename, since these mount",
+                f.token
+            );
+        }
     }
 
     /// The readme must state the read-only rule, since that is the single
