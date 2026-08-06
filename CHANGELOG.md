@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Backspace erases inside a booted disk instead of reprinting what it
+  deleted.** Typing `TESTING` and backspacing over it used to leave
+  `TESTINGGNIT` on screen. A modern client's Backspace key sends DEL (0x7F),
+  and every operating system on these disks reads that as a Teletype *rubout* —
+  it removes the character and then echoes the character it removed, which is
+  right for a printing terminal and useless on a screen. Measured on three of
+  them (MITS CP/M 2.2, Altair Disk Extended BASIC, Altair Hard Disk BASIC): all
+  three erase properly on plain BS (0x08), answering with the universal
+  `BS SPACE BS`. Both spellings of the key — 0x7F and a Commodore's PETSCII DEL
+  0x14, which the guests did not recognise at all — now reach a booted guest as
+  0x08. The other half of the same repair is on the way out: the guest's
+  `BS SPACE BS` reaches a Commodore as cursor-left, space, cursor-left rather
+  than as the destructive PETSCII DEL that would pull the line about. That makes
+  three PETSCII output translators in the gateway, and the test that holds the
+  first two to the same rule now covers the third.
+
 - **The CPU passes the *undocumented*-flag exerciser too.** `EXZ80ALL` — the
   same ZEXALL family with bits 3 and 5 of `F` pinned as well — reports all 79
   groups OK, under the banner `Undefined status bits taken into account`. This

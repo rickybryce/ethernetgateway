@@ -3793,4 +3793,63 @@ mod tests {
             EGT80_COM.len()
         );
     }
+
+    /// **What a booted guest actually does with each spelling of Backspace.**
+    ///
+    /// The measurement behind `telnet/cpm_boot_ui.rs`'s `boot_key_for_guest`.
+    /// A modern client's Backspace key sends DEL (0x7F), and every operating
+    /// system on these disks reads that as a Teletype *rubout*: it deletes the
+    /// character and then prints the character it deleted, so backspacing over
+    /// `TESTING` leaves `TESTINGGNIT` on the screen. Plain BS (0x08) is what
+    /// they all erase on, answering with the universal `BS SPACE BS`.
+    ///
+    /// Measured, not reasoned, and on more than one guest on purpose — the
+    /// three disks below are three different operating systems (Digital
+    /// Research's BDOS and two MITS BASICs) and they agree, which is what makes
+    /// the translation safe to apply to every booted disk rather than to a
+    /// list of them.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to a bootable image. Run it against
+    /// several — `DISK01` (MITS CP/M 2.2), `DISK03` (Altair Disk Extended
+    /// BASIC) and `HDSK01` (Altair Hard Disk BASIC) were the three used.
+    #[test]
+    #[ignore]
+    fn test_a_booted_guest_erases_for_backspace_not_del() {
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to a bootable image");
+            return;
+        };
+        let bytes = std::fs::read(&path).unwrap();
+
+        // Type a word, then the key, and see what comes back for the key alone.
+        let echo_of = |key: u8| -> Vec<u8> {
+            let mut m = BootMachine::new();
+            // Read-only: this asks the guest a question, it does not write.
+            m.insert(0, bytes.clone(), true).expect("a bootable image");
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).expect("boots");
+            let signon = run_until_quiet(&mut m, &mut cpu, 200_000_000);
+            assert!(!signon.is_empty(), "the disk never said anything");
+            for &b in b"TESTING" {
+                m.send_key(b);
+            }
+            let typed = run_until_quiet(&mut m, &mut cpu, 50_000_000);
+            assert_eq!(typed, b"TESTING", "the guest is not echoing what we type");
+            m.send_key(key);
+            run_until_quiet(&mut m, &mut cpu, 50_000_000)
+        };
+
+        let bs = echo_of(0x08);
+        let del = echo_of(0x7F);
+        println!("BS 0x08 -> {bs:02X?}\nDEL 0x7F -> {del:02X?}");
+        assert_eq!(
+            bs, b"\x08 \x08",
+            "BS must erase with the universal BS SPACE BS, got {bs:02X?}"
+        );
+        assert!(
+            del.contains(&b'G'),
+            "DEL is expected to echo the deleted character back — if this disk \
+             does something else, boot_key_for_guest is worth re-reading: {del:02X?}"
+        );
+    }
 }

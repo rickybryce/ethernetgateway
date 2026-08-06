@@ -31,10 +31,20 @@ pub(crate) fn petscii_to_ascii_byte(byte: u8) -> u8 {
 /// bytes from an emulated UART and has to keep every non-letter untouched.
 /// Deliberately the same two ranges as that function: if the mapping is ever
 /// wrong it should be wrong in one place and fixed in one place.
+///
+/// ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, never PETSCII DEL
+/// (0x14), and ASCII DEL (0x7F) is treated the same as BS.  This is the third
+/// PETSCII output translator in the gateway and the rule is identical in all
+/// three — see `serial.rs`'s `translate_ascii_to_petscii_byte` for the full
+/// write-up.  It matters here because every booted operating system measured
+/// erases with the universal `BS SPACE BS`: mapped to 0x14 that reads as
+/// *delete, space, delete* on a C64 and pulls the line about, where 0x9D gives
+/// left, space, left — the character overwritten and the cursor before it.
 pub(crate) fn ascii_to_petscii_byte(byte: u8) -> u8 {
     match byte {
         b'A'..=b'Z' => byte + 32,
         b'a'..=b'z' => byte - 32,
+        0x08 | 0x7F => 0x9D,
         _ => byte,
     }
 }

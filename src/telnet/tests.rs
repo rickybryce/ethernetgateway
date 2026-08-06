@@ -1047,15 +1047,18 @@ fn test_filter_petscii_translates_backspace_to_cursor_left() {
     assert_eq!(filter_output(b"ab\x7Fc", true), b"AB\x9DC");
 }
 
-/// Neither PETSCII output translator may map a host's backspace to the
-/// destructive PETSCII DEL again.
+/// No PETSCII output translator may map a host's backspace to the destructive
+/// PETSCII DEL again.
 ///
-/// There are two of them — `filter_gateway_output` here and
+/// There are three of them — `filter_gateway_output` here,
 /// `translate_ascii_to_petscii_byte` in `serial.rs` (the modem emulator's
-/// `AT+PETSCII=1` path) — and **both carried the identical defect**, so fixing
-/// one would have left a C64 dialling out through the modem still corrupted.
+/// `AT+PETSCII=1` path) and `ascii_to_petscii_byte` in `colors.rs` (a booted
+/// disk image's console stream) — and the first two carried the identical
+/// defect, so fixing one would have left a C64 dialling out through the modem
+/// still corrupted; the third was written later and started out with the byte
+/// simply falling through, which on a booted disk is the same corruption again.
 /// They live in different modules with different signatures, so they cannot
-/// share a unit test; this scans both sources instead, the same technique
+/// share a unit test; this scans all three sources instead, the same technique
 /// `config::test_every_written_key_can_be_applied` uses on its `match`.
 ///
 /// Scoped to each translator's own body so an unrelated, legitimate `0x14`
@@ -1064,7 +1067,7 @@ fn test_filter_petscii_translates_backspace_to_cursor_left() {
 #[test]
 fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
     // (file label, source, marker that opens the translator, bytes to scan)
-    let sites: [(&str, &str, &str, usize); 2] = [
+    let sites: [(&str, &str, &str, usize); 3] = [
         (
             "telnet/gateway.rs filter_gateway_output",
             include_str!("gateway.rs"),
@@ -1076,6 +1079,12 @@ fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
             include_str!("../serial.rs"),
             "fn translate_ascii_to_petscii_byte",
             300,
+        ),
+        (
+            "telnet/colors.rs ascii_to_petscii_byte",
+            include_str!("colors.rs"),
+            "fn ascii_to_petscii_byte",
+            200,
         ),
     ];
     for (label, src, marker, span) in sites {
