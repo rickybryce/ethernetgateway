@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The CPU passes the *undocumented*-flag exerciser too.** `EXZ80ALL` — the
+  same ZEXALL family with bits 3 and 5 of `F` pinned as well — reports all 79
+  groups OK, under the banner `Undefined status bits taken into account`. This
+  had been recorded as a known gap on the grounds that iz80 "does not claim to
+  reproduce" those bits; that was wrong. It implements them throughout, from
+  Sean Young's *The Undocumented Z80 Documented*, including the two cases where
+  they are not a plain copy of the result — the block instructions and 16-bit
+  add. Nothing needed changing; the gap was in the notes, not the core.
+  `EXZ80ALL` ships on no disk, so the test's documentation now records how to
+  assemble it from `ex.mac` and how to validate the toolchain first.
 - **The CPU now passes its conformance suite completely.** `EXZ80DOC` — the
   ZEXALL exerciser, documented flags — reports **all 79 instruction groups OK**
   and ends `All tests successful.`, and Supersoft's Diagnostics II reports

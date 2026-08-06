@@ -1544,17 +1544,41 @@ mod tests {
     /// * `8080PRE.COM` — the 8080 equivalent.
     /// * `CPUTEST.COM` — Diagnostics II by Supersoft. Broad, and it names the
     ///   area that failed.
-    /// * `EXZ80DOC.COM` — the ZEXALL family, *documented* flags only. This is
-    ///   the fair one for an emulator: `EXZ80ALL` also pins the undocumented
-    ///   flag bits, which iz80 does not claim to reproduce. It compares a CRC
-    ///   per instruction group against a known-good value, so it cannot be
-    ///   satisfied by output that merely looks plausible — the exact-oracle
-    ///   property this project keeps choosing. **All 79 groups pass**, ending
-    ///   `All tests successful.` The last one to fall was
+    /// * `EXZ80DOC.COM` — the ZEXALL family, *documented* flags only. It
+    ///   compares a CRC per instruction group against a known-good value, so it
+    ///   cannot be satisfied by output that merely looks plausible — the
+    ///   exact-oracle property this project keeps choosing. **All 79 groups
+    ///   pass**, ending `All tests successful.` The last one to fall was
     ///   `<ini,outi,ind,outd><,r>`, and it was not an instruction bug at all:
     ///   those instructions copy a byte *from a port* into memory and set `N`
     ///   from its top bit, so an unclaimed port's value lands in the CRC. It
     ///   read `0` here and `0xFF` everywhere else — see `CpmMachine::port_in`.
+    ///
+    /// * `EXZ80ALL.COM` — **the same exerciser with the undocumented flag bits
+    ///   pinned as well, and it also passes all 79 groups.** Its banner says
+    ///   `Undefined status bits taken into account`, against the doc build's
+    ///   `NOT taken into account`, which is how you tell the two runs apart.
+    ///
+    ///   This bullet used to say that `EXZ80ALL` was unfair because iz80 "does
+    ///   not claim to reproduce" those bits. That was simply wrong, and it left
+    ///   a gap in the record that looked like a compatibility risk: iz80
+    ///   implements bits 3 and 5 throughout, from Sean Young's *The
+    ///   Undocumented Z80 Documented* — including the two places they do not
+    ///   simply copy the result, the block instructions (TUZD-4.2) and 16-bit
+    ///   add (TUZD-8.6). Measuring it took less time than the claim had been
+    ///   sitting there.
+    ///
+    ///   **It is not on any disk — build it.** `ex.mac` is the source for the
+    ///   whole family and `exkind` picks the variant (`0` = 8080, `1` = doc,
+    ///   `2` = all), so with z80pack's own assembler:
+    ///   ```text
+    ///   z80asm -l -T -sn -p0 -dexkind=2 -fb -oexz80all.com ex.mac
+    ///   ```
+    ///   Validate the toolchain before trusting its output: build `-dexkind=1`
+    ///   and check it still reports all 79 groups OK, which is what says the
+    ///   assembler and the source agree with the `EXZ80DOC.COM` on the disk.
+    ///   (Byte-identical it will not be — the disk copy is padded to a CP/M
+    ///   record and fills uninitialised space differently.)
     ///
     /// The suites live on z80pack's `z80tests.dsk` and `i8080tests.dsk`, and
     /// `cpmls -f ibm-3740` / `cpmcp -f ibm-3740` read them — the skew *is* the
