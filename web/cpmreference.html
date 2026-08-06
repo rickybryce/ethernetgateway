@@ -779,6 +779,19 @@ altairhd_cobol.dsk</code></pre>
                     usually what you want; writing to them is not. Renaming with a prefix is an
                     <em>override</em> that skips the inspection, not a requirement.
                 </p>
+                <p>
+                    Two things bound that override, because it is the one path that mounts
+                    read-write without looking inside. A prefix <strong>cannot make a file the
+                    wrong size into a disk</strong>: the size must still be the format's, and for a
+                    while it only had to be <em>at least</em> that, so a 625,920-byte Cromemco
+                    double-density image called <code>ibm3740_&hellip;</code> was accepted and read
+                    as a 256,256-byte single-density one &mdash; writable, with its directory
+                    landing mid-track. And the size is <strong>not required to be exact</strong>:
+                    anything short of one whole record over is a <em>trailer</em>, which is real
+                    &mdash; three images in the standard Altair set are their format's size plus 96
+                    bytes, and demanding an exact match refused them on the file length before
+                    their directory was ever read.
+                </p>
                 <div class="callout">
                     <p>
                         The read-only rule is the last line of defence in this feature, and it is

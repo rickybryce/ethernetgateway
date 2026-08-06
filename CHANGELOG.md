@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.0] - Unreleased
 
+### Fixed
+
+- **A mis-named image could be trusted, and the gateway recommended the
+  rename.** Naming a format with a filename prefix is an override — it skips
+  the directory inspection and mounts read-write — and its size check had only
+  a lower bound. A 625,920-byte Cromemco double-density image called
+  `ibm3740_x.dsk` cleared the 256,256 that format needs twice over and mounted
+  writable, read as single density with its directory landing in the middle of
+  a data track. Worse, the refusal an unmountable size produced said "rename it
+  with a format prefix, e.g. `ibm3740_mydisk.dsk`" — advice that cannot work,
+  since a prefix names the layout rather than the size, and that produced
+  exactly that mount if followed. Both ends are now bounded, and the message
+  points at the remedy that does exist: a disk we cannot mount is often still
+  bootable.
+- **Three real disks were refused for being 96 bytes too long.** `DISK13`,
+  `DISK14` and `DISK16` in the widely circulated Altair set are an `altair8`
+  disk plus a 96-byte trailer, and all three boot. Mounting demanded an exact
+  size and turned them away on the file length before reading their directory.
+  Both mount paths now allow anything short of one whole record, past which a
+  file is a different geometry rather than a padded one — the identical
+  96-byte trailer had already been found and fixed on the boot path and left
+  here. The three now mount read-write and list coherent directories: two
+  CP/M 3 system disks and a CP/M 2.2 tools disk. Nothing was loosened to do it,
+  because size was never what made a disk writable — whatever the size lets
+  through still has its whole directory checked.
+
 ### Added
 
 - **Cromemco disks boot — the fourth and last board on the disk-controller

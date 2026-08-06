@@ -167,7 +167,14 @@ is optional, as above: a sound filesystem is writable either way.
     for f in FORMATS {
         s.push_str(&format!("    {:<10} {}\n", f.token, f.label));
         if let Some(size) = f.exact_size {
-            s.push_str(&format!("    {:<10} exactly {} bytes\n", "", size));
+            // "or a little more", not "exactly": several images in circulation
+            // carry a few bytes past their last record, and refusing those was
+            // a real defect on both paths.  The mount side tolerates anything
+            // short of one whole record, past which it is a different geometry.
+            s.push_str(&format!(
+                "    {:<10} {} bytes (a short trailer is OK)\n",
+                "", size
+            ));
         }
         s.push('\n');
     }

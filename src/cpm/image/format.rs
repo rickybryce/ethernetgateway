@@ -1204,4 +1204,55 @@ mod tests {
             );
         }
     }
+
+    /// **No two formats may claim overlapping sizes**, trailer included.
+    ///
+    /// This is the invariant the whole "drop a disk in and it works" behaviour
+    /// stands on: a size names one format outright, so identification never has
+    /// to choose between two and the `Ambiguous` branch stays unreachable. It
+    /// was true of the bare sizes by luck of history; it became something that
+    /// could be *broken* the moment sizes turned into ranges, because a trailer
+    /// allowance widens every one of them by a record.
+    ///
+    /// A new format landing a record away from an existing one would not fail
+    /// loudly — it would make one disk sometimes mount as the other, with every
+    /// offset computed from the wrong geometry. Hence a test rather than a note.
+    #[test]
+    fn test_no_two_formats_claim_overlapping_sizes() {
+        for a in FORMATS {
+            let Some(a_lo) = a.exact_size else { continue };
+            for b in FORMATS {
+                if std::ptr::eq(a, b) {
+                    continue;
+                }
+                let Some(b_lo) = b.exact_size else { continue };
+                assert!(
+                    a_lo > b.max_bytes() || b_lo > a.max_bytes(),
+                    "{} ({}..={}) overlaps {} ({}..={}) — a size would no longer \
+                     name one format, and identification would have to guess",
+                    a.token,
+                    a_lo,
+                    a.max_bytes(),
+                    b.token,
+                    b_lo,
+                    b.max_bytes(),
+                );
+            }
+        }
+    }
+
+    /// The declared exact size is also the size the geometry needs.
+    ///
+    /// `max_bytes` is built on `min_bytes` while identification's lower bound is
+    /// `exact_size`, so the two must agree or the tolerance would sit at the
+    /// wrong end of the range.
+    #[test]
+    fn test_the_declared_size_is_the_size_the_geometry_needs() {
+        for f in FORMATS {
+            if let Some(exact) = f.exact_size {
+                assert_eq!(exact, f.min_bytes(), "{}", f.token);
+            }
+            assert!(f.max_bytes() > f.min_bytes(), "{}: no room for a trailer", f.token);
+        }
+    }
 }

@@ -369,9 +369,23 @@ where
     }
 
     // --- sniffed --------------------------------------------------------
+    //
+    // The same trailer tolerance the named path uses, and for the same reason:
+    // an image in circulation may carry a few bytes past its last record, and
+    // that does not make it a different disk. This required an *exact* match
+    // until it was measured — `DISK13`, `DISK14` and `DISK16` are 337,664
+    // bytes, which is an `altair8` disk plus 96, and all three boot perfectly
+    // while mounting refused them outright on size before their directory was
+    // ever looked at. The identical 96-byte trailer was one of the two root
+    // causes that once stopped these disks *booting*; it was fixed there and
+    // left here.
+    //
+    // Widening this costs no safety, because size was never what made a disk
+    // writable: whatever it lets through still has its whole directory checked
+    // below, and fails to read-only *with the reason* if it does not hold up.
     let by_size: Vec<&'static Format> = FORMATS
         .iter()
-        .filter(|f| f.exact_size == Some(size))
+        .filter(|f| f.exact_size.is_some_and(|exact| (exact..=f.max_bytes()).contains(&size)))
         .collect();
     // An unrecognised token becomes the explanation only when inspection has
     // nothing better to offer.
@@ -494,6 +508,50 @@ mod tests {
             assert!(!id.force_read_only(), "{token}: a checked filesystem is writable");
             assert!(id.describe().contains("checks out"));
         }
+    }
+
+    /// An image with a short trailer is the same disk, unnamed as well as named.
+    ///
+    /// **Measured, not supposed.** `DISK13`, `DISK14` and `DISK16` in the widely
+    /// circulated Altair set are 337,664 bytes — an `altair8` disk plus exactly
+    /// 96 — and all three boot. Mounting used to demand an exact size and so
+    /// refused them on the file length before their directory was ever read,
+    /// reporting "no known format is 337664 bytes". With the tolerance they
+    /// mount read-write and list coherent CP/M 3 and CP/M 2.2 directories.
+    ///
+    /// The same 96-byte trailer once stopped these disks *booting*, was fixed on
+    /// that path, and was left on this one — which is why the number here is
+    /// spelled out rather than derived: it is a real quantity from real files.
+    #[test]
+    fn test_an_unnamed_image_with_a_short_trailer_is_still_the_same_disk() {
+        for token in ["ibm3740", "altair8", "altairhd"] {
+            let fmt = by_token(token).unwrap();
+            let record = fmt.max_bytes() - fmt.min_bytes() + 1;
+            for extra in [0, 96.min(record - 1), record - 1] {
+                let id = identify("whatever.dsk", fmt.min_bytes() + extra, |f| {
+                    (f.token == token).then(|| consistent_dir(f))
+                })
+                .unwrap_or_else(|e| panic!("{token} +{extra}: {e}"));
+                assert_eq!(id.format.token, token);
+                assert!(!id.force_read_only(), "{token} +{extra} must stay writable");
+            }
+            // A whole record more is a different geometry, not a trailer.
+            assert!(
+                identify("whatever.dsk", fmt.min_bytes() + record, |f| {
+                    (f.token == token).then(|| consistent_dir(f))
+                })
+                .is_err(),
+                "{token}: a whole extra record must not be taken as this format"
+            );
+        }
+        // The real file lengths, so the constants above cannot drift away from
+        // the disks that motivated them.
+        let altair8 = by_token("altair8").unwrap();
+        assert_eq!(altair8.min_bytes(), 337_568);
+        assert!(
+            (altair8.min_bytes()..=altair8.max_bytes()).contains(&337_664),
+            "DISK13/14/16 are 337,664 bytes and must be inside the tolerance"
+        );
     }
 
     /// A directory that does *not* hold together stays read-only — the guard has
