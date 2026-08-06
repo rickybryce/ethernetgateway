@@ -1281,12 +1281,32 @@ mod tests {
         }
     }
 
-    // NOTE: `test_cpu_conformance_suite` below has one known open failure that
-    // is deliberately *not* worked around here — see the commit that added it.
-    // PRELIM.COM's register-file check lands its pushed block one byte high; the
-    // extraction, the loaded image and the push sequence itself are all ruled
-    // out, and the next step is an SP-logged instruction trace. Do not "fix" it
-    // by loosening the assertions.
+    // NOTE: `PRELIM.COM` cannot pass here, and the reason is settled — do not
+    // spend another session on it. It is **not** our pushes and never was.
+    //
+    // This note used to say the pushed block "lands one byte high" with an
+    // SP-logged instruction trace as the next step. That diagnosis was anchored
+    // on the wrong address: `regs2` is at `0559h`, not `0558h` — the `hlval`
+    // bytes `A5 3C` that follow it sit at `056Dh` and pin it — so the block was
+    // always in the right place, with only its top byte wrong.
+    //
+    // The fault is upstream of the register test. PRELIM opens by rotating all
+    // 65,536 bytes down one with `LDIR` and back up with `LDDR` from
+    // `HL = 0080h`, which passes over its own `LDIR` at `01A4h`; the write
+    // pointer trails the read pointer by one, so at `HL = 01A5h` it replaces
+    // the `ED` with `B0`. A repeating block instruction re-fetches its opcode
+    // every iteration (`PC ← PC - 2`), so the copy stops there while the
+    // following `LDDR` — whose writes move *away* from its own bytes — runs to
+    // completion. Memory is left shifted up one byte and every later test reads
+    // the wrong byte. See `test_a_block_move_that_overwrites_its_own_opcode_stops_there`.
+    //
+    // That is the hardware's behaviour, not a defect: z80pack ships both models
+    // and calls the other one `FAST_BLOCK`, "much faster but not accurate Z80
+    // block instr." Its `cpmsim` — which carries these very disks — defines it;
+    // its accurate machines do not. PRELIM's rotation survives only there.
+    //
+    // The core itself is covered by the suites that *can* judge it: EXZ80DOC
+    // passes all 79 groups, and Diagnostics II reports `CPU TESTS OK`.
 
     /// The shadow-register round trip `PRELIM.COM` rejects, in isolation.
     ///
@@ -1338,10 +1358,10 @@ mod tests {
     ///
     /// PRELIM sets `SP` to a known address, pushes `IY IX HL DE BC AF`, swaps to
     /// the shadow set and pushes `HL' DE' BC' AF'`, then checks the twenty bytes
-    /// that lands. Against our core the block arrives **one byte higher** than it
-    /// expects — every value correct and in order, the base address off by one —
-    /// so this pins whether the fault is in the pushes themselves or in
-    /// something PRELIM does before them.
+    /// that lands. It was written to answer whether the fault PRELIM reports is
+    /// in the pushes themselves or in something it does before them, and the
+    /// answer is **before them** — the pushes are right, and this passing is
+    /// what says so. See the note above `test_the_shadow_af_round_trip`.
     #[test]
     fn test_the_register_file_pushes_where_prelim_expects() {
         let _g = crate::cpm::image::registry::tests_lock();
@@ -1382,7 +1402,8 @@ mod tests {
         let below = cpm.read_block(TOP - 21, 1);
         assert_eq!(
             below[0], 0,
-            "a push wrote below TOP-20 — the block is shifted, exactly what PRELIM reports"
+            "a push wrote below TOP-20 — the block would be shifted, which is \
+             what PRELIM was once thought to be reporting"
         );
         assert_eq!(got.len(), 20);
         // The last push (AF') must be the lowest pair: F' then A'.
@@ -1390,6 +1411,118 @@ mod tests {
             (got[0], got[1]),
             (0x02, 0x04),
             "AF' did not land at the bottom of the block; got {got:02X?}"
+        );
+    }
+
+    /// **`LDIR`/`LDDR` with `BC = 0` must move 65,536 bytes, not none.**
+    ///
+    /// The counter is decremented *before* it is tested, so zero wraps to
+    /// `FFFFh` and the block runs the whole address space. This is not a corner
+    /// nobody reaches: it is the first thing `PRELIM.COM` does, and it is how
+    /// its author checks the repeat loop terminates on the counter rather than
+    /// on a sign or a zero test done in the wrong order.
+    ///
+    /// Kept small and one-directional so a failure names which instruction is
+    /// wrong instead of reporting "memory looks odd".
+    #[test]
+    fn test_a_block_move_with_bc_zero_moves_the_whole_address_space() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        // LDIR: copy 0200h.. down one byte, wrapping the whole way round.
+        let prog = [
+            0x21, 0x00, 0x02, // LD HL,0200h
+            0x11, 0xFF, 0x01, // LD DE,01FFh
+            0x01, 0x00, 0x00, // LD BC,0000h
+            0xED, 0xB0, //       LDIR
+            0x76, //             HLT
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        cpm.write_block(0x0200, &[0xAA, 0xBB, 0xCC]);
+        let abort = AtomicBool::new(false);
+        // Generous: a full sweep is 65,536 transfers.
+        let _ = cpm.run(400_000, &abort);
+        assert_eq!(
+            cpm.read_block(0x01FF, 3),
+            vec![0xAA, 0xBB, 0xCC],
+            "LDIR with BC=0 must copy 65,536 bytes — the source moved down one \
+             byte. Copying none leaves the destination untouched, which is what \
+             shifts every later address in PRELIM by one and makes its register \
+             test read the wrong byte."
+        );
+
+        // LDDR, the other direction, for the same reason.
+        let prog = [
+            0x21, 0x00, 0x02, // LD HL,0200h
+            0x11, 0x01, 0x02, // LD DE,0201h
+            0x01, 0x00, 0x00, // LD BC,0000h
+            0xED, 0xB8, //       LDDR
+            0x76, //             HLT
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        cpm.write_block(0x01FE, &[0xAA, 0xBB, 0xCC]);
+        let _ = cpm.run(400_000, &abort);
+        assert_eq!(
+            cpm.read_block(0x01FF, 3),
+            vec![0xAA, 0xBB, 0xCC],
+            "LDDR with BC=0 must copy 65,536 bytes too"
+        );
+    }
+
+    /// **A repeating block instruction re-fetches its own opcode, so it stops
+    /// if the copy overwrites it.**
+    ///
+    /// This is the whole of why `PRELIM.COM` cannot pass here, and it is a
+    /// property worth pinning rather than a curiosity. The Z80 implements
+    /// `LDIR` as *one* transfer followed by `PC ← PC - 2`, so the instruction is
+    /// fetched again from memory on every iteration. A copy that runs over its
+    /// own two opcode bytes therefore changes what executes next — the loop
+    /// ends there, mid-block.
+    ///
+    /// `PRELIM` opens by rotating all 65,536 bytes down one byte with `LDIR`
+    /// and back up with `LDDR`, from `HL = 0080h` — which passes straight over
+    /// its own `LDIR` at `01A4h`. On this model the `LDIR` stops after ~294
+    /// bytes while the following `LDDR` (whose writes move *away* from its
+    /// opcode) runs to completion, so memory is left shifted up by one and
+    /// every later test reads the wrong byte. That is not a fault in the core:
+    /// it is what the hardware does.
+    ///
+    /// z80pack, whose disks carry these exercisers, ships both models and says
+    /// so in `sim.h` — `FAST_BLOCK`, "much faster but not accurate Z80 block
+    /// instr.", loops internally and cannot see the overwrite. Its `cpmsim`
+    /// defines it; its accurate machines (`cromemcosim`, `mosteksim`, `picosim`)
+    /// leave it commented out. `PRELIM` passes only on the inaccurate one.
+    #[test]
+    fn test_a_block_move_that_overwrites_its_own_opcode_stops_there() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        // The copy starts *below* this program and moves up, writing one byte
+        // behind itself — so the destination pointer walks over the `LDIR`'s
+        // own two bytes at 0109h, exactly as PRELIM's does at 01A4h.
+        let prog = [
+            0x01, 0x40, 0x00, // 0100: LD BC,0040h   (64 — more than it will get)
+            0x21, 0xF0, 0x00, // 0103: LD HL,00F0h   (source, below the program)
+            0x11, 0xEF, 0x00, // 0106: LD DE,00EFh   (dest = source - 1)
+            0xED, 0xB0, //       0109: LDIR
+            0x76, //             010B: HLT
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        cpm.write_block(0x00F0, &[0xAA]); // proves the copy ran at all
+        cpm.write_block(0x0120, &[0xEE]); // beyond where it can reach if it stops
+        let abort = AtomicBool::new(false);
+        let _ = cpm.run(100_000, &abort);
+
+        assert_eq!(cpm.read_block(0x00EF, 1), vec![0xAA], "the copy never started");
+        // The destination reaches 0109h when the source reaches 010Ah — 27
+        // transfers in, well short of the 64 the counter allows. Everything
+        // past that must be untouched.
+        assert_eq!(
+            cpm.read_block(0x011F, 1),
+            vec![0x00],
+            "the copy ran past its own opcode. A repeating block instruction \
+             re-fetches, so overwriting its opcode has to stop it; looping \
+             internally is z80pack's FAST_BLOCK, which its own header calls \
+             'not accurate'."
         );
     }
 
@@ -1401,8 +1534,13 @@ mod tests {
     /// coming back corrupted. This tests it directly, with the instruction
     /// exercisers the 8080/Z80 world settled on:
     ///
-    /// * `PRELIM.COM` — Frank Cringle's preliminary tests. Fast, and it fails
-    ///   loudly on anything basic being wrong. Run this first.
+    /// * `PRELIM.COM` — Frank Cringle's preliminary tests. **Expected to fail
+    ///   here, for a reason that is settled and is not a fault in the core** —
+    ///   see the note above `test_the_shadow_af_round_trip`. It opens by
+    ///   rotating all of memory with `LDIR`/`LDDR` across the instruction's own
+    ///   opcode, which only survives on an emulator that loops block
+    ///   instructions internally instead of re-fetching. Its failure action is
+    ///   a silent `JMP 0000`, so it simply prints nothing.
     /// * `8080PRE.COM` — the 8080 equivalent.
     /// * `CPUTEST.COM` — Diagnostics II by Supersoft. Broad, and it names the
     ///   area that failed.
@@ -1411,13 +1549,27 @@ mod tests {
     ///   flag bits, which iz80 does not claim to reproduce. It compares a CRC
     ///   per instruction group against a known-good value, so it cannot be
     ///   satisfied by output that merely looks plausible — the exact-oracle
-    ///   property this project keeps choosing.
+    ///   property this project keeps choosing. **All 79 groups pass**, ending
+    ///   `All tests successful.` The last one to fall was
+    ///   `<ini,outi,ind,outd><,r>`, and it was not an instruction bug at all:
+    ///   those instructions copy a byte *from a port* into memory and set `N`
+    ///   from its top bit, so an unclaimed port's value lands in the CRC. It
+    ///   read `0` here and `0xFF` everywhere else — see `CpmMachine::port_in`.
     ///
-    /// The suites live on z80pack's `z80tests.dsk` and `i8080tests.dsk`. Those
-    /// are `cpmsim` disks, which share the 256,256-byte size of an IBM 3740 but
-    /// **not** its layout: their BIOS's `SECTRAN` is `HL = BC + 1`, no
-    /// translation at all, so reading one with our `ibm3740` skew table
-    /// scrambles it silently. Extract with a no-skew reader.
+    /// The suites live on z80pack's `z80tests.dsk` and `i8080tests.dsk`, and
+    /// `cpmls -f ibm-3740` / `cpmcp -f ibm-3740` read them — the skew *is* the
+    /// IBM 3740 one. The disks also carry the sources, `prelim.mac` and
+    /// `ex.mac`, which are worth more than the binaries when a group fails:
+    /// they say what each test does and what it expects.
+    ///
+    /// This paragraph used to say the opposite — that `cpmsim`'s `SECTRAN` is
+    /// `HL = BC + 1` with no translation, so an `ibm3740` reader would scramble
+    /// the file, and to extract with a no-skew reader. That was read from the
+    /// wrong branch of `SECTRAN`; the other one goes through the DPH's
+    /// translation table, which is our `IBM3740_SKEW` plus one. It is a
+    /// dangerous thing to get wrong in this direction: a scrambled directory
+    /// still lists plausible filenames, so the mistake shows up as a CPU that
+    /// appears to fail its own conformance suite.
     ///
     /// Ignored, and wants a release build — `EXZ80DOC` is billions of cycles:
     /// ```text

@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The CPU now passes its conformance suite completely.** `EXZ80DOC` — the
+  ZEXALL exerciser, documented flags — reports **all 79 instruction groups OK**
+  and ends `All tests successful.`, and Supersoft's Diagnostics II reports
+  `CPU IS Z80` / `CPU TESTS OK`. The one group that had been failing,
+  `<ini,outi,ind,outd><,r>`, turned out not to be an instruction fault at all:
+  those instructions copy a byte *from an I/O port* into memory and set the `N`
+  flag from its top bit, so whatever an unclaimed port returns lands in the
+  group's CRC.
+- **A port nothing answers at now reads `0xFF`, not zero.** That is the real
+  fix behind the CRC, and it matters well beyond a test. Zero is a *plausible*
+  reading — an idle status register, a device present and ready — so guest
+  software probing for hardware found boards that were not there. `0xFF` is
+  what an unloaded bus gives, because it floats high. Our own booted-disk
+  machine already answered `0xFF`; only the CP/M emulator disagreed, on the
+  grounds that its guest is "software we chose", which is not true of a feature
+  whose purpose is running arbitrary `.COM` files. Every one of z80pack's
+  machines defines `IO_DATA_UNUSED 0xff`, and its `cpmsim` records why —
+  "unused I/O ports need to return FF, see survey.mac".
 - **Two data disks were run as programs instead of being refused.** `DISK0B`
   ("Time Sharing Basic V2 programs") and `DISK0F` ("Altair Mini-Disk DOS
   programs") are the data companions of two disks that boot, and they carry no

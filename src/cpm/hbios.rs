@@ -527,8 +527,12 @@ mod tests {
         m.set_access(resolve_access("hbios_1"));
         m.modem_queue_rx(b"xy");
         use iz80::Machine;
-        assert_eq!(m.port_in(0x82), 0, "SIO status stays inert");
-        assert_eq!(m.port_in(0x83), 0, "SIO data must not drain the ring");
+        // `0xFF` is what "inert" means on a bus: nothing drives those lines, so
+        // they float high. Zero would be a *plausible* SIO status — an idle,
+        // present board — which is the opposite of what this asserts. See
+        // `CpmMachine::port_in`.
+        assert_eq!(m.port_in(0x82), 0xFF, "SIO status stays inert");
+        assert_eq!(m.port_in(0x83), 0xFF, "SIO data must not drain the ring");
         m.port_out(0x83, b'Z');
         assert!(m.modem_drain_tx().is_empty(), "a port write reaches nothing");
         assert_eq!(m.modem_rx_len(), 2, "ring untouched");

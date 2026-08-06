@@ -105,11 +105,28 @@ impl Machine for CpmMachine {
     }
 
     fn port_in(&mut self, address: u16) -> u8 {
-        // A port the modem does not claim reads zero here.  A booted Altair
-        // answers 0xFF for the same case — see `BootMachine` — because an
-        // unloaded S-100 bus floats high; under our own BDOS the guest is
-        // running software we chose, and zero is the long-standing behaviour.
-        self.modem.port_in(address as u8).unwrap_or(0)
+        // **A port nothing answers at reads `0xFF`, not zero.**
+        //
+        // This used to read zero, justified on the grounds that the guest is
+        // "software we chose". It is not: the whole point of the emulator is
+        // running arbitrary `.COM` files, and software that probes for hardware
+        // is exactly the software that reads a port nobody drives. Zero is a
+        // *plausible* answer — an idle status register, a device present and
+        // ready — so a probe finds a board that is not there. `0xFF` is the
+        // answer an unloaded bus gives, because it floats high.
+        //
+        // Every other machine agrees, and it is worth listing because they were
+        // measured rather than assumed: our own `BootMachine` answers `0xFF`;
+        // every one of z80pack's eight machines defines
+        // `IO_DATA_UNUSED 0xff`, and `cpmsim`'s changelog carries the reason —
+        // "unused I/O ports need to return FF, see survey.mac", `survey.mac`
+        // being a real CP/M program that inventories hardware. The lone
+        // exception there is `intelmdssim`, a different bus entirely.
+        //
+        // It is also load-bearing for conformance: `INI`/`IND` copy the byte a
+        // port gives into memory and set `N` from its top bit, so the value
+        // lands in ZEXALL's CRC for the `<ini,outi,ind,outd><,r>` group.
+        self.modem.port_in(address as u8).unwrap_or(0xFF)
     }
 
     fn port_out(&mut self, address: u16, value: u8) {
@@ -123,11 +140,19 @@ mod tests {
     use crate::cpm::modem_port::MODEM_RING_CAP;
     use crate::cpm::uart::resolve_access;
 
+    /// With no modem selected, the UART ports read as an *empty bus* — `0xFF`,
+    /// the same as any other port nothing answers at.
+    ///
+    /// Zero would be worse than useless here: it is what a real, idle status
+    /// register looks like, so a guest probing for a UART would find one and
+    /// then wait forever for a character. See `CpmMachine::port_in`.
     #[test]
     fn test_ports_inert_without_modem() {
         let mut m = CpmMachine::new();
-        assert_eq!(m.port_in(0x82), 0);
-        assert_eq!(m.port_in(0x83), 0);
+        assert_eq!(m.port_in(0x82), 0xFF);
+        assert_eq!(m.port_in(0x83), 0xFF);
+        // And a port no profile ever uses reads the same way.
+        assert_eq!(m.port_in(0x40), 0xFF);
         m.port_out(0x82, 0x55); // must not panic
         assert!(m.modem_drain_tx().is_empty());
     }
@@ -208,8 +233,10 @@ mod tests {
     fn test_aux_leaves_ports_inert() {
         let mut m = CpmMachine::new();
         m.set_access(ModemAccess::Aux);
-        // No port answers in AUX mode; the driver uses the ring accessors.
-        assert_eq!(m.port_in(0x82), 0);
+        // No port answers in AUX mode; the driver uses the ring accessors. An
+        // unanswered port reads as an empty bus, `0xFF`, not zero — see
+        // `CpmMachine::port_in`.
+        assert_eq!(m.port_in(0x82), 0xFF);
         m.port_out(0x83, b'Z');
         assert!(m.modem_drain_tx().is_empty()); // OUT ignored in AUX mode
         m.modem_tx_push(b'Z'); // driver's AUX-out path
