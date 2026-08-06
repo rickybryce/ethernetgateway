@@ -474,8 +474,14 @@ mod tests {
     #[test]
     fn test_the_cold_start_enters_at_7d() {
         let t = Tarbell::new();
-        // A sector shaped like the real ones: code at the front, a jump at 7Dh.
+        // A sector shaped like the real ones: code at the front, a jump at 7Dh
+        // — and *dense*, because a few opcodes over a field of zeros is the
+        // shape of a data disk's header-and-padding, which `looks_bootable`
+        // refuses. See `boot::looks_bootable`.
         let mut image = vec![0u8; IMAGE_LEN as usize];
+        for (i, b) in image[..SECTOR_LEN].iter_mut().enumerate() {
+            *b = [0x31u8, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08][i % 7];
+        }
         image[..3].copy_from_slice(&[0x31, 0x00, 0x01]); // LXI SP,0100h
         image[0x7D..0x80].copy_from_slice(&[0xC3, 0x00, 0x00]); // JMP 0000h
         assert_eq!(

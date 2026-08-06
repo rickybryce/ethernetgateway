@@ -3191,12 +3191,17 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                                 <code>63K CP/M 2.2b</code>); <strong>4 of 6</strong>
                                 <code>TDISK*</code>; and <strong>all 3</strong> <code>CDISK*</code>.
                                 Separately, 9 of the disks in z80pack's own library boot.
-                                The five that do not are each accounted for:
-                                <code>DISK0D</code> and <code>TDISK06</code> are correctly refused
-                                (data, and a blank), <code>TDISK04</code> waits on the VDM-1, and
-                                <code>DISK0B</code> and <code>DISK0F</code> load and then go quiet
-                                for reasons not yet established &mdash; the one genuinely open item
-                                in this row. Between them these reach CP/M 1.3, 1.4, 1975, 2.2 and
+                                The five that do not are each accounted for, and
+                                <strong>only one is still work</strong>: <code>TDISK04</code> waits
+                                on the VDM-1. The other four are correctly refused &mdash;
+                                <code>TDISK06</code> is a blank, and <code>DISK0D</code>,
+                                <code>DISK0B</code> and <code>DISK0F</code> are the <em>data</em>
+                                companions of disks that do boot, carrying no boot program at all.
+                                The last two of those used to load and go quiet, which read like a
+                                fault and was recorded here as the one open item in this row; they
+                                were in fact being <em>run</em> &mdash; <code>DISK0B</code>
+                                executing its own volume label as instructions &mdash; and are now
+                                refused with the reason. Between them these reach CP/M 1.3, 1.4, 1975, 2.2 and
                                 3.0, MP/M, UCSD p-System IV, CDOS, Altair DOS, Disk Extended BASIC,
                                 Time Sharing BASIC and Hard Disk BASIC.</td>
                         </tr>

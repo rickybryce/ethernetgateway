@@ -789,6 +789,11 @@ mod tests {
     fn test_the_cold_start_loads_the_boot_sector_at_0080() {
         let c = Cromemco::new();
         let mut image = vec![0u8; SD as usize];
+        // Dense, like a real boot sector: a few opcodes over a field of zeros
+        // is a data disk's header-and-padding, which `looks_bootable` refuses.
+        for (i, b) in image[..SD_SECTOR_LEN].iter_mut().enumerate() {
+            *b = [0x3Eu8, 0x01, 0xD3, 0x40, 0x11, 0x7F, 0x31][i % 7];
+        }
         // The real first four bytes of all three sample disks.
         image[..4].copy_from_slice(&[0x3E, 0x01, 0xD3, 0x40]);
         image[4..8].copy_from_slice(&[0x11, 0x7F, 0x31, 0x21]);

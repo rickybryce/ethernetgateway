@@ -311,8 +311,37 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
     if payload.len() < 8 {
         return false;
     }
-    // All-identical bytes is an erased or unformatted sector.
-    if payload.iter().all(|&b| b == payload[0]) {
+    // **Mostly one repeated byte is padding, not a program.** An erased or
+    // unformatted sector is the obvious case — all `00h`, or all `E5h` — but the
+    // one that mattered is subtler: a *data* disk's first sector holds a short
+    // header and then nothing. `DISK0B` is "Time Sharing Basic V2 programs" and
+    // carries its volume label, `VOL±TS2FILES`, followed by 112 zero bytes;
+    // `DISK0F` is "Altair Mini-Disk DOS programs" and carries two stray bytes
+    // and 126 zeros. Both used to pass this check, so we ran them: DISK0B
+    // executes its own label as instructions, DISK0F NOPs its way off into
+    // cleared memory. Either way the machine goes quiet, which reads like a
+    // disk we cannot boot rather than a disk with no boot program on it.
+    //
+    // **The four-fifths is measured, and the first two thresholds reasoned for
+    // it were both wrong.** Across every image in the Altair and z80pack
+    // collections, taking the payload each controller really extracts: the
+    // disks that boot run from 5% to **63%** one-byte (z80pack's `mpm-2`, whose
+    // loader is short and zero-padded), and the ones with no boot program are
+    // 89%, 98% and 100%. A half-way rule would have killed the three Altair
+    // hard disks; a trailing-zero-run rule would have killed `mpm-2`. Four
+    // fifths sits 17 points clear of the highest disk that works and 9 below
+    // the lowest that does not.
+    //
+    // Erring lenient is deliberate: too strict refuses a disk that would have
+    // run, while too lenient only leaves the old behaviour, which is what this
+    // is improving on rather than depending on.
+    let mut counts = [0usize; 256];
+    let mut top = 0usize;
+    for &b in payload {
+        counts[b as usize] += 1;
+        top = top.max(counts[b as usize]);
+    }
+    if top > payload.len() * 4 / 5 {
         return false;
     }
     // Entirely printable text is a data sector, not code.
@@ -337,11 +366,24 @@ mod tests {
         0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB, 0x08, 0xE6, 0x08, 0xC2, 0x07, 0x00,
     ];
 
+    /// A synthetic boot sector that is *dense*, like a real one.
+    ///
+    /// It used to be the fourteen real opcodes and then zeros, which is 89% one
+    /// byte — the signature of a data disk's header-and-padding, and now
+    /// refused as such. That made four tests fail at once when
+    /// [`looks_bootable`] learned to tell those apart, and the tests were the
+    /// thing that was wrong: no boot sector this project has ever measured is
+    /// anywhere near that sparse (the emptiest that really boots is 63%).
+    /// Repeating the real bytes gives it the byte distribution of actual code.
     fn boot_sector() -> Vec<u8> {
         let mut s = vec![0u8; SECTOR_LEN];
         s[0] = 0x80; // track 0, high bit set as the controller writes it
-        s[BOOT_DATA_OFFSET..BOOT_DATA_OFFSET + REAL_BOOT_START.len()]
-            .copy_from_slice(REAL_BOOT_START);
+        let data = &mut s[BOOT_DATA_OFFSET..BOOT_DATA_OFFSET + BOOT_DATA_LEN];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = REAL_BOOT_START[i % REAL_BOOT_START.len()];
+        }
+        // The entry path still depends on the first instructions being real.
+        data[..REAL_BOOT_START.len()].copy_from_slice(REAL_BOOT_START);
         s
     }
 
@@ -477,6 +519,54 @@ mod tests {
         assert!(!looks_bootable(&[0xE5; 128]), "unformatted");
         assert!(!looks_bootable(b"PLAIN TEXT ON A DATA DISK, NOTHING ELSE HERE AT ALL"));
         assert!(!looks_bootable(&[0x31, 0x00]), "too short to judge");
+    }
+
+    /// **A data disk's first sector is a header and then padding, and that is
+    /// what tells it apart from a boot sector.**
+    ///
+    /// The two shapes here are the real ones, taken from the images that
+    /// motivated the rule. `DISK0B` ("Time Sharing Basic V2 programs") holds its
+    /// volume label and 112 zeros; `DISK0F` ("Altair Mini-Disk DOS programs")
+    /// holds two bytes and 126. Both used to be *run*: DISK0B executed its own
+    /// label as instructions and DISK0F NOPped into cleared memory, and both
+    /// then sat silent, which looks like a disk we cannot boot rather than one
+    /// with nothing to boot.
+    #[test]
+    fn test_a_data_disks_header_and_padding_is_not_a_boot_sector() {
+        let mut ts2 = vec![0u8; 128];
+        ts2[..16].copy_from_slice(b"\x80\x6d\x00\x00VOL\xb1TS2FILES");
+        assert!(!looks_bootable(&ts2), "a volume label and padding is not a program");
+
+        let mut mini = vec![0u8; 128];
+        mini[..2].copy_from_slice(&[0x15, 0x15]);
+        assert!(!looks_bootable(&mini), "two bytes and padding is not a program");
+    }
+
+    /// The threshold has to clear the *padded* boot sectors, and those go much
+    /// further than they look.
+    ///
+    /// Measured over every image in the Altair and z80pack collections, using
+    /// the payload each controller really extracts: disks that boot run up to
+    /// **63%** one repeated byte — z80pack's `mpm-2`, a short loader with a long
+    /// zero tail — while the disks with no boot program are 89% and above.
+    ///
+    /// This is the guard on the number, and it is here because the two
+    /// thresholds reasoned out before measuring were *both* wrong: one-half
+    /// would have refused the three Altair hard disks, and a
+    /// trailing-zero-run rule would have refused `mpm-2`.
+    #[test]
+    fn test_a_padded_boot_sector_is_still_bootable() {
+        // The shape of mpm-2's: real code, then a long tail of zeros.
+        let mut padded = vec![0u8; 128];
+        padded[..47].copy_from_slice(&[0x31; 47]);
+        assert_eq!(padded.iter().filter(|&&b| b == 0).count() * 100 / 128, 63);
+        assert!(looks_bootable(&padded), "63% zero boots in real life — mpm-2 does");
+
+        // And the far side: 89% is DISK0B, the tightest disk that must not run.
+        let mut sparse = vec![0u8; 128];
+        sparse[..14].copy_from_slice(&[0x31; 14]);
+        assert_eq!(sparse.iter().filter(|&&b| b == 0).count() * 100 / 128, 89);
+        assert!(!looks_bootable(&sparse), "89% zero is padding, not a program");
     }
 
     /// Boot every real image in a folder and report what happened.

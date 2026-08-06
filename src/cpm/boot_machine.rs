@@ -1032,6 +1032,37 @@ mod tests {
         vec![0u8; geom.image_len() as usize]
     }
 
+    /// Code-like filler for a synthetic boot sector's unused tail.
+    ///
+    /// The opening bytes of a real Altair boot sector, repeated. Never
+    /// executed — see [`bootable_image`].
+    const BOOT_FILLER: [u8; 7] = [0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08];
+
+    /// An image whose boot sector has the byte distribution of a real one.
+    ///
+    /// A hand-built fixture is a few opcodes and then zeros, which is over 90%
+    /// one byte — the exact shape of a *data* disk's header-and-padding, and
+    /// refused as such by [`super::super::boot::looks_bootable`]. That is
+    /// correct rather than unfortunate: the sparsest boot sector measured
+    /// across the Altair and z80pack collections is 63%, while the disks with
+    /// no boot program on them are 89% and up. Four tests here were built on
+    /// the unrealistic shape and all failed together when the check learned to
+    /// tell the two apart.
+    ///
+    /// Callers overwrite the front with whatever code they are testing; the
+    /// filler only occupies the tail.
+    fn bootable_image(geom: Geometry) -> Vec<u8> {
+        use super::super::boot::{BOOT_DATA_LEN, BOOT_DATA_OFFSET};
+        let mut img = image(geom);
+        for (i, b) in img[BOOT_DATA_OFFSET..BOOT_DATA_OFFSET + BOOT_DATA_LEN]
+            .iter_mut()
+            .enumerate()
+        {
+            *b = BOOT_FILLER[i % BOOT_FILLER.len()];
+        }
+        img
+    }
+
     #[test]
     fn test_geometry_is_recognised_by_size() {
         assert_eq!(geometry_for(337_568), Some(Geometry::EIGHT_INCH));
@@ -1130,7 +1161,7 @@ mod tests {
     /// which is the hardest kind of fault to attribute.
     #[test]
     fn test_a_rom_console_machine_has_its_rom_in_memory_after_boot() {
-        let mut img = image(Geometry::EIGHT_INCH);
+        let mut img = bootable_image(Geometry::EIGHT_INCH);
         img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
         let mut m = BootMachine::new();
         m.set_machine("console_04_cuter");
@@ -1159,7 +1190,7 @@ mod tests {
     /// 64K one's memory.
     #[test]
     fn test_a_port_console_machine_places_no_rom() {
-        let mut img = image(Geometry::EIGHT_INCH);
+        let mut img = bootable_image(Geometry::EIGHT_INCH);
         img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
         let mut m = BootMachine::new();
         m.insert(0, img, true).unwrap();
@@ -1799,7 +1830,7 @@ mod tests {
     /// guest span forever at its first instruction that touched the drive.
     #[test]
     fn test_the_head_may_move_once_the_bootstrap_is_done() {
-        let mut img = image(Geometry::EIGHT_INCH);
+        let mut img = bootable_image(Geometry::EIGHT_INCH);
         img[3..3 + 8].copy_from_slice(&[0x31, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB]);
         let mut m = BootMachine::new();
         m.insert(0, img, true).unwrap();
@@ -1818,7 +1849,7 @@ mod tests {
     /// reports, and leaves the payload where the CPU will find it.
     #[test]
     fn test_boot_places_the_payload_and_sets_pc() {
-        let mut img = image(Geometry::EIGHT_INCH);
+        let mut img = bootable_image(Geometry::EIGHT_INCH);
         // A plausible boot sector: LXI SP,0DF00h / DI / XRA A / OUT 08h.
         let code = [0x31u8, 0x00, 0xDF, 0xF3, 0xAF, 0xD3, 0x08, 0xDB];
         img[3..3 + code.len()].copy_from_slice(&code);
@@ -3044,6 +3075,11 @@ mod tests {
         // A tiny program that does what z80pack's CBIOS does: read the console
         // data port and loop. On a blocking console it never gets past the read.
         let mut img = vec![0u8; 256_256];
+        // A dense boot sector — see `bootable_image` for why the tail matters.
+        // This device's sector is the front of the file, not offset 3.
+        for (i, b) in img[..128].iter_mut().enumerate() {
+            *b = BOOT_FILLER[i % BOOT_FILLER.len()];
+        }
         // IN A,(01h) / JP 0000
         img[..5].copy_from_slice(&[0xDB, 0x01, 0xC3, 0x00, 0x00]);
         let mut m = BootMachine::new();

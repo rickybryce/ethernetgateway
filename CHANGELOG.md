@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two data disks were run as programs instead of being refused.** `DISK0B`
+  ("Time Sharing Basic V2 programs") and `DISK0F` ("Altair Mini-Disk DOS
+  programs") are the data companions of two disks that boot, and they carry no
+  boot program at all — DISK0B's first sector is its volume label,
+  `VOL±TS2FILES`, followed by 112 zero bytes, and DISK0F's is two stray bytes
+  and 126. Both slipped past the "does this look like a boot sector" check, so
+  the machine ran them: DISK0B executed its own label as instructions and
+  DISK0F ran through a field of NOPs into cleared memory, and both then sat
+  silent — which reads like a disk the gateway cannot boot rather than a disk
+  with nothing on it to boot. They are now refused with the same message their
+  sibling `DISK0D` already got: "this image has no boot sector — it is data,
+  not a system disk".
+  - The rule is that a payload which is **more than four-fifths a single
+    repeated byte** is padding rather than a program, and the fraction is
+    measured rather than argued: across every image in the Altair and z80pack
+    collections, taking the payload each controller really extracts, the disks
+    that boot run from 5% to 63% and the ones with no boot program are 89% and
+    above. Two thresholds reasoned out before measuring were both wrong — a
+    half-way rule would have refused the three Altair hard disks, and a
+    trailing-zero-run rule would have refused z80pack's `mpm-2`, whose loader
+    is short and zero-padded.
 - **A mis-named image could be trusted, and the gateway recommended the
   rename.** Naming a format with a filename prefix is an override — it skips
   the directory inspection and mounts read-write — and its size check had only
