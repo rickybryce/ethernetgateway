@@ -1797,9 +1797,16 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             let len = mounted
                 .and_then(|m| std::fs::metadata(&m.path).ok())
                 .map(|md| md.len());
+            // The board is named here and not in the telnet rows: a web page has
+            // room for it, a 40-column PETSCII screen does not.
+            let board = len
+                .and_then(crate::cpm::boot::slot_board)
+                .map(|b| format!(" on the {b}"))
+                .unwrap_or_default();
             note.push_str(&format!(
-                " <span class=\"sub\">{}</span>",
-                html_escape(&crate::cpm::boot::slot_name(&naming, drive0, len))
+                " <span class=\"sub\">{}{}</span>",
+                html_escape(&crate::cpm::boot::slot_name(&naming, drive0, len)),
+                html_escape(&board),
             ));
         }
         if drive0 == 0 {

@@ -738,22 +738,6 @@ impl BootMachine {
             .map(|c| (c.name(), c.slot_word()))
     }
 
-    /// How a slot reads on a booted machine: `unit 1 (MITS 88-HDSK hard disk)`.
-    ///
-    /// The counterpart to the emulator's `B:`, and deliberately not a drive
-    /// letter. Our `A:`-`P:` are our own BDOS's drives; a booted guest is
-    /// talking to a board, and stock Altair CP/M answering to `B:` is that
-    /// guest's convention rather than a fact about the machine.
-    pub fn slot_label(key: Option<&str>, image_len: u64, slot: u8) -> String {
-        match BootMachine::board_for(key, image_len) {
-            Some((board, word)) => format!("{word} {slot} ({board})"),
-            // Named as a slot anyway: the screens still have to put it in a row,
-            // and "no board takes it" is the message the operator needs, not a
-            // blank.
-            None => format!("slot {slot} (no board takes this size)"),
-        }
-    }
-
     /// Can the machine `key` names carry an image this size at all?
     ///
     /// Asked by `detect::machine_for` so that an unclear detection does not land

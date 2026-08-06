@@ -1027,7 +1027,7 @@ impl App {
             .max_height(340.0)
             .show(ui, |ui| {
                 egui::Grid::new("cpm_mount_grid")
-                    .num_columns(4)
+                    .num_columns(3)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                 for drive0 in 0..crate::cpm::NUM_DRIVES {
@@ -1103,7 +1103,16 @@ impl App {
                                     .ok()
                                 })
                                 .map(|md| md.len());
-                            ui.label(crate::cpm::boot::slot_name(&naming, drive0, len));
+                            // With the board named: the desktop has room for it
+                            // where a 40-column PETSCII screen does not.
+                            let board = len
+                                .and_then(crate::cpm::boot::slot_board)
+                                .map(|b| format!(" on the {b}"))
+                                .unwrap_or_default();
+                            ui.label(format!(
+                                "{}{board}",
+                                crate::cpm::boot::slot_name(&naming, drive0, len)
+                            ));
                         }
                         if drive0 == 0 {
                             ui.label(if booting {

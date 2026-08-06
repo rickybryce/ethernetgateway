@@ -548,20 +548,25 @@ impl TelnetSession {
             // the guest is talking to the 88-HDSK and never looks there.
             // Everything worked; nothing is reachable; and until this line
             // nothing said so.
-            let slot = crate::cpm::boot_machine::BootMachine::slot_label(
-                None,
-                len as u64,
-                step.unit,
-            );
+            let board = crate::cpm::boot_machine::BootMachine::board_for(None, len as u64);
+            let slot = match board {
+                Some((_, word)) => format!("{word} {}", step.unit),
+                None => format!("slot {}", step.unit),
+            };
             notes.push(format!(
                 "{slot}: {name}{}",
                 if step.writable { "" } else { " (R/O)" }
             ));
-            if crate::cpm::boot_machine::BootMachine::board_for(None, len as u64)
-                != boot_board
-            {
-                notes.push(format!("  {name} is on another board -"));
-                notes.push("  the guest may not reach it.".to_string());
+            // Only when both boards are known.  An unknown one is not evidence
+            // of a mismatch, and warning on it would fire this on every mount
+            // the moment the boot image became unreadable — the loudest possible
+            // response to the least informative state.
+            if let (Some((got, _)), Some((want, _))) = (board, boot_board) {
+                if got != want {
+                    notes.push(format!("{name} is on the {got},"));
+                    notes.push("not the booted disk's board -".to_string());
+                    notes.push("the guest may not reach it.".to_string());
+                }
             }
         }
         notes.extend(gap_warning(disks));

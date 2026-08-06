@@ -111,7 +111,10 @@ impl TelnetSession {
             if !booted.is_empty() {
                 self.send_line("").await?;
                 self.send_line("  Booted:").await?;
-                let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 62 };
+                // 26, not 30: the row is three of indent, the name, a space and
+                // the nine characters of "(running)" — which at 30 came to 43
+                // columns on a 40-column screen.
+                let width = if self.terminal_type == TerminalType::Petscii { 26 } else { 62 };
                 for name in &booted {
                     self.send_line(&format!(
                         "   {} {}",
@@ -601,14 +604,17 @@ impl TelnetSession {
                 // Two different facts about slot 0, and which one is true
                 // depends on what is running.  EGT80 lives in the gateway's own
                 // drive A: folder, which a booted disk never sees.
-                note.push_str(if booting {
-                    " - the booted disk is here"
-                } else {
-                    " - hides EGT80"
-                });
+                note.push_str(if booting { " - booted disk here" } else { " - hides EGT80" });
             }
-            let line = format!("  {}{}", self.cyan(&letter.to_string()), self.dim(&note));
-            self.send_line(&truncate_to_width(&line, 200)).await?;
+            // The *note* is bounded, not the finished line.  `truncate_to_width`
+            // counts characters, and a coloured line is mostly escape bytes — so
+            // the 200 this used to be given never truncated anything, and a row
+            // holding a long filename ran off a 40-column screen.  Cutting the
+            // escapes instead would be worse than the overflow.
+            let width = if self.terminal_type == TerminalType::Petscii { 37 } else { 77 };
+            let line =
+                format!("  {}{}", self.cyan(&letter.to_string()), self.dim(&truncate_to_width(&note, width)));
+            self.send_line(&line).await?;
         }
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))

@@ -114,17 +114,35 @@ pub fn slot_naming(boot_image: &str) -> SlotNaming {
 
 /// Name slot `slot`, for an image of `image_len` bytes if that is known.
 ///
+/// **Short on purpose** — `drive 1`, not `drive 1 (MITS 88-DCDD floppy)`. These
+/// rows are read on a 40-column PETSCII screen as often as an 80-column one, and
+/// the first draft of this put the board name in here: at 31 characters it made
+/// a 45-character row and truncated the *filename* away, which is the one thing
+/// on the line the operator needs. The board is available separately from
+/// [`slot_board`], for the surfaces that have room and for the boot screen's
+/// mismatch warning, where it is the whole point.
+///
 /// `image_len` is `None` for an empty slot or one whose file cannot be read;
 /// under [`SlotNaming::Boards`] the board is chosen by the image's *size*, so
 /// without it the honest answer names the number and stops there.
 pub fn slot_name(naming: &SlotNaming, slot: u8, image_len: Option<u64>) -> String {
     match naming {
         SlotNaming::Drives => format!("{}:", (b'A' + slot) as char),
-        SlotNaming::Boards => match image_len {
-            Some(len) => super::boot_machine::BootMachine::slot_label(None, len, slot),
+        SlotNaming::Boards => match image_len.and_then(slot_word) {
+            Some(word) => format!("{word} {slot}"),
             None => format!("slot {slot}"),
         },
     }
+}
+
+/// What the board taking an image this size calls one of its slots.
+pub fn slot_word(image_len: u64) -> Option<&'static str> {
+    super::boot_machine::BootMachine::board_for(None, image_len).map(|(_, word)| word)
+}
+
+/// The board an image this size goes on, for the surfaces with room to say it.
+pub fn slot_board(image_len: u64) -> Option<&'static str> {
+    super::boot_machine::BootMachine::board_for(None, image_len).map(|(board, _)| board)
 }
 
 /// The `cpm_boot_backspace` value that hands a booted guest BS (0x08).
@@ -496,15 +514,70 @@ mod tests {
 
         let f = slot_name(&SlotNaming::Boards, 1, Some(floppy));
         let h = slot_name(&SlotNaming::Boards, 1, Some(platter));
-        assert!(f.starts_with("drive 1 ("), "a floppy board has drives: {f}");
-        assert!(h.starts_with("unit 1 ("), "the 88-HDSK has units: {h}");
-        assert!(h.contains("88-HDSK"), "and says which board: {h}");
+        assert_eq!(f, "drive 1", "a floppy board has drives");
+        assert_eq!(h, "unit 1", "the 88-HDSK has units");
         assert_ne!(f, h, "the two boards must not read the same at the same slot");
 
-        // A size no board takes says so rather than inventing a slot, and an
-        // unknown size names the number and stops.
-        assert!(slot_name(&SlotNaming::Boards, 2, Some(4_242)).contains("no board"));
+        // The board itself is a separate question, asked by the surfaces with
+        // room for the answer — see `test_a_slot_name_leaves_room_for_the_filename`
+        // for why it is not in the name.
+        assert!(
+            super::slot_board(platter).is_some_and(|b| b.contains("88-HDSK")),
+            "the board is still nameable: {:?}",
+            super::slot_board(platter)
+        );
+        assert_ne!(super::slot_board(floppy), super::slot_board(platter));
+
+        // A size no board takes, and an unknown size, both fall back to the bare
+        // number — never to a drive letter, which would be the one answer that
+        // says something untrue.  The board reads as absent rather than guessed.
+        assert_eq!(slot_name(&SlotNaming::Boards, 2, Some(4_242)), "slot 2");
+        assert_eq!(super::slot_board(4_242), None);
         assert_eq!(slot_name(&SlotNaming::Boards, 3, None), "slot 3");
+    }
+
+    /// **A slot name has to leave room for the filename beside it.**
+    ///
+    /// The regression this pins was mine, made in the commit that introduced
+    /// these names: the board went *into* `slot_name`, which at
+    /// `unit 1 (MITS 88-HDSK hard disk)` is 31 characters and made a 45-character
+    /// row on a 40-column PETSCII screen — truncating away the filename, the one
+    /// thing on the line the operator actually needs. The board lives in
+    /// `slot_board` now, for the surfaces that have room.
+    ///
+    /// The budget is the narrowest real row: the telnet disks screen indents
+    /// three, then prints the slot, a space, and up to 28 characters of
+    /// filename, inside 40 columns.
+    #[test]
+    fn test_a_slot_name_leaves_room_for_the_filename() {
+        use super::{slot_name, slot_naming, SlotNaming};
+        use crate::cpm::boot_machine::BootMachine;
+
+        const INDENT: usize = 3;
+        const FILENAME: usize = 28; // what the PETSCII row allows
+        const PETSCII_COLS: usize = 40;
+
+        // Every medium this gateway can boot, so a new board cannot slip in
+        // with a long word and quietly overflow the row.
+        let mut sizes: Vec<u64> = BootMachine::bootable_media().iter().map(|m| m.bytes).collect();
+        sizes.push(4_242); // and a size no board takes
+        assert!(sizes.len() > 3, "the media table looks empty: {sizes:?}");
+
+        for naming in [SlotNaming::Drives, SlotNaming::Boards] {
+            for &len in &sizes {
+                for slot in 0..crate::cpm::NUM_DRIVES {
+                    let name = slot_name(&naming, slot, Some(len));
+                    let row = INDENT + name.chars().count() + 1 + FILENAME;
+                    assert!(
+                        row <= PETSCII_COLS,
+                        "{naming:?} slot {slot} for {len} bytes is {name:?} — a \
+                         {row}-column row on a {PETSCII_COLS}-column screen"
+                    );
+                }
+            }
+        }
+        // And the naming helper agrees with what the rows are built from.
+        assert_eq!(slot_naming(""), SlotNaming::Drives);
     }
     use super::super::dcdd::{Disk, Geometry};
     use super::*;
