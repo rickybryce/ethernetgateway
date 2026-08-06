@@ -1348,6 +1348,36 @@ impl App {
         .on_hover_text(
             "Where a BOOTED disk finds its console.  Ignored by the CP/M                  emulator, which has no console to place.  A disk that loads                  its operating system and then goes quiet is usually looking                  for a console that is not there, and will sit polling a                  keyboard port for ever.  Not autodetected: what a guest polls                  cannot tell the machine it wants from another machine's                  keyboard at the same address.",
         );
+        // What a BOOTED disk is handed for the Backspace key.  The same
+        // `BACKSPACE_CHOICES` list the telnet and web screens render -- and the
+        // telnet boot picker too, which asks again per disk.
+        ui.horizontal(|ui| {
+            ui.label("Booted disk's backspace:");
+            egui::ComboBox::from_id_salt("cpm_boot_backspace_combo")
+                .width(320.0)
+                .selected_text(crate::cpm::boot::backspace_label(&self.cfg.cpm_boot_backspace))
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::cpm::boot::BACKSPACE_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_boot_backspace,
+                            value.to_string(),
+                            *label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "What a BOOTED disk is handed when you press Backspace.  Ignored by \
+             the CP/M emulator, which reads its own console line and accepts \
+             either.  Most of these operating systems erase on BS and read a \
+             terminal's DEL as a Teletype RUBOUT -- deleting the character and \
+             then printing the character they deleted, so TESTING backspaced \
+             over reads TESTINGGNIT.  CP/M 1.3, 1.4 and the 1975 build are the \
+             opposite: the rubout is their editing key and BS prints a literal \
+             ^H.  The telnet boot picker asks again per disk and starts from \
+             this setting.",
+        );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
         ui.horizontal(|ui| {

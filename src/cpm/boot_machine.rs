@@ -2927,6 +2927,94 @@ mod tests {
         assert!(spoke > 0, "no image in {dir} said anything");
     }
 
+    /// **What every bootable image in a folder does with each spelling of
+    /// Backspace.**
+    ///
+    /// The wide version of the single-disk measurement, and the reason the
+    /// gateway can carry a *default* rather than a list of disks it works on.
+    /// One run boots each image, types a word at whatever prompt it reaches, and
+    /// reports the bytes it gets back for BS (0x08) and for DEL (0x7F)
+    /// separately, so a guest that wants the rubout can be seen rather than
+    /// assumed not to exist.
+    ///
+    /// Each key is measured on its own freshly booted machine: an editing key
+    /// changes the line the guest is holding, so measuring both against one boot
+    /// would let the first answer shape the second.
+    ///
+    /// Ignored — set `CPM_BOOT_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_survey_backspace_across_every_bootable_image() {
+        let Ok(dir) = std::env::var("CPM_BOOT_DIR") else {
+            eprintln!("set CPM_BOOT_DIR to run this");
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".dsk"))
+            .collect();
+        names.sort();
+
+        /// Boot one image and see what it echoes for `key` after a typed word.
+        /// `None` if the disk never reached a prompt we could type at.
+        fn echo_for(bytes: &[u8], key: u8) -> Option<(Vec<u8>, Vec<u8>)> {
+            let configured = std::env::var("CPM_BOOT_MACHINE")
+                .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
+            let (machine, _why) = crate::cpm::detect::machine_for(&configured, bytes);
+            let mut m = BootMachine::new();
+            m.set_machine(&machine);
+            m.insert(0, bytes.to_vec(), true).ok()?;
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).ok()?;
+            if run_until_quiet(&mut m, &mut cpu, 200_000_000).is_empty() {
+                return None; // never signed on
+            }
+            for &b in b"TESTING" {
+                m.send_key(b);
+            }
+            let typed = run_until_quiet(&mut m, &mut cpu, 50_000_000);
+            m.send_key(key);
+            Some((typed, run_until_quiet(&mut m, &mut cpu, 50_000_000)))
+        }
+
+        // A guest that erases answers the universal BS SPACE BS.  Anything else
+        // is worth a human reading the bytes, which is why they are printed.
+        const ERASE: &[u8] = b"\x08 \x08";
+        let (mut booted, mut bs_erases, mut del_erases) = (0u32, 0u32, 0u32);
+        let mut odd: Vec<String> = Vec::new();
+        for name in &names {
+            let bytes = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
+            let Some((typed, bs)) = echo_for(&bytes, 0x08) else {
+                println!("  --       {name}  (no prompt)");
+                continue;
+            };
+            let del = echo_for(&bytes, 0x7F).map(|(_, d)| d).unwrap_or_default();
+            booted += 1;
+            if bs == ERASE {
+                bs_erases += 1;
+            }
+            if del == ERASE {
+                del_erases += 1;
+            }
+            if bs != ERASE {
+                odd.push(name.clone());
+            }
+            println!(
+                "  {name:<16} typed={:02X?}  BS={:02X?}  DEL={:02X?}",
+                typed, bs, del
+            );
+        }
+        println!(
+            "\n  {booted} booted to a prompt: {bs_erases} erase on BS, {del_erases} on DEL"
+        );
+        if !odd.is_empty() {
+            println!("  did NOT erase on BS: {odd:?}");
+        }
+        assert!(booted > 0, "no image in {dir} reached a prompt");
+    }
+
     /// **A guest that prints through a monitor ROM reaches its prompt and takes
     /// commands.**
     ///
@@ -3794,27 +3882,28 @@ mod tests {
         );
     }
 
-    /// **What a booted guest actually does with each spelling of Backspace.**
+    /// **Which backspace setting one disk wants, and why the setting exists.**
     ///
-    /// The measurement behind `telnet/cpm_boot_ui.rs`'s `boot_key_for_guest`.
-    /// A modern client's Backspace key sends DEL (0x7F), and every operating
-    /// system on these disks reads that as a Teletype *rubout*: it deletes the
-    /// character and then prints the character it deleted, so backspacing over
-    /// `TESTING` leaves `TESTINGGNIT` on the screen. Plain BS (0x08) is what
-    /// they all erase on, answering with the universal `BS SPACE BS`.
+    /// The single-disk version of
+    /// [`test_survey_backspace_across_every_bootable_image`], for when a
+    /// particular disk misbehaves and the question is what it is asking for.
     ///
-    /// Measured, not reasoned, and on more than one guest on purpose — the
-    /// three disks below are three different operating systems (Digital
-    /// Research's BDOS and two MITS BASICs) and they agree, which is what makes
-    /// the translation safe to apply to every booted disk rather than to a
-    /// list of them.
+    /// It deliberately does **not** assert that BS erases. That was this test's
+    /// first form, written when three MITS disks had been measured and agreeing,
+    /// and it was wrong in the way an over-strong test is always wrong: it
+    /// encoded a rule from a sample instead of reporting what the disk does.
+    /// The wide survey then found CP/M 1.3, 1.4 and the 1975 build doing the
+    /// exact opposite, and this test failed on them — correctly, but as a
+    /// failure rather than as the finding it was. What is actually true is that
+    /// a disk falls into one of three measured groups, so that is what this
+    /// checks and prints.
     ///
-    /// Ignored: set `CPM_BOOT_IMAGE` to a bootable image. Run it against
-    /// several — `DISK01` (MITS CP/M 2.2), `DISK03` (Altair Disk Extended
-    /// BASIC) and `HDSK01` (Altair Hard Disk BASIC) were the three used.
+    /// Ignored: set `CPM_BOOT_IMAGE` to a bootable image. `HDSK01` (Altair Hard
+    /// Disk BASIC) wants `backspace`; z80pack's `cpm14.dsk` wants `rubout`;
+    /// z80pack's `cpm22-1.dsk` does not care.
     #[test]
     #[ignore]
-    fn test_a_booted_guest_erases_for_backspace_not_del() {
+    fn test_a_booted_guest_names_the_backspace_setting_it_wants() {
         let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
             eprintln!("set CPM_BOOT_IMAGE to a bootable image");
             return;
@@ -3822,8 +3911,15 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
 
         // Type a word, then the key, and see what comes back for the key alone.
+        // A fresh machine per key: an editing key changes the line the guest is
+        // holding, so measuring both against one boot would let the first answer
+        // shape the second.
         let echo_of = |key: u8| -> Vec<u8> {
+            let configured = std::env::var("CPM_BOOT_MACHINE")
+                .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
+            let (machine, _why) = crate::cpm::detect::machine_for(&configured, &bytes);
             let mut m = BootMachine::new();
+            m.set_machine(&machine);
             // Read-only: this asks the guest a question, it does not write.
             m.insert(0, bytes.clone(), true).expect("a bootable image");
             let mut cpu = BootMachine::new_cpu();
@@ -3839,17 +3935,26 @@ mod tests {
             run_until_quiet(&mut m, &mut cpu, 50_000_000)
         };
 
+        const ERASE: &[u8] = b"\x08 \x08";
         let bs = echo_of(0x08);
         let del = echo_of(0x7F);
         println!("BS 0x08 -> {bs:02X?}\nDEL 0x7F -> {del:02X?}");
-        assert_eq!(
-            bs, b"\x08 \x08",
-            "BS must erase with the universal BS SPACE BS, got {bs:02X?}"
-        );
+        let wants = match (bs == ERASE, del == ERASE) {
+            (true, true) => "either — both keys erase",
+            (true, false) => "cpm_boot_backspace = backspace",
+            (false, true) => "cpm_boot_backspace = rubout",
+            // CP/M 1.x lands here: nothing erases, but the rubout is still its
+            // editing key and BS is not — it prints a literal `^H`.
+            (false, false) if del.contains(&b'G') => {
+                "cpm_boot_backspace = rubout (nothing erases; the rubout is its editing key)"
+            }
+            (false, false) => "neither erases — read the bytes above",
+        };
+        println!("this disk wants: {wants}");
         assert!(
-            del.contains(&b'G'),
-            "DEL is expected to echo the deleted character back — if this disk \
-             does something else, boot_key_for_guest is worth re-reading: {del:02X?}"
+            bs == ERASE || del == ERASE || del.contains(&b'G'),
+            "neither key erases and DEL is not the rubout either, so this disk \
+             does something the survey has not seen: BS={bs:02X?} DEL={del:02X?}"
         );
     }
 }

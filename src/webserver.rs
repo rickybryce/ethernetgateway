@@ -1020,6 +1020,7 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
+        "cpm_boot_backspace",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -2031,6 +2032,27 @@ fn render_more_popups(cfg: &Config) -> String {
         )
     })
     .collect();
+    let cpm_backspace_options: String = crate::cpm::boot::BACKSPACE_CHOICES
+        .iter()
+        .map(|(value, label)| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                value,
+                // Compared through `backspace_erases`, not by string equality:
+                // a hand-edited value neither choice matches must show as the
+                // behaviour the gateway is really giving it, or saving this form
+                // would silently change a setting nobody touched.
+                if crate::cpm::boot::backspace_erases(&cfg.cpm_boot_backspace)
+                    == crate::cpm::boot::backspace_erases(value)
+                {
+                    " selected"
+                } else {
+                    ""
+                },
+                html_escape(label),
+            )
+        })
+        .collect();
     let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
         .iter()
         .map(|c| {
@@ -2109,7 +2131,15 @@ fn render_more_popups(cfg: &Config) -> String {
              <span class=\"hint\">Where a booted disk finds its console. \
              Ignored by the emulator, which has no console to place. A disk that \
              loads and then goes quiet is usually looking for a console that is \
-             not there.</span>",
+             not there.</span>\
+             <span class=\"label\">Booted disk's backspace key:</span>\
+             <select name=\"cpm_boot_backspace\">{cpm_backspace_options}</select>\
+             <span class=\"hint\">Most of these operating systems erase on BS and \
+             read your terminal's DEL as a Teletype rubout \u{2014} deleting the \
+             character and then printing the character they deleted. CP/M 1.x is \
+             the opposite: the rubout is its editing key and BS prints a literal \
+             ^H. The telnet boot picker asks again per disk and starts from \
+             this.</span>",
         ),
         cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
 

@@ -309,7 +309,30 @@ impl TelnetSession {
         let ans = self.get_menu_input(false).await?.unwrap_or_default();
         let writable = ans.starts_with('y');
 
-        self.cpm_boot_session(&path, writable).await
+        // And how this disk wants Backspace.  Asked here, per boot, because it
+        // is a property of the operating system on the disk and not of the
+        // gateway: most of them erase on BS and read a terminal's DEL as a
+        // Teletype rubout — printing the character they just deleted — but CP/M
+        // 1.x is the other way round, and it is one keypress to say so.
+        // `cpm_boot_backspace` seeds the default so the common case is Return.
+        let default_erase =
+            crate::cpm::boot::backspace_erases(&config::get_config().cpm_boot_backspace);
+        self.send_line(&format!("  {}", self.dim("Backspace erases (N = rubout, as"))).await?;
+        self.send_line(&format!("  {}", self.dim("CP/M 1.x expects)"))).await?;
+        self.send(&format!(
+            "  Backspace erases? {}: ",
+            self.cyan(if default_erase { "Y/n" } else { "y/N" })
+        ))
+        .await?;
+        self.flush().await?;
+        let ans = self.get_menu_input(false).await?.unwrap_or_default();
+        let erase = match ans.trim().chars().next() {
+            Some('y') | Some('Y') => true,
+            Some('n') | Some('N') => false,
+            _ => default_erase, // bare Return keeps the configured answer
+        };
+
+        self.cpm_boot_session(&path, writable, erase).await
     }
 
     /// Unmount: list what is mounted, take one off.

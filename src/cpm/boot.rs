@@ -83,6 +83,51 @@ pub fn boot_choice_label(value: &str) -> String {
     }
 }
 
+/// The `cpm_boot_backspace` value that hands a booted guest BS (0x08).
+pub const BACKSPACE_ERASE: &str = "backspace";
+
+/// The `cpm_boot_backspace` value that hands the key through as the terminal
+/// sent it, which on the disks that want it is the Teletype rubout.
+pub const BACKSPACE_RUBOUT: &str = "rubout";
+
+/// What `cpm_boot_backspace` is when nothing says otherwise.
+pub const DEFAULT_BACKSPACE: &str = BACKSPACE_ERASE;
+
+/// The choices for `cpm_boot_backspace`, `(value, label)`.
+///
+/// One list for all three configuration screens *and* the telnet boot picker,
+/// the way [`boot_choices`] serves the boot image and [`super::uart::UART_CHOICES`]
+/// serves the virtual-modem port — four surfaces that must offer the same two
+/// answers and describe them the same way.
+///
+/// The labels lead with the visible symptom rather than the byte, because the
+/// operator meeting this in the boot picker is choosing between two behaviours
+/// they can see, not between 0x08 and 0x7F.
+pub const BACKSPACE_CHOICES: &[(&str, &str)] = &[
+    (BACKSPACE_ERASE, "Backspace erases (most disks)"),
+    (BACKSPACE_RUBOUT, "Rubout, as the disk expects (CP/M 1.x)"),
+];
+
+/// What to show for the current `cpm_boot_backspace` setting.
+///
+/// Reads through [`backspace_erases`] rather than matching the string, so a
+/// hand-edited typo is *displayed* as the behaviour the gateway is actually
+/// giving it — the failure this exists to prevent is a screen that agrees with
+/// the config file and disagrees with the machine.
+pub fn backspace_label(value: &str) -> &'static str {
+    let want = if backspace_erases(value) { BACKSPACE_ERASE } else { BACKSPACE_RUBOUT };
+    BACKSPACE_CHOICES.iter().find(|(v, _)| *v == want).map(|(_, l)| *l).unwrap_or(want)
+}
+
+/// Whether `value` means "translate the key to BS".
+///
+/// Anything unrecognised reads as the default rather than refusing: this is
+/// hand-editable in `egateway.conf`, and a typo that silently picked the *other*
+/// behaviour would be blamed on the disk.
+pub fn backspace_erases(value: &str) -> bool {
+    !value.trim().eq_ignore_ascii_case(BACKSPACE_RUBOUT)
+}
+
 /// Where the bootstrap puts the boot sector, and enters it.
 pub const BOOT_LOAD_ADDR: u16 = 0x0000;
 

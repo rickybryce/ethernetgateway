@@ -11,21 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Backspace erases inside a booted disk instead of reprinting what it
-  deleted.** Typing `TESTING` and backspacing over it used to leave
-  `TESTINGGNIT` on screen. A modern client's Backspace key sends DEL (0x7F),
-  and every operating system on these disks reads that as a Teletype *rubout* —
-  it removes the character and then echoes the character it removed, which is
-  right for a printing terminal and useless on a screen. Measured on three of
-  them (MITS CP/M 2.2, Altair Disk Extended BASIC, Altair Hard Disk BASIC): all
-  three erase properly on plain BS (0x08), answering with the universal
-  `BS SPACE BS`. Both spellings of the key — 0x7F and a Commodore's PETSCII DEL
-  0x14, which the guests did not recognise at all — now reach a booted guest as
-  0x08. The other half of the same repair is on the way out: the guest's
-  `BS SPACE BS` reaches a Commodore as cursor-left, space, cursor-left rather
-  than as the destructive PETSCII DEL that would pull the line about. That makes
-  three PETSCII output translators in the gateway, and the test that holds the
-  first two to the same rule now covers the third.
+- **The backspace key inside a booted disk is now yours to set.** Type
+  `TESTING` into a booted Altair disk, backspace over it, and the screen used to
+  read `TESTINGGNIT`. Your terminal's Backspace key sends DEL (0x7F) and most of
+  these operating systems read that as a Teletype *rubout* — they delete the
+  character and then print the character they deleted, which is right for a
+  printing terminal and wrong for a screen. New `cpm_boot_backspace`
+  (`backspace` — the default — or `rubout`) says which byte a booted guest is
+  handed, and the telnet boot picker asks again per disk, seeded from it.
+
+  There is no answer that suits every disk, and that was **measured across two
+  whole disk folders** rather than reasoned: of the 38 images that reach a
+  prompt, 29 erase on BS and 7 on DEL, but CP/M 1.3, 1.4 and the 1975 build are
+  the *opposite* — the rubout is their editing key and BS prints a literal `^H`,
+  so translating breaks something that already worked. Digital Research's own
+  CP/M 2.2, MP/M and UCSD p-System accept either. A Commodore's DEL key (PETSCII
+  0x14) is folded to whichever byte the setting names, because no guest in
+  either survey recognises 0x14 at all — leaving it alone gave a C64 no editing
+  key rather than the disk's own one.
+
+  The other half is the way out: a guest's `BS SPACE BS` now reaches a Commodore
+  as cursor-left, space, cursor-left rather than as the destructive PETSCII DEL
+  that would pull the line about. That makes three PETSCII output translators in
+  the gateway, and the test that holds the first two to the same rule now covers
+  the third.
+
+  The CP/M **emulator** is unaffected: it reads its own console line and has
+  always accepted both bytes.
 
 - **The CPU passes the *undocumented*-flag exerciser too.** `EXZ80ALL` — the
   same ZEXALL family with bits 3 and 5 of `F` pinned as well — reports all 79

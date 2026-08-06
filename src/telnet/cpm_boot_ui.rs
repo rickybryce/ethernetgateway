@@ -246,33 +246,41 @@ fn gap_warning<T>(disks: &[Option<T>]) -> Option<String> {
 /// One key on its way into a booted guest's console.
 ///
 /// The guest brings its own terminal handling and we do not second-guess it —
-/// with one exception, the same one the output side makes for a Commodore, and
-/// for the same reason: the byte the *keyboard* sends is not the byte the
-/// software is waiting for.
+/// with one exception, and `erase` is the operator's say over whether that
+/// exception applies to the disk in front of them.
 ///
 /// A modern telnet client's Backspace key sends **DEL (0x7F)** and a Commodore's
-/// sends **PETSCII DEL (0x14)**, but every operating system on these disks reads
-/// 0x7F as a Teletype *rubout* — it deletes the character and then **echoes the
-/// character it deleted**, so backspacing over `TESTING` prints `GNIT` after it
-/// instead of erasing anything, and 0x14 it does not recognise at all.  What
-/// they all want is plain **BS (0x08)**, which each of them answers with the
-/// universal `BS SPACE BS`.
+/// sends **PETSCII DEL (0x14)**.  Most of these operating systems read 0x7F as a
+/// Teletype *rubout* — they delete the character and then **echo the character
+/// they deleted**, so backspacing over `TESTING` leaves `TESTINGGNIT` on screen —
+/// and 0x14 they do not recognise at all.  What those want is plain **BS
+/// (0x08)**, which they answer with the universal `BS SPACE BS`.
 ///
-/// Measured rather than reasoned, on three guests, all agreeing:
+/// But not all of them, which is why this is a setting and not a rule.  Measured
+/// across two whole disk folders (see
+/// `boot_machine.rs`'s `test_survey_backspace_across_every_bootable_image`), of
+/// the 38 images that reach a prompt:
 ///
-/// | guest                       | 0x08       | 0x7F        |
-/// |-----------------------------|------------|-------------|
-/// | MITS CP/M 2.2 (DISK01)      | `08 20 08` | `G`         |
-/// | Altair Disk Extended BASIC  | `08 20 08` | `\G`        |
-/// | Altair Hard Disk BASIC      | `08 20 08` | `\G`        |
+/// | guest                                      | 0x08       | 0x7F       |
+/// |--------------------------------------------|------------|------------|
+/// | MITS CP/M 2.2, Altair Disk / Hard Disk BASIC | `08 20 08` | `G`, `\G`  |
+/// | DRI CP/M 2.2, MP/M, UCSD p-System          | `08 20 08` | `08 20 08` |
+/// | **CP/M 1.3 / 1.4 / 1975**                  | **`^H`**   | `G`        |
 ///
-/// See `boot_machine.rs`'s `test_a_booted_guest_erases_for_backspace_not_del`,
-/// which re-runs that measurement against a real disk.
-fn boot_key_for_guest(byte: u8, is_petscii: bool) -> u8 {
+/// 29 erase on BS and 7 on DEL — but the third row is the one that matters
+/// here: for CP/M 1.x the rubout *is* the editing key and BS prints a literal
+/// `^H`, so translating breaks something that already worked.  Hence
+/// `cpm_boot_backspace`, and hence the boot picker asking again per disk.
+fn boot_key_for_guest(byte: u8, is_petscii: bool, erase: bool) -> u8 {
+    // Whichever byte this session's guest edits with.
+    let del = if erase { 0x08 } else { 0x7F };
     match byte {
-        // Both spellings of the key, folded to the one the guests act on.
-        0x7F => 0x08,
-        0x14 if is_petscii => 0x08,
+        // Both spellings of the key, folded to the one the guest acts on.  A
+        // Commodore's is folded under `rubout` too, not just under `backspace`:
+        // 0x14 means nothing to any of these guests, so leaving it alone would
+        // give a C64 no editing key at all rather than the disk's own one.
+        0x7F => del,
+        0x14 if is_petscii => del,
         // The guest is an ASCII machine, so a Commodore's letters are folded on
         // the way in as its output is folded on the way out.
         b if is_petscii => petscii_to_ascii_byte(b),
@@ -533,11 +541,14 @@ impl TelnetSession {
 
     /// Boot an image and run it until the guest stops or the user leaves.
     ///
-    /// `image` is the host path; `writable` decides whether changes are kept.
+    /// `image` is the host path; `writable` decides whether changes are kept;
+    /// `erase` is what the Backspace key is handed to the guest as, which no
+    /// single answer suits every disk — see [`boot_key_for_guest`].
     pub(in crate::telnet) async fn cpm_boot_session(
         &mut self,
         image: &std::path::Path,
         writable: bool,
+        erase: bool,
     ) -> Result<(), std::io::Error> {
         let Some(claim) = BootClaim::take(image) else {
             self.send_line(&format!(
@@ -742,7 +753,7 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
-        let result = self.cpm_boot_run(&mut cpu, &mut machine, &mut modem).await;
+        let result = self.cpm_boot_run(&mut cpu, &mut machine, &mut modem, erase).await;
 
         // Save whatever the guest changed, whatever ended the session — a user
         // who pressed ESC still wants their work.
@@ -797,6 +808,7 @@ impl TelnetSession {
         cpu: &mut Cpu,
         machine: &mut BootMachine,
         modem: &mut CpmModem,
+        erase: bool,
     ) -> Result<(), std::io::Error> {
         let mut executed: u64 = 0;
         let mut esc_run = 0u8;
@@ -879,7 +891,7 @@ impl TelnetSession {
                     } else {
                         esc_run = 0;
                     }
-                    machine.send_key(boot_key_for_guest(b, is_petscii));
+                    machine.send_key(boot_key_for_guest(b, is_petscii, erase));
                 }
                 if keys > 0 {
                     last_key = tokio::time::Instant::now();
@@ -1018,30 +1030,63 @@ mod tests {
              and one of them effectively stops happening"
         );
     }
-    /// Both spellings of the Backspace key reach the guest as the one byte
-    /// every one of these operating systems erases on.
+    /// Under `backspace`, both spellings of the key reach the guest as the one
+    /// byte most of these operating systems erase on.
     ///
-    /// A client sends 0x7F, a Commodore sends 0x14, and a guest reading either
+    /// A client sends 0x7F, a Commodore sends 0x14, and a guest reading 0x7F
     /// literally echoes the character it just deleted instead of rubbing it out
-    /// — the `testinggnit` on screen that this exists to stop.
+    /// — the `TESTINGGNIT` on screen that this setting exists to stop.
     #[test]
-    fn test_both_backspace_keys_reach_the_guest_as_bs() {
-        assert_eq!(boot_key_for_guest(0x7F, false), 0x08, "a client's DEL key");
-        assert_eq!(boot_key_for_guest(0x7F, true), 0x08, "DEL over a PETSCII session");
-        assert_eq!(boot_key_for_guest(0x14, true), 0x08, "a Commodore's DEL key");
-        assert_eq!(boot_key_for_guest(0x08, false), 0x08, "a client that already sends BS");
+    fn test_backspace_mode_sends_bs_for_either_delete_key() {
+        assert_eq!(boot_key_for_guest(0x7F, false, true), 0x08, "a client's DEL key");
+        assert_eq!(boot_key_for_guest(0x7F, true, true), 0x08, "DEL over a PETSCII session");
+        assert_eq!(boot_key_for_guest(0x14, true, true), 0x08, "a Commodore's DEL key");
+        assert_eq!(boot_key_for_guest(0x08, false, true), 0x08, "a client already sending BS");
+    }
+
+    /// Under `rubout` the guest gets the key its own operating system edits
+    /// with, which for CP/M 1.x is the only one that works — BS prints a
+    /// literal `^H` there.
+    ///
+    /// A Commodore's 0x14 is folded here too, and that is the part worth
+    /// pinning: leaving it alone would be faithful to the wire and useless to
+    /// the person, because no guest in either survey recognises 0x14 at all.
+    #[test]
+    fn test_rubout_mode_sends_del_for_either_delete_key() {
+        assert_eq!(boot_key_for_guest(0x7F, false, false), 0x7F, "passed through");
+        assert_eq!(boot_key_for_guest(0x14, true, false), 0x7F, "a Commodore's DEL key");
+        assert_eq!(
+            boot_key_for_guest(0x08, false, false),
+            0x08,
+            "a terminal sending BS is left alone — the setting is about the DEL key"
+        );
     }
 
     /// And nothing else changed: 0x14 is only a delete on a Commodore keyboard,
-    /// and the case fold a booted guest depends on still happens.
+    /// and the case fold a booted guest depends on still happens, both ways.
     #[test]
     fn test_the_rest_of_the_key_path_is_untouched() {
-        assert_eq!(boot_key_for_guest(0x14, false), 0x14, "^T from an ASCII terminal");
-        assert_eq!(boot_key_for_guest(b'A', true), b'a', "PETSCII upper bank");
-        assert_eq!(boot_key_for_guest(0xC1, true), b'A', "PETSCII shifted-upper bank");
-        for b in [b'A', b'z', b'7', 0x1B, 0x0D, 0x03] {
-            assert_eq!(boot_key_for_guest(b, false), b, "{b:#04X} on an ASCII terminal");
+        for erase in [true, false] {
+            assert_eq!(boot_key_for_guest(0x14, false, erase), 0x14, "^T from ASCII");
+            assert_eq!(boot_key_for_guest(b'A', true, erase), b'a', "PETSCII upper bank");
+            assert_eq!(boot_key_for_guest(0xC1, true, erase), b'A', "PETSCII shifted-upper");
+            for b in [b'A', b'z', b'7', 0x1B, 0x0D, 0x03] {
+                assert_eq!(boot_key_for_guest(b, false, erase), b, "{b:#04X} on ASCII");
+            }
         }
+    }
+
+    /// The label a screen shows is the behaviour the machine gives, even when
+    /// the config file says something neither setting means.
+    #[test]
+    fn test_an_unrecognised_backspace_setting_reads_as_the_default() {
+        use crate::cpm::boot::{backspace_erases, backspace_label, BACKSPACE_CHOICES};
+        assert!(backspace_erases("backspace"));
+        assert!(!backspace_erases("rubout"));
+        assert!(!backspace_erases("  RUBOUT  "), "trimmed and case-insensitive");
+        assert!(backspace_erases("nonsense"), "unknown falls back to the default");
+        assert_eq!(backspace_label("nonsense"), BACKSPACE_CHOICES[0].1);
+        assert_eq!(backspace_label("rubout"), BACKSPACE_CHOICES[1].1);
     }
 
     /// The other half of the same repair: what the guest sends *back* to erase.

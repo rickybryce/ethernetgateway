@@ -324,7 +324,12 @@ impl TelnetSession {
             // standing setting that quietly let every visitor write to the same
             // image is a different proposition, and the safe answer is the one
             // that cannot lose a disk.
-            return self.cpm_boot_session(&path, false).await;
+            // No picker on this path, so `cpm_boot_backspace` is the whole
+            // answer here rather than a seed for a question.
+            let erase = crate::cpm::boot::backspace_erases(
+                &config::get_config().cpm_boot_backspace,
+            );
+            return self.cpm_boot_session(&path, false, erase).await;
         }
 
         self.clear_screen().await?;

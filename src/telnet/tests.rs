@@ -2240,22 +2240,22 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
-/// CP/M boot settings: header(3) + blank + 2 status + blank + up to 3 note
-/// lines + blank + 2 actions + blank + Back + prompt = 16.
+/// CP/M boot settings: header(3) + blank + 3 status + blank + up to 3 note
+/// lines + blank + 3 actions + blank + Back + prompt = 18.
 ///
 /// This screen exists *because* the CP/M settings screen is full, so the point
 /// of counting it is to know how much room the next question has — and there is
 /// a known next question: which controller takes an image whose size two boards
-/// both claim.
+/// both claim.  Four rows left for it.
 #[test]
 fn test_cpm_boot_settings_row_count() {
     let header = 3;
-    let status = 1 + 2; // blank + Runs/Machine
+    let status = 1 + 3; // blank + Runs/Machine/Backspace
     let note = 1 + 3; // blank + the longest of the two explanations
-    let actions = 1 + 2; // blank + R, M
+    let actions = 1 + 3; // blank + R, M, B
     let footer = 1 + 1 + 1; // blank + Back + prompt
     let rows = header + status + note + actions + footer;
-    assert_eq!(rows, 16, "the CP/M boot settings screen is {rows} rows");
+    assert_eq!(rows, 18, "the CP/M boot settings screen is {rows} rows");
     assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
 }
 
@@ -2269,9 +2269,9 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
     let body = &src[start..end];
 
-    let hint = "Press R, M, or Q.";
+    let hint = "Press R, M, B, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["R", "M"] {
+    for key in ["R", "M", "B"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"

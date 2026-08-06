@@ -864,6 +864,31 @@ pub struct Config {
     /// difference is not something to guess at — see
     /// [`crate::cpm::console`].
     pub cpm_boot_machine: String,
+    /// What a booted disk is handed when the operator presses Backspace:
+    /// `backspace` (BS, 0x08) or `rubout` (the key as the terminal sent it).
+    ///
+    /// Only meaningful alongside `cpm_boot_image` — the emulator reads its own
+    /// console line and already accepts both spellings.  It exists because
+    /// there is no answer that is right for every disk, and that was **measured
+    /// across two whole disk folders** rather than reasoned:
+    ///
+    /// * MITS CP/M 2.2, Altair Disk Extended BASIC and Altair Hard Disk BASIC —
+    ///   24 of the 29 Altair-folder disks that reach a prompt — erase on BS and
+    ///   read a terminal's DEL as a Teletype **rubout**, deleting the character
+    ///   and then printing the character they deleted.  On a screen that is the
+    ///   `TESTINGGNIT` this key exists to stop.
+    /// * CP/M 1.3, 1.4 and the 1975 build are the **opposite**: the rubout is
+    ///   their editing key, and BS prints a literal `^H`.  Translating for them
+    ///   breaks something that works.
+    /// * Digital Research's own CP/M 2.2 accepts either, so neither setting can
+    ///   hurt it.
+    ///
+    /// `backspace` is the default because it is right for the large majority and
+    /// because the operator meets the choice again in the boot picker, which
+    /// seeds from this key — so the disks in the second group cost one keypress
+    /// rather than a config edit.  See
+    /// [`crate::telnet::cpm_boot_ui::boot_key_for_guest`].
+    pub cpm_boot_backspace: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
     /// inside the emulator and reloaded when the modem powers up or the guest
     /// issues `ATZ` — the same arrangement the physical ports have under their
@@ -991,6 +1016,7 @@ impl Default for Config {
             cpm_mounts: String::new(),
             cpm_boot_image: String::new(),
             cpm_boot_machine: crate::cpm::console::AUTO_MACHINE.to_string(),
+            cpm_boot_backspace: crate::cpm::boot::DEFAULT_BACKSPACE.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1595,6 +1621,14 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_machine")
             .cloned()
             .unwrap_or_else(|| crate::cpm::console::AUTO_MACHINE.to_string()),
+        // Missing means the modern behaviour, which is a change for a config
+        // written before this key existed -- deliberately, because that config
+        // predates the fix and its owner is the person who reported the
+        // reprinted characters.  The boot picker asks again either way.
+        cpm_boot_backspace: map
+            .get("cpm_boot_backspace")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::boot::DEFAULT_BACKSPACE.to_string()),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2362,6 +2396,24 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_boot_machine", &cfg.cpm_boot_machine);
     content.push_str("\
+# cpm_boot_backspace: what a BOOTED disk (above) is handed when you press
+#   Backspace.  Ignored by the CP/M emulator, which reads its own console line
+#   and already accepts either.  The boot picker asks again per boot and starts
+#   from whatever is set here, so this is the default rather than the ruling.
+#     backspace  DEFAULT - send BS (0x08), which the disk erases on
+#     rubout     send the key as your terminal did (DEL, 0x7F)
+#   There is no answer that is right for every disk, and this was measured
+#   across two whole disk folders rather than reasoned.  MITS CP/M 2.2, Altair
+#   Disk Extended BASIC and Altair Hard Disk BASIC - 24 of the 29 Altair-folder
+#   disks that reach a prompt - erase on BS and read DEL as a Teletype RUBOUT,
+#   which deletes the character and then PRINTS the character it deleted: type
+#   TESTING, backspace over it, and the screen reads TESTINGGNIT.  CP/M 1.3,
+#   1.4 and the 1975 build are the opposite - the rubout is their editing key
+#   and BS prints a literal ^H - so they are the reason `rubout` exists.
+#   Digital Research's own CP/M 2.2, MP/M and UCSD p-System accept either.
+");
+    write_kv(&mut content, "cpm_boot_backspace", &cfg.cpm_boot_backspace);
+    content.push_str("\
 # The CP/M virtual modem's saved AT profile, written by AT&W from inside the
 # emulator and reloaded on power-up and on ATZ - exactly as the physical ports
 # save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
@@ -2919,6 +2971,16 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // that is another.
             if crate::cpm::console::is_valid_machine_key(value) {
                 cfg.cpm_boot_machine = value.to_string();
+            }
+        }
+        "cpm_boot_backspace" => {
+            // Only one of the two offered values, for the same reason as the
+            // machine above: a web form or a hand edit could put anything here,
+            // and `backspace_erases` treats everything it does not recognise as
+            // the default — so an unchecked write would leave the file claiming
+            // a setting the gateway is not honouring.
+            if crate::cpm::boot::BACKSPACE_CHOICES.iter().any(|(v, _)| *v == value) {
+                cfg.cpm_boot_backspace = value.to_string();
             }
         }
         "disable_gateway_connections" => {
@@ -3718,6 +3780,9 @@ mod tests {
             // Deliberately not the default, so the roundtrip proves the key is
             // written and read back rather than merely defaulting twice.
             cpm_boot_machine: "console_04_cuter".to_string(),
+            // Likewise not the default: `rubout` is what a CP/M 1.x operator
+            // sets, and it has to survive a write/read cycle to be worth having.
+            cpm_boot_backspace: crate::cpm::boot::BACKSPACE_RUBOUT.to_string(),
             telnet_enabled: false,
             telnet_port: 1234,
             telnet_gateway_negotiate: true,

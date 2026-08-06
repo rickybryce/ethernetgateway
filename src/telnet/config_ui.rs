@@ -917,6 +917,14 @@ impl TelnetSession {
                 ))
             ))
             .await?;
+            self.send_line(&format!(
+                "  Backspace: {}",
+                self.amber(&truncate_to_width(
+                    crate::cpm::boot::backspace_label(&cfg.cpm_boot_backspace),
+                    w
+                ))
+            ))
+            .await?;
             self.send_line("").await?;
             // Said plainly, because a setting that does nothing in the current
             // configuration is worse than no setting: the machine is hardware
@@ -932,6 +940,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
+            self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
@@ -983,9 +992,27 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "b" => {
+                    // Two values, so cycling is the whole interaction.  Same key
+                    // style as the two above rather than a y/n, because this
+                    // screen is a list of cycled settings.
+                    let choices = crate::cpm::boot::BACKSPACE_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == cfg.cpm_boot_backspace)
+                        // An unrecognised value lands on the default next, which
+                        // is also what `backspace_erases` is already honouring.
+                        .unwrap_or(choices.len() - 1);
+                    let next = choices[(idx + 1) % choices.len()].0.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_backspace", &next);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.send_line(&format!("  {}", self.red("Press R, M, or Q."))).await?;
+                    self.send_line(&format!("  {}", self.red("Press R, M, B, or Q."))).await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }
