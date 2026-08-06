@@ -75,6 +75,37 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.dim("No images mounted.")))
                     .await?;
             }
+
+            // Booted images, listed *separately* and without a drive letter.
+            //
+            // Not folded into "Mounted:" above, and not given a letter, because
+            // neither would be true: a booted disk is not on one of our drives
+            // at all — it is 88-DCDD unit 0, and the guest's own operating
+            // system decides what to call it.  Stock Altair CP/M happens to say
+            // A:, which is exactly the coincidence that makes writing `A:` here
+            // a statement this screen cannot stand behind.
+            //
+            // It has to be *somewhere*, though: an image booted without having
+            // been mounted first is in none of the tables above, so the screen
+            // was offering a disk, refusing it with "being run by a booted
+            // session", and showing nothing that accounted for the refusal.
+            let booted = image::registry::booted_image_names();
+            if !booted.is_empty() {
+                self.send_line("").await?;
+                self.send_line("  Booted:").await?;
+                let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 62 };
+                for name in &booted {
+                    self.send_line(&format!(
+                        "   {} {}",
+                        self.amber(&truncate_to_width(name, width)),
+                        self.dim("(running)"),
+                    ))
+                    .await?;
+                }
+                self.send_line(&format!("  {}", self.dim("Running its own OS - not on a"))).await?;
+                self.send_line(&format!("  {}", self.dim("drive of ours, and not mountable"))).await?;
+                self.send_line(&format!("  {}", self.dim("until it exits."))).await?;
+            }
             self.send_line("").await?;
 
             self.send_line(&format!("  {}  Mount an image", self.cyan("M")))

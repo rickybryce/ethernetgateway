@@ -1529,6 +1529,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A disk booted without being mounted first is still visible somewhere.**
+    ///
+    /// This was the gap: `boot_loans` records a mount that a boot *took away*,
+    /// so it covers the disk that was already mounted — and covers nothing at
+    /// all for the ordinary case, picking a disk out of the boot picker's list.
+    /// That image was in none of the registry's tables, so the disks screen
+    /// showed no sign of it while `mount_image` refused it by name.
+    ///
+    /// A screen that refuses an action for a reason it never displayed is the
+    /// same class of defect as a lent drive reading as empty, and it is checked
+    /// the same way: against the registry, not against the drawing code.
+    #[test]
+    fn test_a_booted_image_is_listed_even_when_it_was_never_mounted() {
+        use crate::cpm::image::registry;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+
+        let dir = std::env::temp_dir().join("egw_booted_listing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("altair8_solo.dsk");
+        std::fs::write(&path, b"disk").unwrap();
+
+        assert!(registry::booted_image_names().is_empty(), "nothing booted yet");
+        assert!(
+            registry::boot_loans().is_empty(),
+            "and nothing lent — this disk was never mounted, which is the case that was missed"
+        );
+
+        let claim = BootClaim::take(&path).expect("claimed");
+        assert_eq!(
+            registry::booted_image_names(),
+            vec!["altair8_solo.dsk".to_string()],
+            "the screen has to be able to name what is running"
+        );
+        // Still nothing lent: the two lists answer different questions, and
+        // conflating them is what would put a drive letter on a booted disk.
+        assert!(registry::boot_loans().is_empty());
+
+        drop(claim);
+        assert!(
+            registry::booted_image_names().is_empty(),
+            "the listing outlived the session — the screen would refuse it for ever"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A claim must be released even if the image is deleted while it is
     /// booted.
     ///

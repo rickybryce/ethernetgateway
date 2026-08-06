@@ -364,6 +364,24 @@ pub fn boot_loans() -> Vec<(u8, String)> {
     v
 }
 
+/// The filenames of every image a booted session is running right now.
+///
+/// For the disks screen, which otherwise cannot say why [`mount_image`] refuses
+/// a disk: an image that was booted *without* being mounted first appears in
+/// none of the tables above — [`boot_loans`] records only a mount that was taken
+/// away — so the screen offered a disk, refused it, and gave a reason nothing on
+/// it had shown.
+///
+/// [`mount_image`]: super::mount_image
+pub fn booted_image_names() -> Vec<String> {
+    let mut v: Vec<String> = lock!(booted_images())
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    v.sort();
+    v
+}
+
 /// Hand out a session id.
 ///
 /// One allocator, shared by the emulator's `CpmFs` and the boot path, because
