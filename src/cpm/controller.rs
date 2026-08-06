@@ -157,6 +157,20 @@ pub trait Controller: Send {
     /// Write one of its ports.
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest;
 
+    /// What this board calls one of its slots, in its own documentation.
+    ///
+    /// A floppy controller has *drives*; the 88-HDSK has *units*, each carrying
+    /// one platter. The distinction is not pedantry — it is the whole reason a
+    /// booted disk cannot be described in the gateway's drive letters. Our
+    /// `A:`-`P:` are our BDOS's; a booted guest is talking to this board, and
+    /// what it can reach is decided by its own BIOS and not by us.
+    ///
+    /// Defaulted to `"drive"` because four of the five boards are floppy
+    /// controllers and say so.
+    fn slot_word(&self) -> &'static str {
+        "drive"
+    }
+
     /// Every medium this board takes.
     fn media(&self) -> Vec<Medium>;
 

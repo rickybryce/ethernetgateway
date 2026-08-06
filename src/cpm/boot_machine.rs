@@ -697,6 +697,63 @@ impl BootMachine {
         all_controllers().iter().flat_map(|c| c.media()).collect()
     }
 
+    /// Which board on the machine `key` names would take an image this size,
+    /// as `(board name, its word for a slot)`.
+    ///
+    /// `None` if no board on that machine takes it — which is a real answer and
+    /// not an error: a hard-disk image on a Cromemco is nobody's disk.
+    ///
+    /// **The board is chosen by the image's size, not by the slot it is going
+    /// into**, exactly as [`BootMachine::insert`] does it — same iteration, same
+    /// first-match rule — because the whole point of this function is to say in
+    /// advance what `insert` is about to do. That is the fact the disk screens
+    /// could not previously show: mount a floppy while booting a hard disk and
+    /// it lands on the 88-DCDD *successfully*, while the guest is driving the
+    /// 88-HDSK and never looks there.
+    /// `key` names the machine; `None` asks every board this gateway has.
+    ///
+    /// `None` is for the configuration screens, which name slots before any
+    /// machine exists and must not read a 4.9 MB boot image to draw a row.
+    /// It is not a weaker answer: no two media may claim overlapping sizes, so
+    /// scanning all boards finds the same one a machine carrying it would.
+    pub fn board_for(key: Option<&str>, image_len: u64) -> Option<(&'static str, &'static str)> {
+        let all;
+        let boards: &[Box<dyn Controller>] = match key {
+            Some(k) => {
+                all = super::console::resolve_machine(k)
+                    .boards
+                    .iter()
+                    .map(|b| boards_to_controller(*b))
+                    .collect::<Vec<_>>();
+                &all
+            }
+            None => {
+                all = all_controllers();
+                &all
+            }
+        };
+        boards
+            .iter()
+            .find(|c| c.accepts(image_len).is_some())
+            .map(|c| (c.name(), c.slot_word()))
+    }
+
+    /// How a slot reads on a booted machine: `unit 1 (MITS 88-HDSK hard disk)`.
+    ///
+    /// The counterpart to the emulator's `B:`, and deliberately not a drive
+    /// letter. Our `A:`-`P:` are our own BDOS's drives; a booted guest is
+    /// talking to a board, and stock Altair CP/M answering to `B:` is that
+    /// guest's convention rather than a fact about the machine.
+    pub fn slot_label(key: Option<&str>, image_len: u64, slot: u8) -> String {
+        match BootMachine::board_for(key, image_len) {
+            Some((board, word)) => format!("{word} {slot} ({board})"),
+            // Named as a slot anyway: the screens still have to put it in a row,
+            // and "no board takes it" is the message the operator needs, not a
+            // blank.
+            None => format!("slot {slot} (no board takes this size)"),
+        }
+    }
+
     /// Can the machine `key` names carry an image this size at all?
     ///
     /// Asked by `detect::machine_for` so that an unclear detection does not land
@@ -4049,4 +4106,5 @@ mod tests {
              reach it after all and the hard-disk advice needs rewriting"
         );
     }
+
 }

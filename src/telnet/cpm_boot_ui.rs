@@ -460,6 +460,13 @@ impl TelnetSession {
             writable,
             disks.len(),
         )?;
+        // The board the *booted* disk is on, so a mount that lands on a
+        // different one can be called out.  From the file's size, the same way
+        // `insert` decides it — asking the machine would be circular, since
+        // nothing has gone into it yet.
+        let boot_board = std::fs::metadata(boot_image)
+            .ok()
+            .and_then(|md| crate::cpm::boot_machine::BootMachine::board_for(None, md.len()));
         for step in plan {
             let letter = (b'A' + step.unit) as char;
             // The booted disk's own mount: take it out of service and stop.
@@ -497,6 +504,7 @@ impl TelnetSession {
                     continue;
                 }
             };
+            let len = bytes.len();
             // Only a disk this controller can actually turn.  A hard-disk or
             // Tarbell image mounts perfectly well for the emulator and has no
             // business on an 88-DCDD; refusing it by name beats presenting a
@@ -530,10 +538,31 @@ impl TelnetSession {
                 _claim: claim,
                 remount,
             });
+            // Named by the board that took it, not by the drive letter it was
+            // mounted under, and warned about when that board is not the one the
+            // booted disk is driving.
+            //
+            // This is the case that reads as a broken mount and is not one: the
+            // board is chosen by the image's *size*, so mounting a floppy while
+            // booting a hard disk lands it on the 88-DCDD perfectly well, while
+            // the guest is talking to the 88-HDSK and never looks there.
+            // Everything worked; nothing is reachable; and until this line
+            // nothing said so.
+            let slot = crate::cpm::boot_machine::BootMachine::slot_label(
+                None,
+                len as u64,
+                step.unit,
+            );
             notes.push(format!(
-                "{letter}: {name}{}",
+                "{slot}: {name}{}",
                 if step.writable { "" } else { " (R/O)" }
             ));
+            if crate::cpm::boot_machine::BootMachine::board_for(None, len as u64)
+                != boot_board
+            {
+                notes.push(format!("  {name} is on another board -"));
+                notes.push("  the guest may not reach it.".to_string());
+            }
         }
         notes.extend(gap_warning(disks));
         Ok(notes)

@@ -1737,6 +1737,8 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     let mounts = crate::cpm::image::registry::all();
     let usage = crate::cpm::image::registry::usage();
 
+    let naming = crate::cpm::boot::slot_naming(&cfg.cpm_boot_image);
+    let booting = naming == crate::cpm::boot::SlotNaming::Boards;
     let mut rows = String::new();
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let letter = (b'A' + drive0) as char;
@@ -1788,8 +1790,24 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         if let Some(b) = &busy {
             note.push_str(&format!(" <span class=\"sub\">{}</span>", html_escape(b)));
         }
+        // Under a booted disk the slot is a number on a board, not one of our
+        // drive letters, and whether the guest reaches it is its own BIOS's
+        // business.  Same `cpm_mounts` underneath; only the name differs.
+        if booting {
+            let len = mounted
+                .and_then(|m| std::fs::metadata(&m.path).ok())
+                .map(|md| md.len());
+            note.push_str(&format!(
+                " <span class=\"sub\">{}</span>",
+                html_escape(&crate::cpm::boot::slot_name(&naming, drive0, len))
+            ));
+        }
         if drive0 == 0 {
-            note.push_str(" <span class=\"sub\">A: hides EGT80 while mounted</span>");
+            note.push_str(if booting {
+                " <span class=\"sub\">the booted disk is here</span>"
+            } else {
+                " <span class=\"sub\">A: hides EGT80 while mounted</span>"
+            });
         }
         rows.push_str(&format!(
             "<div class=\"row\"><span class=\"label\">{letter}:</span>\

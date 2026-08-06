@@ -1002,6 +1002,9 @@ impl App {
     /// Contents of the "Mount CP/M Drives" window: a row per drive.
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let cpm_base = base.clone();
+        let naming = crate::cpm::boot::slot_naming(&self.cfg.cpm_boot_image);
+        let booting = naming == crate::cpm::boot::SlotNaming::Boards;
         let images = crate::cpm::image::available_images(&base);
         let mounts = crate::cpm::image::registry::all();
         let usage = crate::cpm::image::registry::usage();
@@ -1024,7 +1027,7 @@ impl App {
             .max_height(340.0)
             .show(ui, |ui| {
                 egui::Grid::new("cpm_mount_grid")
-                    .num_columns(3)
+                    .num_columns(4)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                 for drive0 in 0..crate::cpm::NUM_DRIVES {
@@ -1086,8 +1089,28 @@ impl App {
                         if let Some(b) = &busy {
                             ui.label(egui::RichText::new(b).color(AMBER_BRIGHT));
                         }
+                        // Under a booted disk the slot is a number on a board,
+                        // not one of our drive letters — the same `cpm_mounts`
+                        // underneath, named for what is actually running.
+                        if booting {
+                            let len = self.cpm_mount_draft
+                                .get(idx)
+                                .filter(|n| !n.is_empty())
+                                .and_then(|n| {
+                                    std::fs::metadata(
+                                        crate::cpm::image::images_dir(&cpm_base).join(n),
+                                    )
+                                    .ok()
+                                })
+                                .map(|md| md.len());
+                            ui.label(crate::cpm::boot::slot_name(&naming, drive0, len));
+                        }
                         if drive0 == 0 {
-                            ui.label("(A: hides EGT80 while mounted)");
+                            ui.label(if booting {
+                                "(the booted disk is here)"
+                            } else {
+                                "(A: hides EGT80 while mounted)"
+                            });
                         }
                         ui.end_row();
                     }

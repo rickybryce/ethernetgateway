@@ -762,6 +762,12 @@ impl Hdsk {
 }
 
 impl Controller for Hdsk {
+    /// The 88-HDSK manual's own word. Each unit carries one platter, which is
+    /// exactly what a 4.9 MB image is.
+    fn slot_word(&self) -> &'static str {
+        "unit"
+    }
+
     fn name(&self) -> &'static str {
         "MITS 88-HDSK hard disk"
     }

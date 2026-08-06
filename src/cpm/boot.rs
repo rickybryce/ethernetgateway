@@ -83,6 +83,50 @@ pub fn boot_choice_label(value: &str) -> String {
     }
 }
 
+/// What a mount slot should be *called*, which depends on what CP/M is set to
+/// run — and is one function so telnet, web and the desktop cannot disagree.
+///
+/// The same `cpm_mounts` list underneath either way. Two lists would be two
+/// config keys saying one thing, which is the shape of defect this project has
+/// produced more than once; what genuinely differs is only the name of the slot.
+///
+/// * **The emulator** owns drives `A:`&ndash;`P:` — our BDOS is underneath them,
+///   the jail applies, and a mount is authoritative: if we put an image on `B:`,
+///   `B:` is that image.
+/// * **A booted disk** owns the hardware. A mount is handed to a *board*, at a
+///   drive or unit number, and whether the guest can reach it is decided by its
+///   own BIOS. Stock Altair floppy CP/M knows four drives; the 88-HDSK CP/M on
+///   these disks knows exactly one — the whole platter — so nothing mounted
+///   beside it is reachable at all. Calling that slot `B:` would be us making a
+///   promise the guest never agreed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotNaming {
+    /// Drives `A:`–`P:`, the emulator's own.
+    Drives,
+    /// A board's drive or unit number, on a booted machine.
+    Boards,
+}
+
+/// Which naming a given configuration calls for.
+pub fn slot_naming(boot_image: &str) -> SlotNaming {
+    if boot_image.trim().is_empty() { SlotNaming::Drives } else { SlotNaming::Boards }
+}
+
+/// Name slot `slot`, for an image of `image_len` bytes if that is known.
+///
+/// `image_len` is `None` for an empty slot or one whose file cannot be read;
+/// under [`SlotNaming::Boards`] the board is chosen by the image's *size*, so
+/// without it the honest answer names the number and stops there.
+pub fn slot_name(naming: &SlotNaming, slot: u8, image_len: Option<u64>) -> String {
+    match naming {
+        SlotNaming::Drives => format!("{}:", (b'A' + slot) as char),
+        SlotNaming::Boards => match image_len {
+            Some(len) => super::boot_machine::BootMachine::slot_label(None, len, slot),
+            None => format!("slot {slot}"),
+        },
+    }
+}
+
 /// The `cpm_boot_backspace` value that hands a booted guest BS (0x08).
 pub const BACKSPACE_ERASE: &str = "backspace";
 
@@ -408,6 +452,60 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The emulator names its own drives; a booted machine names a board's.
+    ///
+    /// One list underneath either way — this is a naming decision, not a second
+    /// `cpm_mounts`. What it is protecting is a promise: under the emulator our
+    /// BDOS is beneath `B:`, so `B:` means what it says; under a booted disk the
+    /// slot is a number on a board and the guest's own BIOS decides what it can
+    /// reach, so a letter there would be us answering for the guest.
+    #[test]
+    fn test_a_slot_is_named_for_whatever_cpm_is_set_to_run() {
+        use super::{slot_name, slot_naming, SlotNaming};
+        assert_eq!(slot_naming(""), SlotNaming::Drives, "no boot image = the emulator");
+        assert_eq!(slot_naming("   "), SlotNaming::Drives, "and whitespace is empty");
+        assert_eq!(slot_naming("altair8_cpm22.dsk"), SlotNaming::Boards);
+
+        // The emulator's names never mention a board — its drives are ours.
+        assert_eq!(slot_name(&SlotNaming::Drives, 0, None), "A:");
+        assert_eq!(slot_name(&SlotNaming::Drives, 1, Some(337_568)), "B:");
+        assert_eq!(slot_name(&SlotNaming::Drives, 15, None), "P:");
+    }
+
+    /// A booted slot is named by the board the image's **size** puts it on, and
+    /// the two kinds of disk must not come out with the same word.
+    ///
+    /// This is the fact the screens could not previously show, and the one that
+    /// cost a morning: mount a floppy while booting a hard disk and it lands on
+    /// the 88-DCDD perfectly well, while the guest is driving the 88-HDSK.
+    /// Everything works; nothing is reachable.
+    #[test]
+    fn test_a_booted_slot_names_the_board_the_size_chooses() {
+        use super::{slot_name, SlotNaming};
+        use crate::cpm::boot_machine::BootMachine;
+
+        // Measured sizes, not invented ones: an Altair 8" floppy and one
+        // 88-HDSK platter, both straight out of the media tables.
+        let floppy = BootMachine::bootable_media()
+            .into_iter()
+            .find(|m| m.label.contains("88-DCDD") || m.label.to_lowercase().contains("altair"))
+            .map(|m| m.bytes)
+            .expect("the floppy medium is in the table");
+        let platter = 4_988_928u64;
+
+        let f = slot_name(&SlotNaming::Boards, 1, Some(floppy));
+        let h = slot_name(&SlotNaming::Boards, 1, Some(platter));
+        assert!(f.starts_with("drive 1 ("), "a floppy board has drives: {f}");
+        assert!(h.starts_with("unit 1 ("), "the 88-HDSK has units: {h}");
+        assert!(h.contains("88-HDSK"), "and says which board: {h}");
+        assert_ne!(f, h, "the two boards must not read the same at the same slot");
+
+        // A size no board takes says so rather than inventing a slot, and an
+        // unknown size names the number and stops.
+        assert!(slot_name(&SlotNaming::Boards, 2, Some(4_242)).contains("no board"));
+        assert_eq!(slot_name(&SlotNaming::Boards, 3, None), "slot 3");
+    }
     use super::super::dcdd::{Disk, Geometry};
     use super::*;
 

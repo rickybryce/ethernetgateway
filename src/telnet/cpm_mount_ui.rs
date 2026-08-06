@@ -37,13 +37,29 @@ impl TelnetSession {
 
             // What is mounted right now, so the operator sees the state before
             // being asked to change it.
+            //
+            // A slot is named for whatever CP/M is set to run, and the naming is
+            // not cosmetic.  Under the emulator our BDOS is underneath the
+            // drives, so `B:` is a promise we keep.  Under a booted disk the
+            // slot is a number on a *board*, and whether the guest reaches it is
+            // its own BIOS's business — calling it `B:` there would be us making
+            // a promise on the guest's behalf.
+            let naming = crate::cpm::boot::slot_naming(&config::get_config().cpm_boot_image);
             let lent = image::registry::boot_loans();
             let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
             if any {
-                self.send_line("  Mounted:").await?;
+                self.send_line(match naming {
+                    crate::cpm::boot::SlotNaming::Drives => "  Mounted:",
+                    crate::cpm::boot::SlotNaming::Boards => "  Mounted (for the booted disk):",
+                })
+                .await?;
                 for (i, m) in mounts.iter().enumerate() {
                     let Some(m) = m else { continue };
-                    let letter = (b'A' + i as u8) as char;
+                    let slot = crate::cpm::boot::slot_name(
+                        &naming,
+                        i as u8,
+                        std::fs::metadata(&m.path).ok().map(|md| md.len()),
+                    );
                     let ro = if m.read_only { " (R/O)" } else { "" };
                     let busy = usage
                         .get(i)
@@ -52,8 +68,8 @@ impl TelnetSession {
                         .unwrap_or_default();
                     let width = if self.terminal_type == TerminalType::Petscii { 28 } else { 60 };
                     self.send_line(&format!(
-                        "   {}: {}{}{}",
-                        self.cyan(&letter.to_string()),
+                        "   {} {}{}{}",
+                        self.cyan(&slot),
                         self.amber(&truncate_to_width(&m.filename, width)),
                         ro,
                         self.dim(&busy),
@@ -61,11 +77,13 @@ impl TelnetSession {
                     .await?;
                 }
                 for (drive0, name) in &lent {
-                    let letter = (b'A' + drive0) as char;
+                    // No length: the file is in a booted session's hands, and a
+                    // stat of it would name a board for bytes nobody can rely on.
+                    let slot = crate::cpm::boot::slot_name(&naming, *drive0, None);
                     let width = if self.terminal_type == TerminalType::Petscii { 20 } else { 52 };
                     self.send_line(&format!(
-                        "   {}: {} {}",
-                        self.cyan(&letter.to_string()),
+                        "   {} {} {}",
+                        self.cyan(&slot),
                         self.amber(&truncate_to_width(name, width)),
                         self.dim("(booted)"),
                     ))
@@ -534,14 +552,27 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("CHOOSE A DRIVE")))
-            .await?;
+        let naming = crate::cpm::boot::slot_naming(&config::get_config().cpm_boot_image);
+        let booting = naming == crate::cpm::boot::SlotNaming::Boards;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow(if booting { "CHOOSE A SLOT" } else { "CHOOSE A DRIVE" })
+        ))
+        .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         self.send_line(&format!("  {}", self.amber(&truncate_to_width(filename, width))))
             .await?;
         self.send_line("").await?;
+
+        // This image's own size, which is what decides the board it would go on
+        // — not the slot it is going into.  Read once for the whole list.
+        let image_len = std::fs::metadata(
+            crate::cpm::image::images_dir(&self.cpmmount_base()).join(filename),
+        )
+        .ok()
+        .map(|md| md.len());
 
         // Drives in use cannot be changed, and are shown saying why rather than
         // silently missing — a drive that vanished from the list would read as
@@ -551,6 +582,15 @@ impl TelnetSession {
             let busy = usage.get(i as usize).and_then(|u| u.describe());
             let held = mounts.get(i as usize).and_then(|m| m.as_ref());
             let mut note = String::new();
+            // Under a booted disk, say what the slot *is* before saying what is
+            // in it: the number and the board are the whole answer to "will the
+            // guest see this", and the letter is only how `cpm_mounts` spells it.
+            if booting {
+                note.push_str(&format!(
+                    "  {}",
+                    crate::cpm::boot::slot_name(&naming, i, image_len)
+                ));
+            }
             if let Some(m) = held {
                 note.push_str(&format!(" - holds {}", m.filename));
             }
@@ -558,7 +598,14 @@ impl TelnetSession {
                 note.push_str(&format!(" - {b}"));
             }
             if i == 0 {
-                note.push_str(" - hides EGT80");
+                // Two different facts about slot 0, and which one is true
+                // depends on what is running.  EGT80 lives in the gateway's own
+                // drive A: folder, which a booted disk never sees.
+                note.push_str(if booting {
+                    " - the booted disk is here"
+                } else {
+                    " - hides EGT80"
+                });
             }
             let line = format!("  {}{}", self.cyan(&letter.to_string()), self.dim(&note));
             self.send_line(&truncate_to_width(&line, 200)).await?;
