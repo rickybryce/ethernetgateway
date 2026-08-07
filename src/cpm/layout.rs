@@ -105,12 +105,17 @@ Inside a booted disk there is no jail, no A> from us and no EGT80.  Press
 ESC twice to get back to the gateway.  A booted image is opened READ-ONLY
 and held by one session at a time.
 
-Your mounted images do come along: each rides the controller unit its
-drive letter names (B: is unit 1, C: is unit 2), and the disk being booted
-is always unit 0.  What the guest CALLS them, and how many it can reach at
-all, belongs to its own BIOS - stock Altair CP/M knows four.  An empty
-unit between two full ones answers nothing, exactly as the real board
-does, so selecting one looks like a hang; ESC ESC still works.
+Your mounted images do come along: each rides the controller slot its
+drive letter names (B: is slot 1, C: is slot 2), and the disk being booted
+is always slot 0.  What a slot IS belongs to the board — on the floppy
+controllers it is a drive, but on the 88-HDSK it is a PLATTER, four to a
+drive, so slots 0-3 are the first Datakeeper's four platters.  What the
+guest CALLS them, and how many it can reach at all, belongs to its own
+BIOS - stock Altair CP/M knows four drives, the 88-HDSK CP/M uses the
+fixed platter (slot 1) as its B:, and Hard Disk BASIC's MOUNT numbers its
+disks by platter.  An empty slot between two full ones answers nothing,
+exactly as the real board does, so selecting one looks like a hang;
+ESC ESC still works.
 
 Set what the CP/M menu item runs with cpm_boot_image (the 'CP/M runs'
 setting in every UI), or boot one for a single visit from the telnet boot

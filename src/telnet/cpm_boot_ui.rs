@@ -548,11 +548,18 @@ impl TelnetSession {
             // the guest is talking to the 88-HDSK and never looks there.
             // Everything worked; nothing is reachable; and until this line
             // nothing said so.
+            //
+            // Through `slot_name` rather than assembled here: the 88-HDSK's
+            // slots are a drive and a platter, not a flat row, so a second copy
+            // of "word plus number" would quietly disagree with every other
+            // screen the moment a board's slots stopped being flat — which is
+            // exactly what happened to the board itself.
             let board = crate::cpm::boot_machine::BootMachine::board_for(None, len as u64);
-            let slot = match board {
-                Some((_, word)) => format!("{word} {}", step.unit),
-                None => format!("slot {}", step.unit),
-            };
+            let slot = crate::cpm::boot::slot_name(
+                &crate::cpm::boot::SlotNaming::Boards,
+                step.unit,
+                Some(len as u64),
+            );
             notes.push(format!(
                 "{slot}: {name}{}",
                 if step.writable { "" } else { " (R/O)" }
@@ -561,7 +568,7 @@ impl TelnetSession {
             // of a mismatch, and warning on it would fire this on every mount
             // the moment the boot image became unreadable — the loudest possible
             // response to the least informative state.
-            if let (Some((got, _)), Some((want, _))) = (board, boot_board) {
+            if let (Some(got), Some(want)) = (board, boot_board) {
                 if got != want {
                     notes.push(format!("{name} is on the {got},"));
                     notes.push("not the booted disk's board -".to_string());

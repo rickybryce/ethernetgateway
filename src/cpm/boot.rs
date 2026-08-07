@@ -93,17 +93,23 @@ pub fn boot_choice_label(value: &str) -> String {
 /// * **The emulator** owns drives `A:`&ndash;`P:` — our BDOS is underneath them,
 ///   the jail applies, and a mount is authoritative: if we put an image on `B:`,
 ///   `B:` is that image.
-/// * **A booted disk** owns the hardware. A mount is handed to a *board*, at a
-///   drive or unit number, and whether the guest can reach it is decided by its
-///   own BIOS. Stock Altair floppy CP/M knows four drives; the 88-HDSK CP/M on
-///   these disks knows exactly one — the whole platter — so nothing mounted
-///   beside it is reachable at all. Calling that slot `B:` would be us making a
-///   promise the guest never agreed to.
+/// * **A booted disk** owns the hardware. A mount is handed to a *board*, at
+///   whatever that board calls a slot, and whether the guest can reach it is
+///   decided by its own BIOS. Stock Altair floppy CP/M knows four drives; the
+///   88-HDSK CP/M on these disks uses the drive's fixed platter — slot 1 — as
+///   its `B:`. Calling either of them `B:` *ourselves* would be a promise the
+///   guest never agreed to, which is the whole reason this enum exists.
+///
+/// A board's slots need not even be a flat row: the 88-HDSK's are a drive and
+/// a platter, so it names them `unit 0.1`. That is [`Controller::slot_label`]'s
+/// job, not this module's — see [`slot_name`].
+///
+/// [`Controller::slot_label`]: super::controller::Controller::slot_label
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotNaming {
     /// Drives `A:`–`P:`, the emulator's own.
     Drives,
-    /// A board's drive or unit number, on a booted machine.
+    /// Whatever the board calls the slot, on a booted machine.
     Boards,
 }
 
@@ -128,21 +134,21 @@ pub fn slot_naming(boot_image: &str) -> SlotNaming {
 pub fn slot_name(naming: &SlotNaming, slot: u8, image_len: Option<u64>) -> String {
     match naming {
         SlotNaming::Drives => format!("{}:", (b'A' + slot) as char),
-        SlotNaming::Boards => match image_len.and_then(slot_word) {
-            Some(word) => format!("{word} {slot}"),
+        SlotNaming::Boards => match image_len.and_then(|len| slot_label(len, slot)) {
+            Some(label) => label,
             None => format!("slot {slot}"),
         },
     }
 }
 
-/// What the board taking an image this size calls one of its slots.
-pub fn slot_word(image_len: u64) -> Option<&'static str> {
-    super::boot_machine::BootMachine::board_for(None, image_len).map(|(_, word)| word)
+/// What the board taking an image this size calls slot `slot`.
+pub fn slot_label(image_len: u64, slot: u8) -> Option<String> {
+    super::boot_machine::BootMachine::slot_label(None, image_len, slot)
 }
 
 /// The board an image this size goes on, for the surfaces with room to say it.
 pub fn slot_board(image_len: u64) -> Option<&'static str> {
-    super::boot_machine::BootMachine::board_for(None, image_len).map(|(board, _)| board)
+    super::boot_machine::BootMachine::board_for(None, image_len)
 }
 
 /// The `cpm_boot_backspace` value that hands a booted guest BS (0x08).
@@ -515,7 +521,12 @@ mod tests {
         let f = slot_name(&SlotNaming::Boards, 1, Some(floppy));
         let h = slot_name(&SlotNaming::Boards, 1, Some(platter));
         assert_eq!(f, "drive 1", "a floppy board has drives");
-        assert_eq!(h, "unit 1", "the 88-HDSK has units");
+        // Two coordinates, because the 88-HDSK's slots are not a flat row: a
+        // drive carries four platters and each is one image, so slot 1 is the
+        // *first* drive's *second* platter — which is what Altair Hard Disk
+        // BASIC calls disk 1.
+        assert_eq!(h, "unit 0.1", "an 88-HDSK slot is a platter on a drive");
+        assert_eq!(slot_name(&SlotNaming::Boards, 5, Some(platter)), "unit 1.1");
         assert_ne!(f, h, "the two boards must not read the same at the same slot");
 
         // The board itself is a separate question, asked by the surfaces with

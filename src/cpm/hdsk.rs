@@ -54,12 +54,31 @@ pub const SECTOR_LEN: usize = 256;
 /// per cylinder", sector address 0 through 23.
 pub const SECTORS: u8 = 24;
 
-/// Heads on the drives these images came off.
+/// Heads on one platter — one per side.
 ///
-/// The board addresses 0–7 — the fixed platter is 2 and 3, the removable 0 and
-/// 1 — but a drive with fewer platters narrows that, and the 4.9 MB images are
-/// a single platter: 406 × 2 × 24 × 256 is exactly their size.
+/// **This is per platter, not per drive.** A 4.9 MB image is a single platter:
+/// 406 × 2 × 24 × 256 is exactly its size, so an image is two heads' worth of
+/// surface and the geometry constants below are that image's geometry.
 pub const HEADS: u8 = 2;
+
+/// Platters one drive can carry.
+///
+/// The head field in a sector command is three bits, and the firmware on these
+/// disks says what those bits are: `CFORMT`'s own comment is "ADATA Bits 7:6 =
+/// Platter #, Bit 5 = Side #", and its `GETHED` folds the pair into the same
+/// head field the read and write commands use. So **head 0–7 is platter × 2 +
+/// side** — the removable cartridge is platter 0 (heads 0 and 1), the fixed
+/// platter is 1 (heads 2 and 3), and the extension adds two more.
+///
+/// This was `HEADS` alone for a long time, which made heads 2–7 read as "off
+/// the end of the disk" and cost a real capability: Altair Hard Disk BASIC
+/// numbers its disks by **platter**, so `MOUNT 1` on a one-drive machine is
+/// head 2 of unit 0, not unit 1 at all. With one platter per drive, answering
+/// `HIGHEST DISK NUMBER?` with anything but 0 made a bare `MOUNT` — which
+/// mounts every disk the operator declared — fail on the second one, and no
+/// arrangement of images could have helped, because the guest was never
+/// addressing another unit.
+const PLATTERS: usize = 4;
 
 /// Cylinders. The manual gives the seek range as 0–405.
 pub const CYLINDERS: u16 = 406;
@@ -128,6 +147,24 @@ const FORMAT_FILL: u8 = 0xE5;
 
 /// Drives the board can address.
 const UNITS: usize = 4;
+
+/// Media the board can address at once — one image per platter, four platters
+/// on each of four drives.
+///
+/// Sixteen, which is what a booted machine has slots for, so the mapping is
+/// exact: **slot = unit × 4 + platter**. Unit-major rather than platter-major
+/// on purpose — a machine with one Datakeeper on it is the ordinary case, and
+/// this way its four platters are slots 0–3, which is the numbering Altair
+/// Hard Disk BASIC's own `MOUNT` uses.
+const SLOTS: usize = UNITS * PLATTERS;
+
+/// The highest head number the board addresses, plus one.
+///
+/// Eight, which is exactly the range the three-bit head field can name — so no
+/// command can ask for a platter this board could not have, and "which platter"
+/// is never a bounds question.
+#[cfg(test)]
+const MAX_HEAD: u8 = PLATTERS as u8 * HEADS;
 
 /// Ports the 88-4PIO occupies — octal 160–167.
 const PORT_BASE: u8 = 0xA0;
@@ -297,18 +334,33 @@ impl Command {
 }
 
 /// One drive attached to the controller.
+///
+/// A drive has one head positioner and all its platters ride on it, so the
+/// cylinder lives here and the media live on [`Platter`].
 #[derive(Debug, Clone, Copy)]
 struct Unit {
-    present: bool,
-    read_only: bool,
     /// Where the heads are. A read or write uses this, not a cylinder in the
     /// command — the command carries only head and sector.
     cylinder: u16,
 }
 
+/// One recording surface pair — the medium a single image is.
+#[derive(Debug, Clone, Copy)]
+struct Platter {
+    present: bool,
+    read_only: bool,
+    /// The machine's slot holding this platter's image.
+    ///
+    /// Carried rather than recomputed because it is what a [`HostRequest`]
+    /// names: the machine knows nothing about units and platters, only which
+    /// of its sixteen images to move bytes to and from.
+    slot: u8,
+}
+
 /// The controller.
 pub struct Hdsk {
     units: [Unit; UNITS],
+    platters: [[Platter; PLATTERS]; UNITS],
     buffers: [[u8; SECTOR_LEN]; BUFFERS],
 
     /// Low byte of the command being assembled, latched from port 167.
@@ -421,7 +473,8 @@ impl Default for Hdsk {
 impl Hdsk {
     pub fn new() -> Hdsk {
         Hdsk {
-            units: [Unit { present: false, read_only: true, cylinder: 0 }; UNITS],
+            units: [Unit { cylinder: 0 }; UNITS],
+            platters: [[Platter { present: false, read_only: true, slot: 0 }; PLATTERS]; UNITS],
             buffers: [[0; SECTOR_LEN]; BUFFERS],
             pending_low: 0,
             selected: 0,
@@ -443,18 +496,41 @@ impl Hdsk {
         }
     }
 
-    /// Byte offset of a sector, in the order these images store them.
+    /// The platter a head number selects on `unit`, present or not.
     ///
-    /// Cylinder, then head, then sector — which is what the sample set's own
+    /// `None` only when the board could not address it at all — the head field
+    /// is three bits, so in practice that is an out-of-range unit.
+    fn platter(&self, unit: u8, head: u8) -> Option<&Platter> {
+        self.platters.get(unit as usize)?.get((head / HEADS) as usize)
+    }
+
+    /// Has this drive anything on it?
+    ///
+    /// The unit-level question, for the commands that are about the drive
+    /// rather than about one surface — Read Status, Seek, and the restore.
+    fn unit_ready(&self, unit: u8) -> bool {
+        self.platters
+            .get(unit as usize)
+            .is_some_and(|ps| ps.iter().any(|p| p.present))
+    }
+
+    /// Which slot's image holds a sector, and its byte offset in that image.
+    ///
+    /// Cylinder, then side, then sector — which is what the sample set's own
     /// README describes ADEXER's `XD` command producing, and what the file size
     /// confirms: 406 × 2 × 24 × 256 is exactly 4,988,928.
-    fn offset(&self, unit: u8, head: u8, sector: u8) -> Option<u64> {
-        let u = self.units.get(unit as usize)?;
-        if !u.present || head >= HEADS || sector >= SECTORS || u.cylinder >= CYLINDERS {
+    ///
+    /// The head selects the *platter* as well as the side, and each platter is
+    /// its own image, so the offset is within that one — `head % HEADS` is the
+    /// side and everything above it has already chosen the file.
+    fn offset(&self, unit: u8, head: u8, sector: u8) -> Option<(u8, u64)> {
+        let cylinder = self.units.get(unit as usize)?.cylinder;
+        let p = self.platter(unit, head)?;
+        if !p.present || sector >= SECTORS || cylinder >= CYLINDERS {
             return None;
         }
-        let track = u.cylinder as u64 * HEADS as u64 + head as u64;
-        Some((track * SECTORS as u64 + sector as u64) * SECTOR_LEN as u64)
+        let track = cylinder as u64 * HEADS as u64 + (head % HEADS) as u64;
+        Some((p.slot, (track * SECTORS as u64 + sector as u64) * SECTOR_LEN as u64))
     }
 
     /// What a Read Status of `addr` answers.
@@ -520,10 +596,14 @@ impl Hdsk {
             Command::Seek => {
                 let cylinder = word & 0x01FF;
                 self.ready = true;
-                match self.units.get_mut(unit as usize) {
-                    Some(u) if u.present && cylinder < CYLINDERS => u.cylinder = cylinder,
-                    Some(u) if u.present => self.status |= error::ILLEGAL_SECTOR,
-                    _ => self.status |= error::NOT_READY,
+                // The positioner is the drive's, not a platter's, so this is
+                // the one place the unit-level question is the right one.
+                if !self.unit_ready(unit) {
+                    self.status |= error::NOT_READY;
+                } else if cylinder >= CYLINDERS {
+                    self.status |= error::ILLEGAL_SECTOR;
+                } else if let Some(u) = self.units.get_mut(unit as usize) {
+                    u.cylinder = cylinder;
                 }
                 HostRequest::None
             }
@@ -532,11 +612,11 @@ impl Hdsk {
                 let head = ((word >> 5) & 0x07) as u8;
                 let buffer = ((word >> 8) & 0x03) as usize;
                 let writing = Command::of(word) == Command::WriteSector;
-                let Some(offset) = self.offset(unit, head, sector) else {
+                let Some((slot, offset)) = self.offset(unit, head, sector) else {
                     // Which of the two it is matters to a driver: an unplugged
-                    // drive and a sector number off the end of the platter are
+                    // platter and a sector number off the end of one are
                     // different faults with different fixes.
-                    self.status |= if self.units.get(unit as usize).is_some_and(|u| u.present) {
+                    self.status |= if self.platter(unit, head).is_some_and(|p| p.present) {
                         error::ILLEGAL_SECTOR
                     } else {
                         error::NOT_READY
@@ -544,7 +624,8 @@ impl Hdsk {
                     self.ready = true;
                     return HostRequest::None;
                 };
-                if writing && self.units[unit as usize].read_only {
+                let read_only = self.platter(unit, head).is_some_and(|p| p.read_only);
+                if writing && read_only {
                     self.status |= error::WRITE_PROTECT;
                     self.ready = true;
                     return HostRequest::None;
@@ -557,9 +638,7 @@ impl Hdsk {
                 // the whole error byte rather than masking it would then see every
                 // read fail. ADEXER masks with 7Fh on an ordinary read and 80h on
                 // this one, which is exactly the distinction being drawn here.
-                if matches!(Command::of(word), Command::ReadUnformatted)
-                    && self.units[unit as usize].read_only
-                {
+                if matches!(Command::of(word), Command::ReadUnformatted) && read_only {
                     self.status |= error::WRITE_PROTECT;
                 }
                 self.pending_buffer = buffer;
@@ -573,12 +652,12 @@ impl Hdsk {
                     // written, never saw the command finish, and the file it
                     // was saving silently did not appear.
                     self.ready = true;
-                    HostRequest::Write { drive: unit, offset, len: SECTOR_LEN }
+                    HostRequest::Write { drive: slot, offset, len: SECTOR_LEN }
                 } else {
                     // A read is not finished until the machine has supplied the
                     // bytes, which it does through `buffer_loaded`.
                     self.ready = false;
-                    HostRequest::Read { drive: unit, offset, len: SECTOR_LEN }
+                    HostRequest::Read { drive: slot, offset, len: SECTOR_LEN }
                 }
             }
             Command::ReadBuffer | Command::WriteBuffer => {
@@ -646,7 +725,7 @@ impl Hdsk {
                 // reads status, and reads IV 17 back will see what it wrote here
                 // and something else on real hardware.
                 let addr = (word & 0xFF) as usize;
-                if !self.units.get(unit as usize).is_some_and(|u| u.present) {
+                if !self.unit_ready(unit) {
                     self.status |= error::NOT_READY;
                     self.ready = true;
                     return HostRequest::None;
@@ -693,18 +772,13 @@ impl Hdsk {
                 // and its `GETHED` folds those into the same head field the
                 // sector commands use, because head 0-7 *is* platter × 2 + side.
                 let head = ((word >> 5) & 0x07) as u8;
-                let Some(u) = self.units.get(unit as usize).copied().filter(|u| u.present) else {
+                let Some(p) = self.platter(unit, head).copied().filter(|p| p.present) else {
                     self.status |= error::NOT_READY;
                     self.ready = true;
                     return HostRequest::None;
                 };
-                if u.read_only {
+                if p.read_only {
                     self.status |= error::WRITE_PROTECT;
-                    self.ready = true;
-                    return HostRequest::None;
-                }
-                if head >= HEADS {
-                    self.status |= error::ILLEGAL_SECTOR;
                     self.ready = true;
                     return HostRequest::None;
                 }
@@ -724,8 +798,8 @@ impl Hdsk {
                 }
                 self.ready = true;
                 HostRequest::Fill {
-                    drive: unit,
-                    offset: head as u64 * SECTORS as u64 * SECTOR_LEN as u64,
+                    drive: p.slot,
+                    offset: (head % HEADS) as u64 * SECTORS as u64 * SECTOR_LEN as u64,
                     chunk: SECTORS as usize * SECTOR_LEN,
                     stride: HEADS as u64 * SECTORS as u64 * SECTOR_LEN as u64,
                     count: CYLINDERS as usize,
@@ -744,9 +818,9 @@ impl Hdsk {
                 // the same annotation calls this entry "reset controller (used for
                 // HOME)". A driver that resets the board and then reads without
                 // seeking is entitled to be at cylinder 0.
-                for u in self.units.iter_mut() {
-                    if u.present {
-                        u.cylinder = 0;
+                for i in 0..UNITS {
+                    if self.unit_ready(i as u8) {
+                        self.units[i].cylinder = 0;
                     }
                 }
                 self.transfer = None;
@@ -762,10 +836,24 @@ impl Hdsk {
 }
 
 impl Controller for Hdsk {
-    /// The 88-HDSK manual's own word. Each unit carries one platter, which is
-    /// exactly what a 4.9 MB image is.
+    /// The 88-HDSK manual's own word for what one image is.
+    ///
+    /// A *platter*, not a unit: a Datakeeper drive carries up to four of them
+    /// and addresses each by head number, so an image is a platter and a unit
+    /// is four slots. Slots 0–3 are the first drive's, which is the numbering
+    /// Altair Hard Disk BASIC's `MOUNT` uses for its disks.
     fn slot_word(&self) -> &'static str {
-        "unit"
+        "platter"
+    }
+
+    /// `unit U.P` — the drive, then the platter on it.
+    ///
+    /// Both coordinates, because a bare slot number says neither: slot 5 is the
+    /// *second* drive's *second* platter, and an operator putting a disk in
+    /// front of a guest needs to know which drive it lands on. Eight characters
+    /// at every slot, which is the row budget.
+    fn slot_label(&self, slot: u8) -> String {
+        format!("unit {}.{}", slot as usize / PLATTERS, slot as usize % PLATTERS)
     }
 
     fn name(&self) -> &'static str {
@@ -876,8 +964,8 @@ impl Controller for Hdsk {
                     // instead. Restore needs no such guess.
                     if addr as usize == iv::DISK_CONTROL_B && value & iv::CYL_RESTORE == 0 {
                         let selected = self.selected;
-                        if let Some(u) = self.units.get_mut(selected as usize) {
-                            if u.present {
+                        if self.unit_ready(selected) {
+                            if let Some(u) = self.units.get_mut(selected as usize) {
                                 u.cylinder = 0;
                             }
                         }
@@ -930,11 +1018,15 @@ impl Controller for Hdsk {
         if self.accepts(image_len).is_none() {
             return Err(format!("{image_len} bytes is not an 88-HDSK image"));
         }
-        let u = self
-            .units
-            .get_mut(drive as usize)
-            .ok_or_else(|| format!("the 88-HDSK addresses units 0-3, not {drive}"))?;
-        *u = Unit { present: true, read_only, cylinder: 0 };
+        // Slot to (unit, platter), unit-major — see [`SLOTS`].
+        let unit = drive as usize / PLATTERS;
+        let platter = drive as usize % PLATTERS;
+        let p = self
+            .platters
+            .get_mut(unit)
+            .and_then(|ps| ps.get_mut(platter))
+            .ok_or_else(|| format!("the 88-HDSK addresses {SLOTS} platters, not slot {drive}"))?;
+        *p = Platter { present: true, read_only, slot: drive };
         Ok(())
     }
 
@@ -1170,6 +1262,88 @@ mod tests {
         let st = h.port_in(port::STATUS).0;
         assert_eq!(st & error::ILLEGAL_SECTOR, error::ILLEGAL_SECTOR, "{st:#04x}");
         assert_eq!(st & error::NOT_READY, 0, "the drive is present, the sector is not");
+    }
+
+    /// **A head number above 1 selects another platter, not a bad address.**
+    ///
+    /// The head field is three bits and the firmware spends them as platter ×
+    /// 2 + side (`CFORMT`: "ADATA Bits 7:6 = Platter #, Bit 5 = Side #"). This
+    /// board once treated everything above head 1 as off the end of the disk,
+    /// and the cost was not theoretical: Altair Hard Disk BASIC numbers its
+    /// disks by platter, so its bare `MOUNT` — which mounts every disk the
+    /// operator declared at `HIGHEST DISK NUMBER?` — failed on disk 1 with
+    /// `AFMS I/O ERROR CODE=9F` while `MOUNT 0` worked, and no arrangement of
+    /// images could have helped, because the guest was reading head 2 of unit
+    /// 0 the whole time and never addressed a second unit at all.
+    #[test]
+    fn test_a_head_above_the_first_platter_reads_the_next_slot() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, false).unwrap(); // unit 0, platter 0
+        h.insert(1, IMAGE_LEN, false).unwrap(); // unit 0, platter 1
+        let _ = h.port_in(port::STATUS);
+        command(&mut h, 7); // seek unit 0 to cylinder 7 — one positioner, both platters
+
+        // Head 2 is platter 1 side 0, and side 0 of a platter is where its own
+        // image starts: the same offset head 0 gives, out of the *other* file.
+        let want = ((7u64 * HEADS as u64) * SECTORS as u64 + 3) * SECTOR_LEN as u64;
+        assert_eq!(
+            command(&mut h, 0x3000 | (2 << 5) | 3),
+            HostRequest::Read { drive: 1, offset: want, len: SECTOR_LEN },
+            "head 2 is the second platter's first side"
+        );
+        // And head 3 is that platter's other side, a track further in.
+        let want = ((7u64 * HEADS as u64 + 1) * SECTORS as u64 + 3) * SECTOR_LEN as u64;
+        assert_eq!(
+            command(&mut h, 0x3000 | (3 << 5) | 3),
+            HostRequest::Read { drive: 1, offset: want, len: SECTOR_LEN }
+        );
+    }
+
+    /// A platter that is not fitted is not ready — the same answer an absent
+    /// drive gives, because from the guest's side it is the same fault.
+    #[test]
+    fn test_an_empty_platter_on_a_present_drive_is_not_ready() {
+        let mut h = Hdsk::new();
+        h.insert(0, IMAGE_LEN, false).unwrap();
+        let _ = h.port_in(port::STATUS);
+        for head in HEADS..MAX_HEAD {
+            command(&mut h, 0x3000 | (u16::from(head) << 5));
+            let st = h.port_in(port::STATUS).0;
+            assert_eq!(st & error::NOT_READY, error::NOT_READY, "head {head}: {st:#04x}");
+        }
+        // But the drive itself is ready, because one of its platters is —
+        // Read Status is a question about the unit, not about a surface.
+        command(&mut h, 0x6000 | iv::CYL_LOW as u16);
+        assert_eq!(h.port_in(port::STATUS).0 & error::NOT_READY, 0);
+    }
+
+    /// Sixteen slots, four platters on each of four drives, unit-major — so
+    /// the first drive's platters are slots 0-3, which is how Hard Disk BASIC
+    /// numbers its disks.
+    #[test]
+    fn test_every_slot_maps_to_one_platter_of_one_drive() {
+        let mut h = Hdsk::new();
+        for slot in 0..SLOTS as u8 {
+            h.insert(slot, IMAGE_LEN, false).unwrap_or_else(|e| panic!("slot {slot}: {e}"));
+        }
+        assert!(h.insert(SLOTS as u8, IMAGE_LEN, false).is_err(), "and no seventeenth");
+        let _ = h.port_in(port::STATUS);
+        for unit in 0..UNITS as u16 {
+            for head in 0..MAX_HEAD as u16 {
+                let want = unit as u8 * PLATTERS as u8 + (head / HEADS as u16) as u8;
+                assert_eq!(
+                    command(&mut h, 0x3000 | (unit << 10) | (head << 5)),
+                    HostRequest::Read {
+                        drive: want,
+                        offset: (head % HEADS as u16) as u64
+                            * SECTORS as u64
+                            * SECTOR_LEN as u64,
+                        len: SECTOR_LEN,
+                    },
+                    "unit {unit} head {head}"
+                );
+            }
+        }
     }
 
     /// A write-protected disk refuses the write and says why, rather than
@@ -1463,7 +1637,8 @@ mod tests {
     fn test_read_status_rewrites_the_unit_select_byte() {
         let mut h = Hdsk::new();
         h.insert(0, IMAGE_LEN, false).unwrap();
-        h.insert(2, IMAGE_LEN, false).unwrap();
+        // Slot 8 is unit 2's first platter — the read below names unit 2.
+        h.insert(2 * PLATTERS as u8, IMAGE_LEN, false).unwrap();
         let _ = h.port_in(port::STATUS);
 
         // Set the start/stop bit, which the rewrite must preserve.
@@ -1562,7 +1737,7 @@ mod tests {
     fn test_initialize_brings_the_heads_home() {
         let mut h = Hdsk::new();
         h.insert(0, IMAGE_LEN, false).unwrap();
-        h.insert(1, IMAGE_LEN, false).unwrap();
+        h.insert(PLATTERS as u8, IMAGE_LEN, false).unwrap(); // unit 1's first platter
         let _ = h.port_in(port::STATUS);
         command(&mut h, 100);
         command(&mut h, (1 << 10) | 42);
@@ -1615,7 +1790,7 @@ mod tests {
     fn test_each_unit_remembers_its_own_cylinder() {
         let mut h = Hdsk::new();
         h.insert(0, IMAGE_LEN, false).unwrap();
-        h.insert(1, IMAGE_LEN, false).unwrap();
+        h.insert(PLATTERS as u8, IMAGE_LEN, false).unwrap(); // unit 1's first platter
         let _ = h.port_in(port::STATUS);
 
         command(&mut h, 5); // unit 0 to cylinder 5
@@ -1623,7 +1798,10 @@ mod tests {
 
         let req = command(&mut h, 0x3000 | (1 << 10) | 3); // read unit 1, sector 3
         let want = ((9u64 * HEADS as u64) * SECTORS as u64 + 3) * SECTOR_LEN as u64;
-        assert_eq!(req, HostRequest::Read { drive: 1, offset: want, len: SECTOR_LEN });
+        assert_eq!(
+            req,
+            HostRequest::Read { drive: PLATTERS as u8, offset: want, len: SECTOR_LEN }
+        );
 
         let req = command(&mut h, 0x3000 | 3); // read unit 0, sector 3
         let want = ((5u64 * HEADS as u64) * SECTORS as u64 + 3) * SECTOR_LEN as u64;

@@ -159,8 +159,8 @@ pub trait Controller: Send {
 
     /// What this board calls one of its slots, in its own documentation.
     ///
-    /// A floppy controller has *drives*; the 88-HDSK has *units*, each carrying
-    /// one platter. The distinction is not pedantry — it is the whole reason a
+    /// A floppy controller has *drives*; the 88-HDSK has *platters*, four to a
+    /// drive. The distinction is not pedantry — it is the whole reason a
     /// booted disk cannot be described in the gateway's drive letters. Our
     /// `A:`-`P:` are our BDOS's; a booted guest is talking to this board, and
     /// what it can reach is decided by its own BIOS and not by us.
@@ -169,6 +169,20 @@ pub trait Controller: Send {
     /// controllers and say so.
     fn slot_word(&self) -> &'static str {
         "drive"
+    }
+
+    /// What this board calls slot `slot`, for a row on a screen.
+    ///
+    /// The word and the number, which is right for every board whose slots are
+    /// a flat row of drives. The 88-HDSK overrides it because its slots are not
+    /// flat: a slot is a platter on a drive, and both coordinates matter to
+    /// whoever is deciding where to put an image.
+    ///
+    /// **Kept short on purpose** — see [`crate::cpm::boot::slot_name`], whose
+    /// test pins the budget at eight characters. A longer label truncates the
+    /// filename off a 40-column PETSCII row.
+    fn slot_label(&self, slot: u8) -> String {
+        format!("{} {slot}", self.slot_word())
     }
 
     /// Every medium this board takes.

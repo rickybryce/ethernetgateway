@@ -2136,8 +2136,11 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         buffer data. Also documented, also as implemented.</li>
                     <li>Heads narrow with the platter count &mdash; &ldquo;the head
                         range of a Drive containing only one platter is 0 through
-                        1&rdquo; &mdash; which is what these single-platter 4.9&nbsp;MB
-                        images are, and why the head count here is 2.</li>
+                        1&rdquo; &mdash; which is why a 4.9&nbsp;MB image is
+                        <em>two</em> heads' worth of surface. <strong>It is not why
+                        the board stops at head 1</strong>, and reading it that way
+                        was a defect for months: see <em>Altair Hard Disk BASIC
+                        counts platters, not drives</em> below.</li>
                     <li>The write-bit deviation is confirmed <em>as a deviation</em>:
                         the manual really does say Write Sector is Read Sector
                         &ldquo;except that bit 13 must be zero rather than one&rdquo;.
@@ -2399,6 +2402,74 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     <li>The body text puts the CRC result on bit 3; the errata
                         says it is <strong>only</strong> on bit 5.</li>
                 </ul>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Altair Hard Disk BASIC counts platters, not drives</h3>
+                <p>
+                    A Datakeeper <em>unit</em> is a drive; the media on it are
+                    <em>platters</em>, and a 4.9&nbsp;MB image is one platter, not
+                    one drive. The board addresses up to four platters per unit
+                    and names them through the head field &mdash; head 0&ndash;7
+                    <em>is</em> platter&times;2&nbsp;+&nbsp;side, which every source
+                    here already said: the manual's head range, <code>CFORMT</code>'s
+                    &ldquo;Bits 7:6 = Platter #, Bit 5 = Side #&rdquo;, and the boot
+                    loader's own comment about A11 choosing the removable platter or
+                    the fixed one.
+                </p>
+                <p>
+                    We modelled a unit as carrying exactly one platter and stopped
+                    the head range at 1. Everything that had ever been measured
+                    still passed &mdash; the CP/M hard disk boots, and its BIOS uses
+                    head 0 and 1 of unit 0 only &mdash; and the defect stayed
+                    invisible until a guest asked for a second <em>disk</em>:
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The symptom.</strong> Boot <code>HDSK01</code>
+                        (Altair Hard Disk BASIC 300-5-F), answer
+                        <code>HIGHEST DISK NUMBER?</code> with anything above 0, and
+                        a bare <code>MOUNT</code> &mdash; which mounts every disk
+                        that answer declared &mdash; fails with
+                        <code>AFMS I/O ERROR CODE=9F</code>, while
+                        <code>MOUNT 0</code> works. The trace says why in one line:
+                        <code>MOUNT 1</code> seeks <strong>unit 0</strong> and reads
+                        <strong>heads 2 and 3</strong>. BASIC's disk number is the
+                        platter. No arrangement of images could have helped &mdash;
+                        putting a second hard disk on unit 1 changed nothing,
+                        because the guest never addressed unit 1.
+                    </p>
+                </div>
+                <p>
+                    So a slot is a platter, and the mapping is
+                    <strong>slot = unit&times;4 + platter</strong> &mdash;
+                    unit-major, so a machine with one Datakeeper has its four
+                    platters at slots 0&ndash;3, which is exactly the numbering
+                    BASIC uses. The rows call them <code>unit 0.1</code> rather
+                    than a bare number, because both coordinates matter to whoever
+                    is deciding where an image lands. The positioner stays per
+                    <em>unit</em> &mdash; one set of heads carries every platter on
+                    a drive, so a seek moves all of them.
+                </p>
+                <p>
+                    Proved the strong way, against the guest's own operating
+                    system: with <code>HDSK02</code> (the Altair Accounting System)
+                    at slot 1, <code>MOUNT</code> answers <code>OK</code> and
+                    <code>FILES 1</code> lists that disk's own directory &mdash;
+                    <code>$A.GLTRA</code>, <code>AP MENU</code>, the payroll and
+                    ledger files &mdash; none of which are on the boot disk.
+                </p>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The lesson is the one this page keeps
+                        relearning.</strong> The narrowing was justified by a real
+                        quotation &mdash; &ldquo;the head range of a Drive
+                        containing only one platter is 0 through 1&rdquo; &mdash;
+                        applied to the wrong subject. That sentence is about the
+                        <em>drive</em> a customer bought; it says nothing about
+                        what the <em>controller</em> may be asked for. A fact about
+                        one image's geometry had been promoted into a limit on the
+                        board, and every test we had agreed, because every disk we
+                        had booted used one platter.
+                    </p>
+                </div>
                 <p class="dim-text">
                     Same clean-room posture as everything else here: this comes
                     from the published manual and will be cross-checked against

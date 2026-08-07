@@ -36,7 +36,9 @@ trap 'rm -rf "$WORK"' EXIT
 #           PCPUT.COM *and* SYSGEN.COM.  Both, because those two gates share
 #           CPM_TOOL_IMAGE and need one tool each; DISK07 has PCPUT but not
 #           SYSGEN, and naming it makes the SYSGEN gate fail on a good disk
-#   HDSK03  63K CP/M 2.2b for the MITS 88-HDSK, the only bootable hard disk
+#   HDSK01  Altair Hard Disk BASIC, whose MOUNT numbers disks by platter
+#   HDSK02  the Altair Accounting System — the fixed-platter companion
+#   HDSK03  63K CP/M 2.2b for the MITS 88-HDSK
 #   TDISK02 Tarbell 1011      TDISK03 z80pack device      TDISK04 VDM-1 screen
 #   TDISK05 CUTER ROM console CDISK02 Cromemco 4FDC, double density
 export CPM_BOOT_DIR="$DISKS"
@@ -49,6 +51,13 @@ export CPM_FLOPPY_BOOT="$DISKS/DISK01.DSK"
 export CPM_FLOPPY_MOUNT="$DISKS/DISK05.DSK"
 export CPM_HDSK_IMAGE="$DISKS/HDSK03.DSK"
 export CPM_HD_BOOT="$DISKS/HDSK03.DSK"
+# The platter gate needs a hard disk whose operating system numbers its disks
+# by platter — Altair Hard Disk BASIC does, CP/M does not — plus any second
+# 88-HDSK image to put on the fixed platter.  HDSK02 is the Accounting System,
+# so the two directories have nothing in common and "did it read the other
+# disk" has an unambiguous answer.
+export CPM_HDSK_BASIC="$DISKS/HDSK01.DSK"
+export CPM_HDSK_DATA="$DISKS/HDSK02.DSK"
 export CPM_TARBELL_IMAGE="$DISKS/TDISK02.DSK"
 export CPM_Z80PACK_IMAGE="$DISKS/TDISK03.DSK"
 export CPM_VDM_IMAGE="$DISKS/TDISK04.DSK"

@@ -728,7 +728,7 @@ impl BootMachine {
     /// machine exists and must not read a 4.9 MB boot image to draw a row.
     /// It is not a weaker answer: no two media may claim overlapping sizes, so
     /// scanning all boards finds the same one a machine carrying it would.
-    pub fn board_for(key: Option<&str>, image_len: u64) -> Option<(&'static str, &'static str)> {
+    pub fn board_for(key: Option<&str>, image_len: u64) -> Option<&'static str> {
         let all;
         let boards: &[Box<dyn Controller>] = match key {
             Some(k) => {
@@ -747,7 +747,31 @@ impl BootMachine {
         boards
             .iter()
             .find(|c| c.accepts(image_len).is_some())
-            .map(|c| (c.name(), c.slot_word()))
+            .map(|c| c.name())
+    }
+
+    /// What the board taking an image this size calls slot `slot`.
+    ///
+    /// Separate from [`BootMachine::board_for`] rather than another field of
+    /// its tuple because a label is *computed* — the 88-HDSK's names a drive
+    /// and a platter — so it cannot be a `&'static str`.
+    pub fn slot_label(key: Option<&str>, image_len: u64, slot: u8) -> Option<String> {
+        let all;
+        let boards: &[Box<dyn Controller>] = match key {
+            Some(k) => {
+                all = super::console::resolve_machine(k)
+                    .boards
+                    .iter()
+                    .map(|b| boards_to_controller(*b))
+                    .collect::<Vec<_>>();
+                &all
+            }
+            None => {
+                all = all_controllers();
+                &all
+            }
+        };
+        boards.iter().find(|c| c.accepts(image_len).is_some()).map(|c| c.slot_label(slot))
     }
 
     /// Can the machine `key` names carry an image this size at all?
@@ -1697,11 +1721,13 @@ mod tests {
         m.insert(0, vec![0x11; Geometry::EIGHT_INCH.image_len() as usize], false).unwrap();
         m.insert(1, vec![0x22; IMAGE_LEN as usize], false).unwrap();
 
-        // The hard disk reads *its* unit 1 and gets its own bytes.
+        // The hard disk reads *its* slot 1 and gets its own bytes. Slot 1 is
+        // unit 0's second platter, which the guest reaches by head — head 2,
+        // since head is platter x 2 + side.
         m.port_out(0xA1, 0); // a status read first, to clear the power-on byte
         m.port_in(0xA1);
-        m.port_out(0xA7, 0x00);
-        m.port_out(0xA3, 0x30 | 0x04); // read sector 0, head 0, unit 1
+        m.port_out(0xA7, 0x40); // head 2, sector 0
+        m.port_out(0xA3, 0x30); // read sector, unit 0
         m.port_out(0xA7, 0x00);
         m.port_out(0xA3, 0x50); // read buffer, all 256
         let mut got = Vec::new();
@@ -1710,15 +1736,15 @@ mod tests {
         }
         assert!(got.iter().all(|&b| b == 0x22), "the hard disk must read its own image");
 
-        // And *its* unit 0 — where the floppy is — is refused, not served with
+        // And *its* slot 0 — where the floppy is — is refused, not served with
         // floppy bytes at a hard-disk offset.
         m.port_out(0xA7, 0x00);
-        m.port_out(0xA3, 0x30); // read sector 0, unit 0
+        m.port_out(0xA3, 0x30); // read sector 0, head 0: unit 0's first platter
         let err = m.port_in(0xA1);
         assert_eq!(
             err & crate::cpm::hdsk::error::NOT_READY,
             crate::cpm::hdsk::error::NOT_READY,
-            "unit 0 holds a floppy, so the hard disk has no disk there: {err:#04x}"
+            "slot 0 holds a floppy, so the hard disk has no platter there: {err:#04x}"
         );
 
         // The floppy still reads its own drive 0, unaffected.
@@ -4070,17 +4096,25 @@ mod tests {
     /// * **Floppy boot** (`DISK01` = MITS CP/M 2.2, `DISK05` at unit 1) — works.
     ///   `DIR B:` lists the mounted disk's files.
     /// * **Hard disk boot** (`HDSK03` = "63K CP/M 2.2b ver 1.5, For MITS
-    ///   88-HDSK") — cannot. `STAT` reports `A: R/W, Space: 3744k` and *nothing
-    ///   else*: that BIOS carries exactly one drive, the whole 4.9 MB platter,
-    ///   so there is no B: to select and `DIR B:` answers `Bdos Err On B: Bad
-    ///   Sector`. Putting a second hard disk at unit 1 changes nothing — proved
-    ///   by the control below, which gets byte-identical output with the unit
-    ///   left empty.
+    ///   88-HDSK") — also works, and **this is the half that used to read the
+    ///   other way**. It was recorded here as a BIOS carrying exactly one
+    ///   drive, on the strength of `DIR B:` answering `Bdos Err On B: Bad
+    ///   Sector` whether or not a disk was mounted. Both readings were true and
+    ///   the conclusion was wrong: its B: is the drive's **fixed platter**,
+    ///   heads 2 and 3, and our controller stopped at head 1, so the slot was
+    ///   never served no matter what was in it. With platters modelled, the
+    ///   same BIOS lists the same slot's files.
     ///
-    /// **Do not "fix" the hard-disk case by patching the guest's BIOS.** The
-    /// disk being right about its own hardware is the premise of booting. The
-    /// way in and out of a booted hard disk is the virtual modem and the disk's
-    /// own `PCGET`/`PCPUT` — see
+    /// The reason it looked settled is worth keeping: the control *was* right —
+    /// mounted and unmounted really did give identical output — and a control
+    /// can only tell you the guest is not seeing your disk. Which of the two
+    /// sides is at fault is a different question, and "the guest's BIOS is
+    /// limited" is the comfortable answer to reach for.
+    ///
+    /// **Still do not "fix" a guest's BIOS.** The disk being right about its
+    /// own hardware is the premise of booting; what changed here is *our*
+    /// hardware being wrong. The way in and out of a booted disk is still the
+    /// virtual modem and the disk's own `PCGET`/`PCPUT` — see
     /// [`test_pcget_pulls_egt80_in_over_the_virtual_modem`].
     ///
     /// Ignored: set `CPM_FLOPPY_BOOT`/`CPM_FLOPPY_MOUNT` to two CP/M floppies
@@ -4134,21 +4168,148 @@ mod tests {
         assert!(stat.contains("A:"), "the boot drive must be there: {stat:?}");
         assert!(
             !stat.contains("B:"),
-            "this BIOS was measured to carry exactly one drive; if it now has a \
-             second, the advice in the docs about hard-disk boots is stale: {stat:?}"
+            "a bare STAT reports the drives that are logged in, and only A: is \
+             until something selects B:. If B: appears here without being asked \
+             for, this is no longer measuring what it thinks: {stat:?}"
         );
 
-        // The control that makes the claim mean something: whatever the guest
-        // does for B:, it does identically with a disk in unit 1 and without
-        // one — so it is not looking there, and no mounting change could help.
+        // The control that makes the claim mean something: with slot 1 empty
+        // the guest's B: is a fault, and with a platter there it is a disk.
+        // Both readings come from the same BIOS asking for the same heads, so
+        // the difference can only be our platter.
         let empty = boot_with(&hd, None, b"DIR B:\r");
         let filled = boot_with(&hd, Some(&hd), b"DIR B:\r");
         println!("--- hard disk boot, DIR B: ---\nempty:  {empty}\nfilled: {filled}");
-        assert_eq!(
-            empty, filled,
-            "a disk at unit 1 changed what the guest sees, so this BIOS does \
-             reach it after all and the hard-disk advice needs rewriting"
+        // Not `contains("B: ")` in either direction — `Bdos Err On B: Bad
+        // Sector` contains it too, which is the trap this test's own doc
+        // comment warns about and which I then walked into.
+        assert!(
+            empty.contains("Bdos Err"),
+            "with the fixed platter absent, B: must be a fault: {empty:?}"
         );
+        assert!(
+            !filled.contains("Bdos Err") && filled.contains("COM"),
+            "an image on the fixed platter must show up at the guest's own B:, \
+             which is heads 2 and 3 of the same drive: {filled:?}"
+        );
+
+        // And it is genuinely that image being read, not A: answered twice: the
+        // same file is on both platters here, so the *set* of names must match
+        // even though the BIOS reads the two with different skews (its own
+        // source: `HD0SKEW equ 1`, `HD1SKEW equ 13`).
+        let a_side = boot_with(&hd, Some(&hd), b"DIR\r");
+        // Listing rows only — the echoed command and the `A>` prompt are on
+        // lines of their own, and taking them made "DIR" and the drive letters
+        // into filenames.
+        fn names(s: &str) -> Vec<&str> {
+            let mut v: Vec<&str> = s
+                .lines()
+                .filter(|l| l.starts_with("A: ") || l.starts_with("B: "))
+                .flat_map(|l| l[3..].split(':'))
+                .flat_map(|f| f.split_whitespace())
+                .filter(|w| w.len() <= 8 && w.chars().all(|c| c.is_ascii_alphanumeric()))
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+        assert_eq!(
+            names(&a_side),
+            names(&filled),
+            "the same image on both platters must list the same files"
+        );
+    }
+
+    /// **Altair Hard Disk BASIC's `MOUNT` reaches every platter it was told
+    /// about.**
+    ///
+    /// The gate for the platter model, and it is a gate rather than a unit test
+    /// because nothing short of the guest's own operating system can tell the
+    /// two models apart. Under the old one — a unit carrying exactly one
+    /// platter — every measurement we had still passed: the CP/M hard disk
+    /// boots, and its BIOS never asks for a head above 1. This disk does.
+    ///
+    /// `MOUNT` with no argument mounts every disk the operator declared at
+    /// `HIGHEST DISK NUMBER?`, and BASIC numbers its disks by **platter**, so
+    /// disk 1 is head 2 of unit 0. With one platter per unit that read as "off
+    /// the end of the disk" and `MOUNT` failed with `AFMS I/O ERROR CODE=9F`
+    /// while `MOUNT 0` worked — which is exactly how it was reported.
+    ///
+    /// The oracle is the companion disk's own directory, not a string that
+    /// might mean anything: `FILES 1` must list a name that `FILES 0` does not,
+    /// which only a genuinely different disk can produce. The control is the
+    /// same boot with slot 1 empty, where `MOUNT` must still fail — otherwise
+    /// this would pass on a build that quietly served the boot disk twice.
+    ///
+    /// Ignored: set `CPM_HDSK_BASIC` to `HDSK01` (Altair Hard Disk BASIC) and
+    /// `CPM_HDSK_DATA` to another 88-HDSK image.
+    #[test]
+    #[ignore]
+    fn test_hard_disk_basic_mounts_every_platter() {
+        let (Ok(basic), Ok(data)) =
+            (std::env::var("CPM_HDSK_BASIC"), std::env::var("CPM_HDSK_DATA"))
+        else {
+            eprintln!("set CPM_HDSK_BASIC and CPM_HDSK_DATA to run this");
+            return;
+        };
+
+        /// Boot Hard Disk BASIC, declare `highest` as the top disk number, and
+        /// run `cmds`. `second` goes in slot 1 — unit 0's second platter.
+        ///
+        /// The sign-on questions are answered by measurement, not by guessing:
+        /// `LINEPRINTER?` rejects `N` and every digit and re-asks, so a blank
+        /// line here would loop forever and the failure would look like a hung
+        /// machine. `C` is a Centronics printer and is accepted.
+        fn boot_basic(basic: &str, second: Option<&str>, highest: &str, cmds: &[&str]) -> String {
+            let mut m = BootMachine::new();
+            m.insert(0, std::fs::read(basic).unwrap(), true).expect("the hard disk");
+            if let Some(p) = second {
+                m.insert(1, std::fs::read(p).unwrap(), true).expect("the second platter");
+            }
+            // 8080, because this is a 1979 MITS disk and the machine it ran on
+            // had no Z80 in it.
+            let mut cpu = BootMachine::new_cpu_for(crate::cpm::cpu::CPU_8080);
+            m.boot(&mut cpu, 0).expect("boots");
+            assert!(
+                run_until_quiet(&mut m, &mut cpu, 200_000_000).contains(&b'?'),
+                "{basic} never asked its first question"
+            );
+            for answer in ["", "C", highest, "", "1", "1", "79"] {
+                type_at(&mut m, &mut cpu, format!("{answer}\r").as_bytes(), 200_000_000);
+            }
+            let mut out = String::new();
+            for c in cmds {
+                out.push_str(&type_at(&mut m, &mut cpu, format!("{c}\r").as_bytes(), 800_000_000));
+            }
+            out
+        }
+
+        // The control first: two disks declared, only one platter fitted.
+        let alone = boot_basic(&basic, None, "1", &["MOUNT"]);
+        assert!(
+            alone.contains("ERROR"),
+            "with nothing on platter 1, MOUNT must fail — otherwise this gate \
+             cannot tell a working second platter from the boot disk served \
+             twice: {alone:?}"
+        );
+
+        let both = boot_basic(&basic, Some(&data), "1", &["MOUNT", "FILES 0", "FILES 1"]);
+        assert!(!both.contains("ERROR"), "MOUNT must reach both platters: {both:?}");
+
+        // Split the two listings and prove the second is a different disk.
+        let (zero, one) = both.split_once("FILES 1").expect("both listings");
+        let names = |s: &str| -> Vec<String> {
+            s.lines().filter_map(|l| l.split_whitespace().next()).map(str::to_string).collect()
+        };
+        let on_zero = names(zero);
+        let only_on_one: Vec<String> =
+            names(one).into_iter().filter(|n| !on_zero.contains(n)).collect();
+        assert!(
+            !only_on_one.is_empty(),
+            "FILES 1 listed nothing FILES 0 did not, so the guest may be \
+             reading one disk twice:\n{both}"
+        );
+        println!("platter 1 carries {} files of its own, e.g. {:?}", only_on_one.len(), &only_on_one[..only_on_one.len().min(5)]);
     }
 
     /// **Does each guest's own operating system reach the disk we mounted at
@@ -4158,9 +4319,15 @@ mod tests {
     /// reasoned about. This is the sweep behind it, and it is a separate
     /// measurement because "the second drive works" is a claim about **each
     /// disk's own BIOS**, not about our controller: a MITS floppy CP/M reaches
-    /// four units, the 88-HDSK BIOS carries exactly one, and a disk that is not
-    /// CP/M at all has no `DIR` to ask with. Only booting each one can say
-    /// which of those any particular disk is.
+    /// four units, the 88-HDSK CP/M reaches the drive's fixed platter as its
+    /// B:, and a disk that is not CP/M at all has no `DIR` to ask with. Only
+    /// booting each one can say which of those any particular disk is.
+    ///
+    /// This sweep is also where a limit of *ours* can hide as a limit of
+    /// theirs. It read the 88-HDSK CP/M as a one-drive BIOS for months, and it
+    /// was not — the board stopped at head 1 and never served the platter that
+    /// BIOS was asking for. A guest that cannot see a disk is evidence about
+    /// the pair, not about the guest.
     ///
     /// The companion is chosen by measurement, never by filename: the first
     /// other image in the folder that is **the same size** (so whatever board
