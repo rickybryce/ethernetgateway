@@ -584,7 +584,7 @@
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="overview">
                 <div class="section-title">Overview</div>
-                <p class="intro">The CP/M emulator runs real Z80 <code>.COM</code> software against an emulated CP/M 2.2, with a virtual Hayes modem the guest can dial out through.</p>
+                <p class="intro">The CP/M emulator runs real Z80 &mdash; or 8080, see <code>cpm_cpu</code> &mdash; <code>.COM</code> software against an emulated CP/M 2.2, with a virtual Hayes modem the guest can dial out through.</p>
 
                 <p>
                     Two separate features in this gateway both say &ldquo;CP/M&rdquo;, and it is
@@ -597,7 +597,7 @@
                     <tbody>
                         <tr>
                             <td><strong>CP/M emulator</strong><br><span class="dim-text">(this page)</span></td>
-                            <td>A real Z80 CPU emulator running actual <code>.COM</code> programs against an emulated CP/M 2.2 &mdash; BDOS, BIOS, optional RomWBW HBIOS, and a virtual modem.</td>
+                            <td>A real CPU emulator &mdash; a Z80, or an 8080 if <code>cpm_cpu</code> says so &mdash; running actual <code>.COM</code> programs against an emulated CP/M 2.2 &mdash; BDOS, BIOS, optional RomWBW HBIOS, and a virtual modem.</td>
                             <td><code>src/cpm/</code> + <code>telnet/cpm_emu.rs</code></td>
                         </tr>
                         <tr>
@@ -634,7 +634,7 @@
                     <code>HELP</code> says both.
                 </p>
                 <p>
-                    <strong>The drives are shared between sessions.</strong> Each session gets its own Z80 and
+                    <strong>The drives are shared between sessions.</strong> Each session gets its own CPU and
                     its own 64&nbsp;KB, but one set of folders serves all of them, so two people in the emulator
                     see the same files. A session entering while another is already inside is told so. Writing is
                     protected: a file one session is writing is <em>claimed</em> until it closes the file or
@@ -679,7 +679,7 @@
                         <tr><td><code>cpm_boot_image</code></td><td><em>(empty)</em></td><td>What the CP/M menu item runs: empty = the CP/M emulator, or a bare filename in <code>CPM/images</code> to cold-boot that disk. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_machine</code></td><td><code>altair_2sio</code></td><td>Which machine a <em>booted</em> disk thinks it is on &mdash; specifically where it finds its console. Ignored by the emulator, which has no console to place. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_backspace</code></td><td><code>backspace</code></td><td>What a <em>booted</em> disk is handed when you press Backspace &mdash; <code>backspace</code> (BS, <code>08h</code>) or <code>rubout</code> (DEL, <code>7Fh</code>). Ignored by the emulator, which reads its own console line and accepts either. The telnet boot picker asks again per disk and starts from this. See <a href="#booting">Booting</a>.</td></tr>
-                        <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. <strong>EGT80 is Z80 code</strong> and will crash an 8080. See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. <strong>EGT80 is Z80 code</strong> and will crash an 8080, and the <code>hbios_*</code> modem profiles emulate RomWBW &mdash; Z80/Z180 firmware &mdash; so the software that looks for it will not run on an 8080 either. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
                         <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
                         <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>

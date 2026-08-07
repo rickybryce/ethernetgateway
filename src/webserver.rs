@@ -3386,6 +3386,60 @@ mod tests {
         );
     }
 
+    /// **Every CP/M select must be rendered once AND collected by the save.**
+    ///
+    /// The tests above prove each select is *drawn* with the right options
+    /// selected, which is the half that is easy to see. The other half is the
+    /// bug class that hit `allow_relay_kermit` and is invisible: a field the
+    /// save path does not collect renders perfectly, the operator changes it,
+    /// and the save silently drops it. `cpm_cpu` arrived with the same shape —
+    /// a select in the CP/M panel and one line in `plain_keys` — so the whole
+    /// cluster is pinned here rather than only the new one.
+    ///
+    /// Exactly once, too: the page is a single form, so a name appearing twice
+    /// submits twice and the last value wins.
+    #[test]
+    fn test_cpm_selects_are_rendered_and_saved() {
+        let cfg = Config::default();
+        let page = render_main_page(&cfg, None);
+        let keys = [
+            "cpm_boot_image",
+            "cpm_boot_machine",
+            "cpm_boot_backspace",
+            "cpm_cpu",
+            "cpm_emu_uart",
+        ];
+        for name in keys {
+            assert_eq!(
+                page.matches(&format!("name=\"{name}\"")).count(),
+                1,
+                "{name} must appear exactly once in the form"
+            );
+        }
+
+        // And a submitted value comes back out of the save path.  Values that
+        // `apply_config_key` accepts, so a refusal downstream cannot be mistaken
+        // for the field being collected.
+        let mut form = empty_form();
+        form.insert("cpm_boot_machine".into(), crate::cpm::console::AUTO_MACHINE.into());
+        form.insert("cpm_boot_backspace".into(), crate::cpm::boot::BACKSPACE_RUBOUT.into());
+        form.insert("cpm_cpu".into(), crate::cpm::cpu::CPU_8080.into());
+        form.insert("cpm_emu_uart".into(), crate::cpm::uart::DEFAULT_UART.into());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+        for (name, want) in [
+            ("cpm_boot_machine", crate::cpm::console::AUTO_MACHINE),
+            ("cpm_boot_backspace", crate::cpm::boot::BACKSPACE_RUBOUT),
+            ("cpm_cpu", crate::cpm::cpu::CPU_8080),
+            ("cpm_emu_uart", crate::cpm::uart::DEFAULT_UART),
+        ] {
+            assert_eq!(
+                updates.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()),
+                Some(want),
+                "{name} is rendered but the save does not collect it"
+            );
+        }
+    }
+
     /// The CPU needs all three UIs too, both processors offered, and — as with
     /// the backspace select above — the *behaviour* selected rather than the
     /// string, since `is_8080` reads anything it does not recognise as the Z80.
@@ -4572,20 +4626,37 @@ mod tests {
     /// submitted — so reading absence as "set to none" would unmount exactly
     /// the drives the screen said could not be changed.  Same hazard as the
     /// role-gated checkboxes, and the same reason it needs a test.
+    ///
+    /// **It takes the registry lock, and that is not a formality.**
+    /// `apply_cpm_mount_form` is not a pure function: a submitted-but-empty
+    /// select means "drive folder", so this call really does unmount drive B:
+    /// in the process-global table.  This test used to run without the lock on
+    /// the strength of a comment saying "nothing was mounted in this test
+    /// process" — true of the test in isolation, and false the moment it
+    /// interleaves with one that mounts something.  That is the whole mechanism
+    /// of the release-only flake in
+    /// [`test_a_save_does_not_wipe_mounts_that_are_live`]: it mounts B: and C:,
+    /// this test unmounts B: underneath it, and the assertion comes back
+    /// `C=altair8_two.dsk` with no B — which reads as a save wiping a mount,
+    /// i.e. as the very defect that test exists to catch.
     #[test]
     fn test_absent_mount_select_is_not_read_as_unmount() {
+        use crate::cpm::image::registry;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
         let cfg = Config::default();
         let mut fields: HashMap<String, String> = HashMap::new();
         // Only drive B: submitted, and empty (an explicit "drive folder").
         fields.insert("cpm_mount_b".to_string(), String::new());
         let (_notice, value) = apply_cpm_mount_form(&fields, &cfg);
-        // Nothing was mounted in this test process, so the result is empty —
-        // the point is that it did not panic and did not invent mounts for the
-        // fifteen drives whose selects were absent.
+        // Nothing is mounted — the reset above makes that true rather than
+        // assumed — so the point is that it did not panic and did not invent
+        // mounts for the fifteen drives whose selects were absent.
         assert!(
             !value.contains("A="),
             "an unsubmitted drive must not be given an image: {value}"
         );
+        registry::tests_reset();
     }
 
     #[test]

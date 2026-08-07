@@ -236,7 +236,8 @@ pub enum Stop {
     Aborted,
 }
 
-/// The emulated CP/M machine: a Z80 CPU plus its 64 KB address space.
+/// The emulated CP/M machine: a CPU — a Z80, or the 8080 `cpm_cpu` can name
+/// instead — plus its 64 KB address space.
 pub struct Cpm {
     cpu: Cpu,
     mem: CpmMachine,

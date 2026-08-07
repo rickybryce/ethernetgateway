@@ -700,7 +700,11 @@ impl TelnetSession {
         // booted guest is dialable exactly as an emulator session is.
         let _peer_reg = cpm_peer_register(modem.enabled());
 
-        let mut cpu = BootMachine::new_cpu_for(&config::get_config().cpm_cpu);
+        // Read once and used twice — to build the CPU and to say which one the
+        // guest got.  Two reads could straddle another session's save and put a
+        // notice on the screen that the machine disagrees with.
+        let cpu_setting = config::get_config().cpm_cpu.clone();
+        let mut cpu = BootMachine::new_cpu_for(&cpu_setting);
         if let Err(e) = machine.boot(&mut cpu, 0) {
             self.send_line(&format!("  {}", self.red(&e.to_string()))).await?;
             self.send_line("").await?;
@@ -727,6 +731,13 @@ impl TelnetSession {
         if let Some(note) = &detected_note {
             let width = if self.terminal_type == TerminalType::Petscii { 38 } else { 76 };
             self.send_line(&format!("  {}", self.dim(&truncate_to_width(note, width)))).await?;
+        }
+        // The processor, on the same rule as the console below: only when it is
+        // not the default.  A booted guest that decodes an instruction the way
+        // the other CPU would looks like a corrupt disk, and this is the line
+        // that says otherwise.
+        if crate::cpm::cpu::is_8080(&cpu_setting) {
+            self.send_line(&format!("  {}", self.dim("CPU: 8080."))).await?;
         }
         if machine_key != crate::cpm::console::DEFAULT_MACHINE {
             let c = machine.console();

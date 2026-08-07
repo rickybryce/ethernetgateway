@@ -2755,9 +2755,17 @@ mod tests {
     /// committed to the wrong track all fail it, and each of those has happened
     /// here at least once.
     ///
+    /// **`CPM_TOOL_IMAGE` is shared with
+    /// [`test_capture_altair_ground_truth`], which needs `PCPUT.COM` on the
+    /// same disk**, and the two gates used to document *opposite* assignments
+    /// of these two variables — so each passed alone and one always failed when
+    /// the set was run in one go. DISK05 carries both tools; the disk under
+    /// study is DISK01. Nothing on the host is modified either way: unit 1 is
+    /// writable in memory only. `tools/cpm-live-gates` sets the whole set.
+    ///
     /// Ignored:
-    ///   `CPM_TOOL_IMAGE=...DISK01.DSK`   boots, carries SYSGEN
-    ///   `CPM_DATA_IMAGE=...DISK05.DSK`   a different CP/M, whose system is replaced
+    ///   `CPM_TOOL_IMAGE=...DISK05.DSK`   boots, carries SYSGEN *and* PCPUT
+    ///   `CPM_DATA_IMAGE=...DISK01.DSK`   a different CP/M, whose system is replaced
     #[test]
     #[ignore]
     fn test_a_system_track_written_by_a_guest_still_boots() {
@@ -3595,12 +3603,20 @@ mod tests {
     /// was written for this disk and sends it out byte for byte.
     ///
     /// Two drives, because the disk being *measured* must not be touched. Drive
-    /// 0 is a tool disk carrying `PCPUT.COM` (DISK07 in the Altair-Duino set);
-    /// drive 1 is the disk under study, mounted read-only, and files are named
-    /// `B:NAME.EXT`.
+    /// 0 is a tool disk carrying `PCPUT.COM`; drive 1 is the disk under study,
+    /// mounted read-only, and files are named `B:NAME.EXT`.
+    ///
+    /// **`CPM_TOOL_IMAGE` is shared with
+    /// [`test_a_system_track_written_by_a_guest_still_boots`], which needs
+    /// `SYSGEN.COM` on the same disk**, so the tool disk has to carry both —
+    /// DISK05 does. This used to name DISK07, which carries PCPUT but *not*
+    /// SYSGEN: it satisfied this gate and made the other one fail with
+    /// `SYSGEN?`, which reads like a broken guest. The string `SYSGEN` is in
+    /// DISK07's bytes, inside another file; a name in the image is not a file
+    /// in the directory. `tools/cpm-live-gates` sets the whole set at once.
     ///
     /// Ignored:
-    ///   `CPM_TOOL_IMAGE=...DISK07.DSK`   boots, has PCPUT.COM
+    ///   `CPM_TOOL_IMAGE=...DISK05.DSK`   boots, has PCPUT.COM *and* SYSGEN.COM
     ///   `CPM_DATA_IMAGE=...DISK01.DSK`   the disk to measure, drive B:
     ///   `CPM_GT_FILES=DEMO.PRN,PIP.COM`  files to pull off B:
     ///   `CPM_GT_DIR=/tmp/gt`             where to write them
@@ -4214,14 +4230,24 @@ mod tests {
             Some(t)
         }
 
-        let read = |n: &str| std::fs::read(std::path::Path::new(&dir).join(n)).unwrap();
+        // Reported rather than unwrapped, the lesson the boot survey next door
+        // learned the hard way: one file this process cannot read — a
+        // permission, a half-copied download — would otherwise panic the run and
+        // hide every disk after it, which reads exactly like a regression.
+        let read = |n: &str| match std::fs::read(std::path::Path::new(&dir).join(n)) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                println!("  {n:<16} unreadable ({e})");
+                None
+            }
+        };
         let (mut asked, mut reached) = (0u32, 0u32);
         let mut missed: Vec<String> = Vec::new();
         for name in &names {
-            let bytes = read(name);
+            let Some(bytes) = read(name) else { continue };
             let own = dir_tokens(&bytes).unwrap_or_default();
             let Some((second, want)) = names.iter().filter(|n| *n != name).find_map(|n| {
-                let b = read(n);
+                let b = read(n)?;
                 if b.len() != bytes.len() {
                     return None; // a different medium — not this machine's unit 1
                 }
@@ -4241,7 +4267,8 @@ mod tests {
                 println!("  {name:<16} skipped — {e}");
                 continue;
             }
-            if let Err(e) = m.insert(1, read(&second), true) {
+            let Some(companion) = read(&second) else { continue };
+            if let Err(e) = m.insert(1, companion, true) {
                 println!("  {name:<16} unit 1 refused {second}: {e}");
                 continue;
             }

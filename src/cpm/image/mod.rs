@@ -1378,14 +1378,24 @@ mod tests {
     }
 
     /// A traversal attempt must be refused before anything touches the disk.
+    ///
+    /// Holds the registry lock even though the name is refused before the table
+    /// is reached: "this call cannot reach the global table" is a claim about
+    /// today's code path, and the two calls below it in this file are the kind
+    /// that can.
     #[test]
     fn test_mount_refuses_a_traversing_name() {
+        let _g = registry::tests_lock();
         let err = mount_image(Path::new("/tmp"), 0, "../../etc/passwd").unwrap_err();
         assert!(err.contains("not a valid image name"), "{err}");
     }
 
+    /// Under the lock: this unmounts a real drive in the process-global table,
+    /// and "nobody else uses drive 9" is exactly the assumption that made the
+    /// mount-form test next door a source of intermittent failures elsewhere.
     #[test]
     fn test_unmount_an_empty_drive_says_so() {
+        let _g = registry::tests_lock();
         let err = unmount_drive(9).unwrap_err();
         assert!(err.contains("no image mounted"), "{err}");
     }

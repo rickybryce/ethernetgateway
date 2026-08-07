@@ -2284,18 +2284,32 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
-/// **The CP/M boot screen is now FULL.**
+/// **The CP/M boot screen is now FULL, counted from the screen itself.**
 ///
-/// header(3) + blank + 4 settings + blank + 3 dim lines (the longer branch, a
-/// disk is configured) + 2 dim CPU lines + blank + 4 keys + blank + Back +
-/// prompt = 22, which is the whole PETSCII budget.  Pinned because the next
-/// setting added here has nowhere to go and must open a submenu instead —
-/// exactly how this screen came to exist when the CP/M one filled up.
+/// Adding the CPU took it to exactly 22 rows, the whole PETSCII budget, so the
+/// next setting there has nowhere to go and must open a submenu instead —
+/// which is how this screen came to exist when the CP/M one filled up.
+///
+/// Counted from the source rather than written down as a sum: a hand-copied
+/// row count agrees with the screen only until somebody adds a line, and then
+/// it passes while the screen overflows. The other screen tests here do the
+/// arithmetic by hand because their layouts are fixed; this one is at its limit,
+/// which is exactly when the number has to be a measurement.
 #[test]
 fn test_cpm_boot_screen_row_count() {
-    let rows = 3 + 1 + 4 + 1 + 3 + 2 + 1 + 4 + 1 + 1 + 1;
-    assert!(rows <= 22, "CP/M boot screen is {rows} rows, exceeds 22");
-    assert_eq!(rows, 22, "if this screen has shrunk, say so here before adding to it");
+    let src = include_str!("config_ui.rs");
+    let start = src.find("pub(in crate::telnet) async fn cpm_boot_settings").expect("the fn");
+    let end = src[start..].find("let prompt = format!").expect("the prompt line") + start;
+    let drawn = src[start..end].matches("self.send_line(").count();
+    // Every row is a `send_line`, less the two lines of whichever dim branch
+    // does not run (3 when a disk is configured, 2 when it is not), plus the
+    // prompt itself — drawn with `send` so the cursor stays on it.
+    let rows = drawn - 2 + 1;
+    assert!(rows <= 22, "CP/M boot screen is {rows} rows, over the 22-row PETSCII budget");
+    assert_eq!(
+        rows, 22,
+        "this screen was full at 22; if it has shrunk, say why here before filling it again"
+    );
 }
 
 /// Both CPU labels have to fit the 40-column PETSCII screen once the
@@ -7234,6 +7248,30 @@ fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
         line,
         PETSCII_WIDTH
     );
+}
+
+/// **Both spellings of the emulator's sign-on line fit a C64 row.**
+///
+/// The 8080 form is the one at risk: it carries a warning as well as the
+/// version, and it is drawn only when a non-default processor is configured —
+/// so an overflow here would wrap the screen for exactly the operators who are
+/// already doing something unusual, and nobody else would ever see it.
+#[test]
+fn test_cpm_banner_lines_fit_petscii() {
+    for line in [
+        crate::telnet::cpm_emu::CPM_BANNER_Z80,
+        crate::telnet::cpm_emu::CPM_BANNER_8080,
+    ] {
+        assert!(
+            line.len() + 2 <= PETSCII_WIDTH,
+            "banner '{line}' is {} cols with the indent, over {PETSCII_WIDTH}",
+            line.len() + 2
+        );
+    }
+    // The 8080 line has to name the processor and say what it costs; a version
+    // string alone would leave the operator to discover EGT80 crashing.
+    assert!(crate::telnet::cpm_emu::CPM_BANNER_8080.contains("8080"));
+    assert!(crate::telnet::cpm_emu::CPM_BANNER_8080.contains("EGT80"));
 }
 
 /// The emulator's out-of-band drain probes the wire once per CPU batch — and a

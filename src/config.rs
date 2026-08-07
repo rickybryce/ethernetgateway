@@ -382,7 +382,7 @@ const DEFAULT_CPM_EMU_ENABLED: bool = true;
 /// entirely — as a way in.  Now the narrow behaviour is the opt-in and the rest
 /// of the allowlist stays intact either way.
 const DEFAULT_DISABLE_GATEWAY_CONNECTIONS: bool = false;
-/// Runaway ceiling for the CP/M emulator, in millions of Z80 instructions
+/// Runaway ceiling for the CP/M emulator, in millions of instructions
 /// per program run (2000 = 2 billion).  Generous enough for real utilities
 /// (an assembler pass, a BASIC run) yet finite so a compute-bound `.COM`
 /// that never reads the console still terminates.  Interactive programs are
@@ -818,9 +818,10 @@ pub struct Config {
     /// [`DEFAULT_DISABLE_GATEWAY_CONNECTIONS`].  Loopback is never affected.
     pub disable_gateway_connections: bool,
     /// Runaway ceiling for a single CP/M-emulator program run, in millions
-    /// of Z80 instructions (2000 = 2 billion).  A compute-bound `.COM` that
-    /// never performs console I/O is aborted once it reaches this count, so
-    /// the user always regains the `A>` prompt.
+    /// of instructions (2000 = 2 billion) — instructions of whichever
+    /// processor `cpm_cpu` names, a Z80 unless it says otherwise.  A
+    /// compute-bound `.COM` that never performs console I/O is aborted once it
+    /// reaches this count, so the user always regains the `A>` prompt.
     pub cpm_emu_max_minstr: u32,
     /// Virtual-modem access profile for the CP/M emulator — which machine/port
     /// (`rc2014_1b`, `altair_2sio1`, …) the emulated modem answers at, the BDOS
@@ -2339,9 +2340,9 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("\
 # CP/M emulator.  When enabled, the main menu offers a 'CP/M
-# System' item that runs a real CP/M 2.2 environment in an emulated Z80,
-# running .COM software the user launches, sandboxed to a CPM/
-# directory under transfer_dir.  On by default; set it off and the menu
+# System' item that runs a real CP/M 2.2 environment on an emulated Z80 - or
+# an 8080, see cpm_cpu below - running .COM software the user launches,
+# sandboxed to a CPM/ directory under transfer_dir.  On by default; set it off and the menu
 # item is hidden and the key is rejected.
 # cpm_emu_enabled: the CP/M emulator main-menu item (on by default).  It runs
 #   the Z80 software a user launches -- be sure you trust the CP/M files you
@@ -2350,7 +2351,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   The guest reaches the network only through cpm_emu_uart, which now defaults
 #   to rc2014_1b (the port the bundled EGT80 terminal expects); set it to off
 #   to leave the emulator with no modem.
-# cpm_emu_max_minstr: runaway ceiling per program run, in millions of Z80
+# cpm_emu_max_minstr: runaway ceiling per program run, in millions of
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.
 # cpm_emu_uart: how the emulated CP/M reaches the virtual modem.  off

@@ -1,4 +1,5 @@
-//! CP/M emulator — a real CP/M 2.2 environment running in an emulated Z80,
+//! CP/M emulator — a real CP/M 2.2 environment running on an emulated Z80
+//! (or 8080 — `cpm_cpu`, the one CP/M key that serves a booted disk too),
 //! reachable as its own main-menu item over telnet/SSH.
 //!
 //! This is a **completely separate** feature from the Gateway Shell
@@ -149,6 +150,13 @@ pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::
 
 /// Highest emulated drive letter (A:–P:, the 16 drives CP/M 2.2 allows).
 const CPM_LAST_DRIVE: u8 = b'P';
+
+/// The emulator's sign-on line on the default processor.
+pub(in crate::telnet) const CPM_BANNER_Z80: &str = "CP/M 2.2 (iz80).  Type HELP.";
+
+/// The same line when `cpm_cpu` selects the 8080, where the warning is worth
+/// more than the core's name: EGT80 is on drive A: and is Z80 code.
+pub(in crate::telnet) const CPM_BANNER_8080: &str = "CP/M 2.2 (8080).  EGT80 needs Z80.";
 
 /// EGT80, the gateway's own CP/M terminal, carried inside the binary and
 /// placed on drive A: when the drive folders are created (see
@@ -332,6 +340,14 @@ impl TelnetSession {
             return self.cpm_boot_session(&path, false, erase).await;
         }
 
+        // The processor this visit runs on, read ONCE.  The banner below, the
+        // machine `cpmemu_repl` builds and what `VER` reports all come from
+        // this one value: another session can save the config while this one is
+        // running, and a screen that says one processor while the machine runs
+        // another is the failure every other CP/M setting here is careful to
+        // avoid.
+        let cpu_setting = config::get_config().cpm_cpu.clone();
+
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
@@ -352,9 +368,20 @@ impl TelnetSession {
             self.amber("files you run in the emulator.")
         ))
         .await?;
+        // The processor is named only when it is not the default, so the usual
+        // screen is unchanged and the unusual one says so on a line the
+        // operator is already reading — no new row, because this screen has a
+        // 40-column PETSCII budget like every other.  Both forms are measured
+        // against it by `test_cpm_banner_lines_fit_petscii`; the 8080 one drops
+        // "iz80" to make room for the warning, which is the part that matters
+        // when the terminal on drive A: is about to crash.
         self.send_line(&format!(
             "  {}",
-            self.dim("CP/M 2.2 (iz80).  Type HELP.")
+            self.dim(if crate::cpm::cpu::is_8080(&cpu_setting) {
+                CPM_BANNER_8080
+            } else {
+                CPM_BANNER_Z80
+            })
         ))
         .await?;
         // Boot-banner memory report, as a real CP/M system prints on cold start.
@@ -401,7 +428,7 @@ impl TelnetSession {
         let base = std::fs::canonicalize(&base).unwrap_or(base);
         let mut fs = CpmFs::new(base);
 
-        self.cpmemu_repl(&mut fs).await
+        self.cpmemu_repl(&mut fs, &cpu_setting).await
     }
 
     /// The disk `cpm_boot_image` names, if it names one that is really there.
@@ -515,7 +542,11 @@ impl TelnetSession {
     /// else is looked up as `<verb>.COM` on the drive and run as a real
     /// transient program, falling back to CP/M's bad-verb error (`VERB?`)
     /// when no such file exists.
-    async fn cpmemu_repl(&mut self, fs: &mut CpmFs) -> Result<(), std::io::Error> {
+    async fn cpmemu_repl(
+        &mut self,
+        fs: &mut CpmFs,
+        cpu_setting: &str,
+    ) -> Result<(), std::io::Error> {
         // One machine persists for the whole session: the TPA (and the low
         // vectors, reinstalled each load) survive across program runs, so a
         // warm-boot back to `A>` leaves the last program's memory image in
@@ -524,7 +555,7 @@ impl TelnetSession {
         // On the processor the operator picked -- the same key a booted disk
         // reads, because a machine that ran one CPU here and another there
         // would be two answers to one question.
-        let mut cpm = Cpm::new_for(&config::get_config().cpm_cpu);
+        let mut cpm = Cpm::new_for(cpu_setting);
         // Wire the virtual-modem access (if the operator selected one) so a
         // CP/M comms program finds its modem at the configured machine ports
         // or on the BDOS AUX: device.  The modem "brain" (AT layer + outbound
@@ -617,9 +648,17 @@ impl TelnetSession {
                 }
                 "HELP" | "?" => self.cpmemu_help().await?,
                 "VER" | "VERSION" => {
+                    // Names the processor actually running rather than the one
+                    // that used to be the only choice: `VER` is where a guest
+                    // program's author looks when something decodes oddly, and
+                    // a machine that reports a Z80 while running an 8080 sends
+                    // them to the wrong place.
                     self.send_line(&format!(
                         "  {}",
-                        self.green("CP/M 2.2 emulator (iz80 Z80 core)")
+                        self.green(&format!(
+                            "CP/M 2.2 emulator (iz80 {} core)",
+                            if crate::cpm::cpu::is_8080(cpu_setting) { "8080" } else { "Z80" }
+                        ))
                     ))
                     .await?;
                     self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
@@ -1155,7 +1194,7 @@ impl TelnetSession {
         }
     }
 
-    /// Run a loaded program on the emulated Z80, servicing the console BDOS
+    /// Run a loaded program on the emulated CPU, servicing the console BDOS
     /// group against the live session, until it warm-boots, the user breaks
     /// out, or the instruction ceiling is hit.  Returns `Ok(false)` if the
     /// session disconnected (the caller should leave the emulator), else

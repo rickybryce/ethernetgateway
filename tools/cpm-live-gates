@@ -1,0 +1,79 @@
+#!/bin/sh
+# Run every CP/M live gate — the `#[ignore]` tests that need real disk images.
+#
+# These are the project's ground truth: booting, mounting, writing, the virtual
+# modem, EGT80 and the CPU exercisers, measured against disks somebody else
+# made.  They are `#[ignore]` because CI has no images, and each one reads its
+# own environment variable — which meant the *set* of variables lived only in
+# whoever last ran them.  Guessing it wrongly does not look like a mistake: the
+# gate boots, the guest says something reasonable, and the test fails as though
+# the code had regressed.  That happened, which is why this file exists.
+#
+#   usage:  tools/cpm-live-gates <altair-disk-folder> [extra cargo test args]
+#
+# The folder is the Altair-Duino disk collection (DISK01..DISK16, HDSK01..03,
+# TDISK01..06, CDISK01..03).  Nothing here is written to it; every gate that
+# writes works on a copy in memory or in a temp dir.
+#
+# Release, because several gates run billions of instructions.  With no images
+# at all every gate still passes — it skips itself and says so — and that is how
+# CI runs them.
+set -e
+
+DISKS=${1:?usage: tools/cpm-live-gates <altair-disk-folder> [cargo args]}
+[ -d "$DISKS" ] || { echo "no such folder: $DISKS" >&2; exit 1; }
+shift || true
+
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# Which disk each gate wants, and why that one:
+#   DISK01  MITS CP/M 2.2 — the reference floppy boot, and the disk measured
+#           against its own operating system
+#   DISK05  a second CP/M floppy — reached at B: by the mount gates, and the
+#           *tool* disk for the two that need one, because it carries
+#           PCPUT.COM *and* SYSGEN.COM.  Both, because those two gates share
+#           CPM_TOOL_IMAGE and need one tool each; DISK07 has PCPUT but not
+#           SYSGEN, and naming it makes the SYSGEN gate fail on a good disk
+#   HDSK03  63K CP/M 2.2b for the MITS 88-HDSK, the only bootable hard disk
+#   TDISK02 Tarbell 1011      TDISK03 z80pack device      TDISK04 VDM-1 screen
+#   TDISK05 CUTER ROM console CDISK02 Cromemco 4FDC, double density
+export CPM_BOOT_DIR="$DISKS"
+export CPM_IDENTIFY_DIR="$DISKS"
+export CPM_DETECT_DIR="$DISKS"
+export CPM_IMAGE_DIR="$DISKS"
+export CPM_BOOT_IMAGE="$DISKS/DISK01.DSK"
+export CPM_ALTAIR_IMAGE="$DISKS/DISK01.DSK"
+export CPM_FLOPPY_BOOT="$DISKS/DISK01.DSK"
+export CPM_FLOPPY_MOUNT="$DISKS/DISK05.DSK"
+export CPM_HDSK_IMAGE="$DISKS/HDSK03.DSK"
+export CPM_HD_BOOT="$DISKS/HDSK03.DSK"
+export CPM_TARBELL_IMAGE="$DISKS/TDISK02.DSK"
+export CPM_Z80PACK_IMAGE="$DISKS/TDISK03.DSK"
+export CPM_VDM_IMAGE="$DISKS/TDISK04.DSK"
+export CPM_CUTER_IMAGE="$DISKS/TDISK05.DSK"
+export CPM_CROMEMCO_IMAGE="$DISKS/CDISK02.DSK"
+# The ground-truth capture needs TWO disks and they are not interchangeable:
+# drive 0 must carry PCPUT.COM *and* SYSGEN.COM (the other gate on this same
+# variable runs SYSGEN), drive 1 is the disk being measured.  Pointing both at
+# one disk fails with "Can't Open File", and a tool disk missing one of the two
+# fails with "SYSGEN?" — each reads like a broken guest rather than a mis-set
+# harness, which is the whole reason this file spells the pairing out.
+export CPM_TOOL_IMAGE="$DISKS/DISK05.DSK"
+export CPM_DATA_IMAGE="$DISKS/DISK01.DSK"
+export CPM_GT_FILES=DEMO.PRN
+export CPM_GT_DIR="$WORK/ground-truth"
+# Written to, so a temp dir rather than anything of the operator's.
+export CPM_LAYOUT_DIR="$WORK/layout"
+export CPM_LIVE_BASE="$REPO/transfer/CPM"
+export CPM_DUMP_IMAGE="$REPO/transfer/CPM/images/altair8_cpm22.dsk"
+export CPM_DUMP_FILE=PIP.COM
+# The CPU exerciser: 8080PRE if it has been extracted from z80pack's
+# i8080tests.dsk (cpmcp -f ibm-3740), otherwise the gate skips itself.
+# `CPM_CPUTEST_CPU=8080` runs it on the core `cpm_cpu = 8080` selects.
+[ -n "$CPM_CPUTEST_COM" ] && export CPM_CPUTEST_COM
+
+cd "$REPO"
+echo "CP/M live gates against $DISKS"
+exec cargo test --release -- --ignored --test-threads=1 "$@"

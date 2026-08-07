@@ -29,6 +29,13 @@
 //! parity instead of overflow, the 8080's subtract half-carry, its own `DAA`,
 //! and the unused flag bits forced — which is what makes the setting worth
 //! offering at all.
+//!
+//! One other combination is worth knowing about rather than guarding against:
+//! the `hbios_*` [`super::uart`] profiles emulate **RomWBW**, which is Z80/Z180
+//! firmware, so the software that looks for it is Z80 code and will not run on
+//! an 8080 whatever we answer. The gateway does not refuse the pairing — the
+//! guest is free to probe and find nothing, exactly as it would on real 8080
+//! iron — but nothing about `hbios_*` becomes useful by selecting the 8080.
 
 use iz80::Cpu;
 
