@@ -48,9 +48,23 @@ pub struct Mount {
     /// True when this mount refuses writes — either the image was identified by
     /// sniffing rather than by name, the file itself is read-only, or the
     /// directory arrived damaged.
+    ///
+    /// **This is our BDOS's answer, and it has no authority over a booted
+    /// disk.** Two of its three causes are statements about *our* writer: that
+    /// we are not sure enough of the format to place a record, or that the
+    /// directory we read does not add up. A booted guest asks neither of us —
+    /// it owns the format and writes whole sectors — so the boot path reads
+    /// [`Mount::host_read_only`] instead. See `plan_boot_disks`.
     pub read_only: bool,
     /// Why it is read-only, for the UIs to explain.  Empty when it is not.
     pub read_only_reason: String,
+    /// The host would not let anyone write this file.
+    ///
+    /// Kept apart from [`Mount::read_only`] because it is the one cause that
+    /// survives leaving our filesystem behind: it is the write-protect tab, a
+    /// fact about the file rather than an opinion about its contents. A booted
+    /// guest is refused writes to this image for this reason and no other.
+    pub host_read_only: bool,
     /// The shared filesystem.  Cloning a `Mount` clones this handle, which is
     /// the point: everyone gets the same one.
     pub fs: Arc<Mutex<ImageFs>>,
@@ -62,6 +76,7 @@ impl std::fmt::Debug for Mount {
             .field("filename", &self.filename)
             .field("format", &self.format)
             .field("read_only", &self.read_only)
+            .field("host_read_only", &self.host_read_only)
             .finish()
     }
 }
@@ -647,6 +662,7 @@ mod tests {
             format: fmt.token,
             read_only: true,
             read_only_reason: String::new(),
+            host_read_only: false,
             fs: Arc::new(Mutex::new(fs)),
         }
     }

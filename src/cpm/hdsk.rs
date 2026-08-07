@@ -836,16 +836,6 @@ impl Hdsk {
 }
 
 impl Controller for Hdsk {
-    /// The 88-HDSK manual's own word for what one image is.
-    ///
-    /// A *platter*, not a unit: a Datakeeper drive carries up to four of them
-    /// and addresses each by head number, so an image is a platter and a unit
-    /// is four slots. Slots 0–3 are the first drive's, which is the numbering
-    /// Altair Hard Disk BASIC's `MOUNT` uses for its disks.
-    fn slot_word(&self) -> &'static str {
-        "platter"
-    }
-
     /// `unit U.P` — the drive, then the platter on it.
     ///
     /// Both coordinates, because a bare slot number says neither: slot 5 is the

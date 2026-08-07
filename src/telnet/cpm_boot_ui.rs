@@ -12,9 +12,15 @@
 //! * **One session per image.** A booted guest owns whole drives and writes
 //!   raw sectors, so the per-file claim that keeps two CP/M sessions from
 //!   interleaving records has nothing to grip. A second session is refused.
-//! * **Read-only unless asked.** The guest can write anywhere inside an image,
-//!   and nothing above it interprets the format well enough to notice a
-//!   mistake. Protection is the default; writing is a decision.
+//! * **Read-only unless asked, and then everywhere.** The guest can write
+//!   anywhere inside an image, and nothing above it interprets the format well
+//!   enough to notice a mistake. Protection is the default; writing is a
+//!   decision — one decision, covering every disk in the machine, because that
+//!   is what a machine with the write-protect tabs off is. The mounted disks
+//!   were once excluded from it on the strength of `Mount::read_only`, which
+//!   is our BDOS's opinion of a format a booted guest never asks us about; see
+//!   `plan_boot_disks`. What still refuses a write is the host refusing the
+//!   file.
 //! * **No instruction ceiling.** `cpm_emu_max_minstr` bounds one transient
 //!   program in the emulator and hands the user back their `A>`. A booted
 //!   operating system *is* the session, and running indefinitely at its own
@@ -131,17 +137,28 @@ struct BootPlanStep {
 ///
 /// Pure, so the rules can be tested without a session, a registry or a disk:
 ///
-/// * unit 0 is the disk being booted and is not in the plan — the bootstrap can
-///   load a system from any unit (measured), but the system it loads comes up
-///   as its own A: and reads unit 0 from then on, so a boot disk parked
-///   anywhere else runs against whatever is in unit 0 and looks like a hang;
-/// * every other mount rides the unit its drive letter names, because that is
+/// * slot 0 is the disk being booted and is not in the plan — the bootstrap can
+///   load a system from any slot (measured), but the system it loads comes up
+///   as its own A: and reads slot 0 from then on, so a boot disk parked
+///   anywhere else runs against whatever is in slot 0 and looks like a hang;
+/// * every other mount rides the slot its drive letter names, because that is
 ///   the only mapping under which the letters an operator chose mean anything
-///   to the guest;
-/// * a mount is writable only when the boot session is writable *and* the
-///   mount is — the stricter of the two wins, since this path writes raw
-///   sectors and nothing above it understands the format well enough to catch
-///   a mistake;
+///   to the guest. What a *slot* is belongs to the board — a drive on the
+///   floppy controllers, a platter on the 88-HDSK, which carries four to a
+///   drive — and this function does not need to know which: it hands the
+///   machine a number, and the machine's controllers decide what it addresses;
+/// * a mount is writable when the boot session is writable and the *host* will
+///   let the file be written. Deliberately **not** gated on `Mount::read_only`:
+///   that is our BDOS's answer, and two of its three causes — "identified by
+///   inspection" and "the directory does not add up" — are statements about
+///   *our* writer, which a booted guest never calls. It owns the format and
+///   writes whole sectors, so a disk our record-placer would not touch is one
+///   its own operating system reads and writes perfectly. Gating on that made
+///   a booted machine less capable than the hardware it emulates: the disks
+///   were in the drives and every one of them was write-protected by an
+///   opinion the guest had not asked for. What survives is the write-protect
+///   tab — `Mount::host_read_only`, a fact about the file — plus the
+///   operator's own answer for the session;
 /// * a drive another session is working in is left out, and so is the boot
 ///   image appearing twice, which would be two views of one file with separate
 ///   write-backs and the last one saved winning.
@@ -213,7 +230,7 @@ fn plan_boot_disks(
         plan.push(BootPlanStep {
             unit: drive0 as u8,
             path: mount.path.clone(),
-            writable: writable && !mount.read_only,
+            writable: writable && !mount.host_read_only,
             lend_only: false,
         });
     }
@@ -660,12 +677,13 @@ impl TelnetSession {
             remount: None,
         });
 
-        // Everything else mounted comes along, at the unit its drive letter
-        // names: B: is unit 1, C: is unit 2, and so on.  What the guest calls
-        // them is the guest's business — its BIOS names the units it knows
-        // about and refuses the rest, which for stock Altair CP/M means A: to
-        // D:.  We present the hardware and let the disk decide, exactly as with
-        // everything else on this path.
+        // Everything else mounted comes along, at the slot its drive letter
+        // names: B: is slot 1, C: is slot 2, and so on.  What that slot *is* is
+        // the board's business — a drive on a floppy controller, a platter on
+        // the 88-HDSK — and what the guest calls it is the guest's: its BIOS
+        // names what it knows about and refuses the rest, which for stock
+        // Altair CP/M means A: to D:.  We present the hardware and let the disk
+        // decide, exactly as with everything else on this path.
         let notes = match self
             .cpm_boot_attach_mounts(&mut machine, &mut disks, writable, &mut remounts, image)
         {
@@ -1163,6 +1181,11 @@ mod tests {
             filename: name.to_string(),
             read_only,
             read_only_reason: String::new(),
+            // Our BDOS's answer and the host's are separate questions, and the
+            // boot path asks only the second — so a helper that conflated them
+            // could not have shown the difference.  `mount_at` is the ordinary
+            // case: whatever we think of the directory, the file is writable.
+            host_read_only: false,
             format: "altair8",
             fs: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::cpm::image::fs::ImageFs::mount(
@@ -1193,11 +1216,11 @@ mod tests {
         vec![Usage::default(); 16]
     }
 
-    /// The mapping the whole feature rests on: a mounted image rides the unit
-    /// its drive letter names.  Anything else and the letters an operator chose
-    /// stop meaning what they say.
+    /// The mapping the whole feature rests on: a mounted image rides the board
+    /// slot its drive letter names.  Anything else and the letters an operator
+    /// chose stop meaning what they say.
     #[test]
-    fn test_mounts_ride_the_unit_their_letter_names() {
+    fn test_mounts_ride_the_slot_their_letter_names() {
         let m = mounts(&[(0, "boot.dsk", false), (1, "b.dsk", false), (5, "f.dsk", false)]);
         let (plan, _) = plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), true, 16).unwrap();
         assert_eq!(
@@ -1248,24 +1271,48 @@ mod tests {
         assert!(notes.iter().any(|n| n.contains("boot disk")), "{notes:?}");
     }
 
-    /// Two ways to be read-only, and the stricter wins.  This path writes raw
-    /// sectors with nothing above it able to notice a mistake, so a session the
-    /// operator did not open for writing must not write anywhere.
+    /// **Which read-only answer a booted disk is subject to, and which it is
+    /// not.**
+    ///
+    /// The session's own is absolute: a machine the operator did not open for
+    /// writing writes nowhere, because this path lays down raw sectors and
+    /// nothing above it could notice a mistake.
+    ///
+    /// The *mount's* is not, and that is the whole point of this test. Two of
+    /// its three causes — the format was identified by inspection, or the
+    /// directory did not add up — are our record-placer declining a job it is
+    /// not sure of. A booted guest never calls it: the disk's own operating
+    /// system owns the format. Honouring that answer here write-protected
+    /// every companion disk in the machine on the strength of an opinion the
+    /// guest had not asked for, which is not what the hardware does.
+    ///
+    /// What does survive is the host refusing the file — the write-protect
+    /// tab, a fact about the file rather than about its contents.
     #[test]
-    fn test_read_only_is_the_stricter_of_mount_and_session() {
-        let m = mounts(&[(1, "rw.dsk", false), (2, "ro.dsk", true)]);
-        let w = |writable| {
-            plan_boot_disks(&m, &idle(), Path::new("/images/boot.dsk"), writable, 16).unwrap()
+    fn test_the_boot_path_honours_the_host_not_our_own_writer() {
+        let mut m = mounts(&[(1, "plain.dsk", false), (2, "we-would-not.dsk", true)]);
+        // A third: the host itself refuses the file, whatever we make of it.
+        let mut tab = mount_at("write-protected.dsk", false);
+        tab.host_read_only = true;
+        m[3] = Some(tab);
+
+        let w = |mounts: &[Option<Mount>], writable| {
+            plan_boot_disks(mounts, &idle(), Path::new("/images/boot.dsk"), writable, 16)
+                .unwrap()
                 .0
                 .iter()
                 .map(|s| (s.unit, s.writable))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(w(true), vec![(1, true), (2, false)], "a R/O mount stays R/O");
         assert_eq!(
-            w(false),
-            vec![(1, false), (2, false)],
-            "a read-only boot session must not write a writable mount"
+            w(&m, true),
+            vec![(1, true), (2, true), (3, false)],
+            "our own read-only verdict must not reach a booted guest; the host's must"
+        );
+        assert_eq!(
+            w(&m, false),
+            vec![(1, false), (2, false), (3, false)],
+            "a read-only boot session must not write anywhere"
         );
     }
 
@@ -1335,6 +1382,7 @@ mod tests {
             filename: "boot.dsk".into(),
             read_only: false,
             read_only_reason: String::new(),
+            host_read_only: false,
             format: "altair8",
             fs: mount_at("boot.dsk", false).fs,
         });
@@ -1352,6 +1400,7 @@ mod tests {
             filename: "other.dsk".into(),
             read_only: false,
             read_only_reason: String::new(),
+            host_read_only: false,
             format: "altair8",
             fs: mount_at("other.dsk", false).fs,
         });

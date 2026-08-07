@@ -102,8 +102,12 @@ CP/M at all: Altair DOS, Altair Disk Extended BASIC, Time Sharing BASIC,
 Hard Disk BASIC, and CP/M 3.0.
 
 Inside a booted disk there is no jail, no A> from us and no EGT80.  Press
-ESC twice to get back to the gateway.  A booted image is opened READ-ONLY
-and held by one session at a time.
+ESC twice to get back to the gateway.  A booted image is held by one session
+at a time.  Disks are opened READ-ONLY unless the boot picker is told
+otherwise, and that one answer covers the mounted disks as well as the booted
+one - the guest may write any of them, exactly as a machine with the
+write-protect tabs off would.  An image the host will not let us write stays
+read-only whatever the picker was told.
 
 Your mounted images do come along: each rides the controller slot its
 drive letter names (B: is slot 1, C: is slot 2), and the disk being booted

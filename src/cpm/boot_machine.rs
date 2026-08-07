@@ -14,15 +14,18 @@
 //! makes, and it has consequences worth stating rather than discovering:
 //!
 //! * The guest owns the drives. Mounted images are handed to it, each at the
-//!   unit its drive letter names, but it names them itself and reaches only as
-//!   many as its own BIOS knows — stock Altair CP/M knows four.
+//!   slot its drive letter names — a *drive* on the floppy controllers, a
+//!   *platter* on the 88-HDSK, which carries four to a drive. It names them
+//!   itself and reaches only as many as its own BIOS knows: stock Altair CP/M
+//!   knows four drives, and the 88-HDSK CP/M uses the fixed platter as its B:.
 //!   Folder-backed drives, the jail, `EXIT` and the
 //!   Gateway Shell do not exist inside it.
 //! * The blast radius is the images in the drives — narrower than the
 //!   filesystem path's, and easier to state, but the per-file write claim that
 //!   stops two sessions interleaving records has no meaning here. A booted
-//!   image is therefore held by one session and opened read-only unless the
-//!   operator says otherwise.
+//!   image is therefore held by one session, and every disk in the machine is
+//!   opened read-only unless the operator says otherwise — one answer for the
+//!   whole machine, which is what a set of write-protect tabs is.
 //! * Unknown ports read as `0xFF` (an idle bus) rather than as whatever was
 //!   last driven, so a guest probing for hardware we do not have sees nothing
 //!   instead of an echo of itself.
@@ -1986,6 +1989,23 @@ mod tests {
         digits.parse().ok()
     }
 
+    /// The "48k" out of a CP/M `STAT B:` line.
+    ///
+    /// A drive-specific `STAT` says "Bytes Remaining On B: 48k", which is not
+    /// the wording a bare `STAT` uses — see [`free_k`]. Its own function for
+    /// the same reason that one has: both readings of a before/after
+    /// comparison must come from one parser.
+    #[cfg(test)]
+    fn remaining_k(stat: &str) -> Option<u32> {
+        let tail = stat.split("Remaining On").nth(1)?;
+        let digits: String = tail
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    }
+
     fn printable(bytes: &[u8]) -> String {
         bytes
             .iter()
@@ -2688,6 +2708,99 @@ mod tests {
         let stat = type_at(&mut m, &mut cpu, b"STAT\r", 400_000_000);
         println!("--- STAT ---\n{stat}");
         assert!(stat.contains("Space:"), "no free space reported: {stat:?}");
+    }
+
+    /// **A booted guest writes the disk we mounted beside it, and the change
+    /// reaches the host file.**
+    ///
+    /// The gate for allowing writes to mounted images. Two things could go
+    /// wrong and only a live guest can tell them apart: the write could never
+    /// leave the machine (the slot marked read-only, `take_dirty` silent), or
+    /// it could leave under the *wrong slot* and land in the boot disk's file
+    /// — which a single session cannot detect, because a guest reading back its
+    /// own wrong sector sees exactly what it wrote.
+    ///
+    /// So this checks the byte streams apart: the boot image must come back
+    /// **unchanged** and the mounted one **changed**, and then a second machine
+    /// boots the untouched boot disk with the *changed* companion at slot 1 and
+    /// the guest's own `DIR B:` has to find the file. Nothing here trusts our
+    /// reader — the disk's own BIOS answers.
+    ///
+    /// `SAVE` rather than `PIP`, for the reason the hard-disk gate gives: one
+    /// command, no end-of-file to feed, nothing depending on the console.
+    ///
+    /// Ignored: set `CPM_FLOPPY_BOOT`/`CPM_FLOPPY_MOUNT` to two Altair CP/M
+    /// floppies.
+    #[test]
+    #[ignore]
+    fn test_a_guest_writes_a_mounted_disk_and_it_reaches_the_file() {
+        let (Ok(boot), Ok(mount)) =
+            (std::env::var("CPM_FLOPPY_BOOT"), std::env::var("CPM_FLOPPY_MOUNT"))
+        else {
+            eprintln!("set CPM_FLOPPY_BOOT and CPM_FLOPPY_MOUNT to run this");
+            return;
+        };
+        let boot_bytes = std::fs::read(&boot).unwrap();
+        let mount_bytes = std::fs::read(&mount).unwrap();
+
+        let mut m = BootMachine::new();
+        m.insert(0, boot_bytes.clone(), false).expect("the boot floppy");
+        m.insert(1, mount_bytes.clone(), false).expect("the mounted floppy");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        assert!(!run_until_quiet(&mut m, &mut cpu, 200_000_000).is_empty(), "never signed on");
+
+        // `STAT B:` and a bare `STAT` word this differently — "Bytes Remaining
+        // On B: 48k" against "Space: 3744k" — so this is its own parser and
+        // both readings go through it. Comparing a number from one parser with
+        // a number from another proves nothing about the disk.
+        let stat_before = type_at(&mut m, &mut cpu, b"STAT B:\r", 400_000_000);
+        println!("--- STAT B: before ---\n{stat_before}");
+        let before = remaining_k(&stat_before).expect("STAT B: reports free space before");
+        let saved = type_at(&mut m, &mut cpu, b"SAVE 2 B:ZZMOUNT.COM\r", 400_000_000);
+        println!("--- SAVE to B: ---\n{saved}");
+        let listed = type_at(&mut m, &mut cpu, b"STAT B:ZZMOUNT.COM\r", 400_000_000);
+        println!("--- STAT B: in session one ---\n{listed}");
+        assert!(
+            listed.to_ascii_uppercase().contains("ZZMOUNT"),
+            "the save to the mounted disk did not take: {listed:?}"
+        );
+
+        // Which slots came back dirty is the whole question: the *mounted* one
+        // and not the boot disk.  Writing under the wrong slot is the failure a
+        // single session cannot see, and it would show up right here.
+        let dirty = m.take_dirty();
+        let slots: Vec<u8> = dirty.iter().map(|(s, _)| *s).collect();
+        assert_eq!(slots, vec![1], "only the mounted disk should have changed: {slots:?}");
+        let written = dirty.into_iter().next().unwrap().1;
+        assert_eq!(written.len(), mount_bytes.len(), "the mounted image changed size");
+        assert_ne!(written, mount_bytes, "nothing was written to the mounted disk");
+
+        // Session two: the untouched boot disk, and the companion as it would
+        // now be on the host.  The guest's own BIOS has to find the file.
+        let mut m2 = BootMachine::new();
+        m2.insert(0, boot_bytes, true).unwrap();
+        m2.insert(1, written, true).unwrap();
+        let mut cpu2 = BootMachine::new_cpu();
+        m2.boot(&mut cpu2, 0).expect("the boot disk still boots");
+        assert!(!run_until_quiet(&mut m2, &mut cpu2, 200_000_000).is_empty(), "never signed on");
+        let dir = type_at(&mut m2, &mut cpu2, b"DIR B:ZZMOUNT.COM\r", 400_000_000);
+        println!("--- DIR B: in session two ---\n{dir}");
+        assert!(
+            dir.to_ascii_uppercase().contains("ZZMOUNT"),
+            "the file did not survive on the mounted disk: {dir:?}"
+        );
+
+        // And the allocation bitmap moved with it — an entry with its blocks
+        // still free is the corruption that only bites the *next* file written.
+        let stat = type_at(&mut m2, &mut cpu2, b"STAT B:\r", 400_000_000);
+        println!("--- STAT B: in session two ---\n{stat}");
+        let after_free = remaining_k(&stat).expect("STAT B: reports free space after");
+        assert!(
+            after_free < before,
+            "free space on B: went {before}k -> {after_free}k, so the blocks were \
+             never claimed: {stat:?}"
+        );
     }
 
     /// Write a file inside a booted hard disk, then boot the result and find it
@@ -4088,8 +4201,8 @@ mod tests {
     /// **What a booted guest can reach of what we mounted for it — measured on
     /// both kinds of boot.**
     ///
-    /// The gateway inserts every mounted image at the unit its drive letter
-    /// names, and then it is the *guest's own BIOS* that decides whether such a
+    /// The gateway inserts every mounted image at the board slot its drive
+    /// letter names, and then it is the *guest's own BIOS* that decides whether such a
     /// drive exists. Those are two different questions and they have two
     /// different answers here, which is why this test runs both cases:
     ///

@@ -1780,10 +1780,16 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
 
         let mut note = String::new();
         if let Some(m) = mounted {
-            if m.read_only {
+            if crate::cpm::boot::mount_refuses_writes(&naming, m) {
+                // The reason is our BDOS's and only fits its own verdict; under
+                // a booted disk the one cause left is the host's own refusal.
                 note.push_str(&format!(
                     " <span class=\"sub\">read-only: {}</span>",
-                    html_escape(&m.read_only_reason)
+                    html_escape(if booting {
+                        "the image file is read-only on the host"
+                    } else {
+                        &m.read_only_reason
+                    })
                 ));
             }
         }

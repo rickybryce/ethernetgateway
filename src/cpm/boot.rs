@@ -146,6 +146,32 @@ pub fn slot_label(image_len: u64, slot: u8) -> Option<String> {
     super::boot_machine::BootMachine::slot_label(None, image_len, slot)
 }
 
+/// Will this mount refuse writes, for whichever of the two runs CP/M?
+///
+/// The same split as [`SlotNaming`], and for the same reason: the emulator and
+/// a booted disk are asking different questions of the same file.
+///
+/// * **Under the emulator** the answer is `Mount::read_only` — our BDOS is
+///   underneath the drive, so its own doubts about the format or the directory
+///   are exactly what decides whether a write is safe.
+/// * **Under a booted disk** it is `Mount::host_read_only` and nothing else.
+///   The guest owns the format and writes whole sectors; our record-placer is
+///   not in the path and has no standing to protect a disk it never touches.
+///   What is left is the write-protect tab.
+///
+/// One function because it is one rule and there are three screens plus the
+/// boot planner — the shape of defect this project has produced more than once
+/// is a rule stated separately on each surface and updated on some of them.
+pub fn mount_refuses_writes(
+    naming: &SlotNaming,
+    mount: &super::image::registry::Mount,
+) -> bool {
+    match naming {
+        SlotNaming::Drives => mount.read_only,
+        SlotNaming::Boards => mount.host_read_only,
+    }
+}
+
 /// The board an image this size goes on, for the surfaces with room to say it.
 pub fn slot_board(image_len: u64) -> Option<&'static str> {
     super::boot_machine::BootMachine::board_for(None, image_len)

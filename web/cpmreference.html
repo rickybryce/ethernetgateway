@@ -899,7 +899,7 @@ altairhd_cobol.dsk</code></pre>
                     <tbody>
                         <tr><td>Scope</td><td>One drive of sixteen</td><td>The whole machine</td></tr>
                         <tr><td>Filesystem</td><td>Ours</td><td>The guest's</td></tr>
-                        <tr><td>Other drives</td><td>Folders and images alongside</td><td>Mounted images come along, at the unit their letter names; folders do not</td></tr>
+                        <tr><td>Other drives</td><td>Folders and images alongside</td><td>Mounted images come along, at the board slot their letter names; folders do not</td></tr>
                         <tr><td>Our <code>A&gt;</code>, <code>EXIT</code>, EGT80</td><td>Yes</td><td>No &mdash; the guest talks to hardware</td></tr>
                         <tr><td>Getting out</td><td><code>EXIT</code></td><td>Press <strong>ESC twice</strong></td></tr>
                     </tbody>
@@ -1049,10 +1049,20 @@ altairhd_cobol.dsk</code></pre>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">The other drives</h3>
                 <p>
-                    A booted guest is handed <strong>every mounted image</strong>, each on the
-                    controller unit its drive letter names &mdash; B: is unit 1, C: is unit 2, F:
-                    is unit 5. So you can mount several disks, boot one, and copy between them with
-                    the guest's own <code>PIP</code>.
+                    A booted guest is handed <strong>every mounted image</strong>, each in the
+                    controller <em>slot</em> its drive letter names &mdash; B: is slot 1, C: is
+                    slot 2, F: is slot 5. So you can mount several disks, boot one, and copy
+                    between them with the guest's own <code>PIP</code>.
+                </p>
+                <p>
+                    <strong>What a slot is belongs to the board.</strong> On the floppy
+                    controllers it is a drive. On the Altair 88-HDSK it is a <em>platter</em>
+                    &mdash; a Datakeeper drive carries four of them and addresses each by head
+                    number &mdash; so slots 0&ndash;3 are the first drive's four platters, and the
+                    screens name them <code>unit 0.1</code> rather than with a bare number. That
+                    is not a detail: Altair Hard Disk BASIC numbers <em>its</em> disks by platter
+                    too, so its <code>MOUNT</code> and these slots line up, and the 88-HDSK CP/M's
+                    <code>B:</code> is the fixed platter &mdash; slot 1.
                 </p>
                 <div class="callout callout-warn">
                     <p>
@@ -1091,22 +1101,29 @@ altairhd_cobol.dsk</code></pre>
                     named and skipped rather than presented as a drive the guest cannot read. Hard
                     disks are not in that category: they have their own controller and boot on it.
                     Floppies and hard disks <em>can</em> be mixed in one booted machine &mdash; each
-                    goes on its own board, and a board asked for a unit it was never given refuses
-                    rather than reading the other one's disk. What a drive letter cannot be is a unit
-                    on both boards at once: B: is unit 1 of whichever board took the disk, so a hard
-                    disk at B: leaves the floppy board's drive 1 empty. Whether the guest can reach
+                    goes on its own board, and a board asked for a slot it was never given refuses
+                    rather than reading the other one's disk. What a drive letter cannot be is a slot
+                    on both boards at once: B: is slot 1 of whichever board took the disk, so a hard
+                    disk at B: &mdash; the 88-HDSK's second platter &mdash; leaves the floppy board's
+                    drive 1 empty. Whether the guest can reach
                     both at all is its own BIOS's business, as ever.
                 </p>
 
                 <div class="callout">
                     <p>
-                        A booted image is opened <strong>read-only</strong> and is held by
+                        Disks are opened <strong>read-only</strong> and a booted image is held by
                         <strong>one session</strong> at a time. A booted guest writes raw sectors,
                         and nothing above it understands the format well enough to notice a
                         mistake &mdash; so writing is a decision you make in the boot picker, not a
-                        default. There is no instruction ceiling on a booted disk: an operating
-                        system sitting at its own prompt is supposed to run indefinitely. An
-                        abandoned session is closed by the ordinary idle timeout instead.
+                        default. It is <em>one</em> decision, and it covers <strong>every disk in
+                        the machine</strong>: say yes and the guest can write the disk it booted
+                        and every disk mounted beside it, which is what a machine with the
+                        write-protect tabs off is. The one thing that still refuses a write is the
+                        host refusing the file &mdash; an image the operating system will not let
+                        us write stays read-only whatever the picker was told. There is no
+                        instruction ceiling on a booted disk: an operating system sitting at its
+                        own prompt is supposed to run indefinitely. An abandoned session is closed
+                        by the ordinary idle timeout instead.
                     </p>
                 </div>
 

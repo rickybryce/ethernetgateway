@@ -60,7 +60,15 @@ impl TelnetSession {
                         i as u8,
                         std::fs::metadata(&m.path).ok().map(|md| md.len()),
                     );
-                    let ro = if m.read_only { " (R/O)" } else { "" };
+                    // Whose read-only answer applies depends on which CP/M is
+                    // set to run — see `mount_refuses_writes`.  Marking a disk
+                    // R/O here on our BDOS's verdict, while a booted guest was
+                    // free to write it, is the mismatch that helper exists for.
+                    let ro = if crate::cpm::boot::mount_refuses_writes(&naming, m) {
+                        " (R/O)"
+                    } else {
+                        ""
+                    };
                     let busy = usage
                         .get(i)
                         .and_then(|u| u.describe())
@@ -98,7 +106,7 @@ impl TelnetSession {
             //
             // Not folded into "Mounted:" above, and not given a letter, because
             // neither would be true: a booted disk is not on one of our drives
-            // at all — it is 88-DCDD unit 0, and the guest's own operating
+            // at all — it is its board's slot 0, and the guest's own operating
             // system decides what to call it.  Stock Altair CP/M happens to say
             // A:, which is exactly the coincidence that makes writing `A:` here
             // a statement this screen cannot stand behind.
@@ -279,8 +287,10 @@ impl TelnetSession {
     /// Booting is not mounting, and the screen says so: a booted disk runs its
     /// own operating system and owns the hardware, so it is a different thing
     /// from putting an image on drive B:.  The mounted images do come along —
-    /// each at the unit its drive letter names — but what they are *called*
-    /// then belongs to the guest, and so does how many of them it can reach.
+    /// each at the board slot its drive letter names — but what a slot *is*
+    /// belongs to the board (a drive on the floppy controllers, a platter on
+    /// the 88-HDSK), and what it is *called* belongs to the guest, as does how
+    /// many of them it can reach.
     async fn cpmmount_pick_boot(&mut self) -> Result<(), std::io::Error> {
         let base = self.cpmmount_base();
         let images = crate::cpm::image::available_images(&base);
@@ -319,7 +329,7 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating"))).await?;
         self.send_line(&format!("  {}", self.dim("system. Its drive FOLDERS do not"))).await?;
         self.send_line(&format!("  {}", self.dim("apply; mounted images do, each on"))).await?;
-        self.send_line(&format!("  {}", self.dim("the unit its letter names."))).await?;
+        self.send_line(&format!("  {}", self.dim("the board slot its letter names."))).await?;
         self.send_line("").await?;
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         for (i, n) in bootable.iter().take(Self::TRANSFER_PAGE_SIZE).enumerate() {
@@ -354,8 +364,15 @@ impl TelnetSession {
 
         // Writing is a decision, not a default: a booted guest writes raw
         // sectors and nothing above it would notice a mistake.
+        //
+        // "the disks", plural, because this answer has always governed every
+        // drive the session takes and not just the one being booted — it was
+        // worded as though it were about one image while the mounts were
+        // effectively write-protected anyway, and now that they are not, the
+        // understatement would be a trap.
         self.send_line("").await?;
-        self.send(&format!("  Allow writes to this image? {}: ", self.cyan("y/N")))
+        self.send_line(&format!("  {}", self.dim("Covers the mounted disks too."))).await?;
+        self.send(&format!("  Allow writes to the disks? {}: ", self.cyan("y/N")))
             .await?;
         self.flush().await?;
         let ans = self.get_menu_input(false).await?.unwrap_or_default();

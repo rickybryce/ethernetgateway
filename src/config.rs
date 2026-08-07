@@ -2388,10 +2388,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   Sharing BASIC and Hard Disk BASIC all boot this way.  Booting is not mounting: inside a booted
 #   disk there is no jail, no A> from us and no EGT80, because the guest is
 #   talking to hardware rather than to our BDOS.  Your MOUNTED images do come
-#   along, each on the controller unit its drive letter names (B: is unit 1,
-#   C: unit 2), with the booted disk always unit 0 - but the guest names them
-#   itself and reaches only as many as its own BIOS knows, which for stock
-#   Altair CP/M is four.  The image is opened READ-ONLY.
+#   along, each on the controller SLOT its drive letter names (B: is slot 1,
+#   C: slot 2), with the booted disk always slot 0 - but what a slot IS belongs
+#   to the board: a drive on the floppy controllers, a PLATTER on the 88-HDSK,
+#   which carries four to a drive.  The guest names them itself and reaches
+#   only as many as its own BIOS knows - four drives for stock Altair CP/M, and
+#   for the 88-HDSK CP/M the fixed platter as its B:.  Disks are opened
+#   READ-ONLY unless the boot picker is told otherwise, and that answer covers
+#   the mounted disks as well as the booted one.
 ");
     write_kv(&mut content, "cpm_boot_image", &cfg.cpm_boot_image);
     content.push_str("\

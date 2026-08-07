@@ -354,6 +354,7 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
         format: ident.format.token,
         read_only,
         read_only_reason: reason.clone(),
+        host_read_only: host_ro,
         fs: std::sync::Arc::new(std::sync::Mutex::new(image)),
     };
     registry::mount(drive0, mount)?;
@@ -1337,44 +1338,19 @@ mod tests {
     }
 
     /// Backdate a file's mtime without pulling in a dependency.
-    #[cfg(unix)]
+    ///
+    /// `File::set_modified` rather than the `utimensat` shim this used to be.
+    /// That shim was `#[cfg(unix)]` while its *caller* was not, so the test
+    /// above did not compile on Windows at all — a whole platform's build
+    /// broken by a test helper, which Linux cannot see and which sat in the
+    /// tree until CI said so. The standard library has had this since 1.75 and
+    /// it works everywhere, so there is nothing here to gate.
     fn filetime_set(path: &Path, when: std::time::SystemTime) {
-        use std::os::unix::ffi::OsStrExt;
-        let secs = when
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let times = [
-            libc_timespec { tv_sec: secs, tv_nsec: 0 },
-            libc_timespec { tv_sec: secs, tv_nsec: 0 },
-        ];
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        unsafe {
-            utimensat_shim(c.as_ptr(), times.as_ptr());
-        }
-    }
-
-    #[cfg(unix)]
-    #[repr(C)]
-    #[allow(non_camel_case_types)]
-    struct libc_timespec {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-
-    #[cfg(unix)]
-    unsafe extern "C" {
-        #[link_name = "utimensat"]
-        fn utimensat_raw(dirfd: i32, path: *const i8, times: *const libc_timespec, flags: i32)
-            -> i32;
-    }
-
-    #[cfg(unix)]
-    unsafe fn utimensat_shim(path: *const i8, times: *const libc_timespec) {
-        const AT_FDCWD: i32 = -100;
-        unsafe {
-            utimensat_raw(AT_FDCWD, path, times, 0);
-        }
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_modified(when))
+            .expect("backdate the debris");
     }
 
     /// A traversal attempt must be refused before anything touches the disk.

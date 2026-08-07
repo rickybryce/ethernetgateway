@@ -157,32 +157,30 @@ pub trait Controller: Send {
     /// Write one of its ports.
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest;
 
-    /// What this board calls one of its slots, in its own documentation.
+    /// What this board calls slot `slot`, in its own documentation.
     ///
     /// A floppy controller has *drives*; the 88-HDSK has *platters*, four to a
-    /// drive. The distinction is not pedantry — it is the whole reason a
-    /// booted disk cannot be described in the gateway's drive letters. Our
-    /// `A:`-`P:` are our BDOS's; a booted guest is talking to this board, and
-    /// what it can reach is decided by its own BIOS and not by us.
+    /// drive, so it says `unit 0.1`. The distinction is not pedantry — it is
+    /// the whole reason a booted disk cannot be described in the gateway's
+    /// drive letters. Our `A:`-`P:` are our BDOS's; a booted guest is talking
+    /// to this board, and what it can reach is decided by its own BIOS and not
+    /// by us.
     ///
-    /// Defaulted to `"drive"` because four of the five boards are floppy
-    /// controllers and say so.
-    fn slot_word(&self) -> &'static str {
-        "drive"
-    }
-
-    /// What this board calls slot `slot`, for a row on a screen.
-    ///
-    /// The word and the number, which is right for every board whose slots are
-    /// a flat row of drives. The 88-HDSK overrides it because its slots are not
-    /// flat: a slot is a platter on a drive, and both coordinates matter to
-    /// whoever is deciding where to put an image.
+    /// **One method, not a word plus a number.** This was a `slot_word()` that
+    /// callers composed with the slot index, which is only right while every
+    /// board's slots are a flat row. The 88-HDSK's are not, and the composed
+    /// form produced `platter 5` — a platter number that cannot exist, since
+    /// platters are 0-3 and slot 5 is unit 1's platter 1. Two ways to build
+    /// one label is how the surfaces come to disagree, so there is one.
     ///
     /// **Kept short on purpose** — see [`crate::cpm::boot::slot_name`], whose
     /// test pins the budget at eight characters. A longer label truncates the
     /// filename off a 40-column PETSCII row.
+    ///
+    /// Defaulted to `drive` because four of the five boards are floppy
+    /// controllers and say so.
     fn slot_label(&self, slot: u8) -> String {
-        format!("{} {slot}", self.slot_word())
+        format!("drive {slot}")
     }
 
     /// Every medium this board takes.

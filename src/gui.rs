@@ -1078,12 +1078,18 @@ impl App {
                                 });
                         });
                         if let Some(m) = mounted {
-                            if m.read_only {
+                            if crate::cpm::boot::mount_refuses_writes(&naming, m) {
+                                // The stored reason is our BDOS's; under a
+                                // booted disk the only cause left is the host.
                                 ui.label(
                                     egui::RichText::new("read-only")
                                         .color(AMBER_BRIGHT),
                                 )
-                                .on_hover_text(&m.read_only_reason);
+                                .on_hover_text(if booting {
+                                    "the image file is read-only on the host"
+                                } else {
+                                    m.read_only_reason.as_str()
+                                });
                             }
                         }
                         if let Some(b) = &busy {
@@ -1348,7 +1354,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT80 and the CP/M prompt do not                  apply inside it.  The image is opened read-only.",
+            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT80 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless the boot                  picker is told otherwise, and that answer covers the mounted                  disks too.",
         );
         // Which machine a BOOTED disk believes it is running on -- specifically
         // where it finds its console.  The same `MACHINE_CHOICES` list the telnet
