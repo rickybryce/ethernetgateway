@@ -70,6 +70,7 @@ options, and the full AT command set.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
 - **CP/M 2.2 emulator** — a separate thing from the shell above: a real Z80
+  (or an 8080 — `cpm_cpu`, which serves a booted disk too)
   running real `.COM` software (PIP, STAT, ED, ASM, DDT, WordStar…), with the
   CCP built-ins, `SUBMIT` batch jobs, and drives A:–P: as folders under the
   transfer directory — or as mounted **`.dsk` disk images** (Altair 88-HDSK,

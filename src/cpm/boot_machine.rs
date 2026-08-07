@@ -238,21 +238,33 @@ impl BootMachine {
         }
     }
 
-    /// The CPU a booted disk runs on.
+    /// The CPU a booted disk runs on when nobody has said otherwise.
     ///
-    /// A **Z80**, and one place decides so the driver and the tests cannot
-    /// disagree. The Altair shipped with an 8080 and every MITS disk here is
-    /// 8080 code, so an 8080 core is the more literal machine — but the Z80 is
-    /// a superset that runs all of it, Altairs were very commonly fitted with
-    /// Z80 upgrade boards, and the CP/M emulator next door is already a Z80.
+    /// The **default**, which is a Z80, and one place decides so the driver and
+    /// the tests cannot disagree.  The Altair shipped with an 8080 and every
+    /// MITS disk here is 8080 code, so an 8080 core is the more literal machine
+    /// — but the Z80 is a superset that runs all of it, Altairs were very
+    /// commonly fitted with Z80 upgrade boards, and the CP/M emulator next door
+    /// is on the same setting.
     ///
     /// The deciding case is our own: EGT80 is Z80 code and declares itself so.
     /// On an 8080 core it loads, executes a Z80-only opcode as something else,
     /// and takes CP/M down with it — the sign-on comes back corrupted on the
-    /// warm boot. A machine that cannot run the terminal we ship with it is the
-    /// wrong machine.
+    /// warm boot.  That is what makes this the *default* rather than the only
+    /// answer; an operator running period 8080 software can say so with
+    /// `cpm_cpu`, and [`BootMachine::new_cpu_for`] is how the session asks.
+    ///
+    /// Test-only now that the session passes the setting: a live boot must
+    /// never quietly take the default when the operator has chosen otherwise,
+    /// and the compiler is a better guarantee of that than a doc comment.
+    #[cfg(test)]
     pub fn new_cpu() -> Cpu {
-        Cpu::new_z80()
+        Self::new_cpu_for(super::cpu::DEFAULT_CPU)
+    }
+
+    /// The CPU a booted disk runs on, as `cpm_cpu` names it.
+    pub fn new_cpu_for(cpu_setting: &str) -> Cpu {
+        super::cpu::new_cpu(cpu_setting)
     }
 
     /// Offer the configured virtual modem to this machine.
@@ -2336,6 +2348,17 @@ mod tests {
         );
     }
 
+    /// The processor the surveys and the workbench run on: `CPM_BOOT_CPU`,
+    /// defaulting to whatever an unconfigured gateway uses.
+    ///
+    /// Its own function so the survey and the workbench cannot end up reading
+    /// different variables — the same reason the machine is resolved in one
+    /// place.
+    #[cfg(test)]
+    fn survey_cpu() -> String {
+        std::env::var("CPM_BOOT_CPU").unwrap_or_else(|_| crate::cpm::cpu::DEFAULT_CPU.to_string())
+    }
+
     /// Type at a booted guest and let it settle.
     #[cfg(test)]
     fn type_at(m: &mut BootMachine, cpu: &mut Cpu, keys: &[u8], budget: u64) -> String {
@@ -2937,7 +2960,10 @@ mod tests {
                 println!("  skipped  {name}  ({e})");
                 continue;
             }
-            let mut cpu = BootMachine::new_cpu();
+            // `CPM_BOOT_CPU=8080` surveys the whole folder on the other
+            // processor, which is the only way to answer "what does that
+            // setting do to my disks" with a list rather than an opinion.
+            let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
             if let Err(e) = m.boot(&mut cpu, 0) {
                 println!("  refused  {name}: {e}");
                 continue;
@@ -3659,7 +3685,11 @@ mod tests {
         let configured = std::env::var("CPM_BOOT_MACHINE")
             .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
         let (machine, why) = crate::cpm::detect::machine_for(&configured, &bytes);
-        println!("--- machine: {machine} ({}) ---", why.unwrap_or_else(|| "as configured".into()));
+        println!(
+            "--- machine: {machine} ({}), {} ---",
+            why.unwrap_or_else(|| "as configured".into()),
+            crate::cpm::cpu::cpu_label(&survey_cpu())
+        );
         m.set_machine(&machine);
         m.insert(0, bytes, ro).expect("a bootable image");
         // Further drives, `,`-separated, filling units 1 upwards.  `blank:<n>`
@@ -3683,7 +3713,7 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let mut cpu = BootMachine::new_cpu();
+        let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
         m.boot(&mut cpu, unit).expect("boots");
         println!(
             "--- sign-on (booted from unit {unit}) ---\n{}",

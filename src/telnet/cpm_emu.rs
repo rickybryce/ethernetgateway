@@ -521,7 +521,10 @@ impl TelnetSession {
         // warm-boot back to `A>` leaves the last program's memory image in
         // place — which is what makes SAVE authentic (dump the TPA a prior
         // program, e.g. DDT, left behind).
-        let mut cpm = Cpm::new();
+        // On the processor the operator picked -- the same key a booted disk
+        // reads, because a machine that ran one CPU here and another there
+        // would be two answers to one question.
+        let mut cpm = Cpm::new_for(&config::get_config().cpm_cpu);
         // Wire the virtual-modem access (if the operator selected one) so a
         // CP/M comms program finds its modem at the configured machine ports
         // or on the BDOS AUX: device.  The modem "brain" (AT layer + outbound

@@ -889,6 +889,21 @@ pub struct Config {
     /// rather than a config edit.  See
     /// [`crate::telnet::cpm_boot_ui::boot_key_for_guest`].
     pub cpm_boot_backspace: String,
+    /// Which processor both CP/M machines run: `z80` or `8080`.
+    ///
+    /// The one CP/M setting that reaches the emulator *and* a booted disk —
+    /// where the console, the backspace key and the boot image describe a
+    /// booted disk, and the modem port describes the emulator, this is
+    /// underneath both.
+    ///
+    /// `z80` is the default: it is a superset that runs the 8080 software these
+    /// disks are made of, and **EGT80 is Z80 code**, so on an 8080 core the
+    /// terminal we place on drive A: takes CP/M down with it.  The 8080 is
+    /// offered anyway because it is the more literal Altair and because period
+    /// 8080 diagnostics — which detect the CPU from `DCR A` setting parity
+    /// rather than overflow — are correct to fail on a Z80.  See
+    /// [`crate::cpm::cpu`].
+    pub cpm_cpu: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
     /// inside the emulator and reloaded when the modem powers up or the guest
     /// issues `ATZ` — the same arrangement the physical ports have under their
@@ -1017,6 +1032,7 @@ impl Default for Config {
             cpm_boot_image: String::new(),
             cpm_boot_machine: crate::cpm::console::AUTO_MACHINE.to_string(),
             cpm_boot_backspace: crate::cpm::boot::DEFAULT_BACKSPACE.to_string(),
+            cpm_cpu: crate::cpm::cpu::DEFAULT_CPU.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
             serial_b: SerialPortConfig::default(),
@@ -1629,6 +1645,12 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_backspace")
             .cloned()
             .unwrap_or_else(|| crate::cpm::boot::DEFAULT_BACKSPACE.to_string()),
+        // Missing means the Z80, which is what every config written before this
+        // key existed was already running -- so an upgrade changes nothing.
+        cpm_cpu: map
+            .get("cpm_cpu")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::cpu::DEFAULT_CPU.to_string()),
         cpm_emu_modem: CpmModemProfile {
             echo: map
                 .get("cpm_emu_echo")
@@ -2414,6 +2436,23 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_boot_backspace", &cfg.cpm_boot_backspace);
     content.push_str("\
+# cpm_cpu: which processor BOTH CP/M machines run - the emulator's transient
+#   programs and a booted disk's whole operating system.  The only CP/M setting
+#   that reaches both.
+#     z80   DEFAULT - a Zilog Z80.  A strict superset of the 8080, so it runs
+#           every 8080 disk here, and Altairs were very commonly fitted with a
+#           Z80 upgrade board.
+#     8080  an Intel 8080 - the processor the Altair actually shipped with, and
+#           the more literal machine for these disks.
+#   WHAT THE 8080 COSTS: EGT80, the terminal this gateway places on CP/M drive
+#   A:, is Z80 code and declares itself so.  On an 8080 it loads, runs a
+#   Z80-only opcode as something else, and takes CP/M down with it.  Choose the
+#   8080 when you are running period 8080 software - notably diagnostics that
+#   identify the CPU from DCR A setting parity rather than overflow, and are
+#   therefore RIGHT to fail on a Z80.
+");
+    write_kv(&mut content, "cpm_cpu", &cfg.cpm_cpu);
+    content.push_str("\
 # The CP/M virtual modem's saved AT profile, written by AT&W from inside the
 # emulator and reloaded on power-up and on ATZ - exactly as the physical ports
 # save theirs.  Hand-editing is fine; AT&F ignores all of it and returns the
@@ -2981,6 +3020,15 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // a setting the gateway is not honouring.
             if crate::cpm::boot::BACKSPACE_CHOICES.iter().any(|(v, _)| *v == value) {
                 cfg.cpm_boot_backspace = value.to_string();
+            }
+        }
+        "cpm_cpu" => {
+            // Only one of the two processors we have, for the same reason as
+            // the two above: `is_8080` reads anything it does not recognise as
+            // the Z80, so an unchecked write would leave the file claiming an
+            // 8080 while both machines ran a Z80.
+            if crate::cpm::cpu::CPU_CHOICES.iter().any(|(v, _)| *v == value) {
+                cfg.cpm_cpu = value.to_string();
             }
         }
         "disable_gateway_connections" => {
@@ -3783,6 +3831,9 @@ mod tests {
             // Likewise not the default: `rubout` is what a CP/M 1.x operator
             // sets, and it has to survive a write/read cycle to be worth having.
             cpm_boot_backspace: crate::cpm::boot::BACKSPACE_RUBOUT.to_string(),
+            // Likewise not the default: the 8080 is the setting an operator
+            // running period diagnostics picks, and it has to survive the cycle.
+            cpm_cpu: crate::cpm::cpu::CPU_8080.to_string(),
             telnet_enabled: false,
             telnet_port: 1234,
             telnet_gateway_negotiate: true,
@@ -4779,6 +4830,57 @@ mod tests {
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
         apply_config_key(&mut cfg, "cpm_emu_max_minstr", "abc");
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
+    }
+
+    /// The CPU is validated where it is written for the same reason as the two
+    /// settings below, and one reason of its own: `is_8080` reads anything it
+    /// does not recognise as the Z80, so an unchecked write would leave a
+    /// config file claiming an 8080 while both machines ran a Z80.
+    #[test]
+    fn test_apply_config_key_cpm_cpu() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.cpm_cpu,
+            crate::cpm::cpu::CPU_Z80,
+            "a fresh config runs the Z80 — EGT80 is Z80 code"
+        );
+
+        // Both offered processors are settable, iterated rather than hand-typed
+        // so a third could not be added without reaching this key.
+        for (value, _) in crate::cpm::cpu::CPU_CHOICES {
+            apply_config_key(&mut cfg, "cpm_cpu", value);
+            assert_eq!(cfg.cpm_cpu, *value);
+        }
+
+        // Anything else is refused rather than stored.
+        cfg.cpm_cpu = crate::cpm::cpu::CPU_8080.to_string();
+        for bad in ["", "z-80", "8085", "Z80 ", "nonsense"] {
+            apply_config_key(&mut cfg, "cpm_cpu", bad);
+            assert_eq!(cfg.cpm_cpu, crate::cpm::cpu::CPU_8080, "{bad:?} must be refused");
+        }
+
+        // It survives a save/load cycle, and an absent key means the Z80 —
+        // which is what every config written before this key existed was
+        // already running, so an upgrade changes nothing.
+        let dir = std::env::temp_dir().join("egw_test_cpm_cpu_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("cpu.conf");
+        let path = file.to_str().unwrap();
+        write_config_file(path, &cfg).unwrap();
+        assert_eq!(read_config_file(path).cpm_cpu, crate::cpm::cpu::CPU_8080);
+        let text = std::fs::read_to_string(path).unwrap();
+        let stripped: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("cpm_cpu"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(path, stripped).unwrap();
+        assert_eq!(
+            read_config_file(path).cpm_cpu,
+            crate::cpm::cpu::CPU_Z80,
+            "a config written before this key existed must get the Z80"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The boot setting is validated where it is written, not only where it is

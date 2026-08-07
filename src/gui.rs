@@ -1410,6 +1410,34 @@ impl App {
              ^H.  The telnet boot picker asks again per disk and starts from \
              this setting.",
         );
+        // Which processor BOTH CP/M machines run.  The same `CPU_CHOICES` list
+        // the telnet and web screens render -- and the only CP/M setting of the
+        // four that is not about a booted disk alone.
+        ui.horizontal(|ui| {
+            ui.label("CP/M CPU:");
+            egui::ComboBox::from_id_salt("cpm_cpu_combo")
+                .width(320.0)
+                .selected_text(crate::cpm::cpu::cpu_label(&self.cfg.cpm_cpu))
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::cpm::cpu::CPU_CHOICES {
+                        ui.selectable_value(&mut self.cfg.cpm_cpu, value.to_string(), *label);
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Which processor both CP/M machines run -- the emulator's transient \
+             programs and a booted disk's whole operating system.  The Z80 is a \
+             strict superset of the 8080, so it runs every disk here, and \
+             Altairs were very commonly fitted with a Z80 upgrade board.  The \
+             8080 is the processor the Altair actually shipped with, and is \
+             what period diagnostics that identify the CPU from DCR A setting \
+             parity rather than overflow expect -- those are RIGHT to fail on a \
+             Z80.  What the 8080 costs: EGT80, the terminal placed on CP/M \
+             drive A:, is Z80 code and declares itself so, and on an 8080 it \
+             runs a Z80-only opcode as something else and takes CP/M down with \
+             it.",
+        );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
         ui.horizontal(|ui| {

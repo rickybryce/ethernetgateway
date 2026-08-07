@@ -650,7 +650,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Boot settings (what runs, machine)",
+                "  {}  Boot settings (runs, machine, CPU)",
                 self.cyan("B")
             ))
             .await?;
@@ -925,6 +925,14 @@ impl TelnetSession {
                 ))
             ))
             .await?;
+            // The one line on this screen that is *not* only about a booted
+            // disk: the CPU is underneath the emulator too.  Said in the note
+            // below rather than left for the operator to discover.
+            self.send_line(&format!(
+                "  CPU:       {}",
+                self.amber(&truncate_to_width(crate::cpm::cpu::cpu_label(&cfg.cpm_cpu), w))
+            ))
+            .await?;
             self.send_line("").await?;
             // Said plainly, because a setting that does nothing in the current
             // configuration is worse than no setting: the machine is hardware
@@ -937,10 +945,16 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.dim("quiet is usually looking for a"))).await?;
                 self.send_line(&format!("  {}", self.dim("console that is not there."))).await?;
             }
+            // Always said, both branches: the CPU is the exception on this
+            // screen, and an operator who reads "applies to a booted disk"
+            // two lines above would otherwise carry that over to it.
+            self.send_line(&format!("  {}", self.dim("The CPU applies to both. EGT80"))).await?;
+            self.send_line(&format!("  {}", self.dim("needs the Z80."))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
             self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
+            self.send_line(&format!("  {}  Cycle the CPU (Z80 / 8080)", self.cyan("C"))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
@@ -1010,9 +1024,25 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "c" => {
+                    // Two processors, cycled like everything else here.  An
+                    // unrecognised value lands on the Z80 next, which is what
+                    // `is_8080` is already honouring and what EGT80 needs.
+                    let choices = crate::cpm::cpu::CPU_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == cfg.cpm_cpu)
+                        .unwrap_or(choices.len() - 1);
+                    let next = choices[(idx + 1) % choices.len()].0.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_cpu", &next);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.send_line(&format!("  {}", self.red("Press R, M, B, or Q."))).await?;
+                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, or Q."))).await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }

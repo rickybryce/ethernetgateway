@@ -1020,7 +1020,7 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
-        "cpm_boot_backspace",
+        "cpm_boot_backspace", "cpm_cpu",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -2078,6 +2078,26 @@ fn render_more_popups(cfg: &Config) -> String {
             )
         })
         .collect();
+    let cpm_cpu_options: String = crate::cpm::cpu::CPU_CHOICES
+        .iter()
+        .map(|(value, label)| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                value,
+                // Compared through `is_8080`, not by string equality, for the
+                // same reason as the backspace select above: a hand-edited
+                // value neither choice matches must show as the processor the
+                // gateway is really running, or saving this form would change
+                // a setting nobody touched — and this one takes EGT80 down.
+                if crate::cpm::cpu::is_8080(&cfg.cpm_cpu) == crate::cpm::cpu::is_8080(value) {
+                    " selected"
+                } else {
+                    ""
+                },
+                html_escape(label),
+            )
+        })
+        .collect();
     let cpm_uart_options: String = crate::cpm::uart::UART_CHOICES
         .iter()
         .map(|c| {
@@ -2164,7 +2184,15 @@ fn render_more_popups(cfg: &Config) -> String {
              character and then printing the character they deleted. CP/M 1.x is \
              the opposite: the rubout is its editing key and BS prints a literal \
              ^H. The telnet boot picker asks again per disk and starts from \
-             this.</span>",
+             this.</span>\
+             <span class=\"label\">CPU:</span>\
+             <select name=\"cpm_cpu\">{cpm_cpu_options}</select>\
+             <span class=\"hint\">The one setting here that applies to the \
+             emulator as well as to a booted disk. The Z80 runs the 8080 \
+             software these disks are made of; the 8080 is the processor the \
+             Altair shipped with, and is what period diagnostics that identify \
+             the CPU from DCR A expect. EGT80, the terminal placed on drive A:, \
+             is Z80 code and will crash an 8080.</span>",
         ),
         cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
 
@@ -3355,6 +3383,43 @@ mod tests {
                 crate::cpm::boot::DEFAULT_BACKSPACE
             )),
             "an unrecognised value must render as the behaviour actually in force"
+        );
+    }
+
+    /// The CPU needs all three UIs too, both processors offered, and — as with
+    /// the backspace select above — the *behaviour* selected rather than the
+    /// string, since `is_8080` reads anything it does not recognise as the Z80.
+    ///
+    /// The consequence here is sharper than a mis-drawn menu: if nothing
+    /// renders as selected the browser posts the first option, so merely
+    /// opening the page could change the processor under a running CP/M.
+    #[test]
+    fn test_render_main_page_offers_both_cpus() {
+        let mut cfg = Config::default();
+        let html = render_main_page(&cfg, None);
+        assert!(html.contains("name=\"cpm_cpu\""), "the select must be on the page");
+        for (value, label) in crate::cpm::cpu::CPU_CHOICES {
+            assert!(html.contains(&format!("value=\"{value}\"")), "{value} is missing");
+            assert!(html.contains(&html_escape(label)), "{value} has no label");
+        }
+        assert!(
+            html.contains(&format!("value=\"{}\" selected", crate::cpm::cpu::DEFAULT_CPU)),
+            "a fresh config must select the default"
+        );
+
+        cfg.cpm_cpu = crate::cpm::cpu::CPU_8080.to_string();
+        let html = render_main_page(&cfg, None);
+        assert!(
+            html.contains(&format!("value=\"{}\" selected", crate::cpm::cpu::CPU_8080)),
+            "the configured processor must come back selected"
+        );
+
+        // The case the string comparison would get wrong.
+        cfg.cpm_cpu = "something nobody offers".to_string();
+        let html = render_main_page(&cfg, None);
+        assert!(
+            html.contains(&format!("value=\"{}\" selected", crate::cpm::cpu::CPU_Z80)),
+            "an unrecognised value must render as the processor actually in force"
         );
     }
 

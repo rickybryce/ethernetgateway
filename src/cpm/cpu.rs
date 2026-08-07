@@ -1,0 +1,165 @@
+//! Which processor the CP/M machines run on — the Z80, or the 8080 it grew
+//! from.
+//!
+//! One list for all three configuration screens, the way
+//! [`super::uart::UART_CHOICES`] serves the virtual modem's port and
+//! [`super::console::MACHINE_CHOICES`] serves a booted disk's hardware.
+//!
+//! **This is the one CP/M setting that reaches both machines.** Where the
+//! console, the backspace key and the boot image describe a *booted disk*, and
+//! the UART profile describes the *emulator*, the CPU is underneath both: the
+//! emulator's `A>` runs transient programs on it and a booted disk runs its
+//! whole operating system on it. So both [`super::Cpm`] and
+//! [`super::boot_machine::BootMachine`] take their processor from here.
+//!
+//! ## Why the Z80 is the default, and what choosing the 8080 costs
+//!
+//! The Altair shipped with an 8080 and every MITS disk in the sample set is
+//! 8080 code, so the 8080 is the more literal machine. The Z80 is the default
+//! anyway because it is a strict superset that runs all of that, Altairs were
+//! very commonly fitted with Z80 upgrade boards, and — the deciding case —
+//! **EGT80 is Z80 code and declares itself so**. It is placed on drive A: on
+//! first launch, so on an 8080 core the terminal we ship with the gateway
+//! loads, executes a Z80-only opcode as something else, and takes CP/M down
+//! with it. That is a real cost of this setting, not a reason to withhold it:
+//! the operator who wants an 8080 usually wants it *because* they are running
+//! period 8080 software, and the label says what they give up.
+//!
+//! iz80's 8080 mode is a faithful one rather than a relabelled Z80 — real
+//! parity instead of overflow, the 8080's subtract half-carry, its own `DAA`,
+//! and the unused flag bits forced — which is what makes the setting worth
+//! offering at all.
+
+use iz80::Cpu;
+
+/// The `cpm_cpu` value for a Zilog Z80.
+pub const CPU_Z80: &str = "z80";
+
+/// The `cpm_cpu` value for an Intel 8080.
+pub const CPU_8080: &str = "8080";
+
+/// What `cpm_cpu` is when nothing says otherwise.
+pub const DEFAULT_CPU: &str = CPU_Z80;
+
+/// The choices for `cpm_cpu`, `(value, label)`.
+///
+/// Both labels are 24 characters, because the telnet screen truncates to 26 on
+/// a 40-column PETSCII terminal and a label that arrives cut in half cannot say
+/// what it costs.
+pub const CPU_CHOICES: &[(&str, &str)] = &[
+    (CPU_Z80, "Z80 (runs 8080 code too)"),
+    (CPU_8080, "8080 (EGT80 needs a Z80)"),
+];
+
+/// Whether `value` selects the 8080.
+///
+/// Anything unrecognised reads as the Z80 rather than refusing: this is
+/// hand-editable in `egateway.conf`, and a typo that silently dropped the
+/// machine to an 8080 would present as our own terminal crashing CP/M.
+pub fn is_8080(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case(CPU_8080)
+}
+
+/// What to show for the current `cpm_cpu` setting.
+///
+/// Reads through [`is_8080`] rather than matching the string, so a hand-edited
+/// typo is *displayed* as the processor the gateway is actually giving it — the
+/// failure this exists to prevent is a screen that agrees with the config file
+/// and disagrees with the machine.
+pub fn cpu_label(value: &str) -> &'static str {
+    let want = if is_8080(value) { CPU_8080 } else { CPU_Z80 };
+    CPU_CHOICES.iter().find(|(v, _)| *v == want).map(|(_, l)| *l).unwrap_or(want)
+}
+
+/// The CPU a `cpm_cpu` value names, ready to run.
+///
+/// The single place either machine turns the setting into a processor, so the
+/// emulator and a booted disk cannot end up disagreeing about what the operator
+/// asked for.
+pub fn new_cpu(value: &str) -> Cpu {
+    if is_8080(value) {
+        Cpu::new_8080()
+    } else {
+        Cpu::new_z80()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iz80::Machine;
+
+    #[test]
+    fn test_the_default_is_the_z80() {
+        assert_eq!(DEFAULT_CPU, CPU_Z80);
+        assert!(!is_8080(DEFAULT_CPU));
+        assert_eq!(cpu_label(DEFAULT_CPU), CPU_CHOICES[0].1);
+    }
+
+    #[test]
+    fn test_every_choice_resolves_to_itself() {
+        for (value, _) in CPU_CHOICES {
+            assert_eq!(is_8080(value), *value == CPU_8080, "{value} resolved to the other CPU");
+            assert!(
+                cpu_label(value) == CPU_CHOICES.iter().find(|(v, _)| v == value).unwrap().1,
+                "{value} is not labelled as itself"
+            );
+        }
+    }
+
+    /// A value neither choice matches must read *and display* as the Z80.
+    ///
+    /// Both halves matter: a config file is hand-editable, and a screen that
+    /// showed "8080" while the machine ran a Z80 would send somebody looking
+    /// for the fault in their software.
+    #[test]
+    fn test_an_unrecognised_setting_reads_as_the_z80() {
+        for bad in ["", "  ", "Z-80", "i8080a", "8085", "nonsense"] {
+            assert!(!is_8080(bad), "{bad:?} must not select the 8080");
+            assert_eq!(cpu_label(bad), CPU_CHOICES[0].1, "{bad:?} must display as the Z80");
+        }
+        // Spelling and spacing are the operator's, not ours.
+        for good in [" 8080", "8080 ", "8080"] {
+            assert!(is_8080(good), "{good:?} must select the 8080");
+        }
+    }
+
+    /// **The setting really changes the processor, proved by an instruction the
+    /// two decode differently.**
+    ///
+    /// `0x08` is `EX AF,AF'` on a Z80 and an unused no-op on an 8080, so one
+    /// core swaps the accumulator with its shadow and the other leaves it
+    /// alone. Asserting on the *behaviour* rather than on which constructor was
+    /// called is the whole point: a selector that returned the right label and
+    /// the same CPU would pass every other test here.
+    #[test]
+    fn test_the_two_settings_decode_differently() {
+        struct Mem([u8; 65536]);
+        impl Machine for Mem {
+            fn peek(&mut self, a: u16) -> u8 {
+                self.0[a as usize]
+            }
+            fn poke(&mut self, a: u16, v: u8) {
+                self.0[a as usize] = v;
+            }
+            fn port_in(&mut self, _: u16) -> u8 {
+                0xFF // an unclaimed port, as the real machines answer
+            }
+            fn port_out(&mut self, _: u16, _: u8) {}
+        }
+        // A: = 0x11, shadow AF cleared, then EX AF,AF' (or nothing at all).
+        let run = |setting: &str| {
+            let mut cpu = new_cpu(setting);
+            let mut mem = Mem([0; 65536]);
+            mem.0[0] = 0x3E; // LD A,0x11
+            mem.0[1] = 0x11;
+            mem.0[2] = 0x08; // EX AF,AF'  /  8080: unused, no effect
+            cpu.registers().set_pc(0);
+            cpu.execute_instruction(&mut mem);
+            cpu.execute_instruction(&mut mem);
+            cpu.registers().a()
+        };
+        assert_eq!(run(CPU_8080), 0x11, "the 8080 must not know EX AF,AF'");
+        assert_ne!(run(CPU_Z80), 0x11, "the Z80 must swap the accumulator away");
+    }
+}

@@ -2269,9 +2269,9 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
     let body = &src[start..end];
 
-    let hint = "Press R, M, B, or Q.";
+    let hint = "Press R, M, B, C, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["R", "M", "B"] {
+    for key in ["R", "M", "B", "C"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -2281,6 +2281,37 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
             "{key} is displayed but never handled — pressing it would just error"
         );
         assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
+    }
+}
+
+/// **The CP/M boot screen is now FULL.**
+///
+/// header(3) + blank + 4 settings + blank + 3 dim lines (the longer branch, a
+/// disk is configured) + 2 dim CPU lines + blank + 4 keys + blank + Back +
+/// prompt = 22, which is the whole PETSCII budget.  Pinned because the next
+/// setting added here has nowhere to go and must open a submenu instead —
+/// exactly how this screen came to exist when the CP/M one filled up.
+#[test]
+fn test_cpm_boot_screen_row_count() {
+    let rows = 3 + 1 + 4 + 1 + 3 + 2 + 1 + 4 + 1 + 1 + 1;
+    assert!(rows <= 22, "CP/M boot screen is {rows} rows, exceeds 22");
+    assert_eq!(rows, 22, "if this screen has shrunk, say so here before adding to it");
+}
+
+/// Both CPU labels have to fit the 40-column PETSCII screen once the
+/// `  CPU:       ` prefix is allowed for, and still say what the choice costs.
+///
+/// Iterated over the real list rather than hand-copied, so a processor cannot
+/// be added without being measured.
+#[test]
+fn test_cpu_labels_fit_the_petscii_boot_screen() {
+    // "  CPU:       " is 13 columns of 40, and the screen truncates to 26.
+    for (value, label) in crate::cpm::cpu::CPU_CHOICES {
+        assert!(
+            label.len() <= 26,
+            "{value}'s label is {} characters and would arrive truncated: {label:?}",
+            label.len()
+        );
     }
 }
 

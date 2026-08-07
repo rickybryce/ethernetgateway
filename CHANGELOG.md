@@ -114,6 +114,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The CP/M machines run a Z80 or an 8080, your choice.** New `cpm_cpu`
+  (`z80` — the default — or `8080`) on all three configuration surfaces: telnet
+  Other Settings → `E` → `B`, the web "AI, Browser, Weather & CP/M — More"
+  panel, and the GUI. It is the **only CP/M setting that reaches both
+  machines**: where the console, the backspace key and the boot image describe
+  a booted disk, and the modem profile describes the emulator, the processor is
+  underneath both — the emulator's transient programs and a booted disk's whole
+  operating system run on it.
+
+  The Z80 stays the default because it is a strict superset that runs the 8080
+  software these disks are made of, because Altairs were very commonly fitted
+  with a Z80 upgrade board, and because **EGT80 is Z80 code and declares itself
+  so**: on an 8080 the terminal this gateway places on CP/M drive A: loads,
+  runs a Z80-only opcode as something else, and takes CP/M down with it. That
+  is a real cost of choosing the 8080 rather than a reason to withhold it, and
+  it is what the label on all three screens says. Choose the 8080 when you are
+  running period 8080 software — notably diagnostics that identify the CPU from
+  `DCR A` setting parity rather than overflow, which are therefore *right* to
+  fail on a Z80. iz80's 8080 mode is a faithful one, not a relabelled Z80: real
+  parity instead of overflow, the 8080's subtract half-carry, its own `DAA`,
+  and the unused flag bits forced.
+
 - **Cromemco disks boot — the fourth and last board on the disk-controller
   plan.** `src/cpm/cromemco.rs`, the 4FDC/16FDC, and the second user of the
   FD1771 module the Tarbell put in place. All three sample images come up, take

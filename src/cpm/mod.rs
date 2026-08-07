@@ -37,6 +37,7 @@ pub mod boot;
 pub mod boot_machine;
 pub mod console;
 pub mod controller;
+pub mod cpu;
 pub mod dcdd;
 pub mod detect;
 pub mod image;
@@ -255,10 +256,23 @@ impl Default for Cpm {
 }
 
 impl Cpm {
-    /// A fresh Z80 machine with the CP/M low-memory vectors installed.
+    /// A fresh machine on the default processor, with the CP/M low-memory
+    /// vectors installed.
+    ///
+    /// The default rather than the configured CPU, so the tests below — and
+    /// anything else with no operator to ask — get one known machine.  The
+    /// session driver uses [`Cpm::new_for`].
     pub fn new() -> Cpm {
+        Self::new_for(cpu::DEFAULT_CPU)
+    }
+
+    /// A fresh machine on the processor `cpm_cpu` names.
+    ///
+    /// See [`cpu`] for what the choice costs: the 8080 is the more literal
+    /// Altair, and it cannot run EGT80.
+    pub fn new_for(cpu_setting: &str) -> Cpm {
         let mut cpm = Cpm {
-            cpu: Cpu::new(), // Z80
+            cpu: cpu::new_cpu(cpu_setting),
             mem: CpmMachine::new(),
             instructions: 0,
             hbios_line: hbios::default_line(),
@@ -1600,6 +1614,12 @@ mod tests {
     /// CPM_CPUTEST_COM=/path/EXZ80DOC.COM cargo test --release \
     ///     --bin ethernetgateway test_cpu_conformance_suite -- --ignored --nocapture
     /// ```
+    ///
+    /// `CPM_CPUTEST_CPU=8080` runs the same harness on the 8080 core that
+    /// `cpm_cpu = 8080` selects. That is how the 8080 setting is checked
+    /// against software that can tell: `TEST8080.COM` identifies the processor
+    /// from `DCR A` setting parity rather than overflow, so it fails on our Z80
+    /// — correctly — and must pass here.
     #[test]
     #[ignore]
     fn test_cpu_conformance_suite() {
@@ -1610,7 +1630,17 @@ mod tests {
         };
         let _g = crate::cpm::image::registry::tests_lock();
         let program = std::fs::read(&path).expect("the exerciser");
-        let mut cpm = Cpm::new();
+        // On whichever processor `cpm_cpu` names, defaulting to the Z80 as a
+        // session does. `CPM_CPUTEST_CPU=8080` is how the 8080 setting gets
+        // checked against real 8080 software: TEST8080 *fails* on our Z80 and
+        // is right to — it detects the CPU from `DCR A` setting parity rather
+        // than overflow — so it passing under this setting, and only under this
+        // setting, is the strongest evidence available that the choice reaches
+        // the machine rather than only the config file.
+        let setting =
+            std::env::var("CPM_CPUTEST_CPU").unwrap_or_else(|_| cpu::DEFAULT_CPU.to_string());
+        println!("[cpu: {}]", cpu::cpu_label(&setting));
+        let mut cpm = Cpm::new_for(&setting);
         cpm.load_com(&program);
         let abort = AtomicBool::new(false);
 
