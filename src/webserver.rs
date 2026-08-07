@@ -3312,6 +3312,52 @@ mod tests {
         );
     }
 
+    /// The backspace setting needs all three UIs too, both choices offered, and
+    /// the *behaviour* selected rather than the string.
+    ///
+    /// That last part is the one worth a test: `backspace_erases` treats
+    /// anything it does not recognise as the default, so a hand-edited or
+    /// stale value must render as the behaviour the gateway is really giving
+    /// it. Matching on string equality instead would leave nothing selected,
+    /// and the browser would then post the *first* option — silently changing a
+    /// setting the operator never touched, by opening a page.
+    #[test]
+    fn test_render_main_page_offers_both_backspace_choices() {
+        let mut cfg = Config::default();
+        let html = render_main_page(&cfg, None);
+        assert!(html.contains("name=\"cpm_boot_backspace\""), "the select must be on the page");
+        assert!(html.contains("Booted disk's backspace key"), "and be labelled");
+        for (value, label) in crate::cpm::boot::BACKSPACE_CHOICES {
+            assert!(html.contains(&format!("value=\"{value}\"")), "{value} is missing");
+            assert!(html.contains(&html_escape(label)), "{value} has no label");
+        }
+        assert!(
+            html.contains(&format!(
+                "value=\"{}\" selected",
+                crate::cpm::boot::DEFAULT_BACKSPACE
+            )),
+            "a fresh config must select the default"
+        );
+
+        cfg.cpm_boot_backspace = crate::cpm::boot::BACKSPACE_RUBOUT.to_string();
+        let html = render_main_page(&cfg, None);
+        assert!(
+            html.contains(&format!("value=\"{}\" selected", crate::cpm::boot::BACKSPACE_RUBOUT)),
+            "the configured value must come back selected"
+        );
+
+        // The case the string comparison would get wrong.
+        cfg.cpm_boot_backspace = "something nobody offers".to_string();
+        let html = render_main_page(&cfg, None);
+        assert!(
+            html.contains(&format!(
+                "value=\"{}\" selected",
+                crate::cpm::boot::DEFAULT_BACKSPACE
+            )),
+            "an unrecognised value must render as the behaviour actually in force"
+        );
+    }
+
     /// The machine setting needs all three UIs too, and every choice has to be
     /// offered — a select that renders only the current value looks fine and
     /// cannot be changed.
