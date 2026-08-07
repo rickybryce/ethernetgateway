@@ -3650,7 +3650,18 @@ mod tests {
         // Read-only unless asked, like every other path here.  `CPM_BOOT_RW=1`
         // is what lets this workbench prove a *write*.
         let ro = std::env::var_os("CPM_BOOT_RW").is_none();
-        m.insert(0, std::fs::read(&path).unwrap(), ro).expect("a bootable image");
+        let bytes = std::fs::read(&path).unwrap();
+        // The machine, chosen the way a real boot chooses it — `auto` unless
+        // told otherwise.  Without this the workbench silently ran everything
+        // on the default Altair console, so a z80pack or Cromemco disk came up
+        // mute here while booting perfectly in the survey: the tool used to
+        // chase a quiet guest was itself the reason it was quiet.
+        let configured = std::env::var("CPM_BOOT_MACHINE")
+            .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
+        let (machine, why) = crate::cpm::detect::machine_for(&configured, &bytes);
+        println!("--- machine: {machine} ({}) ---", why.unwrap_or_else(|| "as configured".into()));
+        m.set_machine(&machine);
+        m.insert(0, bytes, ro).expect("a bootable image");
         // Further drives, `,`-separated, filling units 1 upwards.  `blank:<n>`
         // for an unformatted one; an empty slot leaves that unit empty, so
         // `,,x.dsk` puts a disk in unit 3 and nothing in 1 or 2.
@@ -4089,6 +4100,172 @@ mod tests {
             "a disk at unit 1 changed what the guest sees, so this BIOS does \
              reach it after all and the hard-disk advice needs rewriting"
         );
+    }
+
+    /// **Does each guest's own operating system reach the disk we mounted at
+    /// unit 1 — asked of every image in a folder.**
+    ///
+    /// [`test_what_a_booted_guest_reaches_of_its_mounts`] pins the two cases we
+    /// reasoned about. This is the sweep behind it, and it is a separate
+    /// measurement because "the second drive works" is a claim about **each
+    /// disk's own BIOS**, not about our controller: a MITS floppy CP/M reaches
+    /// four units, the 88-HDSK BIOS carries exactly one, and a disk that is not
+    /// CP/M at all has no `DIR` to ask with. Only booting each one can say
+    /// which of those any particular disk is.
+    ///
+    /// The companion is chosen by measurement, never by filename: the first
+    /// other image in the folder that is **the same size** (so whatever board
+    /// the booted machine carries accepts it at unit 1) and whose directory our
+    /// own reader verifies as a real CP/M filesystem holding a file the boot
+    /// disk does *not* have.
+    ///
+    /// That last condition is what makes the answer exact rather than a score.
+    /// The expected names come from the companion's own directory, so "reached
+    /// it" means the guest listed a file that is genuinely on that disk and
+    /// nowhere else in the machine — not that the string `B:` appeared, which
+    /// `Bdos Err On B:` also manages, and not that a name appeared which the
+    /// boot disk carries too, which a guest quietly listing A: would produce.
+    ///
+    /// Ignored — set `CPM_BOOT_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_survey_second_drive_across_every_bootable_image() {
+        let Ok(dir) = std::env::var("CPM_BOOT_DIR") else {
+            eprintln!("set CPM_BOOT_DIR to run this");
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".dsk"))
+            .collect();
+        names.sort();
+
+        /// The files a CP/M `DIR` would list on this image, read by our own
+        /// reader, as the `NAMEEXT` tokens the guest's columns collapse to.
+        ///
+        /// `None` when the image is not a filesystem we can verify — which is
+        /// exactly when it is no use as an oracle, since a mis-read directory
+        /// would supply names that are not on the disk at all.
+        fn dir_tokens(bytes: &[u8]) -> Option<Vec<String>> {
+            use crate::cpm::image::{fs::ImageFs, identify::identify, media::MemMedia};
+            let id = identify("unnamed.dsk", bytes.len() as u64, |fmt| {
+                let mut d = Vec::new();
+                for rec in 0..fmt.dir_records() {
+                    let off = fmt.data_record_offset(rec)? as usize;
+                    d.extend_from_slice(bytes.get(off..off + 128)?);
+                }
+                Some(d)
+            })
+            .ok()?;
+            if id.force_read_only() {
+                return None; // identified by size alone — not proven a CP/M disk
+            }
+            let fs = ImageFs::mount(Box::new(MemMedia::new(bytes.to_vec())), id.format, true).ok()?;
+            let mut t: Vec<String> = fs
+                .entries()
+                .iter()
+                // User 0 and extent 0 are what a plain `DIR` shows; a SYS file
+                // is deliberately hidden from it, so it cannot be evidence.
+                .filter(|e| e.user == 0 && e.extent == 0 && !e.system)
+                .map(|e| {
+                    format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&e.name).trim(),
+                        String::from_utf8_lossy(&e.ext).trim()
+                    )
+                    .to_ascii_uppercase()
+                })
+                .filter(|n| n.len() > 2 && n.chars().all(|c| c.is_ascii_graphic()))
+                .collect();
+            t.sort();
+            t.dedup();
+            Some(t)
+        }
+
+        let read = |n: &str| std::fs::read(std::path::Path::new(&dir).join(n)).unwrap();
+        let (mut asked, mut reached) = (0u32, 0u32);
+        let mut missed: Vec<String> = Vec::new();
+        for name in &names {
+            let bytes = read(name);
+            let own = dir_tokens(&bytes).unwrap_or_default();
+            let Some((second, want)) = names.iter().filter(|n| *n != name).find_map(|n| {
+                let b = read(n);
+                if b.len() != bytes.len() {
+                    return None; // a different medium — not this machine's unit 1
+                }
+                let uniq: Vec<String> =
+                    dir_tokens(&b)?.into_iter().filter(|f| !own.contains(f)).collect();
+                (!uniq.is_empty()).then(|| (n.clone(), uniq))
+            }) else {
+                println!("  {name:<16} skipped — no same-size companion is a verified CP/M disk");
+                continue;
+            };
+
+            let (machine, _why) =
+                crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+            let mut m = BootMachine::new();
+            m.set_machine(&machine);
+            if let Err(e) = m.insert(0, bytes, true) {
+                println!("  {name:<16} skipped — {e}");
+                continue;
+            }
+            if let Err(e) = m.insert(1, read(&second), true) {
+                println!("  {name:<16} unit 1 refused {second}: {e}");
+                continue;
+            }
+            let mut cpu = BootMachine::new_cpu();
+            if let Err(e) = m.boot(&mut cpu, 0) {
+                println!("  {name:<16} does not boot: {e}");
+                continue;
+            }
+            let signon = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+            if signon.is_empty() {
+                println!("  {name:<16} no prompt to ask at");
+                continue;
+            }
+            // Some systems ask something before they will take a command —
+            // TDISK01 (CP/M 1.3) opens with `HOW MANY DISKS?`. Typing `DIR B:`
+            // into that answers the question with a `D` and reports a working
+            // disk as unreachable, so the question is answered first. A bare
+            // Return rather than a guess at the answer: it is the one reply
+            // that means "whatever you had in mind", and it was measured to
+            // leave CP/M 1.3 at `A>` with both drives present.
+            let mut note = "";
+            if signon.trim_end().ends_with('?') {
+                note = " (after answering its startup question)";
+                m.send_key(b'\r');
+                run_until_quiet(&mut m, &mut cpu, 200_000_000);
+            }
+            asked += 1;
+            let listed = type_at(&mut m, &mut cpu, b"DIR B:\r", 400_000_000);
+            let squashed: String = listed
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_ascii_uppercase();
+            let hits: Vec<&String> = want.iter().filter(|f| squashed.contains(*f)).collect();
+            if hits.is_empty() {
+                missed.push(name.clone());
+                println!(
+                    "  {name:<16} B: <- {second:<16} NOT reached{note} — {}",
+                    listed.replace('\n', " ").trim()
+                );
+            } else {
+                reached += 1;
+                println!(
+                    "  {name:<16} B: <- {second:<16} reached, {} of its own files (e.g. {}){note}",
+                    hits.len(),
+                    hits[0]
+                );
+            }
+        }
+        println!("\n  {reached} of {asked} guests that reached a prompt saw the disk at unit 1");
+        if !missed.is_empty() {
+            println!("  did NOT reach unit 1: {missed:?}");
+        }
+        assert!(asked > 0, "no image in {dir} reached a prompt with a companion mounted");
     }
 
 }
