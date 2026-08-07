@@ -3041,7 +3041,10 @@ mod tests {
             let mut m = BootMachine::new();
             m.set_machine(&machine);
             m.insert(0, bytes.to_vec(), true).ok()?;
-            let mut cpu = BootMachine::new_cpu();
+            // `CPM_BOOT_CPU` here too: a survey that silently ran a different
+            // processor from the one next door would answer a question nobody
+            // asked.
+            let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
             m.boot(&mut cpu, 0).ok()?;
             if run_until_quiet(&mut m, &mut cpu, 200_000_000).is_empty() {
                 return None; // never signed on
@@ -4272,7 +4275,7 @@ mod tests {
                 println!("  {name:<16} unit 1 refused {second}: {e}");
                 continue;
             }
-            let mut cpu = BootMachine::new_cpu();
+            let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
             if let Err(e) = m.boot(&mut cpu, 0) {
                 println!("  {name:<16} does not boot: {e}");
                 continue;

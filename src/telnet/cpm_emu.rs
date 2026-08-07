@@ -151,12 +151,18 @@ pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::
 /// Highest emulated drive letter (A:–P:, the 16 drives CP/M 2.2 allows).
 const CPM_LAST_DRIVE: u8 = b'P';
 
-/// The emulator's sign-on line on the default processor.
-pub(in crate::telnet) const CPM_BANNER_Z80: &str = "CP/M 2.2 (iz80).  Type HELP.";
+/// The emulator's sign-on line.
+pub(in crate::telnet) const CPM_BANNER: &str = "CP/M 2.2 (iz80).  Type HELP.";
 
-/// The same line when `cpm_cpu` selects the 8080, where the warning is worth
-/// more than the core's name: EGT80 is on drive A: and is Z80 code.
-pub(in crate::telnet) const CPM_BANNER_8080: &str = "CP/M 2.2 (8080).  EGT80 needs Z80.";
+/// An extra line, drawn only when `cpm_cpu` selects the 8080.
+///
+/// A line of its own rather than a re-worded banner: 40 PETSCII columns cannot
+/// hold the version, the processor *and* the warning, and the first attempt at
+/// this dropped "Type HELP." to make room — trading away the only pointer to
+/// the command list, on the screen where a new operator meets the emulator.
+/// This screen is about 15 rows against a budget of 22, so the unusual case can
+/// simply have a row (the boot screen, which is full, could not).
+pub(in crate::telnet) const CPM_NOTE_8080: &str = "8080 selected.  EGT80 needs Z80.";
 
 /// EGT80, the gateway's own CP/M terminal, carried inside the binary and
 /// placed on drive A: when the drive folders are created (see
@@ -368,22 +374,14 @@ impl TelnetSession {
             self.amber("files you run in the emulator.")
         ))
         .await?;
-        // The processor is named only when it is not the default, so the usual
-        // screen is unchanged and the unusual one says so on a line the
-        // operator is already reading — no new row, because this screen has a
-        // 40-column PETSCII budget like every other.  Both forms are measured
-        // against it by `test_cpm_banner_lines_fit_petscii`; the 8080 one drops
-        // "iz80" to make room for the warning, which is the part that matters
-        // when the terminal on drive A: is about to crash.
-        self.send_line(&format!(
-            "  {}",
-            self.dim(if crate::cpm::cpu::is_8080(&cpu_setting) {
-                CPM_BANNER_8080
-            } else {
-                CPM_BANNER_Z80
-            })
-        ))
-        .await?;
+        self.send_line(&format!("  {}", self.dim(CPM_BANNER))).await?;
+        // One extra line when the processor is not the default: it names what
+        // was selected and what that costs, on the screen where the operator is
+        // about to type a program's name.  Both lines are measured against the
+        // 40-column PETSCII width by `test_cpm_banner_lines_fit_petscii`.
+        if crate::cpm::cpu::is_8080(&cpu_setting) {
+            self.send_line(&format!("  {}", self.amber(CPM_NOTE_8080))).await?;
+        }
         // Boot-banner memory report, as a real CP/M system prints on cold start.
         self.send_line(&format!("  {}", self.dim(&Self::cpmemu_tpa_line())))
             .await?;

@@ -7250,17 +7250,17 @@ fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
     );
 }
 
-/// **Both spellings of the emulator's sign-on line fit a C64 row.**
+/// **Both lines of the emulator's sign-on fit a C64 row.**
 ///
-/// The 8080 form is the one at risk: it carries a warning as well as the
-/// version, and it is drawn only when a non-default processor is configured —
-/// so an overflow here would wrap the screen for exactly the operators who are
+/// The 8080 note is the one at risk: it carries a warning as well as the
+/// processor, and it is drawn only when a non-default CPU is configured — so an
+/// overflow here would wrap the screen for exactly the operators who are
 /// already doing something unusual, and nobody else would ever see it.
 #[test]
 fn test_cpm_banner_lines_fit_petscii() {
     for line in [
-        crate::telnet::cpm_emu::CPM_BANNER_Z80,
-        crate::telnet::cpm_emu::CPM_BANNER_8080,
+        crate::telnet::cpm_emu::CPM_BANNER,
+        crate::telnet::cpm_emu::CPM_NOTE_8080,
     ] {
         assert!(
             line.len() + 2 <= PETSCII_WIDTH,
@@ -7268,10 +7268,13 @@ fn test_cpm_banner_lines_fit_petscii() {
             line.len() + 2
         );
     }
-    // The 8080 line has to name the processor and say what it costs; a version
-    // string alone would leave the operator to discover EGT80 crashing.
-    assert!(crate::telnet::cpm_emu::CPM_BANNER_8080.contains("8080"));
-    assert!(crate::telnet::cpm_emu::CPM_BANNER_8080.contains("EGT80"));
+    // The banner keeps its pointer to the command list whatever the processor
+    // is — an earlier version spent those columns on the 8080 warning, which
+    // took HELP away from the screen where a new operator meets the emulator.
+    assert!(crate::telnet::cpm_emu::CPM_BANNER.contains("HELP"));
+    // And the note has to name the processor and say what it costs.
+    assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("8080"));
+    assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("EGT80"));
 }
 
 /// The emulator's out-of-band drain probes the wire once per CPU batch — and a

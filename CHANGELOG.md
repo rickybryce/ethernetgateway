@@ -136,6 +136,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parity instead of overflow, the 8080's subtract half-carry, its own `DAA`,
   and the unused flag bits forced.
 
+  The machine says which processor it is when it is not the default, and only
+  then: the emulator's sign-on adds `8080 selected. EGT80 needs Z80.`, `VER`
+  reports `iz80 8080 core`, and a booted disk prints `CPU: 8080.` on the same
+  rule its console line already followed. `VER` used to say `Z80 core`
+  whatever was running, which is the wrong answer in the one place someone
+  looks when an instruction decodes oddly.
+
 - **Cromemco disks boot — the fourth and last board on the disk-controller
   plan.** `src/cpm/cromemco.rs`, the 4FDC/16FDC, and the second user of the
   FD1771 module the Tarbell put in place. All three sample images come up, take
