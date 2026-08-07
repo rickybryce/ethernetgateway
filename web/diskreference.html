@@ -2417,8 +2417,8 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                 <p>
                     We modelled a unit as carrying exactly one platter and stopped
                     the head range at 1. Everything that had ever been measured
-                    still passed &mdash; the CP/M hard disk boots, and its BIOS uses
-                    head 0 and 1 of unit 0 only &mdash; and the defect stayed
+                    still passed &mdash; the CP/M hard disk boots and lists its
+                    own files from heads 0 and 1 &mdash; and the defect stayed
                     invisible until a guest asked for a second <em>disk</em>:
                 </p>
                 <div class="callout callout-warn">
@@ -2456,6 +2456,27 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     <code>$A.GLTRA</code>, <code>AP MENU</code>, the payroll and
                     ledger files &mdash; none of which are on the boot disk.
                 </p>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>And the 88-HDSK CP/M has a B: after all.</strong>
+                        This page and the tests said for months that its BIOS
+                        carried exactly one drive, on the evidence that
+                        <code>DIR B:</code> answered <code>Bdos Err On B: Bad
+                        Sector</code> whether or not a disk was mounted. Both
+                        halves of that were true and the conclusion was wrong:
+                        its <code>B:</code> is the drive's <em>fixed platter</em>,
+                        which we never served. Put an image on slot 1 now and the
+                        same unmodified BIOS lists it.
+                    </p>
+                    <p>
+                        <strong>A control only proves the guest is not seeing
+                        your disk.</strong> Which of the two sides is at fault is
+                        a separate question, and &ldquo;the guest's BIOS is
+                        limited&rdquo; is the comfortable answer to reach for
+                        &mdash; especially in a project whose whole premise is
+                        that the disk is right about its own hardware.
+                    </p>
+                </div>
                 <div class="callout callout-tip">
                     <p>
                         <strong>The lesson is the one this page keeps
