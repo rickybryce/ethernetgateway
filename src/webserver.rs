@@ -2167,7 +2167,16 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
          </select></div>\
          <div class=\"row\">{cpm}</div>\
-         <div class=\"row\">{cpmmax}</div>\
+         <div class=\"row\">{cpmmax}\
+             <span class=\"hint\">Runaway ceiling for one CP/M emulator program, \
+             in millions of instructions (2000 = 2 billion). A compute-bound \
+             .COM that never reads the console is stopped at this count so the \
+             A&gt; prompt always comes back. Minimum 1; anything above 1000000 \
+             is capped at it rather than refused, so a value meant as \
+             &quot;no limit&quot; is kept as far as it goes \u{2014} which at \
+             emulated speed is over three months of continuous running. Bounds \
+             one transient in the emulator only: a booted disk is the session \
+             and has no ceiling.</span></div>\
          <div class=\"row\">{cpmprof}</div>\
          <div class=\"row\">{cpmecho}{cpmverb}{cpmquiet}</div>\
          <div class=\"row\">{cpmx}{cpmdcd}</div>\

@@ -779,7 +779,20 @@ impl App {
         if let Ok(v) = self.punter_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_retries = v; }
         if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
-        if let Ok(v) = self.cpm_emu_max_minstr_buf.parse::<u32>() && v >= 1 { self.cfg.cpm_emu_max_minstr = v; }
+        // Clamped rather than range-guarded, unlike its neighbours above: the
+        // config loader and `apply_config_key` both clamp this one (see
+        // `config::MAX_CPM_EMU_MAX_MINSTR`), so refusing the value here would
+        // have the desktop disagreeing with telnet and the web about what
+        // typing a huge number does.  The buffer is rewritten when the clamp
+        // bites, or it would differ from `cfg` for ever and leave the window
+        // showing unsaved changes that cannot be saved away.
+        if let Ok(v) = self.cpm_emu_max_minstr_buf.parse::<u32>() && v >= 1 {
+            let clamped = v.min(crate::config::MAX_CPM_EMU_MAX_MINSTR);
+            self.cfg.cpm_emu_max_minstr = clamped;
+            if clamped != v {
+                self.cpm_emu_max_minstr_buf = clamped.to_string();
+            }
+        }
         // No `>= 1` floor on either log limit: `0` is meaningful for both —
         // no size rotation, and keep no rotated generations — matching the
         // config-file loader and `logger::should_rotate`/`rotate`.
@@ -1364,7 +1377,19 @@ impl App {
                 &mut self.cpm_emu_max_minstr_buf,
                 70.0,
             );
-        });
+        })
+        .response
+        .on_hover_text(
+            "Runaway ceiling for one CP/M emulator program, in millions of \
+             instructions (2000 = 2 billion).  A compute-bound .COM that never \
+             reads the console is stopped at this count so the A> prompt always \
+             comes back.  Minimum 1; anything above 1000000 is capped at it \
+             rather than refused, so a value meant as \"no limit\" is kept as \
+             far as it goes -- which at emulated speed is over three months of \
+             continuous running.  This bounds one transient in the emulator \
+             only: a booted disk is the session, is meant to sit at its prompt, \
+             and has no ceiling.",
+        );
         // Disk images get their own window: sixteen drives will not fit here,
         // and mounting is an occasional operation rather than a setting.
         ui.horizontal(|ui| {
@@ -4197,6 +4222,50 @@ mod tests {
         app.sync_numeric_fields();
         assert_eq!(app.cfg.log_max_size_kb, 0);
         assert_eq!(app.cfg.log_max_files, 0);
+    }
+
+    /// The CP/M ceiling is **clamped** here rather than range-guarded like its
+    /// neighbours, because the config loader and `apply_config_key` clamp it —
+    /// so the desktop must not be the one surface where typing a huge number
+    /// does nothing instead of landing on the cap.
+    ///
+    /// The buffer is rewritten when the clamp bites. Without that it would hold
+    /// `4000000000` while `cfg` held the cap for ever, and the window's
+    /// unsaved-changes check compares exactly those two — an edit that could
+    /// never be saved away.
+    #[test]
+    fn test_sync_cpm_ceiling_clamps_and_rewrites_the_buffer() {
+        let mut app = test_app();
+        app.cpm_emu_max_minstr_buf = "500".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_max_minstr, 500);
+
+        app.cpm_emu_max_minstr_buf = "4000000000".into();
+        app.sync_numeric_fields();
+        assert_eq!(
+            app.cfg.cpm_emu_max_minstr,
+            crate::config::MAX_CPM_EMU_MAX_MINSTR,
+            "the desktop must clamp, as the other two surfaces do"
+        );
+        assert_eq!(
+            app.cpm_emu_max_minstr_buf,
+            crate::config::MAX_CPM_EMU_MAX_MINSTR.to_string(),
+            "the field must show what was actually kept, or it reads as an \
+             unsaved change that cannot be saved"
+        );
+
+        // In range, and the boundary, are left exactly alone.
+        app.cpm_emu_max_minstr_buf = crate::config::MAX_CPM_EMU_MAX_MINSTR.to_string();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_max_minstr, crate::config::MAX_CPM_EMU_MAX_MINSTR);
+
+        // Zero and junk leave the last good value alone, as before.
+        app.cpm_emu_max_minstr_buf = "0".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_max_minstr, crate::config::MAX_CPM_EMU_MAX_MINSTR);
+        app.cpm_emu_max_minstr_buf = "x".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.cpm_emu_max_minstr, crate::config::MAX_CPM_EMU_MAX_MINSTR);
     }
 
     /// `refresh_from_global` must rebuild the log buffers too — a buffer left

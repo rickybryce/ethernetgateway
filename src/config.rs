@@ -388,6 +388,24 @@ const DEFAULT_DISABLE_GATEWAY_CONNECTIONS: bool = false;
 /// that never reads the console still terminates.  Interactive programs are
 /// additionally escapable with double-`ESC` at any input prompt.
 const DEFAULT_CPM_EMU_MAX_MINSTR: u32 = 2000;
+
+/// The most `cpm_emu_max_minstr` may be: a million million instructions.
+///
+/// A sanity bound, not a protocol one, and it is **clamped rather than
+/// rejected** — which is the opposite of what every other bounded key here
+/// does, so it is worth saying why. A Kermit packet longer than 9024 bytes is
+/// *nonsense*, so falling back to the default is the right answer for it. An
+/// operator who writes `4000000000` here is not talking nonsense: they mean "do
+/// not stop my program", and at roughly a hundred million emulated instructions
+/// a second even this cap is over three months of continuous running. Rejecting
+/// their number would drop them to the 2000 default — a hundred thousand times
+/// *shorter* than they asked for, written back over their setting the next time
+/// anything saves the config, and with no message to say so. Clamping keeps the
+/// intent; the two values behave identically for any program that exists.
+///
+/// The cap also keeps the number six digits, which is what lets the telnet
+/// screen put the emulator and its ceiling on one 40-column row.
+pub const MAX_CPM_EMU_MAX_MINSTR: u32 = 1_000_000;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -1634,10 +1652,15 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("disable_gateway_connections")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_DISABLE_GATEWAY_CONNECTIONS),
+        // Clamped at the top, rejected at the bottom.  `0` has always meant
+        // "unreadable, use the default" here and still does; a number above the
+        // cap is a coherent wish and is granted as far as it goes.  See
+        // [`MAX_CPM_EMU_MAX_MINSTR`].
         cpm_emu_max_minstr: map
             .get("cpm_emu_max_minstr")
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u32| v >= 1)
+            .map(|v: u32| v.min(MAX_CPM_EMU_MAX_MINSTR))
             .unwrap_or(DEFAULT_CPM_EMU_MAX_MINSTR),
         cpm_emu_uart: map
             .get("cpm_emu_uart")
@@ -2379,6 +2402,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
 #   the console is aborted at this count so the A> prompt always returns.
+#   Minimum 1; anything above 1000000 is CAPPED at 1000000 rather than
+#   refused, so asking for `no limit' gets you as close as this goes -- which
+#   at emulated speed is over three months of continuous running.  Note that
+#   this bounds one transient program in the EMULATOR only: a booted disk is
+#   the session and is meant to sit at its prompt, so it has no such ceiling.
 # cpm_emu_uart: how the emulated CP/M reaches the virtual modem.  off
 #   (default) = no modem; a machine/port profile, e.g. rc2014_1b (RC2014 SIO/2
 #   0x82/0x83), altair_2sio1 (Altair 88-2SIO 0x10/0x11); aux (BDOS AUX:
@@ -3126,8 +3154,11 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             cfg.disable_gateway_connections = value.eq_ignore_ascii_case("true")
         }
         "cpm_emu_max_minstr" => {
+            // Clamped, not rejected — the same rule the file loader follows, so
+            // typing a huge number into any of the three UIs lands on the cap
+            // rather than on the default.  See [`MAX_CPM_EMU_MAX_MINSTR`].
             if let Ok(v) = value.parse::<u32>() && v >= 1 {
-                cfg.cpm_emu_max_minstr = v;
+                cfg.cpm_emu_max_minstr = v.min(MAX_CPM_EMU_MAX_MINSTR);
             }
         }
         "cpm_emu_uart" => {
@@ -4923,6 +4954,53 @@ mod tests {
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
         apply_config_key(&mut cfg, "cpm_emu_max_minstr", "abc");
         assert_eq!(cfg.cpm_emu_max_minstr, 500);
+
+        // Above the cap is **clamped, not refused** — the whole point of the
+        // bound. Refusing would leave 500 here and, from a config file, drop an
+        // operator asking for "no limit" to the 2000 default and write that
+        // over their setting.
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", &u32::MAX.to_string());
+        assert_eq!(cfg.cpm_emu_max_minstr, MAX_CPM_EMU_MAX_MINSTR);
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", "1000001");
+        assert_eq!(cfg.cpm_emu_max_minstr, MAX_CPM_EMU_MAX_MINSTR);
+        // The cap itself is allowed through untouched.
+        apply_config_key(&mut cfg, "cpm_emu_max_minstr", &MAX_CPM_EMU_MAX_MINSTR.to_string());
+        assert_eq!(cfg.cpm_emu_max_minstr, MAX_CPM_EMU_MAX_MINSTR);
+    }
+
+    /// A config file written before the cap existed must not lose its setting.
+    ///
+    /// This is the case the cap was chosen *for*: `cpm_emu_max_minstr` ships in
+    /// released versions, so a file out there can hold any `u32`. Clamping keeps
+    /// what the operator meant; the rejecting form every other bounded key uses
+    /// would silently substitute the 2000 default and then write it back over
+    /// their file the next time anything saved.
+    #[test]
+    fn test_an_existing_oversized_ceiling_is_capped_not_reset() {
+        let dir = std::env::temp_dir().join(format!("egw_ceiling_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("egateway.conf");
+        std::fs::write(&path, "cpm_emu_max_minstr = 4000000000\n").expect("write");
+
+        let cfg = read_config_file_checked(path.to_str().unwrap()).expect("read");
+        assert_eq!(
+            cfg.cpm_emu_max_minstr, MAX_CPM_EMU_MAX_MINSTR,
+            "an oversized ceiling must be capped at the maximum"
+        );
+        assert_ne!(
+            cfg.cpm_emu_max_minstr, DEFAULT_CPM_EMU_MAX_MINSTR,
+            "it must NOT fall back to the default — that is the data loss this \
+             clamp exists to avoid"
+        );
+
+        // Zero keeps its old meaning: unreadable, use the default.  Existing
+        // behaviour, and the clamp must not have quietly turned it into 1.
+        std::fs::write(&path, "cpm_emu_max_minstr = 0\n").expect("write");
+        let cfg = read_config_file_checked(path.to_str().unwrap()).expect("read");
+        assert_eq!(cfg.cpm_emu_max_minstr, DEFAULT_CPM_EMU_MAX_MINSTR);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The CPU is validated where it is written for the same reason as the two
