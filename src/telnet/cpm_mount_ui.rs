@@ -14,6 +14,30 @@
 use super::*;
 use crate::cpm::image;
 
+/// The booted images that are **not** already on the list above.
+///
+/// Two registry tables answer two different questions, and an image can be in
+/// both. `boot_loans` records a *drive* a boot borrowed — which happens when
+/// the image was mounted first, because the boot rewrites the file and the
+/// mount has to go out of service. `booted_image_names` records an *image* a
+/// session is running, mounted or not.
+///
+/// So a disk that was mounted and then booted is in both, and the screen said
+/// so twice: once as `B: name (booted)` with its slot, and again under
+/// `Booted:`. The block's own doc had the scope right all along — "an image
+/// that was booted *without* being mounted first appears in none of the tables
+/// above" — and the code did not implement that clause.
+///
+/// Its own function so the clause is testable. Inline it was four lines that
+/// read like a formality and would be simplified away by the next person to
+/// touch this screen.
+fn booted_not_already_lent(booted: Vec<String>, lent: &[(u8, String)]) -> Vec<String> {
+    booted
+        .into_iter()
+        .filter(|n| !lent.iter().any(|(_, name)| name == n))
+        .collect()
+}
+
 impl TelnetSession {
     /// The `CPM/` container this gateway is configured for.
     pub(in crate::telnet) fn cpmmount_base(&self) -> std::path::PathBuf {
@@ -121,10 +145,7 @@ impl TelnetSession {
             // then booted is lent, so it is already on the list above with its
             // slot and a `(booted)` of its own, and repeating it here said the
             // same thing twice on a screen with no rows to spare.
-            let booted: Vec<String> = image::registry::booted_image_names()
-                .into_iter()
-                .filter(|n| !lent.iter().any(|(_, name)| name == n))
-                .collect();
+            let booted = booted_not_already_lent(image::registry::booted_image_names(), &lent);
             if !booted.is_empty() {
                 self.send_line("").await?;
                 self.send_line("  Booted:").await?;
@@ -768,5 +789,52 @@ impl TelnetSession {
         self.flush().await?;
         let _ = self.wait_for_key().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::booted_not_already_lent;
+
+    /// **An image that was mounted and then booted is listed once, not twice.**
+    ///
+    /// It is in two registry tables at once — `boot_loans` because its drive
+    /// was taken, `booted_image_names` because it is running — and the disks
+    /// screen printed both. On a screen that grows a row per mount and has no
+    /// budget to spare, saying the same thing twice costs a row that a real
+    /// disk needed.
+    #[test]
+    fn test_a_mounted_then_booted_image_is_not_listed_twice() {
+        let lent = vec![(1u8, "altair8_cpm22.dsk".to_string())];
+        assert_eq!(
+            booted_not_already_lent(vec!["altair8_cpm22.dsk".to_string()], &lent),
+            Vec::<String>::new(),
+            "the lent row above already names it, with its slot"
+        );
+    }
+
+    /// **And the case the block exists for still shows.**
+    ///
+    /// The control, and the more important half: an image booted straight from
+    /// the picker was never mounted, so it is in *no* table the screen shows
+    /// above. Filtering it out too would put the screen back where it started
+    /// — offering a disk, refusing it as "run by a booted session", and
+    /// showing nothing that accounted for the refusal.
+    #[test]
+    fn test_an_image_booted_without_being_mounted_is_still_listed() {
+        let lent = vec![(1u8, "altair8_cpm22.dsk".to_string())];
+        assert_eq!(
+            booted_not_already_lent(
+                vec!["altair8_cpm22.dsk".to_string(), "altair8_games.dsk".to_string()],
+                &lent
+            ),
+            vec!["altair8_games.dsk".to_string()],
+        );
+        // With nothing lent at all, every booted image is the screen's only
+        // account of itself.
+        assert_eq!(
+            booted_not_already_lent(vec!["a.dsk".into(), "b.dsk".into()], &[]),
+            vec!["a.dsk".to_string(), "b.dsk".to_string()],
+        );
     }
 }
