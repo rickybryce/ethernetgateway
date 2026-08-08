@@ -327,6 +327,49 @@ pub const IBM3740_SKEW: &[u16] = &[
     19, 25, 5, 11, 17, 23, 3, 9, 15, 21,
 ];
 
+/// The Cromemco single-sided double-density translation, read out of the disk's
+/// own DPH — the `XLT` pointer at DPH+0, sixteen entries for the sixteen
+/// 512-byte sectors of a double-density track.
+///
+/// Found there as a **1-based** permutation, `1 12 7 2 13 8 3 14 9 4 15 10 5 16
+/// 11 6`, and stored 0-based here — the same convention as [`ALTAIR_SKEW`], and
+/// the reason that convention is stated rather than assumed. Sixteen entries and
+/// not sixty-four: CP/M's `SPT` counts 128-byte records, but this BIOS reaches a
+/// physical sector by dividing by four, so what it translates is sectors. The
+/// length was found by requiring the entries to be a permutation, which adjacent
+/// bytes do not form by accident.
+///
+/// Identical on both MICAH disks measured. The double-sided Cromemco format does
+/// **not** translate at all — see [`Skew::None`] and the format below it.
+pub const CROMEMCO_DD_SKEW: &[u16] =
+    &[0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5];
+
+/// The Cromemco double-sided double-density translation — an interleave of four
+/// within each side, thirty-two sectors to a CP/M track.
+///
+/// **Not in the disk's DPH.** Its `XLT` pointer is zero, which normally means a
+/// disk does not translate, and taking that at face value produced a format that
+/// mounted, listed its directory correctly, and returned scrambled file content —
+/// the exact failure the Altair mapping took four hypotheses to escape. This
+/// BIOS translates inside its own `SETSEC` instead of through CP/M's `SECTRAN`,
+/// so `XLT` says nothing about it either way.
+///
+/// Recovered the only way that works: boot the disk, have its own CP/M `TYPE` a
+/// file, and locate each of the file's 128-byte records in the image by exact
+/// text match. That gives logical → physical directly. Logical sectors 0, 1, 2, 3
+/// were measured at physical 0, 4, 8, 12 and logical 4 at physical 1 — an
+/// interleave of four, repeating every sixteen sectors, which is one side.
+///
+/// A CP/M track here is a *cylinder*, both sides, so the table is the sixteen
+/// measured entries and the same pattern again offset by sixteen for the second
+/// side. That second half was extrapolation when it was written and is
+/// **measured now**: `CPMCRT.ASM` is 15,744 bytes and crosses the side boundary,
+/// and the gate below reads it back through the guest.
+pub const CROMEMCO_DSDD_SKEW: &[u16] = &[
+    0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+    16, 20, 24, 28, 17, 21, 25, 29, 18, 22, 26, 30, 19, 23, 27, 31,
+];
+
 /// A complete description of one disk-image format.
 ///
 /// The CP/M half of this (`blocksize`, `maxdir`, `reserved_records`) is the
@@ -373,6 +416,21 @@ pub struct Format {
     /// CP/M will not list.  Other vendors made the same unusual choice, so this
     /// is a field rather than a special case.
     pub exm: Option<u32>,
+    /// Allocation blocks in the data area, when the disk uses fewer than its
+    /// medium would hold.  `None` means "all of them", which is the usual case.
+    ///
+    /// **Explicit for the same reason as [`Format::exm`]**: the disk says so and
+    /// the derivation does not. The Cromemco single-sided double-density format
+    /// declares `DSM 253` — 254 blocks, 520,192 bytes — on a medium with room
+    /// for 300, leaving the last eleven and a half tracks outside the
+    /// filesystem. Both MICAH disks measured say it, so it is the format and not
+    /// one odd disk.
+    ///
+    /// Getting this wrong would be a *write* defect and a quiet one: deriving
+    /// 300 blocks would let us allocate past block 253, into space the guest's
+    /// own BIOS will not address, and the file would be unreadable on the
+    /// machine the disk belongs to while looking perfectly fine here.
+    pub declared_blocks: Option<u32>,
     /// Physical layout of records inside the file.
     pub framing: Framing,
     /// Logical-to-physical sector translation within a data track.
@@ -457,6 +515,18 @@ impl Format {
     /// Records in the data area (everything after the boot tracks).
     pub fn data_records(&self) -> u32 {
         self.total_records.saturating_sub(self.reserved_records)
+    }
+
+    /// Allocation blocks in the data area — what the disk says, or what the
+    /// medium holds when it says nothing.
+    ///
+    /// The one place this question is answered, because it used to be answered
+    /// in four (`fs.rs` and three sites in `identify.rs`), and a disk that
+    /// declares fewer blocks than it could hold needs every one of them to
+    /// agree or the directory check and the allocator disagree about the disk.
+    pub fn data_blocks(&self) -> u32 {
+        self.declared_blocks
+            .unwrap_or_else(|| self.data_records() / (self.blocksize / 128).max(1))
     }
 
     /// Can a blank of this format be made at all?
@@ -593,6 +663,87 @@ impl Format {
 /// file listing and hand back mangled data.
 pub const FORMATS: &[Format] = &[
     // ---- 8" single density, 128-byte sectors -------------------------------
+    // ---- Cromemco 8" double density, single sided, 625,920 bytes ----------
+    //
+    // Track 0 is recorded SINGLE density so a single-density boot ROM can read
+    // it at all; every track after it is double density with 16 sectors of 512
+    // bytes.  3,328 + 76 x 8,192 is 625,920 exactly.  That much was already
+    // measured for the boot path -- see the `src/cpm/cromemco.rs` module
+    // comment, which is also where the 512-byte sector comes from (CDISK03's
+    // BIOS reaches one by `SRL A / SRL A`, four 128-byte records to a sector).
+    //
+    // The filesystem parameters are the disk's own DPB, read out of a booted
+    // guest by calling its BIOS's SELDSK and following DPH+10 -- a declaration,
+    // the same class of evidence `detect.rs` reads from a boot loader.  There is
+    // no external cross-check available: `cpmtools` has no Cromemco definition.
+    //
+    //     SPT 64   BSH 4  BLM 15  EXM 0
+    //     DSM 253  DRM 127  AL0 0xC0  AL1 0x00  CKS 32  OFF 2
+    //
+    // Two independent disks agree byte for byte on all of it -- `CDISK02` from
+    // the Altair-Duino collection and `micah-cpm.dsk` from z80pack's cromemcosim
+    // -- so this is the format, not one disk's quirk.  Both are MICAH 64k CP/M
+    // 2.2 with SUPER BIOS 2.53.
+    //
+    // `DSM 253` is 254 blocks, 520,192 bytes, on a medium that would hold 300 --
+    // see `declared_blocks`.  `OFF 2` reserves two tracks, and because track 0
+    // is the short single-density one those two tracks are 3,328 + 8,192 =
+    // 11,520 bytes, which is exactly where both disks' directories begin.
+    Format {
+        token: "cromemcodd",
+        label: "Cromemco 8\" SSDD, 508K (MICAH CP/M 2.2)",
+        total_records: 4890, // 26 + 76 x 64 records
+        sectrk: 64,
+        records_per_sector: 4, // 512-byte sectors
+        reserved_records: 90,  // track 0 single density (26) + track 1 (64)
+        blocksize: 2048,
+        maxdir: 128,
+        declared_blocks: Some(254),
+        framing: Framing::Raw,
+        skew: Skew::Table(CROMEMCO_DD_SKEW),
+        exm: None,
+        exact_size: Some(625_920),
+    },
+    // ---- Cromemco 8" double density, double sided, 1,256,704 bytes --------
+    //
+    // The same medium with both sides used: 3,328 + 153 x 8,192.  Its BIOS
+    // counts a *cylinder* as a track -- SPT 128 is two 8,192-byte sides -- so
+    // its `OFF 1` reserves one cylinder, which is again 3,328 + 8,192 = 11,520
+    // bytes and again exactly where the directory starts.  The two formats
+    // therefore describe their identical reserved area with different numbers,
+    // which is why `reserved_records` is stored in records here and not tracks.
+    //
+    //     SPT 128  BSH 4  BLM 15  EXM 0
+    //     DSM 607  DRM 255  AL0 0xF0  AL1 0x00  CKS 64  OFF 1
+    //
+    // Agreed on by `CDISK03` (Intelligent Terminals Corp 56k CP/M 2.2, release
+    // 5b) and z80pack's `itc-cpm.dsk`.  608 blocks x 2,048 is 1,245,184, which
+    // is the medium less the reserved cylinder exactly -- this one uses all of
+    // its disk, so no `declared_blocks`.
+    //
+    // **Its XLT pointer is zero and it translates anyway.**  Zero normally means
+    // a disk does not translate, and believing it gave a format that mounted,
+    // listed its directory perfectly and returned scrambled file content -- this
+    // BIOS interleaves inside its own SETSEC rather than through CP/M's SECTRAN,
+    // so XLT says nothing either way.  Caught by the guest-comparison gate and
+    // by nothing else; see `CROMEMCO_DSDD_SKEW`.  Worth noticing that the
+    // single-sided format above interleaves differently again: two disks of one
+    // physical geometry, and skew belongs to the BIOS, not to the medium.
+    Format {
+        token: "cromemcodsdd",
+        label: "Cromemco 8\" DSDD, 1216K (ITC CP/M 2.2)",
+        total_records: 9818, // 26 + 153 x 64 records
+        sectrk: 128,         // a cylinder: both sides
+        records_per_sector: 4,
+        reserved_records: 90, // one cylinder: 26 single-density + 64
+        blocksize: 2048,
+        maxdir: 256,
+        declared_blocks: None,
+        framing: Framing::Raw,
+        skew: Skew::Table(CROMEMCO_DSDD_SKEW),
+        exm: None,
+        exact_size: Some(1_256_704),
+    },
     // The IBM 3740 layout, and the closest thing CP/M had to a universal disk.
     // Both the Tarbell and the Cromemco single-density 8" images are this.
     Format {
@@ -606,6 +757,7 @@ pub const FORMATS: &[Format] = &[
         maxdir: 64,
         framing: Framing::Raw,
         skew: Skew::Table(IBM3740_SKEW),
+        declared_blocks: None,
         exm: None,
         exact_size: Some(256_256),
     },
@@ -666,6 +818,7 @@ pub const FORMATS: &[Format] = &[
             rest: ALTAIR_SKEW,
         },
         // The disk's BIOS states EXM 0 where the usual derivation gives 1.
+        declared_blocks: None,
         exm: Some(0),
         exact_size: Some(337_568),
     },
@@ -684,6 +837,7 @@ pub const FORMATS: &[Format] = &[
         maxdir: 192,
         framing: Framing::Raw,
         skew: Skew::Table(ALTAIR_HDSK_SKEW),
+        declared_blocks: None,
         exm: None,
         exact_size: Some(4_988_928),
     },
@@ -1072,13 +1226,32 @@ mod tests {
         }
     }
 
+    /// A boot area that is a whole number of data tracks — **required only of a
+    /// `Split` skew**, and that distinction is the whole point of the test.
+    ///
+    /// The one place a track number is derived from `reserved_records` is
+    /// `abs_track` in [`Format::data_physical_record`], and the only thing that
+    /// reads `abs_track` is a [`Skew::Split`] boundary. Where the skew is a
+    /// single table, or none, a reserved area that does not divide evenly is
+    /// arithmetically harmless.
+    ///
+    /// And it is not hypothetical: both Cromemco double-density formats record
+    /// **track 0 in single density** so a single-density boot ROM can read the
+    /// disk at all, which makes their reserved area 26 + 64 records — 11,520
+    /// bytes, exactly where both disks' directories begin, and not a whole
+    /// number of the 64-record data tracks. The `Format` doc for `sectrk` says
+    /// this case must fit; this test used to say it must not.
     #[test]
-    fn test_reserved_area_lands_on_a_track_boundary() {
+    fn test_a_split_skews_boot_area_lands_on_a_track_boundary() {
         for f in FORMATS {
+            if !matches!(f.skew, Skew::Split { .. }) {
+                continue;
+            }
             assert_eq!(
                 f.reserved_records % f.sectrk as u32,
                 0,
-                "{}: boot area is not a whole number of tracks",
+                "{}: a Split skew resolves its boundary from an absolute track, so its \
+                 boot area has to be a whole number of tracks",
                 f.token
             );
         }

@@ -108,7 +108,10 @@ impl Params {
     /// bytes wide however you choose to divide it up.
     pub fn derive(fmt: &Format) -> Params {
         let records_per_block = fmt.blocksize / 128;
-        let total_blocks = fmt.data_records() / records_per_block;
+        // Through `data_blocks`, not divided out here: a format may declare
+        // fewer blocks than its medium holds, and the allocator must agree with
+        // the directory check about which it is.
+        let total_blocks = fmt.data_blocks();
         // Block 0 is the directory, so the highest block number is one less
         // than the count.  `saturating_sub` keeps a nonsense format from
         // wrapping to 65535 usable blocks.

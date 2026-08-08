@@ -8,9 +8,11 @@
 //! after.  Turning the emulator on and finding nowhere to put anything is a
 //! small thing that wastes real time.
 //!
-//! Nothing here ever overwrites.  A folder that exists is left exactly as it
-//! is, and the readme is written only when absent — an operator who has
-//! annotated it keeps their notes.
+//! Nothing here overwrites an operator's own work.  A folder that exists is left
+//! exactly as it is.  The readme is the one exception and a deliberate one: it
+//! is *instructions*, so a copy we wrote that has fallen behind the code is
+//! refreshed rather than left to mislead for ever.  A file that is not one of
+//! ours — anything not starting with our header — is never touched.
 
 use super::image::{format::FORMATS, IMAGES_DIR};
 use std::path::{Path, PathBuf};
@@ -194,7 +196,7 @@ the wrong geometry fail that immediately.
 An image that does NOT check out still mounts, but READ-ONLY, and says what
 was wrong with it.  That is the honest answer for a file which is the right
 size and is not this filesystem: plenty of disks are 256,256 bytes without
-being CP/M at all -- a UCSD p-System disk is, and so is a Cromemco CDOS one.
+being CP/M at all -- a UCSD p-System disk is one.
 Reading such an image is safe and often what you want; writing to it is not.
 
 Renaming with a prefix is therefore an override, not a requirement: it says

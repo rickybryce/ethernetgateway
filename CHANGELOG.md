@@ -140,6 +140,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cromemco double-density disks mount now — the last CP/M disks in the
+  collections that would not.** Two new formats, `cromemcodd` (625,920 bytes,
+  single sided) and `cromemcodsdd` (1,256,704 bytes, double sided), which
+  between them cover MICAH 64k CP/M 2.2 and Intelligent Terminals Corp 56k
+  CP/M 2.2. They booted before; now they mount as a drive as well.
+
+  Both record **track 0 in single density** so that a single-density boot ROM
+  can read the disk at all, and everything after it in double density — which
+  is why neither size factors into a tidy geometry, and why their reserved area
+  is 11,520 bytes rather than a whole number of data tracks. The filesystem
+  parameters are the disks' own, read out of a booted guest by calling its
+  BIOS's `SELDSK` and following the disk parameter header: a declaration, the
+  same class of evidence the machine detector reads out of a boot loader. Two
+  independent disks per format agree on every field.
+
+  **The double-sided one says it does not translate sectors and translates
+  anyway.** Its `XLT` pointer is zero, which is CP/M's way of saying there is no
+  skew, and believing it produced a format that mounted, listed its directory
+  perfectly, and returned scrambled file content — the exact failure the Altair
+  mapping took four ruled-out hypotheses to escape. That BIOS interleaves inside
+  its own `SETSEC` rather than through CP/M's `SECTRAN`, so `XLT` says nothing
+  either way. The real translation — an interleave of four within each side —
+  was recovered by booting the disk, having its own CP/M `TYPE` a file, and
+  locating each of the file's 128-byte records in the image by exact text match.
+  The single-sided format interleaves differently again: skew belongs to the
+  BIOS, not to the medium.
+
+  Every one of the four disks is checked by a new live gate that compares our
+  reader's bytes against the guest's own reading of the same file, including one
+  file big enough to cross the double-sided boundary. A directory that parses
+  proves nothing on its own, which is the whole reason that gate exists.
+
+- **A vendor volume label no longer makes a disk "not CP/M".** The ITC disks
+  carry one as their first directory entry — user byte `0x81`, name "Userdisk" —
+  and identification rejected the whole disk on it. CP/M itself never matches
+  such an entry, because a directory search compares that byte against the
+  current user number; ignoring it is the emulation rather than a relaxation of
+  one. Both directory checks skip these records now and still demand a real file
+  entry before trusting the disk. Cromemco **CDOS** disks come along as a result
+  — their filesystem is CP/M-compatible, and it is verified against CDOS's own
+  `TYPE`, so the readme no longer offers CDOS as an example of a disk that is
+  the right size and not this filesystem.
+
 - **CP/M can print now, and you get a document out of it.** New `cpm_printer`
   (`off` — the default — `odt` or `text`) captures what CP/M software sends to
   its `LST:` device and leaves an **OpenDocument** or plain-text file in a

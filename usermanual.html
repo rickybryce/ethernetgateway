@@ -2456,25 +2456,36 @@ it, and the folder&rsquo;s files return the moment you unmount.
 
 <p>
 Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
-<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Three formats
+<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Five formats
 are supported, all measured from real images rather than transcribed from
 another tool&rsquo;s tables: <code>ibm3740</code> (the 256,256-byte 8&Prime;
 single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack library),
 <code>altairhd</code> (the 4,988,928-byte Altair 88-HDSK hard disk from the
-Altair-Duino set) and <code>altair8</code> (the 337,568-byte Altair 88-DCDD
-8&Prime; floppy, which reads, writes and formats).
+Altair-Duino set), <code>altair8</code> (the 337,568-byte Altair 88-DCDD
+8&Prime; floppy, which reads, writes and formats), and the two Cromemco
+double-density 8&Prime; disks &mdash; <code>cromemcodd</code> (625,920 bytes,
+single sided) and <code>cromemcodsdd</code> (1,256,704 bytes, double sided).
+Those last two have their track&nbsp;0 recorded in <em>single</em> density so a
+single-density boot ROM can read them at all, and each interleaves its sectors
+differently from the other: skew belongs to the BIOS, not to the medium.
 </p>
 
 <aside class="note">
-<span class="label">An image with no format prefix mounts read-only</span>
-Without a prefix the format has to be guessed from the file&rsquo;s size and
-contents, and a wrong guess is the one mistake that cannot be caught
-afterwards: every offset would be computed from the wrong geometry, so every
-internal check would agree with every other one right up until a write landed
-in the middle of another file. Reading a guessed image is safe and is allowed;
-writing to one is not. Rename it with the right prefix to make it writable. A
-mount is also read-only when the file is read-only on the host, or when its
-CP/M directory arrives damaged &mdash; the mount screen says which.
+<span class="label">You do not have to rename anything</span>
+An image without a format prefix is identified by <em>inspection</em>, and if
+its CP/M filesystem checks out it mounts read-write just the same. No two
+formats here are the same size, so the size names the format outright; what the
+inspection decides is whether the file really holds that filesystem &mdash; the
+whole directory is read and checked, every allocation block accounted for, no
+block claimed twice, every record count matching the blocks it claims. Random
+bytes under the wrong geometry fail that immediately.
+<br><br>
+An image that does <em>not</em> check out still mounts, but read-only, and says
+what was wrong with it. That is the honest answer for a file which is the right
+size and is not this filesystem: plenty of disks are 256,256 bytes without being
+CP/M at all. A mount is also read-only when the file is read-only on the host.
+Renaming with a prefix is therefore an <em>override</em> &mdash; it says &ldquo;I
+know what this is&rdquo; and skips the inspection &mdash; not a requirement.
 </aside>
 
 <p>

@@ -61,6 +61,16 @@ export CPM_HD_BOOT="$DISKS/HDSK03.DSK"
 # auto-line-feed switch (`LPRINT` sends a bare CR, no line feed).
 export CPM_HDSK_BASIC="$DISKS/HDSK01.DSK"
 export CPM_HDSK_DATA="$DISKS/HDSK02.DSK"
+# The DPB reader and the guest-comparison oracle, which together are how a new
+# disk format is added: ask the disk's own BIOS for its parameters, then prove
+# our reader returns the same bytes the disk's own CP/M does.  CDISK03 because
+# it is the disk whose XLT pointer says "no translation" while its BIOS
+# interleaves anyway -- believing the pointer produced a format that mounted,
+# listed correctly and read scrambled.  CPMCRT.ASM because at 15,744 bytes it
+# crosses the double-sided boundary, which a smaller file does not reach.
+export CPM_DPB_IMAGE="$DISKS/CDISK03.DSK"
+export CPM_ORACLE_IMAGE="$DISKS/CDISK03.DSK"
+export CPM_ORACLE_FILE=CPMCRT.ASM
 export CPM_TARBELL_IMAGE="$DISKS/TDISK02.DSK"
 export CPM_Z80PACK_IMAGE="$DISKS/TDISK03.DSK"
 export CPM_VDM_IMAGE="$DISKS/TDISK04.DSK"

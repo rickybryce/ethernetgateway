@@ -781,7 +781,7 @@ altairhd_cobol.dsk</code></pre>
                     An image that does <em>not</em> check out still mounts, but
                     <strong>read-only</strong>, and says what was wrong. That matters more than it
                     sounds: plenty of disks are 256,256 bytes without being CP/M &mdash; a UCSD
-                    p-System disk is, and so is a Cromemco CDOS one. Reading them is safe and
+                    p-System disk is one. Reading them is safe and
                     usually what you want; writing to them is not. Renaming with a prefix is an
                     <em>override</em> that skips the inspection, not a requirement.
                 </p>
@@ -835,6 +835,8 @@ altairhd_cobol.dsk</code></pre>
                         <tr><td><code>ibm3740</code></td><td>IBM 3740 8&quot; SSSD &mdash; the closest thing CP/M had to a universal disk. Tarbell, Cromemco SD, IMSAI / z80pack.</td><td>256,256</td></tr>
                         <tr><td><code>altair8</code></td><td>Altair 88-DCDD 8&Prime; SSSD floppy (MITS). 137-byte sectors, and a layout that changes partway down the disk &mdash; see the <a href="diskreference.html">Disk Format Reference</a>.</td><td>337,568</td></tr>
                         <tr><td><code>altairhd</code></td><td>Altair 88-HDSK hard disk (the Altair-Duino set). 256-byte sectors, two CP/M records in each.</td><td>4,988,928</td></tr>
+                        <tr><td><code>cromemcodd</code></td><td>Cromemco 8&Prime; SSDD (MICAH CP/M 2.2). Track&nbsp;0 is single density so a single-density boot ROM can read it; the rest is 16 sectors of 512 bytes. Declares 254 blocks on a medium that would hold 300.</td><td>625,920</td></tr>
+                        <tr><td><code>cromemcodsdd</code></td><td>Cromemco 8&Prime; DSDD (ITC CP/M 2.2). Both sides, a CP/M track being a whole cylinder. Its <code>XLT</code> pointer says it does not translate and its BIOS interleaves by four anyway &mdash; believing the pointer gave a format that listed correctly and read scrambled.</td><td>1,256,704</td></tr>
                     </tbody>
                 </table>
                 <p class="dim-text">

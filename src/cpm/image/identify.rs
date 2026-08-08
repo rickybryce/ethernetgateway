@@ -191,11 +191,20 @@ pub fn looks_like_directory(record: &[u8; 128]) -> bool {
         if e[0] == 0xE5 || (e[0] == 0 && e[1..12].iter().all(|&c| c == 0)) {
             continue;
         }
-        // A user number outside 0..15 is not a file entry.  (0x20/0x21 are
-        // CP/M 3 labels and timestamps, which are legitimate but are not
-        // evidence either way, so they are not counted as live.)
+        // A user number outside 0..15 is not a file entry — CP/M's own
+        // directory search compares this byte against the current user number
+        // and so can never match one — but it is **not** grounds to reject the
+        // disk. It used to be, and that refused the ITC CP/M 2.2 disks outright:
+        // their first directory entry is a vendor volume label, first byte
+        // `0x81`, name "Userdisk", followed by ordinary files.
+        //
+        // Not counted as live either, which is what keeps this strict: the
+        // `live > 0` at the end still demands a real file entry, with a
+        // printable 8.3 name, so a record of nothing but unmatched bytes fails
+        // exactly as it did before. (0x20/0x21 are CP/M 3 labels and timestamps
+        // and are skipped by the same rule.)
         if e[0] > 15 {
-            return false;
+            continue;
         }
         // Names are printable 8.3.
         if e[1..12].iter().any(|&c| !(0x20..0x7F).contains(&(c & 0x7F))) {
@@ -262,10 +271,11 @@ pub fn is_erased_directory(dir: &[u8]) -> bool {
 /// the mount rather than after the first write. It cannot sit at "nearly right":
 /// one out-of-range or double-claimed block fails it outright.
 pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'static str> {
-    let blocks = format.data_records() / (format.blocksize / 128).max(1);
+    let blocks = format.data_blocks();
     let per_block = (format.blocksize / 128).max(1);
     let mut claimed: std::collections::HashSet<u16> = std::collections::HashSet::new();
     let mut live = 0usize;
+    let mut other = 0usize;
 
     for e in dir.chunks_exact(32) {
         // Free, in either spelling.
@@ -275,10 +285,28 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
         // CP/M 3 disc labels and timestamp records are legitimate and carry no
         // allocation, so they are skipped rather than judged.
         if e[0] == 0x20 || e[0] == 0x21 {
+            other += 1;
             continue;
         }
+        // Any other user byte outside 0-15 is **skipped, not fatal**.
+        //
+        // This used to reject the whole disk, and it was wrong about real ones:
+        // the ITC CP/M 2.2 disks carry a vendor volume label as their first
+        // directory entry, first byte `0x81`, name "Userdisk". Rejecting on it
+        // said "this may not be a CP/M disk" about a disk whose every other
+        // entry is an ordinary file.
+        //
+        // Skipping is also what **CP/M itself does**: a directory search
+        // compares the entry's user byte with the current user number, which is
+        // 0-15, so an entry outside that range is never matched by anything.
+        // Ignoring it is the emulation, not a relaxation of one.
+        //
+        // The strictness that makes size-plus-inspection safe is kept by the
+        // `live` rule at the end: skipping cannot turn a directory of noise into
+        // a pass, because noise produces no well-formed file entries either.
         if e[0] > 15 {
-            return Err("a user number no CP/M uses");
+            other += 1;
+            continue;
         }
         if e[1..12].iter().any(|&c| !(0x20..0x7F).contains(&(c & 0x7F))) {
             return Err("a filename that is not printable 8.3");
@@ -311,9 +339,14 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
         }
         live += 1;
     }
-    // A blank disk is fine; so is a populated one. What is not fine is a
-    // directory of nothing but labels, which is not evidence of anything.
-    let _ = live;
+    // A blank disk is fine — every entry free — and so is a populated one. What
+    // is not fine is a directory with no CP/M file entries in it at all but
+    // something in it nonetheless: that is not evidence of this filesystem, it
+    // is evidence of bytes. This is the rule that lets the skips above be safe,
+    // because it is what noise cannot satisfy.
+    if live == 0 && other > 0 {
+        return Err("no CP/M file entries, only records CP/M would never match");
+    }
     Ok(())
 }
 
@@ -563,7 +596,7 @@ mod tests {
     #[test]
     fn test_an_inconsistent_directory_stays_read_only() {
         let fmt = by_token("ibm3740").unwrap();
-        let blocks = fmt.data_records() / (fmt.blocksize / 128).max(1);
+        let blocks = fmt.data_blocks();
 
         type Mutate = Box<dyn Fn(&mut Vec<u8>)>;
         let cases: Vec<(&str, Mutate)> = vec![
@@ -708,7 +741,7 @@ mod tests {
     #[test]
     fn test_wide_allocation_entries_are_little_endian() {
         let fmt = by_token("altairhd").unwrap();
-        let blocks = fmt.data_records() / (fmt.blocksize / 128).max(1);
+        let blocks = fmt.data_blocks();
         assert!(blocks > 255, "altairhd must be a 16-bit-allocation disk to test this");
 
         // Block 0x0102 = 258, written low byte first. Read big-endian it would

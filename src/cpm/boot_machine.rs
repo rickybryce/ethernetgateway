@@ -4894,4 +4894,284 @@ mod tests {
             "the page model does not reproduce what this disk printed"
         );
     }
+
+    /// **Ask a booted disk's own BIOS for its disk parameter block.**
+    ///
+    /// The mount side needs five numbers a disk image does not carry anywhere
+    /// an outsider can read: block size, directory entries, EXM, the reserved
+    /// system tracks, and whether logical sectors are translated. Every one of
+    /// them is in the DPB the disk's *own* BIOS hands to CP/M, so the way to
+    /// learn them is to ask it — a declaration, the same class of evidence
+    /// [`crate::cpm::detect`] reads out of a boot loader's port operands, and
+    /// the only authority available here: `cpmtools` has no Cromemco
+    /// definition to cross-check against.
+    ///
+    /// The route is CP/M 2.2's own: page zero's warm-boot vector names the
+    /// BIOS, `SELDSK` at BIOS+27 returns the disk parameter *header*, and the
+    /// DPB address sits at DPH+10. `XLT` at DPH+0 is the sector translate
+    /// table, or zero when the disk does not translate at all.
+    ///
+    /// Ignored — set `CPM_DPB_IMAGE` to a bootable image.
+    #[test]
+    #[ignore]
+    fn test_measure_dpb_of_a_booted_disk() {
+        let Ok(path) = std::env::var("CPM_DPB_IMAGE") else {
+            eprintln!("set CPM_DPB_IMAGE to run this");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("the image");
+        let (machine, _why) =
+            crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+        let mut m = BootMachine::new();
+        m.set_machine(&machine);
+        m.insert(0, bytes, true).expect("the boot image");
+        let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
+        m.boot(&mut cpu, 0).expect("boots");
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
+        assert!(!banner.trim().is_empty(), "{path} never signed on");
+        println!("--- {path} on {machine} ---\n{banner}");
+
+        // Page zero: `JMP WBOOT` at 0000h, so the word at 0001h is BIOS+3.
+        let wboot = u16::from_le_bytes([m.peek(1), m.peek(2)]);
+        let bios = wboot.wrapping_sub(3);
+        let seldsk = bios.wrapping_add(27);
+        println!("BIOS base {bios:#06x}, SELDSK {seldsk:#06x}");
+
+        // Call SELDSK(C = drive 0, E = 0 meaning "not logged in yet, do the
+        // full job").  The guest is idle at its prompt, so its stack is valid;
+        // we push a return address of our own and run until it comes back.
+        const SENTINEL: u16 = 0x0040; // CP/M's reserved scratch area: never executed
+        let sp = cpu.registers().get16(iz80::Reg16::SP).wrapping_sub(2);
+        cpu.registers().set16(iz80::Reg16::SP, sp);
+        m.poke(sp, SENTINEL as u8);
+        m.poke(sp.wrapping_add(1), (SENTINEL >> 8) as u8);
+        cpu.registers().set8(iz80::Reg8::C, 0);
+        cpu.registers().set8(iz80::Reg8::E, 0);
+        cpu.registers().set_pc(seldsk);
+        let mut steps = 0u64;
+        while cpu.registers().pc() != SENTINEL {
+            m.step(&mut cpu);
+            steps += 1;
+            assert!(steps < 5_000_000, "SELDSK never returned");
+        }
+        let dph = cpu.registers().get16(iz80::Reg16::HL);
+        assert_ne!(dph, 0, "SELDSK refused drive 0");
+
+        let word = |m: &mut BootMachine, a: u16| {
+            u16::from_le_bytes([m.peek(a), m.peek(a.wrapping_add(1))])
+        };
+        let xlt = word(&mut m, dph);
+        let dpb = word(&mut m, dph.wrapping_add(10));
+        println!("DPH {dph:#06x}  XLT {xlt:#06x}  DPB {dpb:#06x}");
+
+        let spt = word(&mut m, dpb);
+        let bsh = m.peek(dpb.wrapping_add(2));
+        let blm = m.peek(dpb.wrapping_add(3));
+        let exm = m.peek(dpb.wrapping_add(4));
+        let dsm = word(&mut m, dpb.wrapping_add(5));
+        let drm = word(&mut m, dpb.wrapping_add(7));
+        let al0 = m.peek(dpb.wrapping_add(9));
+        let al1 = m.peek(dpb.wrapping_add(10));
+        let cks = word(&mut m, dpb.wrapping_add(11));
+        let off = word(&mut m, dpb.wrapping_add(13));
+
+        let blocksize = 128u32 << bsh;
+        println!("\n=== DPB as the disk states it ===");
+        println!("  SPT (128-byte records per track) : {spt}");
+        println!("  BSH {bsh}  BLM {blm}  => block size {blocksize} bytes");
+        println!("  EXM                              : {exm}");
+        println!("  DSM (last block number)          : {dsm}  => {} blocks", dsm + 1);
+        println!("  DRM (last dir entry)             : {drm}  => {} entries", drm + 1);
+        println!("  AL0 {al0:#04x} AL1 {al1:#04x}  CKS {cks}");
+        println!("  OFF (reserved tracks)            : {off}");
+        println!("  data area                        : {} bytes", (dsm as u64 + 1) * blocksize as u64);
+
+        if xlt == 0 {
+            println!("\n  XLT is 0 — this disk does NOT translate sectors (skew 1:1)");
+        } else {
+            // How long the table is has to be *found*, not assumed. CP/M's SPT
+            // counts 128-byte records, but a BIOS that reaches a 512-byte
+            // sector by dividing by four translates **sectors**, so its table
+            // is a quarter that long. The right length is the one whose entries
+            // form a permutation — a table of n distinct values covering 1..=n
+            // (or 0..n-1) is not something adjacent bytes do by accident.
+            let read = |m: &mut BootMachine, n: usize| -> Vec<u16> {
+                (0..n).map(|i| m.peek(xlt.wrapping_add(i as u16)) as u16).collect()
+            };
+            let mut found = None;
+            for n in [spt as usize / 4, spt as usize / 2, spt as usize] {
+                if n == 0 {
+                    continue;
+                }
+                let t = read(&mut m, n);
+                let mut s = t.clone();
+                s.sort_unstable();
+                s.dedup();
+                let one_based = s.len() == n && s[0] == 1 && *s.last().unwrap() == n as u16;
+                let zero_based = s.len() == n && s[0] == 0 && *s.last().unwrap() == n as u16 - 1;
+                if one_based || zero_based {
+                    println!(
+                        "\n  XLT at {xlt:#06x}: {n} entries, a permutation of {}..={}",
+                        if one_based { 1 } else { 0 },
+                        if one_based { n } else { n - 1 }
+                    );
+                    println!("  {t:?}");
+                    found = Some(n);
+                    break;
+                }
+            }
+            if found.is_none() {
+                println!("\n  XLT at {xlt:#06x} — no length in {{spt/4, spt/2, spt}} is a permutation");
+                println!("  first {} bytes: {:?}", spt.min(64), read(&mut m, spt.min(64) as usize));
+            }
+        }
+    }
+
+
+    /// **Does our reader produce the same bytes the disk's own CP/M does?**
+    ///
+    /// The gate for a newly added format, and the only kind of check worth
+    /// having here. A directory that parses is *necessary* and nowhere near
+    /// sufficient: the Altair mapping sat at "nearly right" through four ruled
+    /// out hypotheses precisely because a wrong skew still yields a readable
+    /// directory and text files that are still all text. What settles it is an
+    /// exact oracle — the guest's own operating system, reading its own file
+    /// through its own BIOS, with its own idea of where the sectors are.
+    ///
+    /// `TYPE` is that oracle: it goes through the guest's BDOS and BIOS end to
+    /// end. A skew we got wrong shows up as scrambled 128-byte chunks, in the
+    /// right order and the wrong places, which is exactly what the comparison
+    /// below cannot miss and a plausibility check would.
+    ///
+    /// Ignored — set `CPM_ORACLE_IMAGE` to a mountable, bootable image and
+    /// `CPM_ORACLE_FILE` to a text file on it (`NAME.EXT`).
+    #[test]
+    #[ignore]
+    fn test_our_reader_matches_the_guests_own_reading() {
+        let (Ok(path), Ok(want)) =
+            (std::env::var("CPM_ORACLE_IMAGE"), std::env::var("CPM_ORACLE_FILE"))
+        else {
+            eprintln!("set CPM_ORACLE_IMAGE and CPM_ORACLE_FILE to run this");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("the image");
+
+        // --- our side: mount the image and read the file out ---------------
+        // Identified exactly as the mount path does it, closure and all, so
+        // this measures the product's own answer and not a second opinion.
+        let p = std::path::Path::new(&path);
+        let mut probe =
+            crate::cpm::image::media::FileMedia::open(p, true).expect("open for probing");
+        let size = bytes.len() as u64;
+        let filename = p.file_name().unwrap().to_string_lossy().to_string();
+        let ident = crate::cpm::image::identify::identify(&filename, size, |fmt| {
+            let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
+            for rec in 0..fmt.dir_records() {
+                let off = fmt.data_record_offset(rec)?;
+                let mut buf = [0u8; 128];
+                crate::cpm::image::media::Media::read_at(&mut probe, off, &mut buf).ok()?;
+                dir.extend_from_slice(&buf);
+            }
+            (!dir.is_empty()).then_some(dir)
+        })
+        .expect("the image identifies");
+        drop(probe);
+        let media = crate::cpm::image::media::FileMedia::open(p, true).expect("open");
+        let mut fs = crate::cpm::image::fs::ImageFs::mount(Box::new(media), ident.format, true)
+            .expect("mount");
+        let (name, ext) = {
+            let (n, e) = want.split_once('.').unwrap_or((want.as_str(), ""));
+            let mut nb = [b' '; 8];
+            let mut eb = [b' '; 3];
+            for (i, c) in n.bytes().take(8).enumerate() {
+                nb[i] = c.to_ascii_uppercase();
+            }
+            for (i, c) in e.bytes().take(3).enumerate() {
+                eb[i] = c.to_ascii_uppercase();
+            }
+            (nb, eb)
+        };
+        let ours = fs
+            .read_whole(0, &name, &ext, 8 << 20)
+            .expect("read")
+            .unwrap_or_else(|| panic!("{want} is not on {path} as far as our reader can see"));
+        println!("our reader: {} bytes of {want} via {}", ours.len(), ident.format.token);
+
+        // --- the guest's side: boot it and TYPE the same file --------------
+        let (machine, _why) =
+            crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+        let mut m = BootMachine::new();
+        m.set_machine(&machine);
+        m.insert(0, bytes, true).expect("the boot image");
+        let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
+        m.boot(&mut cpu, 0).expect("boots");
+        assert!(
+            !printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000)).trim().is_empty(),
+            "{path} never signed on"
+        );
+        // Raw bytes, not `type_at`: that helper runs the console through
+        // `printable`, which turns a tab into a dot — and this file is
+        // tab-indented assembler, so comparing its output would have been
+        // comparing two different manglings rather than the text.
+        for &b in format!("TYPE {want}\r").as_bytes() {
+            m.send_key(b);
+        }
+        // Kept draining: `run_until_quiet` returns on the first long silence,
+        // and a floppy seek partway through a file is exactly such a silence.
+        // Stopping there truncated the guest's side of the comparison and made
+        // a correct format look wrong.
+        let mut typed_raw = run_until_quiet(&mut m, &mut cpu, 2_000_000_000);
+        for _ in 0..8 {
+            let more = run_until_quiet(&mut m, &mut cpu, 200_000_000);
+            if more.is_empty() {
+                break;
+            }
+            typed_raw.extend_from_slice(&more);
+        }
+        let typed = String::from_utf8_lossy(&typed_raw).to_string();
+
+        // --- compare -------------------------------------------------------
+        //
+        // Both sides are normalised the same way and only in ways that are
+        // *transport*, never content: CP/M ends a text file with a run of ^Z
+        // padding to the record boundary, the console sees CR LF where the file
+        // has CR LF, and the guest echoes the command and prints a prompt. Tabs,
+        // spacing and the order of the actual text are left completely alone —
+        // they are what a wrong skew would disturb.
+        // Compared with **all whitespace removed on both sides**, which is
+        // exactly as strong a test of the mapping and immune to the two ways a
+        // console legitimately differs from a file: CP/M's BDOS expands a tab to
+        // the next eight-column stop, and an 80-column console wraps what is one
+        // line in the file into two on the screen. Neither changes a single
+        // character of content, and a wrong skew changes plenty — it reorders
+        // whole 128-byte records, so the character stream itself comes out
+        // different. Trailing `^Z` padding is dropped for the same reason.
+        let strip = |s: &str| -> String {
+            s.chars().filter(|c| !c.is_whitespace() && *c != '\u{1a}').collect()
+        };
+        let ours_s = strip(&String::from_utf8_lossy(&ours));
+        let guest_s = strip(&typed);
+        assert!(
+            ours_s.len() > 200,
+            "{want} is too small to prove anything ({} chars)",
+            ours_s.len()
+        );
+        assert!(
+            guest_s.contains(&ours_s),
+            "our reading of {want} ({} chars) is not present in the guest's own TYPE output \
+             ({} chars). A mismatch here means the skew or the block mapping is wrong — the \
+             directory parsing correctly proves nothing.\n  ours begins: {:?}\n  guest has : {:?}",
+            ours_s.len(),
+            guest_s.len(),
+            &ours_s[..80.min(ours_s.len())],
+            &guest_s[..160.min(guest_s.len())]
+        );
+        println!(
+            "MATCH: all {} characters of {want} identical between our reader and the \
+             guest's own TYPE, via {}",
+            ours_s.len(),
+            ident.format.token
+        );
+    }
+
 }
