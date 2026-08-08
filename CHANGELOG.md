@@ -158,6 +158,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **z80pack's CP/M 3 works.** It loaded, printed its sign-on and then stopped
+  dead, which looked like a broken disk and was not. Banked CP/M 3 needs the
+  MMU that z80pack's `cpmsim` provides on ports `14h`-`17h`: bank 0 is the whole
+  64 KB, banks 1.. replace only the bottom `segsize` bytes, and everything above
+  that is *common* memory shared by every bank — which is how a banked operating
+  system keeps its BIOS and its stack reachable while swapping the memory
+  underneath them. Measured: `cpm3-1.dsk` writes the bank-select port 284 times
+  before it goes quiet.
+
+  **Implementing the MMU was not enough on its own**, and the second half is the
+  more interesting one: the disk's DMA still wrote straight into bank 0, so every
+  sector landed where a banked guest was not looking. CP/M 3 read its own
+  directory as empty and retried the same sector for ever — 1,677 status polls
+  and not one console read. z80pack keeps a separate `dma_write` that honours the
+  mapping, and now so do we. The disk boots to `A>`, `DIR` lists it and `SHOW`
+  reports it.
+
+- **The z80pack hard disk mounts** (`z80packhd`, 4,177,920 bytes) — the last size
+  in any of the collections that was a real CP/M filesystem we refused. 2 KB
+  blocks, 1,024 directory entries, and **no reserved tracks at all**: the
+  directory starts at byte zero and the whole 4 MB is data, which is a
+  simulator's disk rather than a machine's. Its parameters came from the BIOS of
+  the system disk that uses it, since the volume carries no operating system of
+  its own, and were then checked by reading a 21 KB file back through that
+  guest's own CP/M and comparing it character for character.
+
 - **CP/M printer: bold and underline are real, a bare CR is now a switch, and
   the text file ends its lines the way CP/M does.** All three came out of one
   measurement — running WordStar 3.0 on a booted disk and looking at what

@@ -1311,6 +1311,24 @@ CROMEMCO_DSDD_SKEW   (32 sectors: an interleave of 4 within each side)
                     </p>
                 </div>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">z80pack cpmsim hard disk &mdash; <code>z80packhd</code></h3>
+                <p>
+                    4,177,920 bytes: 255 tracks &times; 128 sectors &times; 128. 2&nbsp;KB blocks,
+                    1,024 directory entries, no translation &mdash; and
+                    <strong>no reserved tracks at all</strong>. There is no boot area to skip: the
+                    directory starts at byte zero and every byte of the 4&nbsp;MB is data. That is
+                    a simulator's disk rather than a machine's, and it shows.
+                </p>
+                <p>
+                    Read from the BIOS of the system disk that <em>uses</em> it, because the volume
+                    cannot speak for itself: <code>hd-tools.dsk</code> carries no operating system,
+                    so it was mounted at the hard-disk slot &mdash; cpmsim drive <code>i</code>,
+                    which is slot&nbsp;8 &mdash; of a booted <code>cpm22-62khd.dsk</code>, and its
+                    DPB fetched through that BIOS's own <code>SELDSK</code>. Then checked the way
+                    everything here is checked: a 21&nbsp;KB file read back through the guest's own
+                    CP/M and compared character for character.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Named versus sniffed</h3>
                 <p>
                     An image whose filename carries a format token

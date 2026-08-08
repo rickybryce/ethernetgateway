@@ -43,6 +43,7 @@ pub mod detect;
 pub mod image;
 pub mod layout;
 mod machine;
+pub mod mmu;
 pub mod modem_port;
 pub mod printer;
 pub mod tarbell;

@@ -215,6 +215,15 @@ pub struct BootMachine {
     /// its own hands; a disk load does not, and pacing a guest that is busy
     /// reading a track would make every `DIR` crawl.
     disk_accesses: u64,
+    /// Bank switching, for the machines that have it.
+    ///
+    /// Idle until a guest allocates a bank, so every disk that does not bank
+    /// pays one predictable branch per memory access and nothing else.
+    mmu: super::mmu::Mmu,
+    /// Does this machine carry an MMU at all?  Only z80pack's does, and a port
+    /// claimed on a machine that has no such device would take it away from
+    /// whatever else lives there.
+    has_mmu: bool,
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
@@ -245,6 +254,8 @@ impl BootMachine {
             modem: ModemPort::new(),
             print: Vec::new(),
             printer_port: None,
+            mmu: super::mmu::Mmu::default(),
+            has_mmu: false,
             disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
@@ -366,6 +377,11 @@ impl BootMachine {
         let machine = super::console::resolve_machine(key);
         self.console = machine.console;
         self.controllers = machine.boards.iter().map(|b| boards_to_controller(*b)).collect();
+        // The MMU is z80pack's, and it comes with z80pack's disk device: both
+        // are parts of the same simulated machine, so the board set is what says
+        // whether this machine can bank.  Claiming ports 14h-17h anywhere else
+        // would take them from a real board that might want them.
+        self.has_mmu = machine.boards.contains(&super::console::Board::Z80pack);
     }
 
     /// The console this machine carries.
@@ -904,12 +920,34 @@ impl BootMachine {
                         // Wrapping, because the guest's address is sixteen bits
                         // and a transfer that runs off the top of memory wraps
                         // on real hardware rather than faulting.
-                        let at = addr.wrapping_add(i as u16) as usize;
-                        self.mem[at] = *b;
+                        //
+                        // **Through the MMU**, exactly as the CPU's own writes
+                        // go.  z80pack keeps a separate `dma_write` for this and
+                        // it honours the bank mapping; writing straight into
+                        // bank 0 instead puts every sector where a banked guest
+                        // is not looking.  CP/M 3 then reads its own directory
+                        // as empty and retries the same sector for ever --
+                        // measured, 1,677 status polls and not one console read.
+                        let at = addr.wrapping_add(i as u16);
+                        if self.mmu.is_idle() {
+                            self.mem[at as usize] = *b;
+                        } else {
+                            self.mmu.write(&mut self.mem, at, *b);
+                        }
                     }
                 } else {
+                    // Reads come out of the same mapping for the same reason:
+                    // a banked guest writing a sector expects the bytes it can
+                    // see to be the bytes that reach the disk.
                     let bytes: Vec<u8> = (0..len)
-                        .map(|i| self.mem[addr.wrapping_add(i as u16) as usize])
+                        .map(|i| {
+                            let at = addr.wrapping_add(i as u16);
+                            if self.mmu.is_idle() {
+                                self.mem[at as usize]
+                            } else {
+                                self.mmu.read(&self.mem, at)
+                            }
+                        })
                         .collect();
                     if let Some(m) = self.disks.get_mut(drive as usize).and_then(|x| x.as_mut()) {
                         if m.read_only {
@@ -1003,11 +1041,20 @@ impl BootMachine {
 
 impl Machine for BootMachine {
     fn peek(&mut self, address: u16) -> u8 {
-        self.mem[address as usize]
+        // The common case is one comparison: no guest has banked, so bank 0 is
+        // the whole machine and this is the array index it always was.
+        if self.mmu.is_idle() {
+            return self.mem[address as usize];
+        }
+        self.mmu.read(&self.mem, address)
     }
 
     fn poke(&mut self, address: u16, value: u8) {
-        self.mem[address as usize] = value;
+        if self.mmu.is_idle() {
+            self.mem[address as usize] = value;
+            return;
+        }
+        self.mmu.write(&mut self.mem, address, value);
     }
 
     fn port_in(&mut self, address: u16) -> u8 {
@@ -1017,6 +1064,9 @@ impl Machine for BootMachine {
             *self.port_hits.entry(port).or_insert(0) += 1;
         }
         match port {
+            // The MMU before the boards: its ports are its own, and only on a
+            // machine that has one.
+            p if self.has_mmu && super::mmu::Mmu::owns_port(p) => self.mmu.port_in(p),
             p if self.controller_for(p).is_some() => {
                 let ctrl = self.controller_for(port).expect("just matched");
                 self.disk_accesses = self.disk_accesses.saturating_add(1);
@@ -1112,6 +1162,9 @@ impl Machine for BootMachine {
             *self.port_hits.entry(port | 0x80).or_insert(0) += 1;
         }
         match port {
+            p if self.has_mmu && super::mmu::Mmu::owns_port(p) => {
+                self.mmu.port_out(p, value);
+            }
             p if self.controller_for(p).is_some() => {
                 let ctrl = self.controller_for(port).expect("just matched");
                 self.disk_accesses = self.disk_accesses.saturating_add(1);
@@ -4927,6 +4980,19 @@ mod tests {
         let mut m = BootMachine::new();
         m.set_machine(&machine);
         m.insert(0, bytes, true).expect("the boot image");
+        // A companion volume, when the drive being asked about is not the boot
+        // disk -- a hard disk, say, whose own parameters live in the BIOS of the
+        // system disk that uses it.  `CPM_DPB_SLOT` is the controller slot and
+        // `CPM_DPB_DRIVE` the number handed to SELDSK; they are separate because
+        // what a slot *is* belongs to the board.
+        if let Ok(second) = std::env::var("CPM_DPB_SECOND") {
+            let slot: u8 = std::env::var("CPM_DPB_SLOT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            m.insert(slot, std::fs::read(&second).expect("the companion"), true)
+                .unwrap_or_else(|e| panic!("slot {slot} refused {second}: {e}"));
+        }
         let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
         m.boot(&mut cpu, 0).expect("boots");
         let banner = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
@@ -4947,7 +5013,11 @@ mod tests {
         cpu.registers().set16(iz80::Reg16::SP, sp);
         m.poke(sp, SENTINEL as u8);
         m.poke(sp.wrapping_add(1), (SENTINEL >> 8) as u8);
-        cpu.registers().set8(iz80::Reg8::C, 0);
+        let drive: u8 = std::env::var("CPM_DPB_DRIVE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        cpu.registers().set8(iz80::Reg8::C, drive);
         cpu.registers().set8(iz80::Reg8::E, 0);
         cpu.registers().set_pc(seldsk);
         let mut steps = 0u64;
@@ -4957,7 +5027,7 @@ mod tests {
             assert!(steps < 5_000_000, "SELDSK never returned");
         }
         let dph = cpu.registers().get16(iz80::Reg16::HL);
-        assert_ne!(dph, 0, "SELDSK refused drive 0");
+        assert_ne!(dph, 0, "SELDSK refused drive {drive}");
 
         let word = |m: &mut BootMachine, a: u16| {
             u16::from_le_bytes([m.peek(a), m.peek(a.wrapping_add(1))])
@@ -5057,14 +5127,19 @@ mod tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("the image");
+        // The disk being *measured* may not be the one that boots: a data volume
+        // has no operating system of its own, so it rides as a companion in the
+        // machine of a system disk that knows how to read it.
+        let measured = std::env::var("CPM_ORACLE_MOUNT").unwrap_or_else(|_| path.clone());
+        let drive_prefix = std::env::var("CPM_ORACLE_DRIVE").unwrap_or_default();
 
         // --- our side: mount the image and read the file out ---------------
         // Identified exactly as the mount path does it, closure and all, so
         // this measures the product's own answer and not a second opinion.
-        let p = std::path::Path::new(&path);
+        let p = std::path::Path::new(&measured);
         let mut probe =
             crate::cpm::image::media::FileMedia::open(p, true).expect("open for probing");
-        let size = bytes.len() as u64;
+        let size = std::fs::metadata(p).expect("the measured image").len();
         let filename = p.file_name().unwrap().to_string_lossy().to_string();
         let ident = crate::cpm::image::identify::identify(&filename, size, |fmt| {
             let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
@@ -5105,6 +5180,14 @@ mod tests {
         let mut m = BootMachine::new();
         m.set_machine(&machine);
         m.insert(0, bytes, true).expect("the boot image");
+        if measured != path {
+            let slot: u8 = std::env::var("CPM_ORACLE_SLOT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            m.insert(slot, std::fs::read(&measured).expect("the companion"), true)
+                .unwrap_or_else(|e| panic!("slot {slot} refused {measured}: {e}"));
+        }
         let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
         m.boot(&mut cpu, 0).expect("boots");
         assert!(
@@ -5115,7 +5198,7 @@ mod tests {
         // `printable`, which turns a tab into a dot — and this file is
         // tab-indented assembler, so comparing its output would have been
         // comparing two different manglings rather than the text.
-        for &b in format!("TYPE {want}\r").as_bytes() {
+        for &b in format!("TYPE {drive_prefix}{want}\r").as_bytes() {
             m.send_key(b);
         }
         // Kept draining: `run_until_quiet` returns on the first long silence,
@@ -5173,6 +5256,61 @@ mod tests {
              guest's own TYPE, via {}",
             ours_s.len(),
             ident.format.token
+        );
+    }
+
+
+
+
+    /// **A banked CP/M 3 disk boots and takes a command.**
+    ///
+    /// The gate for the MMU, and it has to be a gate rather than a unit test
+    /// because nothing short of a banked operating system exercises the thing.
+    /// z80pack's CP/M 3 was the disk that loaded, printed its sign-on and then
+    /// stopped dead for months: its banked BIOS selects a memory bank, and with
+    /// no MMU the select went nowhere and it carried on executing whatever was
+    /// already there.
+    ///
+    /// Two separate faults had to go for this to pass, and the second is the one
+    /// worth remembering: implementing the MMU alone was **not** enough, because
+    /// the disk's DMA still wrote straight into bank 0. The guest read its own
+    /// directory as empty and retried the same sector for ever — 1,677 status
+    /// polls without a single console read.
+    ///
+    /// Ignored — set `CPM_CPM3_IMAGE` to z80pack's `cpm3-1.dsk`.
+    #[test]
+    #[ignore]
+    fn test_a_banked_cpm3_disk_boots_and_takes_commands() {
+        let Ok(path) = std::env::var("CPM_CPM3_IMAGE") else {
+            eprintln!("set CPM_CPM3_IMAGE to run this");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("the image");
+        let (machine, _why) =
+            crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+        let mut m = BootMachine::new();
+        m.set_machine(&machine);
+        m.insert(0, bytes, true).expect("the boot image");
+        let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
+        m.boot(&mut cpu, 0).expect("boots");
+
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 800_000_000));
+        assert!(
+            banner.contains("BANKED BIOS"),
+            "this disk did not reach its banked BIOS at all: {banner:?}"
+        );
+        assert!(
+            banner.trim_end().ends_with("A>"),
+            "reached the BIOS and then stopped, which is what no MMU looks like: {banner:?}"
+        );
+
+        // A prompt is not the same as a working machine: the CCP is banked, so
+        // running a command is what proves the mapping holds under a bank
+        // switch.  DIR reads the directory, which is what the DMA fault broke.
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 800_000_000);
+        assert!(
+            dir.to_ascii_uppercase().contains("CPM3") && dir.contains("SYS"),
+            "DIR did not list this disk's own system file: {dir:?}"
         );
     }
 

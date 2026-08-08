@@ -744,6 +744,44 @@ pub const FORMATS: &[Format] = &[
         exm: None,
         exact_size: Some(1_256_704),
     },
+    // ---- z80pack cpmsim hard disk, 4,177,920 bytes ------------------------
+    //
+    // 255 tracks x 128 sectors x 128 bytes, which the boot path already knew --
+    // this is the medium `z80pack.rs` calls `Geometry::HARD`, and it is drive
+    // `i` in cpmsim's own table.  What was missing was the filesystem.
+    //
+    // Read from the BIOS of the system disk that uses it, not from the volume
+    // itself: `hd-tools.dsk` carries no operating system, so it was mounted at
+    // the hard-disk slot of a booted `cpm22-62khd.dsk` (Udo Munk's CBIOS V1.3-HD)
+    // and its DPB fetched through that BIOS's own SELDSK for drive 8.
+    //
+    //     SPT 128  BSH 4  BLM 15  EXM 0
+    //     DSM 2039  DRM 1023  AL0 0xFF  AL1 0xFF  CKS 256  OFF 0
+    //
+    // **`OFF 0` -- no reserved tracks at all.**  There is no boot area to skip:
+    // the directory starts at byte zero and the whole 4 MB is data.  That is a
+    // simulator's disk rather than a machine's, and it shows.  2,040 blocks of
+    // 2,048 is 4,177,920 exactly, so the filesystem uses every byte and there is
+    // nothing for `declared_blocks` to correct.  1,024 directory entries fill
+    // sixteen blocks, which is what `AL0`/`AL1` of `FF FF` say.
+    Format {
+        token: "z80packhd",
+        label: "z80pack cpmsim hard disk, 4M",
+        total_records: 32_640, // 255 tracks x 128 sectors
+        sectrk: 128,
+        records_per_sector: 1,
+        reserved_records: 0, // OFF 0 -- the directory is at byte zero
+        blocksize: 2048,
+        maxdir: 1024,
+        declared_blocks: None,
+        framing: Framing::Raw,
+        // Its DPH's XLT pointer is zero and, unlike the Cromemco double-sided
+        // disk, that is the truth here -- confirmed by reading a file back
+        // through the guest's own CP/M rather than by believing the pointer.
+        skew: Skew::None,
+        exm: None,
+        exact_size: Some(4_177_920),
+    },
     // The IBM 3740 layout, and the closest thing CP/M had to a universal disk.
     // Both the Tarbell and the Cromemco single-density 8" images are this.
     Format {

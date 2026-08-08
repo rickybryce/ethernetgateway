@@ -2456,7 +2456,7 @@ it, and the folder&rsquo;s files return the moment you unmount.
 
 <p>
 Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
-<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Five formats
+<code>ibm3740_cpm22.dsk</code>, <code>altairhd_cobol.dsk</code>. Six formats
 are supported, all measured from real images rather than transcribed from
 another tool&rsquo;s tables: <code>ibm3740</code> (the 256,256-byte 8&Prime;
 single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack library),
@@ -2464,7 +2464,10 @@ single-density disk used by Tarbell, Cromemco and the IMSAI/z80pack library),
 Altair-Duino set), <code>altair8</code> (the 337,568-byte Altair 88-DCDD
 8&Prime; floppy, which reads, writes and formats), and the two Cromemco
 double-density 8&Prime; disks &mdash; <code>cromemcodd</code> (625,920 bytes,
-single sided) and <code>cromemcodsdd</code> (1,256,704 bytes, double sided).
+single sided) and <code>cromemcodsdd</code> (1,256,704 bytes, double sided),
+plus <code>z80packhd</code> (the 4,177,920-byte z80pack <code>cpmsim</code> hard
+disk, which has no reserved tracks at all &mdash; its directory starts at byte
+zero).
 Those last two have their track&nbsp;0 recorded in <em>single</em> density so a
 single-density boot ROM can read them at all, and each interleaves its sectors
 differently from the other: skew belongs to the BIOS, not to the medium.

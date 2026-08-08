@@ -10598,8 +10598,9 @@ read — has to be recorded here to survive.
 
 ### z80pack — MIT License (MIT)
 
-`src/cpm/z80pack.rs` emulates the disk device of **z80pack**'s `cpmsim` machine
-and is **derived from** its source (`cpmsim/srcsim/simio.c`), not written
+`src/cpm/z80pack.rs` emulates the disk device of **z80pack**'s `cpmsim` machine,
+and `src/cpm/mmu.rs` its bank-switching MMU. Both are **derived from** that
+project's source (`cpmsim/srcsim/simio.c` and `simmem.h`), not written
 clean-room from documentation.
 
 That is a deliberate exception to how every other emulated device in this
@@ -10609,7 +10610,8 @@ documentation and from the guests' own drivers, with other implementations used
 only as cross-checks. z80pack's device is not hardware and never was — it is a
 simulator's invented interface — so its source is the only specification that
 exists, and an implementation built from it is derived work whose notice must
-travel with our binary. MIT into GPL-3.0-or-later is the compatible direction,
+travel with our binary. The MMU is the same case: banked CP/M 3 cannot run
+without it, and there is no datasheet for a device that was never a card. MIT into GPL-3.0-or-later is the compatible direction,
 so this is an attribution obligation rather than a licensing obstacle.
 
 Upstream: <https://github.com/udo-munk/z80pack>

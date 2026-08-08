@@ -68,6 +68,10 @@ export CPM_HDSK_DATA="$DISKS/HDSK02.DSK"
 # interleaves anyway -- believing the pointer produced a format that mounted,
 # listed correctly and read scrambled.  CPMCRT.ASM because at 15,744 bytes it
 # crosses the double-sided boundary, which a smaller file does not reach.
+# Defaults: the Cromemco double-sided disk, whose XLT pointer says "no
+# translation" while its BIOS interleaves anyway.  Overridden by the z80pack
+# block below when that collection is present -- each gate wants one disk, and
+# the z80pack hard disk is the one that cannot speak for itself.
 export CPM_DPB_IMAGE="$DISKS/CDISK03.DSK"
 export CPM_ORACLE_IMAGE="$DISKS/CDISK03.DSK"
 export CPM_ORACLE_FILE=CPMCRT.ASM
@@ -93,6 +97,24 @@ export CPM_LAYOUT_DIR="$WORK/layout"
 # extent bug puts at risk -- see the `Open` fix that WordStar's 34 KB overlay
 # found.
 export CPM_LARGE_DIR="$DISKS"
+# The z80pack gates, if that collection is where it usually is.  Its hard disk
+# is a *data* volume with no operating system of its own, so both the DPB read
+# and the guest-comparison ride as a companion in the machine of the system
+# disk that knows how to read it -- cpmsim drive `i`, which is slot 8.
+Z80PACK="$HOME/z80pack/cpmsim/disks/library"
+if [ -d "$Z80PACK" ]; then
+  export CPM_DPB_IMAGE="$Z80PACK/cpm22-62khd.dsk"
+  export CPM_DPB_SECOND="$Z80PACK/hd-tools.dsk"
+  export CPM_DPB_SLOT=8
+  export CPM_DPB_DRIVE=8
+  export CPM_ORACLE_IMAGE="$Z80PACK/cpm22-62khd.dsk"
+  export CPM_ORACLE_MOUNT="$Z80PACK/hd-tools.dsk"
+  export CPM_ORACLE_SLOT=8
+  export CPM_ORACLE_DRIVE=I:
+  export CPM_ORACLE_FILE=HIST.DOC
+  # Banked CP/M 3: the disk that needs the MMU *and* DMA through it.
+  export CPM_CPM3_IMAGE="$Z80PACK/cpm3-1.dsk"
+fi
 export CPM_LIVE_BASE="$REPO/transfer/CPM"
 # The pristine repo name, not a renamed copy.  This folder used to hold
 # hand-renamed images (`altair8_cpm22.dsk` was this file) and the prefix was

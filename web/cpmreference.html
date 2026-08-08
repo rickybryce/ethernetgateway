@@ -837,6 +837,7 @@ altairhd_cobol.dsk</code></pre>
                         <tr><td><code>altairhd</code></td><td>Altair 88-HDSK hard disk (the Altair-Duino set). 256-byte sectors, two CP/M records in each.</td><td>4,988,928</td></tr>
                         <tr><td><code>cromemcodd</code></td><td>Cromemco 8&Prime; SSDD (MICAH CP/M 2.2). Track&nbsp;0 is single density so a single-density boot ROM can read it; the rest is 16 sectors of 512 bytes. Declares 254 blocks on a medium that would hold 300.</td><td>625,920</td></tr>
                         <tr><td><code>cromemcodsdd</code></td><td>Cromemco 8&Prime; DSDD (ITC CP/M 2.2). Both sides, a CP/M track being a whole cylinder. Its <code>XLT</code> pointer says it does not translate and its BIOS interleaves by four anyway &mdash; believing the pointer gave a format that listed correctly and read scrambled.</td><td>1,256,704</td></tr>
+                        <tr><td><code>z80packhd</code></td><td>z80pack <code>cpmsim</code> hard disk. 255 tracks &times; 128 sectors &times; 128 bytes, 2&nbsp;KB blocks, 1,024 directory entries, and <strong>no reserved tracks</strong> &mdash; the directory begins at byte zero and the whole 4&nbsp;MB is data. A simulator's disk rather than a machine's, and it shows.</td><td>4,177,920</td></tr>
                     </tbody>
                 </table>
                 <p class="dim-text">
