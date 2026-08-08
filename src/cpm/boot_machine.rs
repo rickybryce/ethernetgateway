@@ -4870,8 +4870,8 @@ mod tests {
         // The handshake, likewise: it is bytes, it is not a document, and
         // `SpoolJob::is_empty` exists because of it.
         assert!(!handshake.is_empty(), "the driver initialisation was not seen at all");
-        let mut job = crate::cpm::printer::SpoolJob::new_for(
-            crate::cpm::printer::port_for("altair_c").expect("the board"),
+        let mut job = crate::cpm::printer::SpoolJob::with_auto_lf(
+            crate::cpm::printer::port_for("altair_c").expect("the board").auto_lf,
         );
         for &b in &handshake {
             job.push(b);
@@ -4889,8 +4889,10 @@ mod tests {
             job.push(b);
         }
         let doc = job.plain_text();
+        // CRLF: what CP/M's own text is, and what a vintage machine collecting
+        // this file over XMODEM needs -- see `SpoolJob::plain_text`.
         assert_eq!(
-            doc, "ALPHA\nBETA\n",
+            doc, "ALPHA\r\nBETA\r\n",
             "the page model does not reproduce what this disk printed"
         );
     }

@@ -958,14 +958,24 @@ impl TelnetSession {
             ))
             .await?;
             let port_label = crate::cpm::printer::port_label(&cfg.cpm_printer_port);
+            let autolf_label = crate::cpm::printer::AUTOLF_CHOICES
+                .iter()
+                .find(|(v, _)| *v == cfg.cpm_printer_autolf.trim())
+                .map(|(_, l)| *l)
+                .unwrap_or(crate::cpm::printer::AUTOLF_CHOICES[0].1);
             self.send_line(&format!(
                 "  Board:     {}",
                 self.amber(&truncate_to_width(port_label, w))
             ))
             .await?;
+            self.send_line(&format!(
+                "  Bare CR:   {}",
+                self.amber(&truncate_to_width(autolf_label, w))
+            ))
+            .await?;
             self.send_line("").await?;
 
-            // What the two rows above actually mean, in the configuration the
+            // What the rows above actually mean, in the configuration the
             // operator is looking at.  A setting that does nothing right now is
             // worse than no setting — the same rule the boot screen follows for
             // the machine.
@@ -985,6 +995,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle where printing goes", self.cyan("P"))).await?;
             self.send_line(&format!("  {}  Cycle the booted-disk board", self.cyan("B"))).await?;
+            self.send_line(&format!("  {}  Cycle bare-CR handling", self.cyan("A"))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
@@ -1030,9 +1041,23 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "a" => {
+                    let keys: Vec<&str> =
+                        crate::cpm::printer::AUTOLF_CHOICES.iter().map(|(v, _)| *v).collect();
+                    let idx = keys
+                        .iter()
+                        .position(|k| *k == cfg.cpm_printer_autolf.trim())
+                        .unwrap_or(keys.len() - 1);
+                    let next = keys[(idx + 1) % keys.len()].to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_printer_autolf", &next);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press P, B, or Q.").await?;
+                    self.show_error("Press P, B, A, or Q.").await?;
                 }
             }
         }

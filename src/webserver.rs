@@ -1021,7 +1021,7 @@ fn collect_form_updates(
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
         "cpm_boot_backspace", "cpm_cpu",
-        "cpm_printer", "cpm_printer_port",
+        "cpm_printer", "cpm_printer_port", "cpm_printer_autolf",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -2122,6 +2122,17 @@ fn render_more_popups(cfg: &Config) -> String {
         )
     })
     .collect();
+    let cpm_autolf_options: String = crate::cpm::printer::AUTOLF_CHOICES
+        .iter()
+        .map(|(value, label)| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                value,
+                if *value == cfg.cpm_printer_autolf.trim() { " selected" } else { "" },
+                html_escape(label),
+            )
+        })
+        .collect();
     let cpm_cpu_options: String = crate::cpm::cpu::CPU_CHOICES
         .iter()
         .map(|(value, label)| {
@@ -2249,11 +2260,27 @@ fn render_more_popups(cfg: &Config) -> String {
              PRINT-YYYYMMDD-HHMMSS, five seconds after the last character printed \
              \u{2014} and in the emulator also the moment the program returns to \
              A&gt;, which is exact. Off means printer output appears on the \
-             terminal, as it always has. No bold or underline yet: period \
-             software makes them by overstriking, which is resolved into correct \
-             text rather than into styling.</span>\
+             terminal, as it always has. Bold and underline survive into an \
+             .odt: period software does not ask for them, it OVERSTRIKES \
+             \u{2014} WordStar prints the line, sends a bare CR and reprints just \
+             the emphasised run at the same columns \u{2014} and that becomes real \
+             styling.</span>\
              <span class=\"label\">Booted disk's printer board:</span>\
              <select name=\"cpm_printer_port\">{cpm_printer_port_options}</select>\
+             <span class=\"label\">Bare carriage return:</span>\
+             <select name=\"cpm_printer_autolf\">{cpm_autolf_options}</select>\
+             <span class=\"hint\">Does a bare CR advance the paper? The DIP \
+             switch a real printer interface carried, and it carried one because \
+             the bytes cannot say. Both meanings are in use by period software on \
+             the same board, and both were measured here: Altair Hard Disk \
+             BASIC's LPRINT sends ALPHA&lt;CR&gt;BETA&lt;CR&gt; with no line feed \
+             at all, so a bare CR is its line ending; WordStar 3.0, installed for \
+             a &quot;Teletype-like printer&quot;, emphasises by OVERSTRIKING \
+             \u{2014} it prints the line, sends a bare CR and reprints just the \
+             bold run at the same columns. Turn it on and WordStar's emphasis \
+             lands on lines of its own; turn it off and BASIC prints its whole \
+             report on one line. Auto keeps whatever was measured for the printer \
+             in question.</span>\
              <span class=\"hint\">Ignored by the emulator, whose printer is a \
              BDOS service with no port at all, and ignored entirely when printer \
              output is off. Measured against real software: Altair Hard Disk \

@@ -915,6 +915,13 @@ pub struct Config {
     /// a printer port a booted guest drives itself) but they produce one
     /// document either way. See [`crate::cpm::printer`].
     pub cpm_printer: String,
+    /// Whether a bare CR advances the paper: `auto`, `on` or `off`.
+    ///
+    /// The auto-line-feed switch a real printer interface carried, and for the
+    /// reason it carried one — period software uses a bare CR for both "end of
+    /// line" and "return and overprint", on the same board. `auto` keeps the
+    /// answer measured for each printer. See [`crate::cpm::printer::auto_lf_for`].
+    pub cpm_printer_autolf: String,
     /// Which printer board a BOOTED disk finds: `off`, or a key from
     /// [`crate::cpm::printer::PORT_CHOICES`].
     ///
@@ -1066,6 +1073,7 @@ impl Default for Config {
             cpm_boot_backspace: crate::cpm::boot::DEFAULT_BACKSPACE.to_string(),
             cpm_printer: crate::cpm::printer::DEFAULT_PRINTER.to_string(),
             cpm_printer_port: crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string(),
+            cpm_printer_autolf: crate::cpm::printer::DEFAULT_PRINTER_AUTOLF.to_string(),
             cpm_cpu: crate::cpm::cpu::DEFAULT_CPU.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
@@ -1694,6 +1702,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_printer_port")
             .cloned()
             .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string()),
+        cpm_printer_autolf: map
+            .get("cpm_printer_autolf")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER_AUTOLF.to_string()),
         // Missing means the Z80, which is what every config written before this
         // key existed was already running -- so an upgrade changes nothing.
         cpm_cpu: map
@@ -2517,8 +2529,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   A job is finished after 5 SECONDS with nothing printed - CP/M has no
 #   end-of-print signal, so silence is the only one there is - and in the
 #   emulator also when the program returns to the A> prompt, which is exact.
-#   No bold or underline yet: period software makes them by overstriking, and
-#   that is resolved into correct TEXT rather than into styling.
+#   Bold and underline survive into an .odt.  Period software does not ask for
+#   them, it OVERSTRIKES - WordStar prints the line, sends a bare CR and
+#   reprints just the emphasised run at the same columns - and that is turned
+#   into real styling.  Measured against WordStar 3.0.  Which is also why
+#   cpm_printer_autolf matters: with the switch on, an overstrike pass lands on
+#   a line of its own instead of on top of the text.
 ");
     write_kv(&mut content, "cpm_printer", &cfg.cpm_printer);
     content.push_str("\
@@ -2534,6 +2550,26 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   reads 0xFF here, and every period convention reads a high bit as ready.
 ");
     write_kv(&mut content, "cpm_printer_port", &cfg.cpm_printer_port);
+    content.push_str("\
+# cpm_printer_autolf: does a bare carriage return advance the paper?
+#   The DIP switch a real printer interface carried, and it carried one because
+#   the byte stream cannot say.  Both meanings are in use by period software on
+#   the SAME Altair line printer, and both were measured here:
+#     - Altair Hard Disk BASIC's LPRINT sends ALPHA<CR>BETA<CR> and no line feed
+#       at all, so a bare CR is its line ending.  With the switch off the whole
+#       report prints on one line.
+#     - WordStar 3.0 (installed for a `Teletype-like printer') emphasises by
+#       OVERSTRIKING: it prints the line, sends a bare CR, and reprints just the
+#       bold run at the same columns.  With the switch on, every emphasised
+#       fragment lands on a line of its own instead of on top of the text.
+#     auto   DEFAULT - whatever was measured for the printer in question: on for
+#            the booted disk's Altair line printer, off for the emulator's LST:
+#            service (CP/M sends CR LF, so overstrike is meaningful there)
+#     on     a bare CR ends the line          (Altair BASIC, Disk BASIC)
+#     off    a bare CR returns and overprints (WordStar, and anything that
+#            emphasises the way a daisy-wheel printer did)
+");
+    write_kv(&mut content, "cpm_printer_autolf", &cfg.cpm_printer_autolf);
     content.push_str("\
 # cpm_cpu: which processor BOTH CP/M machines run - the emulator's transient
 #   programs and a booted disk's whole operating system.  The only CP/M setting
@@ -3129,6 +3165,15 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // promising documents that were never going to be written.
             if crate::cpm::printer::PRINTER_CHOICES.iter().any(|(v, _)| *v == value) {
                 cfg.cpm_printer = value.to_string();
+            }
+        }
+        "cpm_printer_autolf" => {
+            // One of the three, for the same reason as the two below:
+            // `auto_lf_for` reads anything it does not recognise as `auto`, so
+            // an unchecked write could leave the file promising a switch
+            // position the printer was never going to be in.
+            if crate::cpm::printer::AUTOLF_CHOICES.iter().any(|(v, _)| *v == value) {
+                cfg.cpm_printer_autolf = value.to_string();
             }
         }
         "cpm_printer_port" => {
@@ -3955,6 +4000,9 @@ mod tests {
             cpm_boot_backspace: crate::cpm::boot::BACKSPACE_RUBOUT.to_string(),
             cpm_printer: crate::cpm::printer::PRINTER_ODT.to_string(),
             cpm_printer_port: crate::cpm::printer::PORT_OFF.to_string(),
+            // Not the default: `off` is what an operator running WordStar sets,
+            // and it has to survive a write/read cycle to be worth having.
+            cpm_printer_autolf: crate::cpm::printer::AUTOLF_OFF.to_string(),
             // Likewise not the default: the 8080 is the setting an operator
             // running period diagnostics picks, and it has to survive the cycle.
             cpm_cpu: crate::cpm::cpu::CPU_8080.to_string(),

@@ -2252,12 +2252,12 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
 #[test]
 fn test_cpm_printer_settings_row_count() {
     let header = 3;
-    let status = 1 + 2; // blank + Output/Board
+    let status = 1 + 3; // blank + Output/Board/Bare CR
     let note = 1 + 3; // blank + the longer of the two explanations
-    let actions = 1 + 2; // blank + P, B
+    let actions = 1 + 3; // blank + P, B, A
     let footer = 1 + 1 + 1; // blank + Back + prompt
     let rows = header + status + note + actions + footer;
-    assert_eq!(rows, 16, "the CP/M printer screen is {rows} rows");
+    assert_eq!(rows, 18, "the CP/M printer screen is {rows} rows");
     assert!(rows <= 22, "CP/M printer settings is {rows} rows, exceeds 22");
 }
 
@@ -2379,9 +2379,9 @@ fn test_cpm_printer_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("\n    /// Boot settings, reached from").expect("the next fn") + start;
     let body = &src[start..end];
 
-    let hint = "Press P, B, or Q.";
+    let hint = "Press P, B, A, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["P", "B"] {
+    for key in ["P", "B", "A"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"

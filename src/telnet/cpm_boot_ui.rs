@@ -924,6 +924,13 @@ impl TelnetSession {
         // anything the bytes can say.  Resolved the same way the port was
         // claimed above, so the two cannot disagree about which board this is.
         let printer_board = print_format.and(crate::cpm::printer::port_for(&cfg.cpm_printer_port));
+        // The auto-line-feed switch: the operator's setting, falling back to
+        // whatever was measured for this board.  Resolved here with the rest,
+        // so one boot cannot change its mind halfway through a document.
+        let print_auto_lf = crate::cpm::printer::auto_lf_for(
+            &cfg.cpm_printer_autolf,
+            printer_board.map(|b| b.auto_lf).unwrap_or(false),
+        );
         let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
         let result = self
             .cpm_boot_run_inner(
@@ -933,7 +940,7 @@ impl TelnetSession {
                 erase,
                 &mut spool,
                 print_format,
-                printer_board,
+                print_auto_lf,
                 &transfer_dir,
             )
             .await;
@@ -996,7 +1003,7 @@ impl TelnetSession {
         erase: bool,
         spool: &mut Option<crate::cpm::printer::SpoolJob>,
         print_format: Option<crate::cpm::printer::Format>,
-        printer_board: Option<&'static crate::cpm::printer::PrinterPort>,
+        print_auto_lf: bool,
         transfer_dir: &str,
     ) -> Result<(), std::io::Error> {
         let mut executed: u64 = 0;
@@ -1060,12 +1067,8 @@ impl TelnetSession {
                 // modern machine, not onto a Commodore's screen.
                 let printed_bytes = machine.take_print();
                 if !printed_bytes.is_empty() {
-                    let job = spool.get_or_insert_with(|| match printer_board {
-                        Some(board) => crate::cpm::printer::SpoolJob::new_for(board),
-                        // Unreachable while the port is claimed from the same
-                        // board, but a plain job is the harmless answer rather
-                        // than an unwrap on a config-shaped value.
-                        None => crate::cpm::printer::SpoolJob::new(),
+                    let job = spool.get_or_insert_with(|| {
+                        crate::cpm::printer::SpoolJob::with_auto_lf(print_auto_lf)
                     });
                     for b in printed_bytes {
                         job.push(b);

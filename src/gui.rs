@@ -1590,9 +1590,48 @@ impl App {
              end-of-print signal of its own, and in the emulator also the moment \
              the program returns to the A> prompt, which is exact.  Off means \
              printer output appears on the terminal, which is where it has \
-             always gone.  No bold or underline yet: period software makes those \
-             by overstriking, and that is resolved into correct text rather than \
-             into styling.",
+             always gone.  Bold and underline survive into an .odt: period \
+             software does not ask for them, it OVERSTRIKES -- WordStar prints \
+             the line, sends a bare CR and reprints just the emphasised run at \
+             the same columns -- and that becomes real styling.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Bare carriage return:");
+            egui::ComboBox::from_id_salt("cpm_printer_autolf_combo")
+                .width(320.0)
+                .selected_text(
+                    crate::cpm::printer::AUTOLF_CHOICES
+                        .iter()
+                        .find(|(v, _)| *v == self.cfg.cpm_printer_autolf.trim())
+                        .map(|(_, l)| *l)
+                        .unwrap_or(crate::cpm::printer::AUTOLF_CHOICES[0].1),
+                )
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::cpm::printer::AUTOLF_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_printer_autolf,
+                            value.to_string(),
+                            *label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Does a bare carriage return advance the paper?  This is the DIP \
+             switch a real printer interface carried, and it carried one because \
+             the byte stream cannot say.  Both meanings are in use by period \
+             software on the SAME board, and both were measured here.  Altair \
+             Hard Disk BASIC's LPRINT sends ALPHA<CR>BETA<CR> and no line feed \
+             at all, so a bare CR is its line ending -- with the switch off its \
+             whole report prints on one line.  WordStar 3.0, installed for a \
+             \"Teletype-like printer\", emphasises by OVERSTRIKING: it prints the \
+             line, sends a bare CR and reprints just the bold run at the same \
+             columns -- with the switch on, every emphasised fragment lands on a \
+             line of its own instead of on top of the text.  Auto keeps whatever \
+             was measured for the printer in question: on for a booted disk's \
+             Altair line printer, off for the emulator's LST: service, where \
+             CP/M sends CR LF and overstrike is meaningful.",
         );
         ui.horizontal(|ui| {
             ui.label("Booted disk's printer:");

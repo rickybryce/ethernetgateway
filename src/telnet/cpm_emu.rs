@@ -517,12 +517,14 @@ impl TelnetSession {
         term: &mut Adm3a,
         byte: u8,
         format: Option<crate::cpm::printer::Format>,
+        auto_lf: bool,
         transfer_dir: &str,
     ) -> Result<(), std::io::Error> {
         let Some(format) = format else {
             return self.cpmemu_emit(term, &[byte]).await;
         };
-        let job = spool.get_or_insert_with(crate::cpm::printer::SpoolJob::new);
+        let job =
+            spool.get_or_insert_with(|| crate::cpm::printer::SpoolJob::with_auto_lf(auto_lf));
         job.push(byte);
         if job.is_full() {
             self.cpmemu_spool_close(spool, format, transfer_dir).await?;
@@ -1379,6 +1381,10 @@ impl TelnetSession {
         // `Config` clone per printed character.  See `cpmemu_print`.
         let cfg = config::get_config();
         let print_format = crate::cpm::printer::format_for(&cfg.cpm_printer);
+        // `LST:` is an operating-system service here, not a board, and what
+        // reaches it is CP/M's own CR LF -- measured.  So the default is off,
+        // which is also what makes WordStar's overstrike mean anything.
+        let print_auto_lf = crate::cpm::printer::auto_lf_for(&cfg.cpm_printer_autolf, false);
         let transfer_dir = cfg.transfer_dir.clone();
         drop(cfg);
         let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
@@ -1391,6 +1397,7 @@ impl TelnetSession {
                 fs,
                 &mut spool,
                 print_format,
+                print_auto_lf,
                 &transfer_dir,
             )
             .await;
@@ -1415,6 +1422,7 @@ impl TelnetSession {
         fs: &mut CpmFs,
         spool: &mut Option<crate::cpm::printer::SpoolJob>,
         print_format: Option<crate::cpm::printer::Format>,
+        print_auto_lf: bool,
         transfer_dir: &str,
     ) -> Result<bool, std::io::Error> {
         cpm.load_com(program);
@@ -1562,7 +1570,7 @@ impl TelnetSession {
                             // reasoning is preserved as the default rather than
                             // overruled.
                             let e = cpm.arg_e();
-                            self.cpmemu_print(spool, &mut term, e, print_format, transfer_dir)
+                            self.cpmemu_print(spool, &mut term, e, print_format, print_auto_lf, transfer_dir)
                                 .await?;
                             cpm.bdos_return(0);
                         }
@@ -1718,7 +1726,7 @@ impl TelnetSession {
                         // an existing operator relies on changes.
                         5 => {
                             let c = cpm.arg_c();
-                            self.cpmemu_print(spool, &mut term, c, print_format, transfer_dir)
+                            self.cpmemu_print(spool, &mut term, c, print_format, print_auto_lf, transfer_dir)
                                 .await?;
                             cpm.bios_return(0);
                         }

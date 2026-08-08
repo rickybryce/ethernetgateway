@@ -140,6 +140,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CP/M printer: bold and underline are real, a bare CR is now a switch, and
+  the text file ends its lines the way CP/M does.** All three came out of one
+  measurement — running WordStar 3.0 on a booted disk and looking at what
+  reached the printer.
+
+  **The auto-line-feed switch is now yours** (`cpm_printer_autolf`: `auto`,
+  `on`, `off`, on all three configuration surfaces). Whether a bare carriage
+  return advances the paper cannot be read off the byte stream, and *both*
+  answers are in use by period software on the same Altair line printer: Altair
+  Hard Disk BASIC's `LPRINT` sends `ALPHA<CR>BETA<CR>` with no line feed at all,
+  so a bare CR is its line ending; WordStar emphasises by **overstriking** —
+  print the line, bare CR, reprint just the bold run at the same columns. With
+  the switch fixed on, as it was, every emphasised fragment landed on a line of
+  its own instead of on top of the text. Real interfaces put this on a DIP
+  switch for exactly this reason. `auto` keeps whatever was measured for each
+  printer, so nothing changes unless you change it.
+
+  **Overstrike becomes real styling.** Bold, underline and both together now
+  survive into the `.odt` as proper ODF spans, recorded per column at the moment
+  the second pass lands — the plain-text rendition keeps exactly the same
+  characters, and a document nobody emphasised gains no markup at all. Verified
+  by printing from WordStar on a booted disk and opening the result in
+  LibreOffice, which shows `<b>BOLD</b>` and `<u>UNDER</u>`. This is what the
+  OpenDocument format was there for; until now it carried none of it.
+
+  **The `.txt` ends its lines CRLF**, not with the host's convention. Measured
+  both ends: CP/M's own text is CR LF (`PIP LST:=DEMO.ASM` sent 65 of each), and
+  this file is written to be collected onto a C64, a CP/M box or an RC2014 by
+  transfer protocols that are binary-transparent — so what is written is exactly
+  what arrives, and a bare-LF file `TYPE`d on CP/M staircases down the screen.
+
 - **Cromemco double-density disks mount now — the last CP/M disks in the
   collections that would not.** Two new formats, `cromemcodd` (625,920 bytes,
   single sided) and `cromemcodsdd` (1,256,704 bytes, double sided), which

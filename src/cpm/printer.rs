@@ -25,16 +25,21 @@
 //!
 //! Both feed the same [`SpoolJob`], so the document logic exists once.
 //!
-//! # What it does not do yet
+//! # Emphasis
 //!
-//! **No bold or underline.** Period software produces them by *overstrike* —
-//! WordStar prints a line, returns with a bare CR and prints it again for
-//! double-strike, or overprints a letter with `_` for underline — and this
-//! module resolves overstrike into readable *text* (see [`Page::put`]) without
-//! turning it into styling. That is a deliberate first step: the text is
-//! correct and complete, and a later pass can recognise the overstrike
-//! patterns, or an Epson `ESC E` / `ESC -1` driver, and emit real ODF spans.
-//! Getting the text right first means that pass cannot silently lose content.
+//! **Bold and underline are recovered from overstrike.** Period software does
+//! not ask for emphasis with an escape code — WordStar installed for a
+//! teletype-like printer prints the line, returns the carriage with a bare CR
+//! and reprints just the emphasised run at the same columns; underline arrives
+//! as a pass of `_` over the letters. That is recorded per column as it lands
+//! (see [`Cell`]) and becomes real styling in the `.odt`, while the plain-text
+//! rendition keeps exactly the same characters. Measured against WordStar 3.0
+//! on a booted disk, and checked by opening the result in LibreOffice.
+//!
+//! It is also why the auto-line-feed switch is a *setting* — see
+//! [`auto_lf_for`]. With it on, every overstrike pass lands on a line of its
+//! own instead of on top of the text, and the emphasis is lost before this
+//! module ever sees it.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -91,9 +96,10 @@ pub struct PrinterPort {
     /// works, and a CR that advances is how a great deal of software ends a
     /// line. The same bytes, two meanings, settled by the hardware.
     ///
-    /// So it is settled here, per board, by measurement — see
-    /// [`PORT_CHOICES`]. The cost of switching it on is that overstrike becomes
-    /// impossible on that printer, which is exactly the cost it had in 1977.
+    /// So it is settled here, per board, by measurement — see [`PORT_CHOICES`].
+    /// **This is the default, not the last word**: `cpm_printer_autolf` lets the
+    /// operator override it, because measurement found period software using
+    /// both meanings on this very board. See [`auto_lf_for`].
     pub auto_lf: bool,
 }
 
@@ -155,6 +161,56 @@ pub fn printer_label(value: &str) -> &'static str {
 /// The label for a `cpm_printer_port` value, falling back to [`PORT_OFF_LABEL`].
 pub fn port_label(value: &str) -> &'static str {
     port_for(value).map(|p| p.label).unwrap_or(PORT_OFF_LABEL)
+}
+
+/// `cpm_printer_autolf`: leave the switch to the board.
+pub const AUTOLF_AUTO: &str = "auto";
+/// `cpm_printer_autolf`: a bare CR ends the line.
+pub const AUTOLF_ON: &str = "on";
+/// `cpm_printer_autolf`: a bare CR returns the carriage and overprints.
+pub const AUTOLF_OFF: &str = "off";
+
+/// What `cpm_printer_autolf` is when nothing says otherwise.
+///
+/// `auto`, meaning each printer keeps the answer measured for it: on for the
+/// Altair line printer a booted disk drives, off for the emulator's `LST:`
+/// service. That is right for the software each was measured against, and the
+/// setting exists for the software it is not.
+pub const DEFAULT_PRINTER_AUTOLF: &str = AUTOLF_AUTO;
+
+/// The choices for `cpm_printer_autolf`, `(value, label)`.
+pub const AUTOLF_CHOICES: &[(&str, &str)] = &[
+    (AUTOLF_AUTO, "Auto - what the printer expects"),
+    (AUTOLF_ON, "On - a bare CR ends the line"),
+    (AUTOLF_OFF, "Off - a bare CR overprints"),
+];
+
+/// Should a bare CR advance the paper, given the setting and the printer's own
+/// default?
+///
+/// **The switch a real interface had, and for the reason it had it.** Whether a
+/// bare carriage return ends a line or returns the head to overprint is not
+/// something the byte stream can say, and on one Altair line printer both
+/// answers are in use by period software:
+///
+/// * Altair Hard Disk BASIC's `LPRINT` sends `ALPHA<CR>BETA<CR>` and no line
+///   feed at all — a bare CR is its line ending, so the paper must advance or
+///   the whole report prints on one line.
+/// * WordStar 3.0, installed for a "Teletype-like printer", emphasises by
+///   *overstriking*: it prints the line, sends a bare CR, and reprints just the
+///   bold run at the same columns. If the paper advances there, every emphasised
+///   fragment lands on a line of its own instead of on top of the text.
+///
+/// Both were measured on this gateway. Neither is wrong. So the operator gets
+/// the switch, exactly as they did in 1979, and `auto` keeps whichever answer
+/// was measured for the printer in question.
+pub fn auto_lf_for(setting: &str, board_default: bool) -> bool {
+    match setting.trim() {
+        s if s.eq_ignore_ascii_case(AUTOLF_ON) => true,
+        s if s.eq_ignore_ascii_case(AUTOLF_OFF) => false,
+        // `auto`, and anything unrecognised: the printer's own answer.
+        _ => board_default,
+    }
 }
 
 /// Resolve `cpm_printer_port` to the port a booted guest prints to.
@@ -266,22 +322,57 @@ pub const MAX_COLUMNS: usize = 132;
 /// double-strike bold and underline are produced.
 #[derive(Debug, Default, Clone)]
 pub struct Page {
-    lines: Vec<Vec<char>>,
+    lines: Vec<Vec<Cell>>,
     row: usize,
     col: usize,
+}
+
+/// One character position on the paper, and what the head did to it.
+///
+/// A cell rather than a `char` because **emphasis on these printers is a fact
+/// about the head passing twice**, not about a code in the stream. WordStar
+/// installed for a teletype-like printer sends no escape sequence at all: it
+/// prints the line, returns the carriage with a bare CR, and prints the
+/// emphasised run again at the same columns. Measured, by printing from real
+/// WordStar 3.0 on a booted disk.
+///
+/// So the only place that information can be kept is here, at the moment the
+/// second pass lands. Recording it costs two bits a column and is what lets the
+/// document carry real bold and underline instead of flattening both to plain
+/// text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    ch: char,
+    /// The same character struck again — WordStar's bold and double-strike.
+    bold: bool,
+    /// A letter and an underscore in the same column, in either order.
+    underline: bool,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell { ch: ' ', bold: false, underline: false }
+    }
 }
 
 impl Page {
     /// Put `c` at the head and advance, growing the page as needed.
     ///
-    /// **Overstrike keeps the letter.** Writing where a non-space character
-    /// already sits is a second pass of the head: WordStar's double-strike
-    /// writes the same character again (so it makes no difference), and its
-    /// underline overprints a letter with `_` — where taking the newcomer would
-    /// throw away the word and leave a row of underscores. So `_` never
-    /// displaces a character, and a space never erases one. Everything else
-    /// wins, because a program deliberately overprinting two different letters
-    /// meant the second one.
+    /// **Overstrike keeps the letter, and remembers that it happened.** Writing
+    /// where a non-space character already sits is a second pass of the head,
+    /// and which pass it is decides what the paper shows:
+    ///
+    /// * the *same* character again is **bold** — WordStar's bold and
+    ///   double-strike are both this, and the text is unchanged;
+    /// * a `_` over a letter, or a letter over a `_`, is **underline** — the
+    ///   letter survives either way, because taking the newcomer would leave a
+    ///   row of underscores where the word was;
+    /// * a space never erases anything, a `_` never displaces a character, and
+    ///   two genuinely different letters resolve to the second, because a
+    ///   program overprinting `A` with `B` meant `B`.
+    ///
+    /// An underscore landing on a *blank* column is just an underscore: on
+    /// paper that is what it is.
     fn put(&mut self, c: char) {
         if self.col >= MAX_COLUMNS {
             self.wrap();
@@ -291,12 +382,21 @@ impl Page {
         }
         let line = &mut self.lines[self.row];
         while line.len() <= self.col {
-            line.push(' ');
+            line.push(Cell::default());
         }
-        let existing = line[self.col];
-        let keep = existing != ' ' && (c == '_' || c == ' ');
-        if !keep {
-            line[self.col] = c;
+        let cell = &mut line[self.col];
+        let existing = cell.ch;
+        if existing == ' ' {
+            cell.ch = c;
+        } else if c == existing {
+            cell.bold = true;
+        } else if c == '_' {
+            cell.underline = true;
+        } else if existing == '_' && c != ' ' {
+            cell.underline = true;
+            cell.ch = c;
+        } else if c != ' ' {
+            cell.ch = c;
         }
         self.col += 1;
     }
@@ -331,7 +431,7 @@ impl Page {
     /// Used to drop the trailing empty page a final form feed leaves behind,
     /// which would otherwise print as a blank sheet.
     fn is_blank(&self) -> bool {
-        self.lines.iter().all(|l| l.iter().all(|&c| c == ' '))
+        self.lines.iter().all(|l| l.iter().all(|c| c.ch == ' '))
     }
 
     /// The page as lines of text, trailing blanks trimmed.
@@ -339,12 +439,30 @@ impl Page {
         let mut out: Vec<String> = self
             .lines
             .iter()
-            .map(|l| l.iter().collect::<String>().trim_end().to_string())
+            .map(|l| l.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
             .collect();
         while out.last().is_some_and(|l| l.is_empty()) {
             out.pop();
         }
         out
+    }
+
+    /// The page as lines of *styled* cells, trailing blanks trimmed the same
+    /// way [`Page::rows`] trims them — so the two always describe the same
+    /// number of lines and the plain and rich renderings cannot drift apart.
+    fn styled_rows(&self) -> Vec<Vec<Cell>> {
+        let keep = self.rows().len();
+        self.lines
+            .iter()
+            .take(keep)
+            .map(|l| {
+                let mut row = l.clone();
+                while row.last().is_some_and(|c| c.ch == ' ') {
+                    row.pop();
+                }
+                row
+            })
+            .collect()
     }
 }
 
@@ -409,11 +527,17 @@ impl SpoolJob {
         }
     }
 
-    /// An empty job for a printer whose auto-line-feed switch is on — a bare CR
-    /// advances the paper. See [`PrinterPort::auto_lf`] for why that is a
-    /// property of the board and not something the bytes can tell us.
-    pub fn new_for(port: &PrinterPort) -> Self {
-        SpoolJob { auto_lf: port.auto_lf, ..Self::new() }
+    /// An empty job with the auto-line-feed switch set explicitly.
+    ///
+    /// The caller decides, because the *operator* decides — see
+    /// [`auto_lf_for`]. A board's own answer is only a default now, and it had
+    /// to become one: measured on one Altair line printer, Altair BASIC's
+    /// `LPRINT` sends a bare CR to **end a line**, and WordStar sends a bare CR
+    /// to **return the carriage and overprint**. Same board, same byte, opposite
+    /// meanings, and nothing in the stream distinguishes them — which is exactly
+    /// why the real interfaces put it on a switch.
+    pub fn with_auto_lf(auto_lf: bool) -> Self {
+        SpoolJob { auto_lf, ..Self::new() }
     }
 
     /// Is there nothing here worth writing out?
@@ -603,6 +727,17 @@ impl SpoolJob {
 
     /// The job as plain text, pages separated by a form feed.
     ///
+    /// Lines end **CRLF**, not with the host's convention.
+    ///
+    /// The source said so: `PIP LST:=DEMO.ASM` measured 65 CR *and* 65 LF, so
+    /// CP/M's own text convention is CRLF and writing bare LF would be a silent
+    /// conversion nobody asked for. The destination says so too — this file
+    /// lands in the transfer directory to be collected onto a C64, a CP/M box
+    /// or an RC2014, and the transfer protocols are binary-transparent, so
+    /// whatever is written here is exactly what arrives. A bare-LF file `TYPE`d
+    /// on CP/M staircases down the screen, which is precisely what [`Page`]
+    /// models a lone LF doing.
+    ///
     /// The form feed is kept rather than dropped, because in a text file it is
     /// the only remaining record of where the guest broke the page, and `lpr`
     /// and every terminal pager act on it.
@@ -619,7 +754,7 @@ impl SpoolJob {
             }
             for row in page.rows() {
                 out.push_str(&row);
-                out.push('\n');
+                out.push_str("\r\n");
             }
         }
         out
@@ -674,40 +809,83 @@ fn push_escaped(out: &mut String, c: char) {
     }
 }
 
-/// One paragraph of printer output.
+/// One paragraph of printer output, carrying whatever emphasis the head left.
+///
+/// Runs of cells sharing a style become one `<text:span>`, and unemphasised
+/// text stays bare — so an ordinary document gains no markup at all and only a
+/// WordStar-style overstrike produces any.
 ///
 /// Leading spaces are the *layout* on a line printer, and XML collapses runs of
 /// whitespace — so they go out as `<text:s text:c="n"/>`, which is ODF's way of
 /// saying "n spaces, and mean it". Without this every indented line, every
 /// column of every table a program printed, slides left against the margin.
-fn odt_paragraph(style: &str, row: &str) -> String {
+/// Spaces are emitted outside spans, so a run of them never inherits emphasis
+/// from the word before it.
+fn odt_paragraph_cells(style: &str, row: &[Cell]) -> String {
     if row.is_empty() {
         return format!("<text:p text:style-name=\"{style}\"/>");
     }
-    let lead = row.len() - row.trim_start().len();
     let mut body = String::new();
-    if lead > 0 {
-        body.push_str(&format!("<text:s text:c=\"{lead}\"/>"));
-    }
-    // Interior runs of two or more spaces need the same treatment; a single
-    // space between words is safe and reads better in the XML.
-    let rest = &row[lead..];
-    let mut run = 0usize;
-    for c in rest.chars() {
-        if c == ' ' {
-            run += 1;
+    let mut spaces = 0usize;
+    let mut leading = true;
+    let mut open: Option<&'static str> = None;
+    for cell in row {
+        if cell.ch == ' ' {
+            spaces += 1;
             continue;
         }
-        if run == 1 {
-            body.push(' ');
-        } else if run > 1 {
-            body.push_str(&format!("<text:s text:c=\"{run}\"/>"));
+        let want = span_style(cell);
+        if want != open && open.is_some() {
+            body.push_str("</text:span>");
+            open = None;
         }
-        run = 0;
-        push_escaped(&mut body, c);
+        if spaces > 0 {
+            // A single space between words reads better literally; leading
+            // spaces and interior runs are layout and must be counted.
+            if spaces == 1 && !leading {
+                body.push(' ');
+            } else {
+                body.push_str(&format!("<text:s text:c=\"{spaces}\"/>"));
+            }
+            spaces = 0;
+        }
+        if want != open {
+            if let Some(name) = want {
+                body.push_str(&format!("<text:span text:style-name=\"{name}\">"));
+            }
+            open = want;
+        }
+        leading = false;
+        push_escaped(&mut body, cell.ch);
+    }
+    if open.is_some() {
+        body.push_str("</text:span>");
     }
     format!("<text:p text:style-name=\"{style}\">{body}</text:p>")
 }
+
+/// [`odt_paragraph_cells`] for text that carries no emphasis.
+#[cfg(test)]
+fn odt_paragraph(style: &str, row: &str) -> String {
+    let cells: Vec<Cell> =
+        row.chars().map(|ch| Cell { ch, bold: false, underline: false }).collect();
+    odt_paragraph_cells(style, &cells)
+}
+
+/// The text style a cell needs, or `None` when it is ordinary.
+fn span_style(cell: &Cell) -> Option<&'static str> {
+    match (cell.bold, cell.underline) {
+        (false, false) => None,
+        (true, false) => Some(ODT_BOLD),
+        (false, true) => Some(ODT_UNDER),
+        (true, true) => Some(ODT_BOLD_UNDER),
+    }
+}
+
+/// Automatic text-style names for the three shapes emphasis can take.
+const ODT_BOLD: &str = "EB";
+const ODT_UNDER: &str = "EU";
+const ODT_BOLD_UNDER: &str = "EBU";
 
 /// `content.xml` for the captured pages.
 ///
@@ -738,20 +916,34 @@ fn odt_content(pages: &[&Page]) -> String {
          <style:paragraph-properties fo:break-before=\"page\" \
          fo:margin-top=\"0cm\" fo:margin-bottom=\"0cm\"/>\
          </style:style>\
+         <style:style style:name=\"EB\" style:family=\"text\">\
+         <style:text-properties fo:font-weight=\"bold\"/>\
+         </style:style>\
+         <style:style style:name=\"EU\" style:family=\"text\">\
+         <style:text-properties style:text-underline-style=\"solid\" \
+         style:text-underline-width=\"auto\" \
+         style:text-underline-color=\"font-color\"/>\
+         </style:style>\
+         <style:style style:name=\"EBU\" style:family=\"text\">\
+         <style:text-properties fo:font-weight=\"bold\" \
+         style:text-underline-style=\"solid\" \
+         style:text-underline-width=\"auto\" \
+         style:text-underline-color=\"font-color\"/>\
+         </style:style>\
          </office:automatic-styles>\
          <office:body><office:text>",
     );
     for (i, page) in pages.iter().enumerate() {
-        let rows = page.rows();
+        let rows = page.styled_rows();
         // A page with nothing on it still has to occupy a sheet, or a
         // deliberately blank page in the middle of a report disappears.
         if rows.is_empty() {
-            xml.push_str(&odt_paragraph(if i == 0 { "LP" } else { "LPB" }, ""));
+            xml.push_str(&odt_paragraph_cells(if i == 0 { "LP" } else { "LPB" }, &[]));
             continue;
         }
         for (j, row) in rows.iter().enumerate() {
             let style = if i > 0 && j == 0 { "LPB" } else { "LP" };
-            xml.push_str(&odt_paragraph(style, row));
+            xml.push_str(&odt_paragraph_cells(style, row));
         }
     }
     xml.push_str("</office:text></office:body></office:document-content>");
@@ -1002,7 +1194,7 @@ mod tests {
     fn rows_auto(bytes: &[u8]) -> Vec<String> {
         let board = port_for("altair_c").expect("the Altair board");
         assert!(board.auto_lf, "this helper is about the switch being on");
-        let mut job = SpoolJob::new_for(board);
+        let mut job = SpoolJob::with_auto_lf(board.auto_lf);
         for &b in bytes {
             job.push(b);
         }
@@ -1034,13 +1226,87 @@ mod tests {
     }
 
     /// The switch is a property of the board, so the two constructors have to
-    /// disagree — if `new_for` ever stopped reading it, every test above would
+    /// disagree — if the wiring ever stopped reading it, every test above would
     /// still pass while a booted disk printed nonsense.
     #[test]
-    fn test_a_job_takes_the_switch_from_its_board() {
-        let board = port_for("altair_c").expect("the Altair board");
-        assert!(SpoolJob::new_for(board).auto_lf, "the board's switch was not read");
+    fn test_a_job_takes_the_switch_it_is_given() {
+        assert!(SpoolJob::with_auto_lf(true).auto_lf);
+        assert!(!SpoolJob::with_auto_lf(false).auto_lf);
         assert!(!SpoolJob::new().auto_lf, "the OS-service printer must not auto-feed");
+    }
+
+    /// **The switch belongs to the operator, with the board's measurement as
+    /// the default.** One printer, two period programs, opposite meanings for a
+    /// bare CR — Altair BASIC ends a line with it, WordStar returns and
+    /// overprints with it — so no fixed answer can serve both.
+    #[test]
+    fn test_auto_lf_setting_overrides_the_board() {
+        let board = port_for("altair_c").expect("the Altair board");
+        assert!(board.auto_lf, "this test is about overriding a board that says on");
+
+        assert!(auto_lf_for(AUTOLF_AUTO, board.auto_lf), "auto keeps the board's answer");
+        assert!(!auto_lf_for(AUTOLF_AUTO, false), "auto keeps the emulator's answer too");
+        assert!(!auto_lf_for(AUTOLF_OFF, board.auto_lf), "off must beat a board that says on");
+        assert!(auto_lf_for(AUTOLF_ON, false), "on must beat a printer that says off");
+        // Hand-edited: case and surrounding space are not a reason to ignore
+        // somebody's setting, and anything unrecognised falls back to the
+        // measured answer rather than to a guess.
+        assert!(!auto_lf_for("  OFF  ", true));
+        assert!(auto_lf_for(" On ", false));
+        assert!(auto_lf_for("nonsense", true));
+        assert!(!auto_lf_for("", false));
+    }
+
+    /// Every choice the menus offer must be one `auto_lf_for` acts on, or a
+    /// surface would present a switch position the printer never takes.
+    #[test]
+    fn test_autolf_choices_are_all_understood() {
+        assert!(AUTOLF_CHOICES.iter().any(|(v, _)| *v == DEFAULT_PRINTER_AUTOLF));
+        assert_eq!(DEFAULT_PRINTER_AUTOLF, AUTOLF_AUTO);
+        for (value, label) in AUTOLF_CHOICES {
+            assert!(!label.is_empty(), "{value:?} has no label for the menus");
+            let (on_default_true, on_default_false) =
+                (auto_lf_for(value, true), auto_lf_for(value, false));
+            match *value {
+                AUTOLF_ON => assert!(on_default_true && on_default_false),
+                AUTOLF_OFF => assert!(!on_default_true && !on_default_false),
+                AUTOLF_AUTO => assert!(on_default_true && !on_default_false),
+                other => panic!("{other:?} is offered but not understood"),
+            }
+        }
+    }
+
+    /// **WordStar's overstrike, as measured off the wire.** It prints the line,
+    /// sends a bare CR, and reprints just the emphasised run at the same
+    /// columns; underline arrives as a pass of `_`. With the switch off that is
+    /// one line with the letters kept; with it on, each pass becomes a line of
+    /// its own, which is what a real printout of this would never look like.
+    #[test]
+    fn test_wordstar_overstrike_needs_the_switch_off() {
+        // The passes cover exactly the emphasised word, which is what WordStar
+        // sends.  An underscore *does* land on a blank column -- on paper that
+        // is simply an underscore -- so the run must not be longer than the
+        // word it underlines.
+        let wire = b"THIS IS BOLD HERE.\r        BOLD\r        ____\r";
+        let mut off = SpoolJob::with_auto_lf(false);
+        for &b in wire {
+            off.push(b);
+        }
+        assert_eq!(
+            off.pages[0].rows(),
+            vec!["THIS IS BOLD HERE."],
+            "overstrike must land on the text, keeping the letters"
+        );
+
+        let mut on = SpoolJob::with_auto_lf(true);
+        for &b in wire {
+            on.push(b);
+        }
+        assert_eq!(
+            on.pages[0].rows(),
+            vec!["THIS IS BOLD HERE.", "        BOLD", "        ____"],
+            "with the switch on, every overstrike pass becomes its own line"
+        );
     }
 
     /// WordStar underlines by overprinting a letter with `_`.  Taking the
@@ -1095,7 +1361,7 @@ mod tests {
 
     #[test]
     fn test_form_feed_starts_a_new_page() {
-        assert_eq!(text_of(b"ONE\x0CTWO"), "ONE\n\u{0C}TWO\n");
+        assert_eq!(text_of(b"ONE\x0CTWO"), "ONE\r\n\u{0C}TWO\r\n");
     }
 
     /// A final form feed is how software *ends* a print, not how it asks for a
@@ -1103,14 +1369,14 @@ mod tests {
     /// document ever printed here.
     #[test]
     fn test_a_trailing_form_feed_leaves_no_blank_page() {
-        assert_eq!(text_of(b"ONE\x0C"), "ONE\n");
+        assert_eq!(text_of(b"ONE\x0C"), "ONE\r\n");
     }
 
     /// A deliberately blank page *in the middle* is content and must survive —
     /// the trimming rule is about the end of the job only.
     #[test]
     fn test_a_blank_page_in_the_middle_survives() {
-        assert_eq!(text_of(b"ONE\x0C\x0CTHREE"), "ONE\n\u{0C}\u{0C}THREE\n");
+        assert_eq!(text_of(b"ONE\x0C\x0CTHREE"), "ONE\r\n\u{0C}\u{0C}THREE\r\n");
     }
 
     /// The guest's own driver handshake lands here as data.  It is not text and
@@ -1138,9 +1404,29 @@ mod tests {
         assert_eq!(rows[1], "X");
     }
 
+    /// **CRLF, not the host's convention.** Measured both ends: CP/M's own text
+    /// is CR LF (`PIP LST:=DEMO.ASM` sent 65 of each), and this file is written
+    /// to be carried to a C64, a CP/M box or an RC2014 by transfer protocols
+    /// that are binary-transparent — so what is written here is exactly what
+    /// arrives. A bare-LF file `TYPE`d on CP/M staircases down the screen,
+    /// which is what [`Page::line_feed`] models a lone LF doing.
+    #[test]
+    fn test_lines_end_crlf() {
+        let out = text_of(b"ONE\r\nTWO\r\n");
+        assert_eq!(out, "ONE\r\nTWO\r\n");
+        assert!(!out.contains("\n\n"), "no doubled line endings");
+        // Every LF is preceded by a CR — the property a vintage reader needs.
+        let bytes = out.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                assert!(i > 0 && bytes[i - 1] == b'\r', "a bare LF at byte {i}");
+            }
+        }
+    }
+
     #[test]
     fn test_trailing_blank_lines_are_trimmed() {
-        assert_eq!(text_of(b"A\n\n\n\n"), "A\n");
+        assert_eq!(text_of(b"A\n\n\n\n"), "A\r\n");
     }
 
     // ── when a job is over ───────────────────────────────────────────────────
@@ -1264,7 +1550,7 @@ mod tests {
             "{name} has something other than a timestamp in it"
         );
 
-        assert_eq!(std::fs::read_to_string(dir.join(&name)).unwrap(), "REPORT\n");
+        assert_eq!(std::fs::read_to_string(dir.join(&name)).unwrap(), "REPORT\r\n");
         // Nothing loose in the transfer directory itself: the whole point of
         // the subfolder is that the operator's own files stay uncluttered.
         let loose: Vec<String> = std::fs::read_dir(&dir)
@@ -1305,8 +1591,8 @@ mod tests {
         let b = second.write(dir.to_str().unwrap(), Format::Text).expect("second");
 
         assert_ne!(a, b, "the second job overwrote the first");
-        assert_eq!(std::fs::read_to_string(dir.join(&a)).unwrap(), "FIRST\n");
-        assert_eq!(std::fs::read_to_string(dir.join(&b)).unwrap(), "SECOND\n");
+        assert_eq!(std::fs::read_to_string(dir.join(&a)).unwrap(), "FIRST\r\n");
+        assert_eq!(std::fs::read_to_string(dir.join(&b)).unwrap(), "SECOND\r\n");
         // And nothing half-written was left lying about under either name.
         let leftovers: Vec<String> = std::fs::read_dir(dir.join(SPOOL_DIR))
             .unwrap()
@@ -1368,6 +1654,84 @@ mod tests {
         assert_eq!(odt_paragraph("LP", ""), "<text:p text:style-name=\"LP\"/>");
         // And the escaping still applies inside a paragraph.
         assert!(odt_paragraph("LP", "a<b").contains("a&lt;b"));
+    }
+
+    /// **Overstrike becomes real bold and underline in the document.** The text
+    /// is unchanged either way — this is what ODT is *for*, and until now it
+    /// carried none of it.
+    #[test]
+    fn test_overstrike_becomes_emphasis() {
+        let mut job = SpoolJob::with_auto_lf(false);
+        // WordStar's shape, measured: the line, a bare CR, then just the
+        // emphasised run at the same columns.
+        for &b in b"THE WORD HERE.\r    WORD\r    ____\r" {
+            job.push(b);
+        }
+        let cells = &job.pages[0].styled_rows()[0];
+        assert_eq!(
+            cells.iter().map(|c| c.ch).collect::<String>(),
+            "THE WORD HERE.",
+            "the text must be untouched"
+        );
+        // Columns 4..8 are the emphasised word.
+        for (i, cell) in cells.iter().enumerate() {
+            let emphasised = (4..8).contains(&i);
+            assert_eq!(cell.bold, emphasised, "bold wrong at column {i}");
+            assert_eq!(cell.underline, emphasised, "underline wrong at column {i}");
+        }
+
+        let xml = odt_content(&job.live_pages());
+        assert!(xml.contains("style:name=\"EBU\""), "no bold+underline style defined");
+        assert!(
+            xml.contains("<text:span text:style-name=\"EBU\">WORD</text:span>"),
+            "the emphasised run is not one span: {xml}"
+        );
+    }
+
+    /// Bold alone and underline alone get their own styles, and plain text gets
+    /// no markup at all — a document nobody emphasised must not grow spans.
+    #[test]
+    fn test_each_emphasis_gets_its_own_style() {
+        let mut bold = SpoolJob::with_auto_lf(false);
+        for &b in b"AB\rAB\r" {
+            bold.push(b);
+        }
+        let x = odt_content(&bold.live_pages());
+        assert!(x.contains("<text:span text:style-name=\"EB\">AB</text:span>"), "{x}");
+
+        let mut under = SpoolJob::with_auto_lf(false);
+        for &b in b"AB\r__\r" {
+            under.push(b);
+        }
+        let x = odt_content(&under.live_pages());
+        assert!(x.contains("<text:span text:style-name=\"EU\">AB</text:span>"), "{x}");
+
+        let mut plain = SpoolJob::with_auto_lf(false);
+        for &b in b"AB\r\n" {
+            plain.push(b);
+        }
+        let x = odt_content(&plain.live_pages());
+        assert!(!x.contains("<text:span"), "plain text must gain no spans: {x}");
+    }
+
+    /// Emphasis must not leak across the spaces between words, and the layout
+    /// spaces must stay outside the span so they carry no styling of their own.
+    #[test]
+    fn test_emphasis_stops_at_the_word() {
+        let mut job = SpoolJob::with_auto_lf(false);
+        for &b in b"ONE TWO\r    TWO\r" {
+            job.push(b);
+        }
+        let xml = odt_content(&job.live_pages());
+        assert!(xml.contains("ONE"), "{xml}");
+        assert!(
+            xml.contains("<text:span text:style-name=\"EB\">TWO</text:span>"),
+            "only the second word is bold: {xml}"
+        );
+        assert!(
+            !xml.contains("<text:span text:style-name=\"EB\">ONE"),
+            "the first word must not be caught up in it: {xml}"
+        );
     }
 
     /// A form feed has to survive into a document that will be printed again at

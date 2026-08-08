@@ -1256,15 +1256,16 @@ altairhd_cobol.dsk</code></pre>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">What it does not do yet</h3>
                 <p>
-                    <strong>No bold or underline.</strong> Period software does not ask for them, it
-                    <em>overstrikes</em>: WordStar prints a line, returns the carriage with a bare CR
-                    and prints it again for double-strike, or overprints a letter with <code>_</code>
-                    for underline. Those are resolved into correct, readable <em>text</em> &mdash;
-                    the letter wins over the underscore, a line printed twice is not doubled &mdash;
-                    rather than into styling. Getting the text right first means a later pass that
-                    recognises the overstrike patterns, or an Epson <code>ESC E</code> driver, cannot
-                    silently lose content on the way to producing real bold.
-                </p>
+                    <strong>Bold and underline are real.</strong> Period software does not ask for them
+                    with an escape code, it <em>overstrikes</em>: WordStar prints the line, returns
+                    the carriage with a bare CR, and reprints just the emphasised run at the same
+                    columns; underline arrives as a pass of <code>_</code> over the letters. That is
+                    recorded as it lands and comes out as real bold and underline in the
+                    <code>.odt</code> &mdash; verified by printing from WordStar&nbsp;3.0 on a booted
+                    disk and opening the result in LibreOffice. It is also why
+                    <code>cpm_printer_autolf</code> exists: with the switch on, each overstrike pass
+                    lands on a line of its own instead of on top of the text. Plain text gains no
+                    markup at all.</p>
             </div>
 
             <hr class="divider">
