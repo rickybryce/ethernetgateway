@@ -468,6 +468,7 @@ impl TelnetSession {
         writable: bool,
         remounts: &mut RemountOnDrop,
         boot_image: &std::path::Path,
+        machine_key: &str,
     ) -> Result<Vec<String>, String> {
         use crate::cpm::image::registry;
         let (plan, mut notes) = plan_boot_disks(
@@ -481,9 +482,18 @@ impl TelnetSession {
         // different one can be called out.  From the file's size, the same way
         // `insert` decides it — asking the machine would be circular, since
         // nothing has gone into it yet.
-        let boot_board = std::fs::metadata(boot_image)
-            .ok()
-            .and_then(|md| crate::cpm::boot_machine::BootMachine::board_for(None, md.len()));
+        // **On this machine**, not on every board the gateway has.  Sizes are
+        // not unique across boards — 256,256 bytes is an IBM 3740 to the
+        // Tarbell and an 8" SSSD to z80pack, which is the whole reason
+        // `MachineChoice::boards` exists — so `board_for(None, ..)` answers
+        // with whichever board `MACHINE_CHOICES` lists first, and that is not
+        // a fact about the machine being booted.  Asking with `None` on both
+        // sides of the comparison below made it report "is on the Tarbell
+        // 1011, not the booted disk's board" for a Cromemco single-density
+        // disk the guest reads perfectly.
+        let boot_board = std::fs::metadata(boot_image).ok().and_then(|md| {
+            crate::cpm::boot_machine::BootMachine::board_for(Some(machine_key), md.len())
+        });
         for step in plan {
             let letter = (b'A' + step.unit) as char;
             // The booted disk's own mount: take it out of service and stop.
@@ -571,7 +581,8 @@ impl TelnetSession {
             // of "word plus number" would quietly disagree with every other
             // screen the moment a board's slots stopped being flat — which is
             // exactly what happened to the board itself.
-            let board = crate::cpm::boot_machine::BootMachine::board_for(None, len as u64);
+            let board =
+                crate::cpm::boot_machine::BootMachine::board_for(Some(machine_key), len as u64);
             let slot = crate::cpm::boot::slot_name(
                 &crate::cpm::boot::SlotNaming::Boards,
                 step.unit,
@@ -685,7 +696,14 @@ impl TelnetSession {
         // Altair CP/M means A: to D:.  We present the hardware and let the disk
         // decide, exactly as with everything else on this path.
         let notes = match self
-            .cpm_boot_attach_mounts(&mut machine, &mut disks, writable, &mut remounts, image)
+            .cpm_boot_attach_mounts(
+                &mut machine,
+                &mut disks,
+                writable,
+                &mut remounts,
+                image,
+                &machine_key,
+            )
         {
             Ok(n) => n,
             Err(why) => {

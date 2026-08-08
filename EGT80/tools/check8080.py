@@ -43,16 +43,39 @@ CC = r'(?:NZ|Z|NC|C|PO|PE|P|M)'            # all eight 8080 conditions
 # assembler is the authority on whether an expression is valid.
 X = r'[^,]+'
 
+# Instructions rejected before the whitelist is consulted.
+#
+# These name registers the 8080 does not have, and they would otherwise
+# slip through a *form* that is right about its shape: `LD A,(IX+0)` is
+# an `LD r,something`, `LD (IX+0),A` is an `LD (expr),A`, `ADD A,(IY+2)`
+# is an `ADD A,something`. Rejecting the register outright is exact -
+# there is no 8080 instruction that mentions IX, IY, I or R at all - and
+# it cannot be over-broad, which a shape-by-shape exclusion could.
+REJECT = [
+    (r'\b(IX|IY|IXH|IXL|IYH|IYL)\b', 'IX/IY do not exist on an 8080'),
+    (r"^LD\s+A\s*,\s*[IR]$", 'LD A,I and LD A,R are ED-prefixed'),
+    (r"^LD\s+[IR]\s*,\s*A$", 'LD I,A and LD R,A are ED-prefixed'),
+    (r"^EX\s+AF", "the shadow registers do not exist on an 8080"),
+]
+
 FORMS = [
-    # 8-bit moves
+    # 8-bit moves.  The immediate forms exclude a parenthesised operand:
+    # `LD BC,(1234H)` is ED 4B, `LD DE,(nn)` is ED 5B and `LD SP,(nn)` is
+    # ED 7B - all Z80-only, and all shaped exactly like the LXI they are
+    # not.  `LD HL,(nn)` IS 8080 (LHLD) and has its own form below, so
+    # excluding the paren here loses nothing.
+    #
+    # This was the second hole of the same kind, found the same way: a
+    # probe that injects the instruction and checks the checker rejects
+    # it.  Do that for every form added here.
     rf'LD\s+{R8},{R8}',
-    rf'LD\s+{R8},{X}',                     # LD r,n  (MVI)
+    rf'LD\s+{R8},(?!\(){X}',              # LD r,n  (MVI)
     rf'LD\s+A,\((?:BC|DE)\)',
     rf'LD\s+\((?:BC|DE)\),A',
     rf'LD\s+A,\({X}\)',                    # LDA nn
     rf'LD\s+\({X}\),A',                    # STA nn
     # 16-bit moves
-    rf'LD\s+{RP},{X}',                     # LXI / also LD SP,HL below
+    rf'LD\s+{RP},(?!\(){X}',              # LXI / also LD SP,HL below
     r'LD\s+SP,HL',
     rf'LD\s+HL,\({X}\)',                   # LHLD
     rf'LD\s+\({X}\),HL',                   # SHLD
@@ -111,6 +134,7 @@ FORMS = [
 DIRECTIVES = r'(?:EQU|ORG|DB|DW|DS|DEFB|DEFW|DEFS|END|\.Z80|\.8080)'
 
 FORM_RE = re.compile(r'^(?:' + '|'.join(f'(?:{f})' for f in FORMS) + r')\s*$', re.I)
+REJECT_RE = [(re.compile(p, re.I), why) for p, why in REJECT]
 DIRECTIVE_RE = re.compile(rf'^{DIRECTIVES}\b', re.I)
 LABEL_RE = re.compile(r'^([A-Za-z$?@][A-Za-z0-9$?@_]*):?\s*')
 
@@ -144,7 +168,10 @@ def main(path):
         if DIRECTIVE_RE.match(ins):
             continue
         checked += 1
-        if not FORM_RE.match(ins):
+        rejected = next((why for r, why in REJECT_RE if r.search(ins)), None)
+        if rejected is not None:
+            bad.append((n, f"{ins}   <- {rejected}"))
+        elif not FORM_RE.match(ins):
             bad.append((n, ins))
 
     if bad:
@@ -165,5 +192,66 @@ def main(path):
     return 0
 
 
+# --- self-test ---------------------------------------------------------
+#
+# This checker has now had TWO holes of the same kind, and both were found
+# the same way: write the instruction down and see whether it is rejected.
+# So that is a mode, run by `make`, rather than something someone thinks
+# to do.
+#
+# MUST_ACCEPT is half the value: a rule that rejects `LD BC,(nn)` by also
+# rejecting `LD HL,(nn)` has not helped, and only the second list notices.
+
+MUST_REJECT = [
+    'JR      NZ,FOO', 'JR      FOO', 'DJNZ    FOO',
+    'BIT     7,A', 'RES     0,B', 'SET     3,(HL)',
+    'SLA     A', 'SRL     B', 'RL      C', 'RRC     D',
+    'LDIR', 'LDDR', 'CPIR', 'INIR', 'OTIR',
+    'IN      A,(C)', 'IN      B,(C)', 'OUT     (C),A', 'OUT     (C),B',
+    'LD      BC,(1234H)', 'LD      DE,(1234H)', 'LD      SP,(1234H)',
+    'LD      A,(IX+0)', 'LD      (IY+3),B', 'ADD     A,(IX+2)',
+    'INC     (IX+0)', 'PUSH    IX', 'POP     IY', 'JP      (IX)',
+    'LD      A,I', 'LD      R,A', 'EXX', "EX      AF,AF'",
+    'ADC     HL,BC', 'SBC     HL,DE', 'NEG', 'IM      1', 'RETI', 'RETN',
+    'RLD', 'RRD', 'LD      SP,IX',
+]
+
+MUST_ACCEPT = [
+    'LD      A,B', 'LD      A,(HL)', 'LD      (HL),A', 'LD      A,(BC)',
+    'LD      (DE),A', 'LD      A,(1234H)', 'LD      (1234H),A',
+    'LD      HL,(1234H)', 'LD      (1234H),HL', 'LD      SP,HL',
+    'LD      BC,1234H', 'LD      A,0FFH',
+    'ADD     A,B', 'ADD     A,10H', 'ADC     A,40H', 'SUB     B', 'SUB     5',
+    'SBC     A,C', 'AND     0FH', 'OR      A', 'XOR     A', 'CP      3',
+    'ADD     HL,DE', 'INC     A', 'DEC     BC', 'INC     (HL)',
+    'RLCA', 'RRCA', 'RLA', 'RRA', 'DAA', 'CPL', 'SCF', 'CCF',
+    'NOP', 'HALT', 'DI', 'EI',
+    'JP      NZ,FOO', 'JP      FOO', 'JP      (HL)', 'JP      M,FOO',
+    'CALL    Z,FOO', 'CALL    FOO', 'RET     NC', 'RET', 'RST     8',
+    'PUSH    AF', 'POP     HL', 'EX      (SP),HL', 'EX      DE,HL',
+    'IN      A,(82H)', 'OUT     (83H),A', 'IN      A,(0)', 'OUT     (0),A',
+]
+
+
+def self_test():
+    """Prove the checker rejects what it must and accepts what it must."""
+    wrong = []
+    for ins in MUST_REJECT:
+        if not any(r.search(ins) for r, _ in REJECT_RE) and FORM_RE.match(ins):
+            wrong.append(f"ACCEPTED a Z80-only instruction: {ins!r}")
+    for ins in MUST_ACCEPT:
+        if any(r.search(ins) for r, _ in REJECT_RE) or not FORM_RE.match(ins):
+            wrong.append(f"REJECTED an 8080 instruction: {ins!r}")
+    if wrong:
+        print("*** check8080 self-test failed:", file=sys.stderr)
+        for w in wrong:
+            print(f"    {w}", file=sys.stderr)
+        return 1
+    print(f"--- self-test: {len(MUST_REJECT)} rejected, {len(MUST_ACCEPT)} accepted")
+    return 0
+
+
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--self-test':
+        sys.exit(self_test())
     sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else 'EGT8080.Z80'))

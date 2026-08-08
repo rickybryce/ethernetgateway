@@ -57,6 +57,7 @@ all: $(TARGET) $(TARGET80)
 .PHONY: port
 port:
 	python3 tools/port8080.py $(SRC) $(SRC80)
+	python3 tools/check8080.py --self-test
 	python3 tools/check8080.py $(SRC80)
 
 $(TARGET): $(SRC) $(ZXCC)
@@ -77,6 +78,7 @@ $(TARGET): $(SRC) $(ZXCC)
 # here assembles perfectly and then crashes an Altair in whatever menu
 # nobody exercised, so it must never reach the COM file.
 $(TARGET80): $(SRC80) tools/check8080.py $(ZXCC)
+	python3 tools/check8080.py --self-test
 	python3 tools/check8080.py $(SRC80)
 	@mkdir -p $(BUILD)
 	sed 's/$$/\r/' $(SRC80) > $(BUILD)/EGT8080.Z80

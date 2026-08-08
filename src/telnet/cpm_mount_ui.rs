@@ -621,12 +621,14 @@ impl TelnetSession {
                 // Two different facts about slot 0, and which one is true
                 // depends on what is running.  EGT80 lives in the gateway's own
                 // drive A: folder, which a booted disk never sees.
-                // "the terminals", plural: drive A: carries EGT8080.COM and
-                // EGT80.COM, and a mount hides both.
+                // "terminals", plural: drive A: carries EGT8080.COM and
+                // EGT80.COM, and a mount hides both.  Article dropped to keep
+                // the row short — this note is appended after the filename and
+                // is the first thing `truncate_to_width` takes away.
                 note.push_str(if booting {
                     " - booted disk here"
                 } else {
-                    " - hides the terminals"
+                    " - hides terminals"
                 });
             }
             // The *note* is bounded, not the finished line.  `truncate_to_width`

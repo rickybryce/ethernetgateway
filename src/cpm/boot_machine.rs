@@ -731,8 +731,20 @@ impl BootMachine {
     ///
     /// `None` is for the configuration screens, which name slots before any
     /// machine exists and must not read a 4.9 MB boot image to draw a row.
-    /// It is not a weaker answer: no two media may claim overlapping sizes, so
-    /// scanning all boards finds the same one a machine carrying it would.
+    ///
+    /// **It IS a weaker answer, and this used to claim otherwise.** The rule
+    /// that no two media may claim overlapping sizes belongs to
+    /// [`crate::cpm::image::format`] — the *mountable* format table — and not
+    /// here: 256,256 bytes is an IBM 3740 to the Tarbell and an 8" SSSD to
+    /// z80pack, which is exactly why [`super::console::MachineChoice::boards`]
+    /// exists. With `None` the answer is whichever board `MACHINE_CHOICES`
+    /// lists first, so for that one size a config screen can name a board the
+    /// running machine does not carry.
+    ///
+    /// Pass the machine wherever it is known. It was `None` on both sides of
+    /// the boot screen's mismatch warning, which made it announce that a
+    /// Cromemco single-density disk was "on the Tarbell 1011, not the booted
+    /// disk's board" — about a disk the guest reads perfectly.
     pub fn board_for(key: Option<&str>, image_len: u64) -> Option<&'static str> {
         let all;
         let boards: &[Box<dyn Controller>] = match key {

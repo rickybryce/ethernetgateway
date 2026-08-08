@@ -114,6 +114,21 @@ pub enum SlotNaming {
 }
 
 /// Which naming a given configuration calls for.
+///
+/// **Known gap: this reads the configured *string*, not what will actually
+/// run.** `cpmemu_boot_target` also falls back to the emulator when the named
+/// image has an unsafe name or is no longer in `CPM/images`, and this does not
+/// — so with a stale `cpm_boot_image` the three disks screens describe a
+/// booted machine while the emulator is what starts. Two consequences, both
+/// cosmetic: the rows are named for a board instead of `A:`-`P:`, and
+/// [`mount_refuses_writes`] answers with the host's verdict where our BDOS's
+/// applies, so an image we have write-protected shows no `(R/O)` marker. The
+/// emulator still refuses the write, with its reason, so nothing is lost —
+/// it just is not foretold.
+///
+/// Not fixed here because the fix is a filesystem probe, and this is called
+/// once per drive per *frame* in the desktop UI. Resolving it once per screen
+/// draw and passing the answer in is the shape that would work.
 pub fn slot_naming(boot_image: &str) -> SlotNaming {
     if boot_image.trim().is_empty() { SlotNaming::Drives } else { SlotNaming::Boards }
 }
