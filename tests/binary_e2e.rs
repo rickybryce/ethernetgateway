@@ -16,7 +16,21 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Backstop on the helper server's wait for its one request.
+///
+/// Only reachable if the session neither fetches nor finishes, which nothing
+/// in `run_session` can do — every drain there is bounded. It exists because
+/// `accept()` has no timeout of its own and the failure it produces is the
+/// worst kind: not a red test but a parked one.
+///
+/// Generous on purpose. The session's own worst case before it fetches is the
+/// 10 s bind wait plus three 5 s drains, so ~26 s; this is over twice that and
+/// still finite.
+const HTTP_ACCEPT_BACKSTOP: Duration = Duration::from_secs(60);
 
 #[test]
 fn test_binary_telnet_browser_e2e() {
@@ -30,10 +44,53 @@ fn test_binary_telnet_browser_e2e() {
     let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_port = http_listener.local_addr().unwrap().port();
 
+    // Set once the session is over, however it ended.  The helper thread
+    // watches it so a session that fails before the fetch takes the helper
+    // down with it instead of leaving it parked on `accept()`.
+    let session_over = Arc::new(AtomicBool::new(false));
+
     // 2. Spawn the localhost HTTP server in a background thread.
     // It serves one request, sends a response, and exits.
-    let http_thread = std::thread::spawn(move || {
-        let (mut stream, _) = http_listener.accept().unwrap();
+    //
+    // `accept()` cannot time out, and `join()` below waits on this thread — so
+    // an upstream failure used to hang the whole suite rather than fail it.
+    // (Measured: 23 minutes, and it would have been indefinite.)  Two bounds
+    // now, and the first is the one that makes it fail *fast*: the session
+    // cannot reach its fetch without this thread answering, so if the session
+    // is over and nothing arrived, nothing is ever going to.
+    let http_thread = {
+        let session_over = Arc::clone(&session_over);
+        std::thread::spawn(move || -> Result<(), String> {
+        http_listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("could not poll the listener: {e}"))?;
+        let deadline = Instant::now() + HTTP_ACCEPT_BACKSTOP;
+        let mut stream = loop {
+            match http_listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if session_over.load(Ordering::SeqCst) {
+                        return Err(
+                            "the session ended without ever fetching the page".to_string()
+                        );
+                    }
+                    if Instant::now() > deadline {
+                        return Err(format!(
+                            "no HTTP request within {HTTP_ACCEPT_BACKSTOP:?}"
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(format!("accept failed: {e}")),
+            }
+        };
+        // Back to blocking, so the read timeout below means what it says
+        // rather than returning WouldBlock immediately.  Whether an accepted
+        // socket inherits the listener's non-blocking flag is platform
+        // dependent, so this is set explicitly instead of assumed.
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| format!("could not restore blocking mode: {e}"))?;
         // Drain request with a short read timeout.
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
@@ -53,7 +110,9 @@ fn test_binary_telnet_browser_e2e() {
             body
         );
         let _ = stream.write_all(resp.as_bytes());
-    });
+        Ok(())
+        })
+    };
 
     // 3. Set up an isolated config in a tmpdir.  The binary auto-
     // creates egateway.conf in its CWD if missing; pre-writing it lets
@@ -96,13 +155,24 @@ fn test_binary_telnet_browser_e2e() {
         run_session(telnet_port, http_port);
     }));
 
+    // Before the join, so a session that failed early releases the helper
+    // immediately instead of holding it to the backstop.
+    session_over.store(true, Ordering::SeqCst);
+
     let _ = child.kill();
     let _ = child.wait();
-    let _ = http_thread.join();
+    let http_outcome = http_thread.join();
     let _ = std::fs::remove_dir_all(&tmp);
 
+    // The session's own verdict first: it is the more informative of the two,
+    // and when the session fails the helper's complaint is only an echo of it.
     if let Err(e) = result {
         std::panic::resume_unwind(e);
+    }
+    match http_outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("the page the session claimed to fetch was never served: {e}"),
+        Err(_) => panic!("the HTTP helper thread panicked"),
     }
 }
 
