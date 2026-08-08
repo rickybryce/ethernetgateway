@@ -1461,4 +1461,78 @@ mod live_tests {
         }
         registry::tests_reset();
     }
+
+    /// **Every file big enough to need more than one extent, across a folder of
+    /// images.**
+    ///
+    /// The population at risk from an extent bug, and the survey behind the one
+    /// that was found: CP/M's first extent is 16 KB, so a file larger than that
+    /// can only be read whole by software that positions itself — and until
+    /// `Open` learned to honour the extent it was given, every one of those
+    /// reads came back from the wrong place without erroring.
+    ///
+    /// Ignored — set `CPM_LARGE_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_survey_files_larger_than_one_extent() {
+        let Ok(dir) = std::env::var("CPM_LARGE_DIR") else {
+            eprintln!("set CPM_LARGE_DIR to run this");
+            return;
+        };
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join(format!("egw_large_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+
+        let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dsk")))
+            .collect();
+        names.sort();
+
+        let mut total = 0usize;
+        for src in &names {
+            let file = src.file_name().unwrap().to_string_lossy().to_string();
+            let dst = images_dir(&base).join(&file);
+            if std::fs::copy(src, &dst).is_err() {
+                continue;
+            }
+            if mount_image(&base, 0, &file).is_ok() {
+                if let Some(m) = registry::get(0) {
+                    let guard = m.fs.lock().unwrap_or_else(|e| e.into_inner());
+                    // A file's size is the highest record it reaches, and the
+                    // directory holds one entry per extent, so the last extent
+                    // is what says how big it is.
+                    let mut sizes: std::collections::BTreeMap<String, u32> =
+                        std::collections::BTreeMap::new();
+                    for e in guard.entries() {
+                        let n = crate::cpm::fcb::format_8_3(&e.name, &e.ext);
+                        let recs = e.extent * 128 + e.rc as u32;
+                        let slot = sizes.entry(n).or_insert(0);
+                        *slot = (*slot).max(recs);
+                    }
+                    let mut big: Vec<(String, u32)> =
+                        sizes.into_iter().filter(|(_, r)| *r > 128).collect();
+                    big.sort_by_key(|(_, r)| std::cmp::Reverse(*r));
+                    if !big.is_empty() {
+                        println!("  {file}:");
+                        for (n, r) in &big {
+                            let extents = r.div_ceil(128);
+                            println!("      {n:14} {:7} bytes  {extents} extents", r * 128);
+                            total += 1;
+                        }
+                    }
+                }
+            }
+            let _ = unmount_drive(0);
+            let _ = std::fs::remove_file(&dst);
+        }
+        println!("\n  {total} files need more than one extent");
+        let _ = std::fs::remove_dir_all(&base);
+        registry::tests_reset();
+    }
+
 }

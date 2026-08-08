@@ -647,6 +647,41 @@
                         position</strong> directly, as a measurement.</li>
                     <li>Read the pattern off the map. Do not guess before this step produces it.</li>
                 </ol>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The other half: ask the BIOS for its parameters</h3>
+                <p>
+                    Byte-matching above recovers the <em>mapping</em> &mdash; where a logical record
+                    physically lives. It does not tell you the block size, the directory size, or
+                    where the data area starts. Those are in the disk parameter block its own BIOS
+                    hands to CP/M, so ask for that too, by CP/M's own route:
+                </p>
+                <ol>
+                    <li>Boot the disk and let it reach its prompt, so the BIOS has finished
+                        initialising.</li>
+                    <li>Page zero holds <code>JMP WBOOT</code> at <code>0000</code>, so the word at
+                        <code>0001</code> is BIOS+3 &mdash; that names the BIOS.</li>
+                    <li>Call <code>SELDSK</code> (BIOS+27) with the drive in C. It returns the
+                        address of the disk parameter <em>header</em> in HL.</li>
+                    <li>The DPB address is at DPH+10, and the sector translate table &mdash; or zero
+                        &mdash; at DPH+0. Read the fifteen bytes: SPT, BSH, BLM, EXM, DSM, DRM, AL0,
+                        AL1, CKS, OFF.</li>
+                </ol>
+                <p>
+                    This is a <em>declaration</em>, the same class of evidence as a boot loader's
+                    port operands, and for the Cromemco disks it was the only authority available:
+                    <code>cpmtools</code> has no Cromemco definition to cross-check against. Two
+                    independent disks per format agreed on every field.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Use both halves, and check the mapping last.</strong> A DPB tells
+                        you nothing about skew, and a zero <code>XLT</code> does not mean there is
+                        none &mdash; a BIOS may translate inside <code>SETSEC</code> where CP/M
+                        never sees it. A format built from the DPB alone mounted, listed its
+                        directory perfectly, and returned scrambled file content. The directory
+                        parsing correctly proves only that the directory parses.
+                    </p>
+                </div>
+
                 <div class="callout callout-tip">
                     <p>
                         <strong>447 records, eight files, twenty tracks, no ambiguity.</strong> The
@@ -1216,15 +1251,86 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
   0,  7, 14, 21,  4, 11, 18,  1,  8, 15, 22,  5,
  12, 19,  2,  9, 16, 23,  6, 13, 20,  3, 10, 17</code></pre>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Cromemco 8&Prime; double density &mdash; <code>cromemcodd</code> and <code>cromemcodsdd</code></h3>
+                <p>
+                    625,920 bytes single sided, 1,256,704 double sided. Neither number factors into
+                    a tidy geometry, and that is the clue to what they are:
+                    <strong>track&nbsp;0 is recorded in <em>single</em> density</strong> so that a
+                    single-density boot ROM can read the disk at all, and everything after it is
+                    double density with sixteen 512-byte sectors to a track.
+                </p>
+                <pre><code>cromemcodd     3,328 + 76 &times; 8,192 =   625,920   (77 tracks, one side)
+cromemcodsdd   3,328 + 153 &times; 8,192 = 1,256,704   (77 cylinders, two sides)</code></pre>
+                <p>
+                    So the reserved area is 11,520 bytes and <em>not</em> a whole number of data
+                    tracks &mdash; which is exactly where both disks' directories begin. The
+                    single-sided BIOS calls that two tracks; the double-sided one calls it one
+                    <em>cylinder</em>, because it counts a cylinder (both sides, 128 records) as a
+                    track. Two ways of describing the same 11,520 bytes.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th></th><th><code>cromemcodd</code></th><th><code>cromemcodsdd</code></th></tr></thead>
+                    <tbody>
+                        <tr><td>Records per track</td><td>64</td><td>128 (a cylinder)</td></tr>
+                        <tr><td>Records per sector</td><td colspan="2">4 &mdash; a 512-byte sector</td></tr>
+                        <tr><td>Block size</td><td colspan="2">2,048</td></tr>
+                        <tr><td>Directory entries</td><td>128</td><td>256</td></tr>
+                        <tr><td>Reserved</td><td>2 tracks</td><td>1 cylinder</td></tr>
+                        <tr><td>Data area</td><td>254 blocks (520,192)</td><td>608 blocks (1,245,184)</td></tr>
+                        <tr><td>Sector translation</td><td>interleave, 16 entries</td><td>interleave of 4, 32 entries</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    The single-sided format <strong>declares less disk than it has</strong>: 254
+                    blocks where the medium would hold 300, leaving the last eleven and a half
+                    tracks outside the filesystem. Both MICAH disks measured say so, so it is the
+                    format and not one odd disk &mdash; and deriving 300 instead would be a
+                    <em>write</em> defect, allocating past what the guest's own BIOS addresses. It
+                    would also flip CP/M's 8-bit/16-bit allocation choice at the 255-block
+                    boundary, so the directory would have been misparsed too.
+                </p>
+                <pre><code>CROMEMCO_DD_SKEW     (16 sectors, from the disk's own XLT, stored 0-based)
+  0, 11,  6,  1, 12,  7,  2, 13,  8,  3, 14,  9,  4, 15, 10,  5
+
+CROMEMCO_DSDD_SKEW   (32 sectors: an interleave of 4 within each side)
+  0,  4,  8, 12,  1,  5,  9, 13,  2,  6, 10, 14,  3,  7, 11, 15,
+ 16, 20, 24, 28, 17, 21, 25, 29, 18, 22, 26, 30, 19, 23, 27, 31</code></pre>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The double-sided disk says it does not translate sectors, and
+                        translates anyway.</strong> Its disk parameter header's <code>XLT</code>
+                        pointer is zero, which is CP/M's way of saying there is no skew. Believing
+                        it produced a format that mounted, listed its directory perfectly, and
+                        returned <em>scrambled file content</em> &mdash; the same shape of failure
+                        the Altair mapping needed four hypotheses to escape, and one no consistency
+                        check can see. That BIOS interleaves inside its own <code>SETSEC</code>
+                        rather than through CP/M's <code>SECTRAN</code>, so <code>XLT</code> says
+                        nothing either way. The single-sided disk of the same physical geometry
+                        interleaves differently again: <strong>skew belongs to the BIOS, not to the
+                        medium.</strong>
+                    </p>
+                </div>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Named versus sniffed</h3>
                 <p>
                     An image whose filename carries a format token
                     (<code>altair8_wordstar.dsk</code>) mounts read-write: the operator has said
-                    what it is. An image without one still mounts, but always
-                    <strong>read-only</strong>, because the format was inferred from size and
-                    content. A misidentified format is the one failure no consistency check can
-                    catch &mdash; every offset comes from the wrong geometry, so every check agrees
-                    with every other check.
+                    what it is. <strong>An image without one is not second class.</strong> No two
+                    formats here are the same size, so the size names the format outright; what
+                    inspection then decides is whether the file really holds that filesystem. The
+                    whole directory is read and checked &mdash; every allocation block, no block
+                    claimed twice, every record count matching the blocks it claims &mdash; and an
+                    image that passes mounts read-write just the same.
+                </p>
+                <p>
+                    One that does <em>not</em> pass still mounts, but read-only, and says what was
+                    wrong. That is the honest answer for a file which is the right size and is not
+                    this filesystem: a UCSD p-System disk is 256,256 bytes without being CP/M at
+                    all. A misidentified format is the one failure no consistency check can catch
+                    &mdash; every offset comes from the wrong geometry, so every check agrees with
+                    every other check &mdash; which is why naming a format is an
+                    <em>override</em> that skips the inspection, and why doing it to a disk that was
+                    rightly refused is the one dangerous use of the convention.
                 </p>
             </div>
 
