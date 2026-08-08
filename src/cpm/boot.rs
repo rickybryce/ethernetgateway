@@ -84,6 +84,35 @@ pub fn boot_choice_label(value: &str) -> String {
     }
 }
 
+/// The suffix a setting carries when it is not what is going to run.
+///
+/// Two words, not one, because the two fallbacks are different mistakes and an
+/// operator fixes them differently: `(missing)` means put the disk back or pick
+/// another, `(invalid name)` means the value in the file could never have named
+/// a disk at all — most likely a path was typed where a bare filename belongs.
+///
+/// Empty for the cases that *are* going to run, so a caller can append it
+/// unconditionally.
+pub fn boot_setting_mark(target: &BootTarget) -> &'static str {
+    match target {
+        BootTarget::Missing(_) => " (missing)",
+        BootTarget::UnsafeName(_) => " (invalid name)",
+        BootTarget::Emulator | BootTarget::Image(_) => "",
+    }
+}
+
+/// What to show for the current `cpm_boot_image` once it has been resolved.
+///
+/// [`boot_choice_label`] answers for a value in the *list*, where every entry
+/// is by construction a disk that is there; this answers for the value that is
+/// **set**, which may not be. All four surfaces use this one — the web page
+/// spelled its own `(missing)` for a while and was the only one that said
+/// anything at all, which is how the desktop and telnet rows came to claim a
+/// disk was booting when the emulator was what started.
+pub fn boot_setting_label(target: &BootTarget, value: &str) -> String {
+    format!("{}{}", boot_choice_label(value), boot_setting_mark(target))
+}
+
 /// What a mount slot should be *called*, which depends on what CP/M is set to
 /// run — and is one function so telnet, web and the desktop cannot disagree.
 ///
@@ -788,6 +817,44 @@ mod tests {
     /// `(R/O)` marker on an image our BDOS was about to refuse a write to.
     /// The label beside it kept saying `Boot vanished.dsk`, which is correct
     /// for a *setting* and is why the mismatch read as deliberate.
+    /// The four surfaces that show `cpm_boot_image` must mark an unrunnable
+    /// setting, and mark it the same way.
+    ///
+    /// The web page spelled its own `(missing)` for a while and was the only
+    /// one that said anything, which is exactly how the desktop and telnet rows
+    /// came to read `Boot vanished.dsk` while the emulator was what started.
+    #[test]
+    fn test_a_setting_that_will_not_run_says_so() {
+        use super::{boot_setting_label, boot_setting_mark, BootTarget};
+
+        assert_eq!(boot_setting_mark(&BootTarget::Emulator), "");
+        assert_eq!(boot_setting_mark(&BootTarget::Image("real.dsk".into())), "");
+        // Two different mistakes, fixed two different ways — put the disk back,
+        // or stop typing a path where a bare filename belongs.
+        assert_eq!(boot_setting_mark(&BootTarget::Missing("x".into())), " (missing)");
+        assert_eq!(
+            boot_setting_mark(&BootTarget::UnsafeName("x".into())),
+            " (invalid name)"
+        );
+        assert_ne!(
+            boot_setting_mark(&BootTarget::Missing("x".into())),
+            boot_setting_mark(&BootTarget::UnsafeName("x".into())),
+            "the two fallbacks must not read the same"
+        );
+
+        // The label is the ordinary one with the mark appended, so a surface
+        // cannot show the mark without the setting or the setting without it.
+        assert_eq!(
+            boot_setting_label(&BootTarget::Missing("gone.dsk".into()), "gone.dsk"),
+            "Boot gone.dsk (missing)"
+        );
+        assert_eq!(
+            boot_setting_label(&BootTarget::Image("real.dsk".into()), "real.dsk"),
+            "Boot real.dsk"
+        );
+        assert_eq!(boot_setting_label(&BootTarget::Emulator, ""), BOOT_EMULATOR_LABEL);
+    }
+
     #[test]
     fn test_a_boot_image_that_is_not_there_names_the_emulators_drives() {
         use super::{boot_target, mount_refuses_writes, slot_name, BootTarget, SlotNaming};

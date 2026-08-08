@@ -2593,6 +2593,48 @@ fn test_numeric_confirmation_lines_splits_without_losing_anything() {
     assert_eq!(wide.len(), 1, "78 columns is plenty; should not split");
 }
 
+/// The `Runs:` row keeps its `(missing)` marker on a PETSCII screen.
+///
+/// The marker is the whole reason the row resolves anything, and it is the
+/// **last** thing on the line — so a naive `truncate_to_width` of the finished
+/// label cuts off exactly the part that is new. `Boot vanished.dsk (missing)`
+/// is 27 characters against the 26 that row allows, which is close enough that
+/// a wider test name would have missed it.
+#[test]
+fn test_the_runs_row_keeps_its_marker_when_the_row_is_too_narrow() {
+    // A transfer dir that does not exist, so any name resolves to Missing —
+    // this is about the fitting, not about the resolving.
+    let nowhere = "/nonexistent-egw-transfer-dir";
+    const PETSCII_W: usize = 26;
+
+    let row = cpm_runs_row("vanished.dsk", nowhere, PETSCII_W);
+    assert!(row.ends_with(" (missing)"), "the marker must survive: {row:?}");
+    assert!(row.chars().count() <= PETSCII_W, "{} columns: {row:?}", row.chars().count());
+    assert!(row.starts_with("Boot"), "and it is still recognisably the setting: {row:?}");
+
+    // A name long enough that the filename must give way, and the marker still
+    // does not.
+    let long = cpm_runs_row("a-very-long-disk-image-name-indeed.dsk", nowhere, PETSCII_W);
+    assert!(long.ends_with(" (missing)"), "{long:?}");
+    assert!(long.chars().count() <= PETSCII_W, "{} columns: {long:?}", long.chars().count());
+
+    // A value that could never be a filename says so differently, because it is
+    // a different mistake to fix.
+    let bad = cpm_runs_row("../../etc/passwd", nowhere, 60);
+    assert!(bad.ends_with(" (invalid name)"), "{bad:?}");
+
+    // The emulator carries no marker at all, and neither does a disk that is
+    // really there — checked on a wide row so nothing can be blamed on fitting.
+    assert_eq!(cpm_runs_row("", nowhere, 60), crate::cpm::boot::BOOT_EMULATOR_LABEL);
+    let dir = std::env::temp_dir().join("egw_runs_row_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let images = dir.join("CPM").join(crate::cpm::image::IMAGES_DIR);
+    std::fs::create_dir_all(&images).unwrap();
+    std::fs::write(images.join("real.dsk"), [0u8; 8]).unwrap();
+    assert_eq!(cpm_runs_row("real.dsk", &dir.to_string_lossy(), 60), "Boot real.dsk");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every numeric-setting confirmation must fit the screen it is printed on,
 /// at that setting's WORST-CASE value.
 ///

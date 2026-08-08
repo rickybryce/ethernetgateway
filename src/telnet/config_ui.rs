@@ -40,6 +40,31 @@ pub(in crate::telnet) fn numeric_confirmation_lines(
     vec![label.to_string(), format!("set to {} {}.", value, unit)]
 }
 
+/// The `Runs:` row on both CP/M configuration screens, fitted to `width`.
+///
+/// Two screens show this and they must not disagree, which is the only reason
+/// three lines are a function.
+///
+/// **The marker is reserved out of the width, not truncated with the rest.**
+/// Appending it and then trimming the whole string would cut off exactly the
+/// words that are the point: `Boot vanished.dsk (missing)` is 27 characters
+/// against the 26 a PETSCII row allows, so the naive version ends
+/// `...dsk (mi` — longer than the plain label and no more informative. The
+/// filename gives way to the marker instead, because a truncated name is still
+/// recognisable and a truncated marker is noise.
+///
+/// One `stat`, once per screen draw — see [`crate::cpm::boot::boot_target`].
+pub(in crate::telnet) fn cpm_runs_row(boot_image: &str, transfer_dir: &str, width: usize) -> String {
+    let target = crate::cpm::boot::boot_target(transfer_dir, boot_image);
+    let mark = crate::cpm::boot::boot_setting_mark(&target);
+    let label = crate::cpm::boot::boot_choice_label(boot_image);
+    format!(
+        "{}{}",
+        truncate_to_width(&label, width.saturating_sub(mark.chars().count())),
+        mark
+    )
+}
+
 impl TelnetSession {
     // ─── CONFIGURATION ──────────────────────────────────────
 
@@ -616,10 +641,7 @@ impl TelnetSession {
             // asking here — our emulator, or somebody's disk.
             self.send_line(&format!(
                 "  Runs:      {}",
-                self.amber(&truncate_to_width(
-                    &crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image),
-                    modem_w
-                ))
+                self.amber(&cpm_runs_row(&cfg.cpm_boot_image, &cfg.transfer_dir, modem_w))
             ))
             .await?;
             self.send_line("").await?;
@@ -903,10 +925,7 @@ impl TelnetSession {
             let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
             self.send_line(&format!(
                 "  Runs:      {}",
-                self.amber(&truncate_to_width(
-                    &crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image),
-                    w
-                ))
+                self.amber(&cpm_runs_row(&cfg.cpm_boot_image, &cfg.transfer_dir, w))
             ))
             .await?;
             self.send_line(&format!(

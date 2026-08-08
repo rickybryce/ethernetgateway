@@ -2037,9 +2037,14 @@ fn render_more_popups(cfg: &Config) -> String {
         if !cfg.cpm_boot_image.is_empty()
             && !choices.iter().any(|(v, _)| *v == cfg.cpm_boot_image)
         {
+            // The marker is `boot_setting_label`'s, not this page's.  It used
+            // to be spelled here, which made this the only surface that said
+            // anything — the desktop and telnet rows went on claiming a disk
+            // was booting while the emulator was what started.
+            let target = crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image);
             choices.push((
                 cfg.cpm_boot_image.clone(),
-                format!("{} (missing)", crate::cpm::boot::boot_choice_label(&cfg.cpm_boot_image)),
+                crate::cpm::boot::boot_setting_label(&target, &cfg.cpm_boot_image),
             ));
         }
         choices

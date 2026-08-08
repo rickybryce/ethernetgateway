@@ -52,7 +52,7 @@ mod config_ui;
 // Width-aware confirmation formatter; used by config_ui itself and by the
 // test that checks every numeric call site's worst case fits the screen.
 #[cfg(test)]
-pub(in crate::telnet) use config_ui::numeric_confirmation_lines;
+pub(in crate::telnet) use config_ui::{cpm_runs_row, numeric_confirmation_lines};
 mod serial_ui;
 mod web;
 mod aichat_ui;

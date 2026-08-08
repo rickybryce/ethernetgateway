@@ -561,6 +561,18 @@ struct App {
     /// a boot image is configured (which decides whether slots are named for a
     /// board at all).
     cpm_slot_labels_from: (Vec<String>, bool),
+    /// The `CP/M runs:` label, with `(missing)` on it when the configured image
+    /// is not there: `(label, the setting it came from, when it was resolved)`,
+    /// and `None` until the first frame asks.
+    ///
+    /// Cached because this one is on the *server panel*, not inside a window an
+    /// operator opens: it is drawn for as long as the desktop UI is up, so the
+    /// `stat` behind the marker cannot be per-frame. Keyed on the setting **and
+    /// a one-second age**, because the setting is not the only thing that can
+    /// change the answer — deleting the `.dsk` in a file manager leaves the
+    /// string alone, and a cache keyed on the string alone would go on claiming
+    /// the disk was there until the operator next touched the combo.
+    cpm_boot_label: Option<(String, String, std::time::Instant)>,
     /// What the last apply reported, shown under the rows.
     cpm_mount_notice: String,
     /// Format token selected in the "new blank disk" row.
@@ -718,6 +730,7 @@ impl App {
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_slot_labels: Vec::new(),
             cpm_slot_labels_from: (Vec::new(), false),
+            cpm_boot_label: None,
             cpm_mount_notice: String::new(),
             cpm_new_format: String::new(),
             cpm_new_name: String::new(),
@@ -1012,6 +1025,31 @@ impl App {
             })
             .collect();
         self.cpm_mount_notice.clear();
+    }
+
+    /// The `CP/M runs:` label, resolved at most once a second.
+    ///
+    /// The marker matters because this row is where an operator finds out that
+    /// the gateway is running the emulator when they asked for a disk — but the
+    /// row is on the always-drawn server panel, so the `stat` behind it has to
+    /// be paid on a schedule rather than per frame. A second is short enough
+    /// that deleting the image and looking at the window reads as instant, and
+    /// long enough that the cost does not scale with egui's repaint rate.
+    fn cpm_boot_label(&mut self) -> String {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some((label, from, at)) = &self.cpm_boot_label {
+            if *from == self.cfg.cpm_boot_image && at.elapsed() < TTL {
+                return label.clone();
+            }
+        }
+        let target = crate::cpm::boot::boot_target(&self.cfg.transfer_dir, &self.cfg.cpm_boot_image);
+        let label = crate::cpm::boot::boot_setting_label(&target, &self.cfg.cpm_boot_image);
+        self.cpm_boot_label = Some((
+            label.clone(),
+            self.cfg.cpm_boot_image.clone(),
+            std::time::Instant::now(),
+        ));
+        label
     }
 
     /// Contents of the "Mount CP/M Drives" window: a row per drive.
@@ -1349,12 +1387,14 @@ impl App {
         // What the CP/M menu item runs: our emulator, or a disk image booted
         // on emulated Altair hardware.  The same `boot_choices` list the telnet
         // and web screens build, so the three cannot drift apart.
+        // Resolved before the closure borrows `self` mutably, and cached — see
+        // `cpm_boot_label`.
+        let boot_label = self.cpm_boot_label();
         ui.horizontal(|ui| {
             ui.label("CP/M runs:");
             egui::ComboBox::from_id_salt("cpm_boot_image_combo")
                 .width(320.0)
-                // Pure — no disk access — because this runs every frame.
-                .selected_text(crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image))
+                .selected_text(boot_label)
                 .show_ui(ui, |ui| {
                     // The images folder is read here rather than above it: this
                     // closure runs only while the list is open, and the same
@@ -1368,11 +1408,20 @@ impl App {
                     if !self.cfg.cpm_boot_image.is_empty()
                         && !choices.iter().any(|(v, _)| *v == self.cfg.cpm_boot_image)
                     {
+                        // The folder has just been listed, so this entry can be
+                        // resolved outright rather than read from the cache —
+                        // and the marker's wording is `boot_setting_label`'s,
+                        // shared with the collapsed text above, the web select
+                        // and both telnet rows.
+                        let target = crate::cpm::boot::boot_target(
+                            &self.cfg.transfer_dir,
+                            &self.cfg.cpm_boot_image,
+                        );
                         choices.push((
                             self.cfg.cpm_boot_image.clone(),
-                            format!(
-                                "{} (missing)",
-                                crate::cpm::boot::boot_choice_label(&self.cfg.cpm_boot_image)
+                            crate::cpm::boot::boot_setting_label(
+                                &target,
+                                &self.cfg.cpm_boot_image,
                             ),
                         ));
                     }
