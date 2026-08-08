@@ -948,8 +948,10 @@ impl TelnetSession {
             // Always said, both branches: the CPU is the exception on this
             // screen, and an operator who reads "applies to a booted disk"
             // two lines above would otherwise carry that over to it.
-            self.send_line(&format!("  {}", self.dim("The CPU applies to both. EGT80"))).await?;
-            self.send_line(&format!("  {}", self.dim("needs the Z80."))).await?;
+            // Two rows, as before: this screen is full at 22 and a third
+            // would push the menu off a PETSCII terminal.
+            self.send_line(&format!("  {}", self.dim("The CPU applies to both. Run"))).await?;
+            self.send_line(&format!("  {}", self.dim("EGT8080 on the 8080."))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
@@ -1027,7 +1029,8 @@ impl TelnetSession {
                 "c" => {
                     // Two processors, cycled like everything else here.  An
                     // unrecognised value lands on the Z80 next, which is what
-                    // `is_8080` is already honouring and what EGT80 needs.
+                    // `is_8080` is already honouring and the setting that runs
+                    // every disk here.
                     let choices = crate::cpm::cpu::CPU_CHOICES;
                     let idx = choices
                         .iter()

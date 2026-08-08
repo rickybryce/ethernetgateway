@@ -9,8 +9,18 @@ ships a separate binary per port (`qterm82` for an RC2014 SIO/2 at 0x82,
 Altair 2SIO build; KERCPM22's generic overlay has no serial driver at all. Get
 the pairing wrong and the program is simply silent.
 
-EGT80 asks instead. One `EGT80.COM` presents a menu, you pick the port, and it
+EGT80 asks instead. One `.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
+
+It ships as **two binaries, one per processor**:
+
+| File | Runs on | Notes |
+|---|---|---|
+| `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. **Reach for this one.** |
+| `EGT80.COM` | The Z80 only | The original. Smaller, and it uses the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
+
+Each saves its settings into *its own* file, so configuring one does not
+configure the other.
 
 **Status: complete (v0.7)** — a working terminal with all five port families,
 settings that survive a restart, and XMODEM file transfer in both directions.
@@ -41,16 +51,16 @@ does not.
 
 ## Getting it
 
-Nothing to install: EGT80 is compiled into the gateway binary and placed on CP/M
-drive A: when the emulator first creates its drive folders. `DIR` shows it, and
-typing `EGT80` runs it.
+Nothing to install: both builds are compiled into the gateway binary and placed
+on CP/M drive A: when the emulator first creates its drive folders. `DIR` shows
+them, and typing `EGT8080` (or `EGT80` on a Z80) runs one.
 
 That copy is **never overwritten** afterwards. EGT80 stores its settings inside
 its own `.COM`, so replacing the file on each launch would silently discard the
 port you chose — and you may be deliberately running an older or locally-modified
 build. Delete it if you want the shipped copy back on the next launch.
 
-Each release archive also carries `EGT80.COM` as a loose file: that is the copy to
+Each release archive also carries both `.COM`s as loose files: those are the copies to
 send to real CP/M hardware over XMODEM (from QTERM use `xk`, never Kermit — it is
 text-only there and truncates binaries at the first `^Z`).
 
@@ -62,7 +72,8 @@ successful `CONNECT` tests the port, the modem and the terminal in one go.
 ## Building
 
 ```sh
-make            # assemble EGT80.COM with SLR Z80ASM
+make            # assemble EGT80.COM and EGT8080.COM with SLR Z80ASM
+make port       # re-derive EGT8080.Z80 from EGT80.Z80 (after editing the latter)
 make check      # prove the source also assembles with M80 and ZMAC
 ```
 
@@ -103,28 +114,72 @@ break by accident and impossible to notice in a modern assembler.
 
 **CI cannot rebuild this.** Assembling needs SLR's `Z80ASM.COM` and `zxcc`, and
 neither is in the repository — the assembler is third-party software we do not
-vendor. So `EGT80.COM` is a committed artifact, and the risk is drift: a source
-edit whose binary was never rebuilt. Four unit tests in `src/telnet/cpm_emu.rs`
-close that gap with no tooling at all — they check the bundled binary is
-a whole number of 128-byte records, starts with the `JP` over the patch area,
-carries the `EGT80CFG` signature at file offset `0x80` (where the save routine
-rewrites record 1), and contains the version string that `EGT80.Z80` declares.
-The version check catches the realistic mistake of bumping the version without
-rebuilding.
+vendor. So both `.COM`s are committed artifacts, and the risk is drift: a source
+edit whose binary was never rebuilt. Unit tests in `src/telnet/cpm_emu.rs` close
+that gap with no tooling at all, and they ask every one of these of **both**
+builds through the same table the placement uses: a whole number of 128-byte
+records, the `JP` over the patch area, the `EGT80CFG` signature at file offset
+`0x80` (where the save routine rewrites record 1), and the version string its
+own source declares. The version check catches the realistic mistake of bumping
+the version without rebuilding.
 
-The fourth, `test_bundled_egt80_matches_pinned_hash`, covers what the other
-three cannot: a code change made *without* touching the version. It asserts an
-explicit `sha256` of the committed binary, so the bytes users run cannot change
+Two more exist only because there are two builds.
+`test_the_8080_build_is_not_the_z80_build` catches a `make` run without a
+`make port` — which produces two files that pass every shape check while the
+one on drive A: crashes an Altair. Its sharper witness is the filename compiled
+into the settings FCB: if `EGT8080.COM` carries `EGT80   COM`, it would save
+its configuration into the other build's file.
+`test_bundled_terminals_match_pinned_hashes` covers what the shape checks
+cannot: a code change made *without* touching the version. It asserts an
+explicit `sha256` of each committed binary, so the bytes users run cannot change
 unless someone edits the hash in the same commit — which puts it in front of a
 reviewer. **So after any legitimate rebuild:**
 
 ```sh
+make port                   # only if you edited EGT80.Z80
 make && make check          # the real gate — three assemblers
-sha256sum EGT80.COM         # paste into PINNED in that test
+sha256sum EGT80.COM EGT8080.COM   # paste into PINNED in that test
 ```
 
-The hash pins the artifact, not its correspondence to the source; only `make`
-proves that, so run it before a release cut.
+The hashes pin the artifacts, not their correspondence to the sources; only
+`make` proves that, so run it before a release cut.
+
+## The 8080 build
+
+`EGT8080.Z80` is **derived**, not hand-maintained. `tools/port8080.py`
+generates it from `EGT80.Z80`, so the two cannot drift: edit the Z80 source,
+run `make port`, and the 8080 build is the same program again. Every difference
+between them is a named rule in that script with its reason attached, and a
+rule that stops matching is a hard error rather than a silent no-op.
+
+The source stays in Zilog mnemonics and is assembled by the same SLR `Z80ASM`,
+because what has to be inside the 8080's set is the *opcodes emitted*, not the
+words used to write them — `ADC A,40H` is 8080 `ACI 40H`, both `CE 40`. The
+price is that the assembler will accept a `JR` and say nothing, so
+`tools/check8080.py` holds the line instead: it matches every instruction
+against the 8080's set by **form**, never by mnemonic.
+
+That distinction is not academic. A census by mnemonic said "312 `JR`, two
+`BIT 7,A`, one `LDIR`, and nothing else". It had missed `LD (nn),DE` and
+sixteen `IN A,(C)`/`OUT (C),A`, all of which hide among instructions the 8080
+does have. The checker found the first on its first run — and its own
+`OUT (n),A` pattern was loose enough to swallow `OUT (C),A`, which shipped a
+build that ran perfectly on a Z80 and, on an 8080, executed `ED` as an
+undocumented `CALL` straight into a string constant. **An operand pattern that
+accepts anything is not a check.**
+
+The substantive part of the port is the port drivers. The 8080 has no
+register-indirect I/O at all, so a terminal whose whole premise is a port
+chosen at *run time* has to write the address into its own `IN` or `OUT`
+before executing it. That is self-modifying code, and it is the idiom this
+program already used twice — `PSSET2` patches the four port vectors, `ASCPAT`
+patches the ASCI register addresses.
+
+The Z180 ASCI family leaves the port menu. Its probe is `MLT BC`, laid down as
+`DB 0EDH,4CH` because no Z80 assembler encodes it, and on an 8080 that `ED` is
+an undocumented `CALL` — so the probe would not fail, it would jump into the
+weeds. `ISZ180` answers "not a Z180" outright, which is the answer all three of
+its callers already knew how to handle.
 
 ## Design
 

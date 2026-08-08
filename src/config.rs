@@ -898,11 +898,11 @@ pub struct Config {
     /// underneath both.
     ///
     /// `z80` is the default: it is a superset that runs the 8080 software these
-    /// disks are made of, and **EGT80 is Z80 code**, so on an 8080 core the
-    /// terminal we place on drive A: takes CP/M down with it.  The 8080 is
-    /// offered anyway because it is the more literal Altair and because period
-    /// 8080 diagnostics — which detect the CPU from `DCR A` setting parity
-    /// rather than overflow — are correct to fail on a Z80.  See
+    /// disks are made of.  The 8080 is offered because it is the more literal
+    /// Altair and because period 8080 diagnostics — which detect the CPU from
+    /// `DCR A` setting parity rather than overflow — are correct to fail on a
+    /// Z80.  It no longer costs the terminal: `EGT8080.COM` is placed on drive
+    /// A: beside `EGT80.COM` and runs on either processor.  See
     /// [`crate::cpm::cpu`].
     pub cpm_cpu: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
@@ -2449,12 +2449,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #           Z80 upgrade board.
 #     8080  an Intel 8080 - the processor the Altair actually shipped with, and
 #           the more literal machine for these disks.
-#   WHAT THE 8080 COSTS: EGT80, the terminal this gateway places on CP/M drive
-#   A:, is Z80 code and declares itself so.  On an 8080 it loads, runs a
-#   Z80-only opcode as something else, and takes CP/M down with it.  Choose the
-#   8080 when you are running period 8080 software - notably diagnostics that
-#   identify the CPU from DCR A setting parity rather than overflow, and are
-#   therefore RIGHT to fail on a Z80.
+#   WHICH TERMINAL: this gateway places TWO on CP/M drive A:.  EGT8080.COM is
+#   built to the 8080's instruction set and runs on EITHER setting, so it is
+#   the one to reach for.  EGT80.COM is the Z80 build - slightly smaller, and
+#   it takes CP/M down with it on an 8080.  Choose the 8080 when you are
+#   running period 8080 software - notably diagnostics that identify the CPU
+#   from DCR A setting parity rather than overflow, and are therefore RIGHT to
+#   fail on a Z80.
 ");
     write_kv(&mut content, "cpm_cpu", &cfg.cpm_cpu);
     content.push_str("\
@@ -4847,7 +4848,7 @@ mod tests {
         assert_eq!(
             cfg.cpm_cpu,
             crate::cpm::cpu::CPU_Z80,
-            "a fresh config runs the Z80 — EGT80 is Z80 code"
+            "a fresh config runs the Z80 — the superset that runs every disk here"
         );
 
         // Both offered processors are settable, iterated rather than hand-typed

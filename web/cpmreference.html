@@ -679,7 +679,7 @@
                         <tr><td><code>cpm_boot_image</code></td><td><em>(empty)</em></td><td>What the CP/M menu item runs: empty = the CP/M emulator, or a bare filename in <code>CPM/images</code> to cold-boot that disk. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_machine</code></td><td><code>altair_2sio</code></td><td>Which machine a <em>booted</em> disk thinks it is on &mdash; specifically where it finds its console. Ignored by the emulator, which has no console to place. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_backspace</code></td><td><code>backspace</code></td><td>What a <em>booted</em> disk is handed when you press Backspace &mdash; <code>backspace</code> (BS, <code>08h</code>) or <code>rubout</code> (DEL, <code>7Fh</code>). Ignored by the emulator, which reads its own console line and accepts either. The telnet boot picker asks again per disk and starts from this. See <a href="#booting">Booting</a>.</td></tr>
-                        <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. <strong>EGT80 is Z80 code</strong> and will crash an 8080, and the <code>hbios_*</code> modem profiles emulate RomWBW &mdash; Z80/Z180 firmware &mdash; so the software that looks for it will not run on an 8080 either. See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. Two terminals are placed on drive A:: <strong><code>EGT8080.COM</code></strong> is built to the 8080's instruction set and so runs on <em>either</em> setting, which is why it is the one to reach for; <code>EGT80.COM</code> is the Z80 build and will crash an 8080. The <code>hbios_*</code> modem profiles emulate RomWBW &mdash; Z80/Z180 firmware &mdash; so other people's software that looks for it is generally Z80 code and will not run on an 8080, though our HBIOS itself answers an 8080 perfectly well (<code>RST 8</code> is an 8080 instruction). See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
                         <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
                         <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>
@@ -1214,7 +1214,7 @@ altairhd_cobol.dsk</code></pre>
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="egt80">
                 <div class="section-title">EGT80 &mdash; the bundled CP/M terminal</div>
-                <p class="intro">EGT80 (&ldquo;Ethernet Gateway Terminal&rdquo;) is this project's own CP/M terminal, written in Z80 assembly. One binary asks which port it is on instead of shipping one build per machine.</p>
+                <p class="intro">EGT80 (&ldquo;Ethernet Gateway Terminal&rdquo;) is this project's own CP/M terminal, written in period Z80 assembly. One binary asks which port it is on instead of shipping one build per machine &mdash; and it ships as <em>two</em> binaries, one per processor.</p>
 
                 <p>
                     Every period terminal we tried was built for one machine's serial port &mdash; QTERM ships
@@ -1227,7 +1227,44 @@ altairhd_cobol.dsk</code></pre>
                     It ships <em>inside</em> the gateway binary and is placed on CP/M drive A: the first time the
                     drive folders are created, then <strong>never overwritten</strong> &mdash; it saves its settings
                     inside its own <code>.COM</code>, so refreshing it would discard your configuration. Deleting
-                    <code>EGT80.COM</code> restores the shipped copy on the next launch.
+                    the file restores the shipped copy on the next launch.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two builds: which one to run</h3>
+                <table class="data-table">
+                    <thead><tr><th>File</th><th>Runs on</th><th>Why it exists</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>EGT8080.COM</code></td><td><strong>Both</strong> &mdash; <code>cpm_cpu = z80</code> and <code>= 8080</code></td><td>Built to the 8080's instruction set, which is a strict subset of the Z80's. <strong>Reach for this one.</strong></td></tr>
+                        <tr><td><code>EGT80.COM</code></td><td>The Z80 only</td><td>The original. A few hundred bytes smaller, and it uses the Z80's relative jumps and <code>IN A,(C)</code>. On an 8080 it takes CP/M down with it.</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Both are on drive A: and each saves its settings into <em>its own</em> file, so configuring one
+                    does not configure the other.
+                </p>
+                <p class="note">
+                    <strong>The 8080 build is derived, not hand-maintained.</strong>
+                    <code>EGT80/tools/port8080.py</code> generates <code>EGT8080.Z80</code> from
+                    <code>EGT80.Z80</code>, so the two cannot drift: edit the Z80 source, run
+                    <code>make port</code>, and the 8080 build is the same program again. Every
+                    difference between them is a named rule in that script with a reason attached &mdash;
+                    <code>JR</code>&rarr;<code>JP</code>, two <code>BIT 7,A</code>, one <code>LDIR</code>,
+                    the Z180 probe, and the port drivers, which on an 8080 must patch the port address
+                    into their own <code>IN</code> and <code>OUT</code> because the 8080 has no
+                    register-indirect I/O at all.
+                </p>
+                <p class="note">
+                    <strong>What holds the line is <code>tools/check8080.py</code>.</strong> The 8080 source is
+                    still written in Zilog mnemonics and assembled by the same Z80 assembler &mdash; what has to
+                    be in the 8080's set is the <em>opcodes emitted</em>, not the words &mdash; so the assembler
+                    would happily accept a <code>JR</code> and say nothing. The checker reads every instruction
+                    and matches it against the 8080's set by <em>form</em>, not by mnemonic, because half the
+                    Z80-only instructions share a mnemonic with an 8080 one. That is not theoretical: a census by
+                    mnemonic reported &ldquo;312 <code>JR</code>, two <code>BIT</code>, one <code>LDIR</code>,
+                    nothing else&rdquo; and had missed <code>LD (nn),DE</code> and sixteen
+                    <code>IN A,(C)</code>/<code>OUT (C),A</code>. The first build ran perfectly on a Z80 and, on
+                    an 8080, executed <code>ED</code> as an undocumented <code>CALL</code> straight into a string
+                    constant.
                 </p>
 
                 <p class="note">

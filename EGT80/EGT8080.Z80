@@ -1,0 +1,4550 @@
+;=======================================================================
+; For God so loved the world, that he gave his only begotten Son, that
+; whosoever believeth in him should not perish, but have everlasting
+; life.
+;                                              - John 3:16, KJV
+;=======================================================================
+; EGT8080 - "Ethernet Gateway Terminal", 8080 build
+;
+; DERIVED FILE - DO NOT EDIT.  Generated from EGT80.Z80 by
+; tools/port8080.py; run `make port` after editing EGT80.Z80.  Editing
+; this file directly means the next `make port` throws the edit away.
+;
+; The same program as EGT80, built for a machine with no Z80 in it - an
+; Altair, an IMSAI, or the gateway's own emulator with cpm_cpu = 8080.
+; 8080 opcodes are a strict subset of the Z80's, so this build runs on
+; BOTH settings and is the one placed on drive A: by default; EGT80.COM
+; stays for the Z80.
+;
+; What differs from EGT80.Z80, and nothing else does: JR became JP, two
+; BIT 7,A became OR A + JP M, the one LDIR became a copy loop, and the
+; Z180 ASCI family left the port menu - its probe is MLT BC, which is an
+; undocumented CALL on an 8080, and the hardware cannot be there anyway.
+; The reasoning for each is in tools/port8080.py.
+;
+; A CP/M terminal program for the Ethernet Gateway, written for real Z80
+; hardware as much as the gateway's own CP/M emulator.  Unlike the period
+; terminals it replaces, the serial port is chosen at RUN TIME from a menu
+; instead of being fixed when the program is assembled - one EGT80.COM
+; serves an RC2014, an Altair, an SC126, or the emulator.
+;
+; Ricky Bryce.  Part of the Ethernet Gateway project.
+;
+;-----------------------------------------------------------------------
+; ASSEMBLER COMPATIBILITY
+;
+; This source is written to assemble with PERIOD tooling - SLR Z80ASM
+; (Z80ASM EGT80/A), Microsoft M80, and ZMAC - so it can be rebuilt on a
+; real CP/M machine, not just cross-assembled.  That imposes rules;
+; please keep to them when editing:
+;
+;   - No macros, no conditional assembly, no local/temporary labels.
+;   - Upper-case Zilog mnemonics, one statement per line.
+;   - Labels unique within their first SIX characters.
+;   - Directives limited to EQU, ORG, DB, DW, DS, END.
+;   - Expressions limited to + - * / AND OR SHL SHR and '$'.
+;   - Plain 7-bit ASCII, no tabs inside quoted strings, <= 80 columns.
+;   - CRLF line endings (the Makefile stages them; an LF-only file makes
+;     M80 and ZMAC assemble almost nothing while reporting success).
+;
+;-----------------------------------------------------------------------
+; COMPLETE: all five port families (Z80 SIO/2, 6850 ACIA, RomWBW HBIOS,
+; Z180 ASCI, CP/M AUX:), the two-step port menu, settings saved into the
+; program's own file, and XMODEM file transfer in both directions.
+;
+;-----------------------------------------------------------------------
+; HOW THE HOT PATH IS KEPT CHEAP
+;
+; Two indirections, both resolved before the loop runs:
+;
+;   Port    - four RAM vectors (VPST/VPIN/VPOST/VPOUT) are rewritten when
+;             the user picks a port, so selecting a port costs nothing per
+;             byte.  This is the shape QTERM's overlays use, except ours
+;             is chosen at run time rather than at assembly time.
+;   Console - three RAM vectors (VCST/VCIN/VCOUT) are pointed either at
+;             the BIOS console entries (CP/M 2.2, far cheaper per byte
+;             than a BDOS call) or at BDOS-6 wrappers (CP/M 3), decided
+;             once at startup.  The loop never tests the version.
+;
+; The terminal loop deliberately keeps NO state in registers across those
+; calls: everything it needs is in A or in memory.  That removes any need
+; for the vectors to preserve registers - which matters because on CP/M 3
+; they land in the BDOS, which preserves nothing.
+;
+;-----------------------------------------------------------------------
+; REGISTER CONVENTION - read this before adding a counted loop
+;
+; The XMODEM code counts 128 bytes in B while calling routines that need
+; counters of their own, and three of them (PSEND, XGETB, XACCUM) used BC
+; for that.  Each one silently destroyed the caller's count, and the
+; symptom was not subtle: the send loop walked off the end of the buffer
+; and shovelled a megabyte of RAM at the wire.
+;
+; So: PSEND and XGETB preserve BC; XACCUM preserves BC and HL (the block
+; loops walk the buffer with HL while it needs HL for the accumulators);
+; COUT/CST/CIN preserve BC, DE and HL.  The port and console vectors
+; preserve NOTHING - call them only with everything you care about either
+; in A or in memory.
+;
+; And the order matters as much as the pushes: a routine that restores a
+; register BEFORE its last call to a port vector has not restored it at
+; all, because the driver sets B to address the port.  PSEND had exactly
+; that bug - it popped BC and then jumped to the output vector - and the
+; symptom was the same runaway buffer walk as forgetting the push.
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; CP/M system equates
+;-----------------------------------------------------------------------
+BDOS    EQU     0005H           ; BDOS entry point
+WBOOT   EQU     0000H           ; warm boot (exit to CCP)
+BIOSPT  EQU     0001H           ; word: address of the BIOS WBOOT entry
+BCONOU  EQU     2               ; console output (no reserved values)
+BCONIO  EQU     6               ; direct console I/O (CP/M 2.2 and 3)
+BVERS   EQU     12              ; return CP/M version
+BOPEN   EQU     15              ; open file
+BCLOSE  EQU     16              ; close file
+BSETDMA EQU     26              ; set the DMA (record buffer) address
+BWRRAN  EQU     34              ; write random record
+BRDBUF  EQU     10              ; read console buffer (a line)
+BDELET  EQU     19              ; delete file
+BREADS  EQU     20              ; read sequential record
+BWRITS  EQU     21              ; write sequential record
+BMAKE   EQU     22              ; create file
+BSEARF  EQU     17              ; search for first match
+
+; Direct-console-I/O sub-codes used on CP/M 3
+DCIRD   EQU     0FFH            ; read a character
+DCIST   EQU     0FEH            ; console status
+
+;-----------------------------------------------------------------------
+; Character equates
+;-----------------------------------------------------------------------
+BEL     EQU     07H
+BS      EQU     08H
+TAB     EQU     09H
+LF      EQU     0AH
+CR      EQU     0DH
+ESC     EQU     1BH
+DEL     EQU     7FH
+
+;-----------------------------------------------------------------------
+; XMODEM protocol bytes and bounds
+;-----------------------------------------------------------------------
+SOH     EQU     01H             ; start of a 128-byte block
+EOT     EQU     04H             ; end of transmission
+ACK     EQU     06H             ; block accepted
+NAK     EQU     15H             ; block rejected / send in checksum mode
+CAN     EQU     18H             ; cancel (two in a row)
+CRCC    EQU     'C'             ; receiver asking for CRC mode
+XRETRY  EQU     10              ; retries per block, and 'C' attempts
+XNOISE  EQU     255             ; junk bytes tolerated before a transfer
+XSHORT  EQU     1               ; inter-byte wait, in XGETB passes
+XLONG   EQU     6               ; wait for a block / handshake
+
+;-----------------------------------------------------------------------
+; Port kinds.  Only SIO is implemented in phase 1; the rest are listed
+; here because the settings block records the kind numerically and the
+; numbering must not shift when they arrive.
+;-----------------------------------------------------------------------
+PKNONE  EQU     0               ; nothing selected
+PKSIO   EQU     1               ; Z80 SIO/2
+PKACIA  EQU     2               ; 6850 ACIA        (phase 2)
+PKHBIO  EQU     3               ; RomWBW HBIOS     (phase 2)
+PKASCI  EQU     4               ; Z180 ASCI        (phase 2)
+PKAUX   EQU     5               ; CP/M BDOS AUX    (phase 2)
+PKS88   EQU     6               ; Altair 88-SIO (the original MITS board)
+
+; Build identity lives in MVER, in the strings, and nowhere else - a
+; second copy in an equate only invites the two to drift apart.
+
+        ORG     0100H
+
+;=======================================================================
+; ENTRY
+;
+; The first instruction jumps over the settings block, which sits at a
+; FIXED, 128-byte-aligned address so that saving it rewrites one record of
+; the file containing settings and nothing else - no risk of writing a
+; half-open FCB or a live variable back into the image.  Period software
+; put its patch area in exactly this place for exactly this reason.
+;=======================================================================
+START:  JP      BEGIN
+
+;=======================================================================
+; SETTINGS  (record 1 of the file: address 0180H, offset 80H)
+;
+; Defaults are the values that suit the most machines: an RC2014/RomWBW
+; second SIO/2 channel, ASCII output, and the ADM-3A clear - the pair that
+; reads correctly on every terminal, with ANSI and colour one keystroke away
+; for those that want them.  CFGCHK validates all of this at startup and
+; falls back to DEFBLK (which mirrors these, minus the port) if a saved
+; block is damaged.
+;=======================================================================
+        ORG     0180H
+CFGSIG: DB      'EGT80CFG'      ; must match CFGREF or the block is ignored
+PKIND:  DB      PKSIO           ; selected port kind
+PBASE:  DB      82H             ; SIO/2 ch B, ACIA base, or HBIOS unit
+PCHAN:  DB      0               ; Z180 ASCI channel (0 or 1); unused elsewhere
+PABASE: DB      0               ; Z180 internal I/O base for the ASCI family.
+                                ; Its own byte, NOT shared with PBASE: PBASE
+                                ; holds a port address for SIO/ACIA and a unit
+                                ; number for HBIOS, and selecting ASCI does not
+                                ; otherwise set it - so sharing meant ASCI
+                                ; inherited whatever the last family used and
+                                ; addressed registers that do not exist.
+FLTMOD: DB      1               ; 0 = ANSI pass, 1 = ASCII strip.  ASCII is
+                                ; the default: an ANSI terminal shows plain
+                                ; ASCII correctly, while a plain terminal shows
+                                ; ANSI as litter.  Colour is opt-in (Settings,
+                                ; A) rather than something a new user has to
+                                ; turn off to read the screen.
+ECHOFL: DB      0               ; local echo off (the remote echoes)
+CRLFFL: DB      0               ; do not add LF to a typed CR
+ESCCH:  DB      19H             ; ^Y, as the QTERM builds here use
+LBAUD:  DB      5               ; index into RATETB; 5 = 9600
+LBITS:  DB      8               ; 7 or 8 data bits
+LPAR:   DB      0               ; parity: 0 none, 1 even, 2 odd
+LSTOP:  DB      1               ; 1 or 2 stop bits
+LADIV:  DB      1               ; 6850 clock divider: 0 = /1, 1 = /16, 2 = /64
+LSAPP:  DB      0               ; 0 = never program the port - the default, and
+                                ; the state to come back to: the port keeps
+                                ; whatever the ROM, the firmware or the OS set
+                                ; up, which is the arrangement that already
+                                ; works on the machine.  1 = apply the line
+                                ; settings above whenever the port is selected.
+CLSMOD: DB      0               ; how to clear the screen: 0 = ADM-3A ^Z,
+                                ; 1 = ANSI ESC [ 2 J, 2 = don't.  ^Z is the
+                                ; default, to match the ASCII display default
+                                ; above: the two settings answer different
+                                ; questions, but shipping an ANSI clear under
+                                ; an ASCII default meant the one program that
+                                ; promised not to emit escape sequences opened
+                                ; by emitting one.  ^Z is also the code the
+                                ; gateway itself translates for whatever client
+                                ; is connected, which is where most copies of
+                                ; this program run.  Its failure mode on a
+                                ; terminal that does not know it is "nothing
+                                ; happens"; ANSI is one keystroke away in
+                                ; Settings, next to the ANSI display mode that
+                                ; wants it.
+
+CFGADR  EQU     0180H           ; where the block lives
+CFGREC  EQU     1               ; ...which is file record 1
+
+        ORG     0200H
+
+BEGIN:  LD      SP,STKTOP       ; our stack, not the CCP's
+        CALL    CONSET          ; choose the console I/O path
+        CALL    CFGCHK          ; trust the saved settings only if sane
+        CALL    PORTST          ; point the port vectors at the default
+        JP      MAINLP          ; main menu - which draws the title itself
+
+;=======================================================================
+; CONSET - decide how console I/O is done, once.
+;
+; CP/M 2.2: take the BIOS console entries from page zero.  The word at
+; 0001H points at the BIOS WBOOT entry, which is the SECOND slot of the
+; jump table, so the console entries sit at fixed offsets from it:
+; CONST = +3, CONIN = +6, CONOUT = +9.
+;
+; CP/M 3: the BIOS is banked and must not be called directly, so use
+; BDOS 6 (direct console I/O), which exists on both systems.
+;=======================================================================
+CONSET: LD      C,BVERS
+        CALL    BDOS
+        LD      (CPMVER),A
+        CP      30H             ; CP/M 3.0 or later?
+        JP      NC,CON3
+        LD      HL,(BIOSPT)     ; BIOS WBOOT entry
+        INC     HL
+        INC     HL
+        INC     HL              ; CONST
+        LD      (VCST+1),HL
+        INC     HL
+        INC     HL
+        INC     HL              ; CONIN
+        LD      (VCIN+1),HL
+        INC     HL
+        INC     HL
+        INC     HL              ; CONOUT
+        LD      (VCOUT+1),HL
+        RET
+CON3:   LD      HL,B6ST
+        LD      (VCST+1),HL
+        LD      HL,B6IN
+        LD      (VCIN+1),HL
+        LD      HL,B6OUT
+        LD      (VCOUT+1),HL
+        RET
+
+;=======================================================================
+; BDOS-6 console wrappers (the CP/M 3 path).
+;
+; They present the BIOS calling convention the rest of the program uses:
+; status returns A=0 for "no key", input returns the byte in A, output
+; takes the byte in C.
+;=======================================================================
+B6ST:   LD      C,BCONIO
+        LD      E,DCIST
+        CALL    BDOS
+        OR      A
+        RET
+B6IN:   LD      C,BCONIO
+        LD      E,DCIRD
+        CALL    BDOS
+        OR      A
+        JP      Z,B6IN          ; no key yet: ask again
+        RET
+; B6OUT - console output on CP/M 3.
+;
+; Direct console I/O reserves three values of E: FFh, FEh and FDh mean
+; "read", "status" and "read, waiting" - so passing a DATA byte of FDh or
+; above through function 6 does not print it.  It performs an input
+; instead, silently dropping the byte and, worse, eating a keystroke the
+; user had typed.  A terminal passing 8-bit data through would hit this.
+;
+; Those three go out through function 2 instead, which has no reserved
+; values.  Function 2 expands tabs, which is why it is not used for
+; everything - but FDh..FFh are not tabs, so nothing is lost.
+B6OUT:  LD      A,C
+        CP      0FDH
+        JP      NC,B6OUT1
+        LD      E,A
+        LD      C,BCONIO
+        JP      BDOS
+B6OUT1: LD      E,A
+        LD      C,BCONOU
+        JP      BDOS
+
+;=======================================================================
+; Console helpers.  COUT takes the byte in A (the rest of the program
+; thinks in A; the BIOS wants C).
+;
+; These preserve BC, DE and HL because what they call does not: a CP/M
+; BIOS is free to destroy any register, and the BDOS certainly does.
+; Assuming otherwise cost an afternoon - printing a string through an
+; unprotected wrapper emitted its first character forever, because the
+; console call had left the string pointer pointing at itself.
+;
+; The cost is 66 T-states on a path that is already waiting on a UART at
+; a millisecond per byte, which is the right trade: the terminal loop is
+; made cheap by holding no state across calls at all, not by shaving
+; pushes off the one routine every screen depends on.
+;
+; CST also normalises the flags, since neither a BIOS console-status
+; routine nor the BDOS promises that Z reflects the value it returns.
+;=======================================================================
+CST:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VCST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A
+        RET
+CIN:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VCIN
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+COUT:   PUSH    AF
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        LD      C,A
+        CALL    VCOUT
+        POP     HL
+        POP     DE
+        POP     BC
+        POP     AF
+        RET
+
+;=======================================================================
+; CRLF - end a line.
+;=======================================================================
+CRLF:   LD      A,CR
+        CALL    COUT
+        LD      A,LF
+        JP      COUT
+
+;=======================================================================
+; PSTR - print the zero-terminated string at HL.
+;
+; Zero-terminated rather than '$'-terminated so that '$' can appear in
+; text, and so printing does not depend on the BDOS being reachable.
+;=======================================================================
+PSTR:   LD      A,(HL)
+        OR      A
+        RET     Z
+        CALL    COUT
+        INC     HL
+        JP      PSTR
+
+;=======================================================================
+; PHEX - print A as two hex digits.  Used for port addresses, which the
+; user needs to see in the same form the hardware documentation uses.
+;=======================================================================
+PHEX:   PUSH    AF
+        RRCA
+        RRCA
+        RRCA
+        RRCA
+        CALL    PHEXD
+        POP     AF
+        CALL    PHEXD
+        RET
+PHEXD:  AND     0FH
+        ADD     A,90H
+        DAA
+        ADC     A,40H
+        DAA
+        JP      COUT
+
+;=======================================================================
+; CCOL - emit a colour, preserving every register.
+;
+; Colour is governed by the ANSI/ASCII setting already in Settings, because
+; that setting means exactly the thing colour depends on: whether this
+; terminal understands escape sequences.  In ASCII mode this is a no-op, so
+; a printing terminal or a PETSCII console sees the same plain text it saw
+; before colour existed - nothing to find, nothing to go wrong.
+;
+; The sequences live in their own strings rather than inside the menu text,
+; so the menus stay measurable: the screen-fit test counts printable
+; columns, and an escape sequence buried in a line would count as width.
+;=======================================================================
+CLHEAD  EQU     0               ; headings and the title
+CLKEY   EQU     1               ; the key letter in a menu line
+CLLBL   EQU     2               ; a label, such as 'Port: '
+CLVAL   EQU     3               ; ...and the value after it
+CLHINT  EQU     4               ; the line that says which key to press
+CLRST   EQU     5               ; back to the terminal's own colours
+
+CCOL:   PUSH    AF
+        PUSH    HL
+        PUSH    DE
+        LD      E,A
+        LD      A,(FLTMOD)
+        OR      A
+        JP      NZ,CCOL1        ; ASCII mode: no colour at all
+        LD      A,E
+        ADD     A,A             ; two bytes per pointer
+        LD      E,A
+        LD      D,0
+        LD      HL,COLTBL
+        ADD     HL,DE
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL
+        CALL    PSTR
+CCOL1:  POP     DE
+        POP     HL
+        POP     AF
+        RET
+
+COLTBL: DW      ESCHD,ESCKY,ESCLB,ESCVL,ESCHT,ESCRS
+ESCHD:  DB      ESC,'[1;36m',0
+ESCKY:  DB      ESC,'[1;33m',0
+ESCLB:  DB      ESC,'[36m',0
+ESCVL:  DB      ESC,'[33m',0
+ESCHT:  DB      ESC,'[32m',0
+ESCRS:  DB      ESC,'[0m',0
+
+;=======================================================================
+; PSTRK - print a menu, colouring the key letters.
+;
+; Every menu line here has the same shape: two spaces, the key, two more
+; spaces, the text.  This walks the string and colours the key wherever it
+; finds that shape, so the menus stay single blocks of readable text in the
+; source instead of being chopped into coloured fragments - and a
+; continuation line (five leading spaces) is left alone, because its third
+; character is a space.
+;=======================================================================
+PSTRK:  LD      C,0             ; 0 = line start, 1 = one leading space,
+                                ; 2 = two (the next char may be a key),
+                                ; 3 = past that, print plainly
+PSTRK1: LD      A,(HL)
+        OR      A
+        RET     Z
+        INC     HL
+        CP      CR
+        JP      Z,PSTRKN
+        CP      LF
+        JP      Z,PSTRKN
+        LD      B,A             ; hold the character
+        LD      A,C
+        CP      2
+        JP      Z,PSTRKK        ; two leading spaces seen already
+        LD      A,B
+        CP      ' '
+        JP      NZ,PSTRK3
+        INC     C               ; another leading space
+        LD      A,B
+        CALL    COUT
+        JP      PSTRK1
+PSTRK3: LD      C,3
+        LD      A,B
+        CALL    COUT
+        JP      PSTRK1
+PSTRKK: LD      A,B
+        CP      ' '
+        JP      Z,PSTRK3        ; a third space: a continuation line
+        LD      A,(HL)          ; a key is followed by a space
+        CP      ' '
+        JP      NZ,PSTRK3
+        LD      A,CLKEY
+        CALL    CCOL
+        LD      A,B
+        CALL    COUT
+        LD      A,CLRST
+        CALL    CCOL
+        LD      C,3
+        JP      PSTRK1
+PSTRKN: LD      C,0
+        CALL    COUT            ; A still holds the CR or LF
+        JP      PSTRK1
+
+;=======================================================================
+; UPCASE - fold the character in A to upper case, so menus accept either.
+;=======================================================================
+UPCASE: CP      'a'
+        RET     C
+        CP      'z'+1
+        RET     NC
+        SUB     20H
+        RET
+
+
+;=======================================================================
+; PORT LAYER
+;
+; PORTST points the four port vectors at the driver for the selected kind.
+; It runs at startup and whenever the user changes the port, so the
+; vectors always agree with the settings block.  A driver is reached
+; through those vectors, so the terminal loop pays one CALL per byte no
+; matter how many families exist.
+;
+; PBASE means whatever the selected family needs: the status port for
+; SIO/2 and the ACIA, the unit number for HBIOS, the internal I/O base
+; for the Z180 ASCI (with the channel in PCHAN), and nothing at all for
+; the CP/M AUX device.
+;=======================================================================
+PORTST: CALL    PORTS1
+        JP      LSAUTO          ; re-apply the line settings, if any were
+                                ; asked for: that is what makes them a
+                                ; setting and not a one-off command
+PORTS1: LD      A,(PKIND)
+        CP      PKSIO
+        JP      Z,PSSIO
+        CP      PKACIA
+        JP      Z,PSACI
+        CP      PKHBIO
+        JP      Z,PSHB
+        CP      PKASCI
+        JP      Z,PSASC
+        CP      PKAUX
+        JP      Z,PSAUX
+        CP      PKS88
+        JP      Z,PSS88
+        LD      HL,PNULL        ; nothing selected: safe stubs
+        LD      DE,PNULL
+        JP      PSSET4
+PSSIO:  LD      HL,SIOST
+        LD      DE,SIOIN
+        CALL    PSSET2
+        LD      HL,SIOOST
+        LD      DE,SIOOUT
+        JP      PSSETO
+PSACI:  CALL    ACINIT          ; a 6850 needs programming before use
+        LD      HL,ACIST
+        LD      DE,ACIIN
+        CALL    PSSET2
+        LD      HL,ACIOST
+        LD      DE,ACIOUT
+        JP      PSSETO
+PSHB:   LD      HL,HBST
+        LD      DE,HBIN
+        CALL    PSSET2
+        LD      HL,HBOST
+        LD      DE,HBOUT
+        JP      PSSETO
+PSASC:  CALL    ASCPAT          ; patch the register addresses in place
+        LD      HL,ASCST
+        LD      DE,ASCIN
+        CALL    PSSET2
+        LD      HL,ASCOST
+        LD      DE,ASCOUT
+        JP      PSSETO
+PSS88:  LD      HL,S8ST
+        LD      DE,S8IN
+        CALL    PSSET2
+        LD      HL,S8OST
+        LD      DE,S8OUT
+        JP      PSSETO
+PSAUX:  XOR     A
+        LD      (AUXFLG),A      ; drop any byte held from a previous port
+        LD      HL,AUXST
+        LD      DE,AUXIN
+        CALL    PSSET2
+        LD      HL,AUXOST
+        LD      DE,AUXOUT
+        JP      PSSETO
+
+;-----------------------------------------------------------------------
+; PSSET2 - point the input pair (status in HL, read in DE) at a driver;
+; called twice, the second time for the output pair.  A tiny helper, but
+; it turns five nearly identical driver-selection blocks into two lines
+; each, which is the difference between adding a family being cheap and
+; being a copy-and-paste hazard.
+;-----------------------------------------------------------------------
+PSSET2: LD      (VPST+1),HL
+        EX      DE,HL           ; the 8080 has no LD (nn),DE, so XCHG and
+        LD      (VPIN+1),HL     ; store HL.  HL and DE are dead on return -
+        RET                     ; every caller reloads both pairs.
+PSSETO: LD      (VPOST+1),HL
+        EX      DE,HL
+        LD      (VPOUT+1),HL
+        RET
+PSSET4: LD      (VPST+1),HL     ; all four at once, for the null stubs
+        LD      (VPIN+1),HL
+        LD      (VPOST+1),HL
+        LD      (VPOUT+1),HL
+        RET
+
+;-----------------------------------------------------------------------
+; PNULL - the no-port-selected stub.  Reports "never ready, never sends"
+; rather than reading a port that may not exist: on real hardware an IN
+; from an unpopulated address returns floating bus noise, which would
+; look like incoming data.
+;-----------------------------------------------------------------------
+PNULL:  XOR     A
+        RET
+
+;-----------------------------------------------------------------------
+; Z80 SIO/2 driver.  PBASE holds the control/status port; data is the
+; next address up, which is how every RC2014-class SIO/2 board is wired.
+; RR0: bit 0 = receive character available, bit 2 = transmit buffer
+; empty.  B is cleared before IN A,(C) because the Z80 puts BC on the
+; address bus and stray high bits confuse partially-decoded boards.
+;-----------------------------------------------------------------------
+SIOST:  LD      A,(PBASE)
+        LD      (IOP1+1),A     ; no IN A,(C) on an 8080: the port
+IOP1:   IN      A,(0)           ; is patched into the operand above
+        AND     01H
+        RET
+SIOIN:  LD      A,(PBASE)
+        INC     A
+        LD      (IOP2+1),A     ; no IN A,(C) on an 8080: the port
+IOP2:   IN      A,(0)           ; is patched into the operand above
+        RET
+SIOOST: LD      A,(PBASE)
+        LD      (IOP3+1),A     ; no IN A,(C) on an 8080: the port
+IOP3:   IN      A,(0)           ; is patched into the operand above
+        AND     04H
+        RET
+SIOOUT: LD      E,A             ; hold the byte; A is needed for the port
+        LD      A,(PBASE)
+        INC     A
+        LD      (IOP4+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      A,E
+IOP4:   OUT     (0),A
+        RET
+
+;-----------------------------------------------------------------------
+; 6850 ACIA driver (Altair 88-2SIO, RC2014 ACIA boards, and many others).
+; PBASE holds the control/status port, data the next address up.  Status:
+; bit 0 = receive data register full, bit 1 = transmit data register
+; empty.
+;-----------------------------------------------------------------------
+ACIST:  LD      A,(PBASE)
+        LD      (IOP5+1),A     ; no IN A,(C) on an 8080: the port
+IOP5:   IN      A,(0)           ; is patched into the operand above
+        AND     01H
+        RET
+ACIIN:  LD      A,(PBASE)
+        INC     A
+        LD      (IOP6+1),A     ; no IN A,(C) on an 8080: the port
+IOP6:   IN      A,(0)           ; is patched into the operand above
+        RET
+ACIOST: LD      A,(PBASE)
+        LD      (IOP7+1),A     ; no IN A,(C) on an 8080: the port
+IOP7:   IN      A,(0)           ; is patched into the operand above
+        AND     02H
+        RET
+ACIOUT: LD      E,A             ; hold the byte; A is needed for the port
+        LD      A,(PBASE)
+        INC     A
+        LD      (IOP8+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      A,E
+IOP8:   OUT     (0),A
+        RET
+
+;-----------------------------------------------------------------------
+; Altair 88-SIO driver - the original MITS serial board, not the 88-2SIO.
+;
+; Same shape as the 6850 above, opposite sense: this board reports ready by
+; pulling a bit LOW.  Bit 0 clear means a character is waiting, bit 7 clear
+; means the transmitter will take one.  Altair software has always been
+; written to that convention (IN 0 / ANI 01 / JNZ wait), and it is why an
+; 88-SIO cannot be driven by an 88-2SIO build however the addresses are set:
+; every test comes out inverted, so the port looks permanently busy and
+; permanently empty at the same time.
+;
+; The masked bit is inverted here so the four vectors keep one contract -
+; non-zero means ready - and no caller has to know which board it is on.
+; There is nothing to initialise: the 88-SIO has no control register.
+;-----------------------------------------------------------------------
+S8ST:   LD      A,(PBASE)
+        LD      (IOP9+1),A     ; no IN A,(C) on an 8080: the port
+IOP9:   IN      A,(0)           ; is patched into the operand above
+        AND     01H             ; 0 = a character is waiting
+        XOR     01H             ; ...so invert: non-zero = ready
+        RET
+S8IN:   LD      A,(PBASE)
+        INC     A
+        LD      (IOP10+1),A     ; no IN A,(C) on an 8080: the port
+IOP10:  IN      A,(0)           ; is patched into the operand above
+        RET
+S8OST:  LD      A,(PBASE)
+        LD      (IOP11+1),A     ; no IN A,(C) on an 8080: the port
+IOP11:  IN      A,(0)           ; is patched into the operand above
+        AND     80H             ; 0 = the transmitter is free
+        XOR     80H
+        RET
+S8OUT:  LD      E,A             ; hold the byte; A is needed for the port
+        LD      A,(PBASE)
+        INC     A
+        LD      (IOP12+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      A,E
+IOP12:  OUT     (0),A
+        RET
+
+;-----------------------------------------------------------------------
+; ACINIT - a 6850 will not talk until it is programmed, and unlike the
+; SIO it forgets nothing gracefully: a master reset (03H) followed by
+; 8 data bits, no parity, 1 stop bit at the /16 clock divisor (15H).
+; Done when the port is selected rather than at startup, so choosing a
+; different family never writes to a chip the user did not pick.
+;-----------------------------------------------------------------------
+ACINIT: LD      A,(PBASE)
+        LD      (IOP13+1),A     ; one port, two writes: both operands are
+        LD      (IOP14+1),A     ; patched before either instruction runs
+        LD      A,03H           ; master reset
+IOP13:  OUT     (0),A
+        LD      A,15H           ; 8N1, /16 clock, receive interrupt off
+IOP14:  OUT     (0),A
+        RET
+
+;-----------------------------------------------------------------------
+; RomWBW HBIOS driver.  No port at all: the firmware moves the byte.  A
+; call is RST 8 with the function in B and the unit in C, and the result
+; comes back in A with the flags set from it - which is exactly the
+; convention the vectors here want, so the status calls need no masking.
+; PBASE holds the unit number.
+;
+; Only usable on a RomWBW machine (or the gateway's emulator with an
+; hbios profile); SCPHB checks for the RST 8 vector before selecting it,
+; because on a bare CP/M machine RST 8 lands in unused memory.
+;-----------------------------------------------------------------------
+HBST:   LD      B,02H           ; serial input status
+        LD      A,(PBASE)
+        LD      C,A
+        RST     8
+        OR      A               ; see HBERR below: negative is an error, not
+        JP      M,HBNONE        ; a count, and must not read as "data ready".
+        RET                     ; OR A sets S from bit 7, so no BIT is needed
+                                ; and A comes back untouched, as this returns
+HBNONE: XOR     A               ; report "nothing to read"
+        RET
+HBIN:   LD      B,00H           ; serial input (waits for a character)
+        LD      A,(PBASE)
+        LD      C,A
+        RST     8
+        LD      A,E             ; the byte arrives in E
+        RET
+HBOST:  LD      B,03H           ; serial output status
+        LD      A,(PBASE)
+        LD      C,A
+        RST     8
+        OR      A               ; bit 7 = error, not room.  S flag, as HBST
+        JP      M,HBFULL
+        RET
+HBFULL: XOR     A               ; report "no room": PSEND then bounds out and
+        RET                     ; the user gets the dead-port diagnosis
+
+;-----------------------------------------------------------------------
+; HBERR - why those two status calls check bit 7.
+;
+; The published API is explicit: for CIOIST and CIOOST, register A carries
+; a count *and* a status, and "negative values (bit 7 set) indicate a
+; standard HBIOS result (error) code".  A wrong unit number - easy to pick,
+; since the list offers four - therefore answers with bit 7 set.
+;
+; Under this program's vector contract, non-zero means ready.  So an error
+; used to read as "a character is waiting", the driver called CIOIN, and
+; the API says that call "will wait indefinitely" when nothing arrives.
+; The terminal loop never got back to the keyboard, so the menu key and ^C
+; were both dead and the machine needed a reset.  Reported from an SC126.
+;
+; Treating a negative result as "not ready" turns that hang into the
+; diagnosis this program already has: the transmitter never comes free,
+; PSEND gives up, and the wrong-port notice appears with ^C live.
+;-----------------------------------------------------------------------
+HBOUT:  LD      E,A             ; the byte goes out in E
+        LD      B,01H           ; serial output
+        LD      A,(PBASE)
+        LD      C,A
+        RST     8
+        RET
+
+
+;-----------------------------------------------------------------------
+; HBCNT - how many character units does HBIOS have?  Count in A, carry set
+; if there is no HBIOS to ask.
+;
+; SYSGET (0F8H) sub-function 00H, the published CIOCNT call: count in E.
+;-----------------------------------------------------------------------
+HBCNT:  LD      A,(0008H)
+        CP      0C3H            ; no RST 8 vector: not a RomWBW machine
+        JP      NZ,HBCNTN
+        LD      B,0F8H
+        LD      C,00H
+        RST     8
+        OR      A
+        JP      NZ,HBCNTN
+        LD      A,E             ; LD leaves the flags alone, so the carry
+        RET                     ; stays clear from the OR above
+HBCNTN: XOR     A
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; HBDEV - ask HBIOS to describe character unit A (CIODEVICE, 06H).
+;
+; Carry set if there is no HBIOS or it refuses the unit - which is how a
+; unit that does not exist answers, so a caller can list what is really
+; there instead of offering a fixed 0-3.  On success HBTYPE holds the
+; device type, and HBBASE / HBPHYS the base I/O address and physical
+; channel the firmware reports.
+;
+; The unit number travels through memory rather than a register because
+; RST 8 is someone else's code: nothing but the documented return
+; registers can be assumed to survive it.
+;-----------------------------------------------------------------------
+HBDEV:  LD      (HBUNIT),A
+        LD      A,(0008H)
+        CP      0C3H
+        JP      NZ,HBDEVN
+        LD      A,(HBUNIT)
+        LD      C,A
+        LD      B,06H
+        RST     8
+        OR      A
+        JP      NZ,HBDEVN
+        LD      A,D
+        LD      (HBTYPE),A
+        LD      A,E
+        LD      (HBPHYS),A
+        LD      A,L
+        LD      (HBBASE),A
+        OR      A               ; clears carry whatever A holds
+        RET
+HBDEVN: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; SHTYPE - print the device-type name HBIOS reported, from the published
+; list of character-device drivers.  An unknown type prints as a hex
+; number rather than a guess - the gateway's own virtual modem is one,
+; being no real chip at all.
+;-----------------------------------------------------------------------
+SHTYPE: LD      A,(HBTYPE)
+        CP      HBTMAX
+        JP      NC,SHTYPU
+        LD      E,A             ; five bytes per name: A*4 + A
+        ADD     A,A
+        ADD     A,A
+        ADD     A,E
+        LD      E,A
+        LD      D,0
+        LD      HL,HBTNAM
+        ADD     HL,DE
+        LD      B,5
+SHTYP1: LD      A,(HL)
+        CALL    COUT
+        INC     HL
+        DEC     B
+        JP      NZ,SHTYP1
+        RET
+SHTYPU: LD      A,'?'
+        CALL    COUT
+        LD      A,(HBTYPE)
+        CALL    PHEX
+        LD      A,' '
+        CALL    COUT
+        LD      A,' '
+        JP      COUT
+
+;-----------------------------------------------------------------------
+; Z180 ASCI driver (SC126 and other Z180 boards).
+;
+; The ASCI registers are Z180 *internal* I/O, reached with IN0/OUT0 -
+; instructions a Z80 assembler cannot encode, so they are laid down as
+; DB ED,38,port (IN0 A,(port)) and DB ED,39,port (OUT0 (port),A).  The
+; operand is an immediate byte, so ASCPAT writes the addresses into these
+; instructions when the port is selected: the same self-patching the
+; vectors use, one level down.  Every such instruction is labelled so the
+; patcher names what it is writing to rather than counting offsets.
+;
+; Register layout, relative to the internal I/O base (PABASE, 00H unless
+; the system has moved it) - channel 1 is the same +1:
+;
+;   CNTLA0 = base+0    STAT0 = base+4    TDR0 = base+6    RDR0 = base+8
+;
+; STAT: bit 7 RDRF, bit 6 OVRN, bit 5 PE, bit 4 FE, bit 1 TDRE.
+; CNTLA: bit 3 EFR - writing a 0 there resets the three error flags.
+;
+; Baud rate and framing are left alone by the *driver*: they live in CNTLA
+; and CNTLB, the system set them, and a terminal has no business re-timing
+; a port that is already working.  The only write to CNTLA here is the
+; error reset, and it is read-modify-write so nothing else changes.  Line
+; settings can be programmed deliberately from the Settings screen
+; (LSASCI), which is a different thing from a driver doing it behind the
+; user's back.
+;-----------------------------------------------------------------------
+ASCST:  DB      0EDH,38H
+ASCS1:  DB      00H             ; IN0 A,(STATn)  - operand patched
+        LD      E,A
+        AND     70H             ; OVRN, PE or FE latched?
+        JP      NZ,ASCERR
+        LD      A,E
+        AND     80H             ; RDRF
+        RET
+ASCIN:  DB      0EDH,38H
+ASCR1:  DB      00H             ; IN0 A,(RDRn)
+        RET
+ASCOST: DB      0EDH,38H
+ASCS2:  DB      00H             ; IN0 A,(STATn)
+        AND     02H             ; TDRE
+        RET
+ASCOUT: DB      0EDH,39H
+ASCT1:  DB      00H             ; OUT0 (TDRn),A
+        RET
+
+;-----------------------------------------------------------------------
+; ASCERR - a receive error is latched.  This matters more than it looks:
+; on the Z180 an overrun stops the receiver until the error is reset, so
+; a single burst of line noise would otherwise leave the port deaf for
+; the rest of the session with no indication of why.
+;
+; The byte that arrived with the error is discarded rather than handed up
+; - it is known bad, and a protocol is better served by a missing byte it
+; will ask for again than by a corrupt one it has to detect.  Then the
+; flags are reset and "nothing to read" is reported.
+;-----------------------------------------------------------------------
+ASCERR: LD      A,E
+        AND     80H             ; did a byte arrive with the error?
+        JP      Z,ASCER1
+        DB      0EDH,38H
+ASCR2:  DB      00H             ; IN0 A,(RDRn) - discard the suspect byte
+ASCER1: DB      0EDH,38H
+ASCC1:  DB      00H             ; IN0 A,(CNTLAn)
+        AND     0F7H            ; EFR = 0 resets OVRN/PE/FE
+        DB      0EDH,39H
+ASCC2:  DB      00H             ; OUT0 (CNTLAn),A
+        XOR     A               ; report: nothing readable this time
+        RET
+
+;-----------------------------------------------------------------------
+; ASCPAT - write the register addresses into the ASCI routines.  Every
+; patched operand in the family belongs here, the four line-settings ones
+; included; a routine that patches only its own is a routine that works
+; until someone selects channel 1.
+;-----------------------------------------------------------------------
+ASCPAT: LD      A,(PCHAN)
+        AND     01H             ; channel 0 or 1
+        LD      E,A
+        LD      A,(PABASE)      ; internal I/O base (00H unless moved)
+        ADD     A,E
+        LD      D,A             ; D = base + channel
+        LD      A,D
+        ADD     A,04H           ; STATn
+        LD      (ASCS1),A
+        LD      (ASCS2),A
+        LD      A,D
+        ADD     A,08H           ; RDRn
+        LD      (ASCR1),A
+        LD      (ASCR2),A
+        LD      A,D
+        ADD     A,06H           ; TDRn
+        LD      (ASCT1),A
+        LD      A,D             ; CNTLAn is the base itself
+        LD      (ASCC1),A
+        LD      (ASCC2),A
+        LD      (LSASA1),A      ; ...and the line-settings pair, which must be
+        LD      (LSASA2),A      ; patched here too: they are the same kind of
+        LD      A,D             ; self-modified operand, and left at 00H they
+        ADD     A,02H           ; would address channel 0 of an unmoved I/O
+        LD      (LSASB1),A      ; base whatever the user picked - writing
+        LD      (LSASB2),A      ; CNTLB's value into CNTLA, whose RE and TE
+        RET                     ; bits would then silence the port
+
+;-----------------------------------------------------------------------
+; ISZ180 - is this processor a Z180?  Carry set if it is not.
+;
+; The ASCI lives inside the CPU, so selecting it on a plain Z80 does not
+; just fail - IN0/OUT0 are undefined there, and the driver would read
+; whatever an undefined opcode leaves behind.  Better to know first.
+;
+; MLT is the convenient test: on a Z180, ED 4C multiplies B by C into BC;
+; on a Z80 that opcode is undefined and behaves as a two-byte no-op, so
+; BC comes back untouched.  2 x 2 = 4 separates the two with no side
+; effects on either.
+;-----------------------------------------------------------------------
+ISZ180: SCF                     ; an 8080 is never a Z180, and this must
+        RET                     ; not even ASK.  The Z80 build probes with
+                                ; MLT BC, laid down as DB 0EDH,4CH because
+                                ; no Z80 assembler encodes it - and on an
+                                ; 8080 that ED byte is an UNDOCUMENTED CALL,
+                                ; so the probe would not fail, it would jump
+                                ; into the weeds.  The bytes are gone rather
+                                ; than left unreachable.  Carry set is "not
+                                ; a Z180", which all three callers already
+                                ; know how to handle.
+
+;-----------------------------------------------------------------------
+; CP/M AUX device driver (BDOS functions 3 and 4).
+;
+; The portable fallback: no hardware knowledge at all, so it works
+; wherever the operating system has an AUX device - including the
+; gateway's emulator, where AUX is wired to the virtual modem.
+;
+; CP/M 2.2 has NO way to ask whether an AUX byte is waiting, which is the
+; catch.  The status call therefore READS one byte and holds it: the
+; gateway returns ^Z when nothing is waiting, so ^Z means "not ready" and
+; anything else is stashed for the next read.  That makes polling work
+; here at the price of not being able to receive a literal ^Z on this
+; family, and on real CP/M 2.2 hardware - where BDOS 3 blocks until a
+; byte arrives - the status call waits rather than returning.  Both are
+; consequences of the missing status call, not choices; use a hardware
+; family instead when one fits the machine.
+;-----------------------------------------------------------------------
+AUXST:  LD      A,(AUXFLG)      ; already holding one?
+        OR      A
+        RET     NZ
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        LD      C,03H           ; BDOS 3: AUX input
+        CALL    BDOS
+        POP     HL
+        POP     DE
+        POP     BC
+        CP      1AH             ; ^Z = nothing waiting
+        JP      Z,AUXST0
+        LD      (AUXHLD),A
+        LD      A,1
+        LD      (AUXFLG),A
+        RET                     ; A is non-zero: ready
+AUXST0: XOR     A
+        RET
+AUXIN:  CALL    AUXST           ; make sure a byte is held
+        XOR     A
+        LD      (AUXFLG),A
+        LD      A,(AUXHLD)
+        RET
+AUXOST: LD      A,1             ; the BDOS blocks for us: always ready
+        RET
+AUXOUT: PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        LD      E,A
+        LD      C,04H           ; BDOS 4: AUX output
+        CALL    BDOS
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+;-----------------------------------------------------------------------
+; Port vector call sites.
+;-----------------------------------------------------------------------
+; The port entry points save BC, DE and HL around the driver, exactly as
+; the console ones above do - and for a reason found the hard way.
+;
+; Four of the five drivers touch only A and BC, so callers got away with
+; holding a pointer in HL across a port call.  The other two do not: HBIOS
+; is an RST 8 into RomWBW's firmware, and CP/M AUX: is a BDOS call.
+; Neither promises to preserve anything beyond its documented returns, and
+; real RomWBW returns values in HL for several functions.
+;
+; Both XMODEM inner loops walk the buffer with HL across exactly these
+; calls.  The failure is quiet and total: on the send side the byte read
+; *and* the byte folded into the CRC both come from the wandering pointer,
+; so they agree, the receiver's check passes, and a file of exactly the
+; right length arrives full of whatever HL happened to point at - all
+; zeros, in the case reported.  On the receive side the bytes are stored
+; through the wandering pointer while the CRC is computed on the byte in
+; A, so again every block "passes" and the file is wrong.  Nothing
+; anywhere reports an error.
+;
+; It could not be reproduced in the gateway's emulator because our HBIOS
+; only sets the registers the API documents, so HL survived there.  A real
+; machine is under no such obligation.
+PST:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A               ; Z reflects "nothing to read"
+        RET
+PIN:    PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPIN
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+POST:   PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPOST
+        POP     HL
+        POP     DE
+        POP     BC
+        OR      A               ; Z reflects "transmitter busy"
+        RET
+POUT:   PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        CALL    VPOUT
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+;=======================================================================
+; PSEND - send the byte in A out the port, waiting for room.
+;
+; The wait is BOUNDED, and that matters more than it sounds.  If the user
+; has picked the wrong port, the transmitter is never ready - an absent
+; chip answers every read the same way forever - so an unbounded wait
+; hangs the program at the first keystroke, with the menu key dead
+; because the loop never gets back to reading the keyboard.  That is the
+; exact moment a user needs the menu, so instead the send gives up, sets
+; PDEAD, and terminal mode reports what happened and hands back control.
+;
+; The bound is deliberately generous - four passes of a 65536-poll loop,
+; several seconds on a 4 MHz Z80 - because a *working* port can legally
+; stall for a long time when hardware flow control is holding it off.
+; Diagnosing a dead port must not misfire on a slow peer.
+;
+; The counter lives in BC and is saved around the status call, because
+; the port drivers use BC for the I/O address.
+;=======================================================================
+PSEND:  PUSH    BC              ; BC is this routine's poll counter; callers
+        LD      (SENDCH),A      ; count block bytes in B, so hand it back
+        LD      A,4
+        LD      (PTRIES),A
+PSNDO:  LD      BC,0            ; 65536 polls per pass
+PSEND1: PUSH    BC
+        CALL    POST
+        POP     BC
+        JP      NZ,PSEND2
+        DEC     BC
+        LD      A,B
+        OR      C
+        JP      NZ,PSEND1
+        LD      A,(PTRIES)
+        DEC     A
+        LD      (PTRIES),A
+        JP      NZ,PSNDO
+        POP     BC
+        LD      A,1
+        LD      (PDEAD),A       ; transmitter never came free
+        RET
+PSEND2: LD      A,(SENDCH)
+        CALL    POUT            ; the driver clobbers BC, so restore AFTER it
+        POP     BC
+        RET
+
+;=======================================================================
+; MAIN MENU
+;=======================================================================
+MAINLP: CALL    SCMENU
+        CALL    CIN
+        CALL    UPCASE
+        CP      'T'
+        JP      Z,DOTERM
+        CP      'S'
+        JP      Z,DOSETT
+        CP      'U'
+        JP      Z,DOSEND
+        CP      'D'
+        JP      Z,DORECV
+        CP      'H'
+        JP      Z,DOHELP
+        CP      'V'
+        JP      Z,DOSAVE
+        CP      'X'
+        JP      Z,DOEXIT
+        LD      A,BEL           ; unknown key: a beep, no scolding
+        CALL    COUT
+        JP      MAINLP
+DOTERM: CALL    TERM
+        JP      MAINLP
+DOSETT: CALL    SCSETT
+        JP      MAINLP
+DOHELP: CALL    SCHELP
+        JP      MAINLP
+DOSAVE: CALL    SAVCFG
+        CALL    TWAIT           ; the menu redraw clears the screen, and
+        JP      MAINLP          ; whether it saved is worth reading
+DOSEND: CALL    XSEND
+        CALL    XSETL           ; leave nothing in flight for the next session
+        CALL    TWAIT
+        JP      MAINLP
+DORECV: CALL    XRECV
+        CALL    XSETL
+        CALL    TWAIT
+        JP      MAINLP
+DOEXIT: CALL    CRLF
+        CALL    XHUP            ; don't leave a call up behind us
+        LD      HL,MBYE
+        CALL    PSTR
+        LD      HL,MVERSE       ; the parting word, before CP/M takes the screen
+        CALL    PSTR
+        JP      WBOOT
+
+;=======================================================================
+; TERMINAL MODE
+;
+; The hot loop.  Port first, then console: incoming data is the side that
+; loses bytes if it is left waiting, while a human's keystroke can spare
+; the microseconds.
+;=======================================================================
+TERM:   LD      A,(PKIND)
+        OR      A
+        JP      NZ,TERM1
+        LD      HL,MNOPRT       ; refuse rather than read a dead port
+        CALL    PSTR
+        JP      TCWAIT          ; ...and they may already be typing
+TERM1:  CALL    SCTTL           ; the banner heads every session, so it is
+        CALL    CRLF            ; always clear which program you are talking
+        LD      HL,MTERM        ; to once the remote end fills the screen
+        CALL    PSTR
+        CALL    SHESC           ; name the menu key - a terminal you cannot
+        LD      HL,MTERM2       ; get out of is the worst kind
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MTERM3
+        CALL    PSTR
+        XOR     A
+        LD      (FSTATE),A      ; no half-finished escape sequence
+        LD      (ESTATE),A      ; on either stream
+        LD      (PDEAD),A       ; and no diagnosis pending
+TLOOP:  CALL    PST             ; anything from the port?
+        JP      Z,TL1
+        CALL    PIN
+        CALL    FILT            ; filter, then to the console
+TL1:    CALL    CST             ; anything from the keyboard?
+        JP      Z,TLOOP
+        CALL    CIN
+        LD      HL,ESCCH
+        CP      (HL)            ; the escape key?
+        JP      Z,TESC
+        CALL    TSEND
+        LD      A,(PDEAD)
+        OR      A
+        JP      NZ,TDEAD
+        JP      TLOOP
+
+;-----------------------------------------------------------------------
+; TDEAD - the port never accepted the byte.  Name the port, say what it
+; means, and leave terminal mode so the menu is reachable again.  This is
+; the failure every other terminal here presents as a silent hang.
+;-----------------------------------------------------------------------
+TDEAD:  CALL    CRLF
+        LD      HL,MDEAD
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MDEAD2
+        CALL    PSTR
+        JP      TCWAIT          ; the user is mid-sentence: only ^C leaves
+
+;-----------------------------------------------------------------------
+; TSEND - send a typed character, honouring local echo and CR handling.
+;-----------------------------------------------------------------------
+TSEND:  LD      (TYPECH),A
+        LD      A,(ECHOFL)
+        OR      A
+        JP      Z,TSEND1
+        LD      A,(TYPECH)
+        CALL    FILTE           ; echo through its own filter state
+TSEND1: LD      A,(TYPECH)
+        CALL    PSEND
+        LD      A,(TYPECH)
+        CP      CR
+        RET     NZ
+        LD      A,(CRLFFL)      ; append LF to a typed CR?
+        OR      A
+        RET     Z
+        LD      A,(ECHOFL)      ; if the echo is ours, echo the LF too -
+        OR      A               ; otherwise the local screen keeps
+        JP      Z,TSEND2        ; overwriting the same line
+        LD      A,LF
+        CALL    FILTE
+TSEND2: LD      A,LF
+        JP      PSEND
+
+;-----------------------------------------------------------------------
+; TESC - the escape key was pressed in terminal mode.
+;
+; One keystroke decides: leave, get help, move a file, or send the escape
+; character itself (pressing it twice), so the key is never trapped away from
+; the remote end.
+;
+; Settings is deliberately absent.  It was here, and it did not work: the
+; screen drew, but the keyboard was still feeding the session, so nothing
+; could be selected.  Transfers belong here - the point of this menu is to
+; fetch a file without dropping the call - while settings are a sit-down job
+; that `E` reaches properly, and leaving terminal mode does not hang up.
+;-----------------------------------------------------------------------
+TESC:   CALL    CRLF
+        LD      HL,MESCMN       ; name the key rather than say "twice"
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MESCM2
+        CALL    PSTR
+        CALL    SHESC
+        LD      HL,MESCM3
+        CALL    PSTR
+        CALL    CIN
+        CALL    UPCASE
+        LD      HL,ESCCH        ; escape twice: send it literally
+        CP      (HL)
+        JP      Z,TESCLI
+        CP      'E'
+        JP      Z,TESCEX
+        CP      'H'
+        JP      Z,TESCHL
+        CP      'U'
+        JP      Z,TESCU
+        CP      'D'
+        JP      Z,TESCD
+        CALL    CRLF            ; anything else: back to the session
+        JP      TLOOP
+TESCLI: LD      A,(ESCCH)
+        CALL    PSEND
+        JP      TLOOP
+TESCHL: CALL    SCHELP
+        JP      TLOOP
+; A transfer started from inside the session does NOT wait for a key: the
+; far end has its own "press any key" right behind ours, and two prompts in
+; a row from two different programs is exactly as confusing as it sounds.
+; The result line stays on screen - returning to the session clears nothing -
+; so nothing is lost by going straight back.
+TESCU:  CALL    XSEND           ; transfer without leaving the session
+        CALL    XSETL
+        CALL    XBACK
+        JP      TLOOP
+TESCD:  CALL    XRECV
+        CALL    XSETL
+        CALL    XBACK
+        JP      TLOOP
+
+;-----------------------------------------------------------------------
+; XBACK - say the transfer is over.  Does NOT wait for a key.
+;
+; Settling the line (XSETL) throws away whatever the far end said as the
+; transfer ended, because that burst is where a truncated escape sequence
+; would have come from - and a BBS says "press any key" in exactly that
+; burst.  So the screen went quiet with the result on it and nothing to
+; explain what to do next, which reads as a hang.
+;
+; One line, and no key.  Waiting here was worse: when the far end's own
+; prompt survives the settle, the user pays two keystrokes for one event -
+; the first appearing to do nothing but move the cursor down a line, which
+; is exactly how it was reported.  So this states where we are and lets the
+; far end own the keystroke it asked for.
+;-----------------------------------------------------------------------
+XBACK:  LD      HL,MXBACK
+        JP      PSTR
+TESCEX: CALL    CRLF
+        LD      HL,MTEXIT
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; TCWAIT - wait for Ctrl-C, swallowing everything else.
+;
+; For a message that appears while the user is TYPING rather than reading.
+; A wrong port stops the very first keystroke, but the rest of the
+; sentence is already on its way: with a "press any key" pause, one of
+; those characters dismisses the notice and the remainder land in the main
+; menu as commands - so the user's half-typed sentence gets *executed*.
+;
+; Only ^C leaves.  Every other byte is read and dropped, so a user who
+; keeps typing sees the notice stay put instead of watching their words
+; run a menu.
+;-----------------------------------------------------------------------
+TCWAIT: LD      HL,MCTRLC
+        CALL    PSTR
+TCWAI1: CALL    CIN
+        CP      03H             ; ^C
+        JP      NZ,TCWAI1       ; anything else: swallow it
+        CALL    CRLF
+        RET
+
+;-----------------------------------------------------------------------
+; TWAIT - "press a key" pause, for screens the user chose to read
+; (help, a finished transfer) where a stray keystroke costs nothing.
+;-----------------------------------------------------------------------
+TWAIT:  LD      HL,MKEY
+        CALL    PSTR
+        CALL    CIN
+        CALL    CRLF
+        RET
+
+;=======================================================================
+; FILT / FILTE - filter a byte to the console.  Byte in A.
+;
+; FILT  is the INBOUND path (bytes from the port).
+; FILTE is the LOCAL ECHO path (bytes the user just typed).
+;
+; They are the same code over SEPARATE state bytes, and that separation
+; matters: the state machine spans several bytes of an escape sequence, so
+; a single shared state would let a typed ESC swallow the next byte that
+; arrived from the port - two independent streams cannot share one
+; half-finished sequence.  HL carries the state byte's address through the
+; whole routine, which is why nothing here may clobber it.
+;
+; ANSI mode passes everything through, for a terminal that understands
+; escape sequences.  ASCII mode is for a printing terminal or a console
+; with no cursor addressing: the high bit is stripped (the classic
+; parity-bit strip, so 8-bit text reads as ASCII rather than as garbage),
+; CSI sequences are swallowed whole, DEL is dropped, and of the control
+; codes only CR, LF, TAB, BS and BEL - the ones that do useful work on any
+; terminal - are let through.
+;
+; State: 0 = normal, 1 = an ESC was seen, 2 = inside a CSI sequence.  The MODE
+; is tested before the state, and ANSI clears it: otherwise switching from
+; ASCII to ANSI part-way through a sequence would keep swallowing bytes on the
+; new setting until that sequence happened to finish.
+;=======================================================================
+FILT:   LD      HL,FSTATE       ; inbound stream's own state
+        JP      FILT0
+FILTE:  LD      HL,ESTATE       ; echo stream's own state
+FILT0:  LD      E,A             ; hold the byte
+        LD      A,(FLTMOD)
+        OR      A
+        JP      NZ,FASCII
+        LD      (HL),0          ; ANSI: no sequence state to carry
+        LD      A,E
+        JP      COUT            ; straight through
+FASCII: LD      A,(HL)          ; ASCII: mid-sequence?
+        OR      A
+        JP      NZ,FILT2
+        LD      A,E
+        AND     7FH             ; strip the high bit
+        LD      E,A
+        CP      ESC
+        JP      Z,FSESC
+        CP      DEL
+        RET     Z               ; DEL prints as litter: drop it
+        CP      20H
+        JP      NC,FPRIN        ; printable
+        CP      CR
+        JP      Z,FPRIN
+        CP      LF
+        JP      Z,FPRIN
+        CP      TAB
+        JP      Z,FPRIN
+        CP      BS
+        JP      Z,FPRIN
+        CP      BEL
+        JP      Z,FPRIN
+        RET                     ; other control code: drop it
+FPRIN:  JP      COUT
+FSESC:  LD      (HL),1
+        RET
+
+;-----------------------------------------------------------------------
+; FILT2 - mid-sequence.  After ESC, '[' opens a CSI (swallow until its
+; final byte, 40H-7EH); anything else is a two-character sequence, so it
+; and the ESC are both gone.
+;-----------------------------------------------------------------------
+FILT2:  DEC     A
+        JP      NZ,FCSI         ; state 2: already inside a CSI
+        LD      A,E
+        AND     7FH
+        CP      '['
+        JP      Z,FCSIST
+        LD      (HL),0          ; two-character escape: done
+        RET
+FCSIST: LD      (HL),2
+        RET
+FCSI:   LD      A,E
+        AND     7FH
+        CP      40H
+        RET     C               ; parameter byte: keep swallowing
+        CP      7FH
+        RET     NC
+        LD      (HL),0          ; final byte: sequence complete
+        RET
+
+
+
+;=======================================================================
+; XMODEM
+;
+; Plain XMODEM: 128-byte blocks, CRC-16 with the checksum fallback a
+; vintage peer may insist on.  One 128-byte buffer serves as both the
+; protocol block and the CP/M record, because they are the same size -
+; that is why XMODEM and CP/M fit together so neatly, and it is what
+; keeps the memory cost of transfers to a single buffer.
+;
+; The CRC is computed a bit at a time rather than from a 512-byte table.
+; A table would cost more memory than the whole transfer code and buy
+; nothing: at 9600 baud a byte takes a millisecond and the CRC of one
+; takes microseconds, so the wire is the limit, not the arithmetic.
+;
+; Both directions run from the menu with the connection already up, so
+; the usual sequence is: dial in terminal mode, tell the far end what you
+; want, then press U or D here.  Leaving terminal mode does not hang up.
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; XSEND - send a file (upload to the far end).
+;
+; The receiver drives the start: it sends 'C' for CRC mode or NAK for
+; checksum, repeatedly, and we answer whichever arrives.  That is the
+; protocol's one piece of negotiation, and honouring it is what makes a
+; transfer work against both a modern peer and a 1980s one.
+;-----------------------------------------------------------------------
+XSEND:  CALL    XREADY          ; is a port selected at all?
+        RET     C
+        CALL    RSTDMA          ; start from CP/M's own record buffer
+        LD      HL,MXSFIL
+        CALL    PSTR
+        CALL    XFNAME
+        RET     C
+        LD      DE,XFCB         ; must exist to be sent
+        LD      C,BOPEN
+        CALL    BDOS
+        INC     A
+        JP      NZ,XSEND1
+        LD      HL,MXNOFIL
+        CALL    PSTR
+        RET
+XSEND1: LD      A,XNOISE
+        LD      (XNCNT),A
+        LD      HL,MXWAIT
+        CALL    PSTR
+        ; No XPURGE here on purpose.  The receiver is already sending its
+        ; 'C' every few seconds, and a purge window on a slow machine can
+        ; be long enough to swallow each one as it arrives - the sender
+        ; would then wait out the whole negotiation with the answer in its
+        ; hand.  The handshake loop below tolerates noise instead.
+        LD      A,XRETRY
+        LD      (XCNT),A
+XSEND2: CALL    XCHKAB          ; waiting for the far end is the likeliest
+        JP      C,XUSER         ; moment to change your mind
+        LD      A,XLONG         ; wait for the receiver to ask
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      NC,XSEND3
+        LD      A,(XCNT)        ; nothing yet: keep waiting a while
+        DEC     A
+        LD      (XCNT),A
+        JP      NZ,XSEND2
+        JP      XFAIL
+XSEND3: CP      CRCC
+        JP      Z,XSENDC
+        CP      NAK
+        JP      Z,XSENDK
+        CP      CAN
+        JP      Z,XABORT
+        ; Noise.  Not an error: the far end usually prints something like
+        ; "start your transfer now" first, and every character of it
+        ; arrives here.  So it gets its own generous budget, kept apart
+        ; from the retry count - spending a retry per character of a
+        ; banner would fail the transfer before it began, which is
+        ; exactly what an earlier version of this did.
+        LD      A,(XNCNT)
+        DEC     A
+        LD      (XNCNT),A
+        JP      NZ,XSEND2
+        JP      XFAIL
+XSENDC: LD      A,1             ; CRC mode
+        JP      XSEND4
+XSENDK: XOR     A               ; checksum mode
+XSEND4: LD      (XCRCM),A
+        CALL    XPURGE          ; drop the far end's "start now" banner: from
+                                ; here on, anything arriving is protocol
+        LD      A,1
+        LD      (XBLK),A        ; XMODEM blocks start at 1
+        LD      HL,MXGO
+        CALL    PSTR
+
+;--- the per-record loop: read one CP/M record, send it, wait for ACK ---
+XSLOOP: CALL    XCHKAB          ; a keypress can stop this
+        JP      C,XUSER
+        LD      DE,XBUF
+        LD      C,BSETDMA
+        CALL    BDOS
+        LD      DE,XFCB
+        LD      C,BREADS
+        CALL    BDOS
+        OR      A
+        JP      NZ,XSDONE       ; no more records: end of file
+        LD      A,XRETRY
+        LD      (XCNT),A
+        LD      A,XNOISE        ; ...and a fresh junk budget, which the
+        LD      (XNCNT),A       ; receive side already does on progress (see
+                                ; XRRSET).  Without it the budget was spent
+                                ; once for the whole transfer, so a line that
+                                ; dribbled the odd stray byte between blocks
+                                ; could fail an upload on its 255th one with
+                                ; every block acknowledged.
+XSBLK:  CALL    XBLKSN          ; put the block on the wire
+XSWAIT: LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      C,XSBAD         ; silence: send the block again
+        CP      ACK
+        JP      Z,XSNEXT
+        CP      CAN
+        JP      Z,XABORT
+        CP      NAK
+        JP      Z,XSBAD         ; asked for it again
+        LD      A,(XNCNT)       ; anything else is noise: keep waiting for a
+        DEC     A               ; real answer instead of resending on it
+        LD      (XNCNT),A
+        JP      NZ,XSWAIT
+        JP      XFAIL
+XSBAD:  LD      A,'?'           ; resend this block
+        CALL    COUT
+        LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JP      NZ,XSBLK
+        JP      XFAIL
+XSNEXT: LD      A,'.'
+        CALL    COUT
+        LD      HL,XBLK
+        INC     (HL)            ; block numbers wrap at 256, as they must
+        JP      XSLOOP
+
+;--- end of file: EOT until acknowledged, then tidy up ---
+XSDONE: LD      A,XRETRY
+        LD      (XCNT),A
+XSEOT:  LD      A,EOT
+        CALL    PSEND
+        LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      C,XSEOT1
+        CP      ACK
+        JP      Z,XSOK
+XSEOT1: LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JP      NZ,XSEOT
+        JP      XFAIL
+XSOK:   LD      DE,XFCB
+        LD      C,BCLOSE
+        CALL    BDOS
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXSENT
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; XBLKSN - send the block in XBUF: header, 128 bytes, then the check.
+;-----------------------------------------------------------------------
+XBLKSN: LD      A,SOH
+        CALL    PSEND
+        LD      A,(XBLK)
+        CALL    PSEND
+        LD      A,(XBLK)
+        CPL                     ; the header carries the block number twice,
+        CALL    PSEND           ; the second time inverted
+        LD      HL,0            ; CRC accumulator
+        LD      (XCRC),HL
+        XOR     A
+        LD      (XSUM),A        ; checksum accumulator
+        LD      HL,XBUF
+        LD      B,128
+XBLKS1: LD      A,(HL)
+        CALL    PSEND
+        LD      A,(HL)
+        CALL    XACCUM          ; fold the byte into both checks
+        INC     HL
+        DEC     B
+        JP      NZ,XBLKS1
+        LD      A,(XCRCM)
+        OR      A
+        JP      Z,XBLKS2
+        LD      HL,(XCRC)       ; CRC-16, high byte first
+        LD      A,H
+        CALL    PSEND
+        LD      A,L
+        JP      PSEND
+XBLKS2: LD      A,(XSUM)
+        JP      PSEND
+
+;-----------------------------------------------------------------------
+; XRECV - receive a file (download from the far end).
+;
+; We drive the start here: 'C' every couple of seconds to ask for CRC
+; mode, and if the far end never answers, NAK for the rest of the
+; attempts - a peer too old to know CRC mode responds to that instead.
+;-----------------------------------------------------------------------
+XRECV:  CALL    XREADY
+        RET     C
+        CALL    RSTDMA          ; the directory search below uses the DMA
+        LD      HL,MXRFIL
+        CALL    PSTR
+        CALL    XFNAME
+        RET     C
+        LD      DE,XFCB         ; refuse to clobber silently
+        LD      C,BSEARF
+        CALL    BDOS
+        INC     A
+        JP      Z,XRECV1
+        LD      HL,MXEXIST
+        CALL    PSTR
+        CALL    CIN
+        CALL    UPCASE
+        CP      'Y'
+        JP      Z,XRECVD
+        CALL    CRLF
+        LD      HL,MXKEEP
+        CALL    PSTR
+        RET
+XRECVD: LD      DE,XFCB
+        LD      C,BDELET
+        CALL    BDOS
+XRECV1: LD      DE,XFCB
+        LD      C,BMAKE
+        CALL    BDOS
+        INC     A
+        JP      NZ,XRECV2
+        LD      HL,MXNOMK       ; directory full, or a bad name
+        CALL    PSTR
+        RET
+XRECV2: LD      A,1
+        LD      (XRXACT),A      ; from here a partial file exists on disk
+        LD      A,XNOISE
+        LD      (XNCNT),A
+        LD      A,1
+        LD      (XCRCM),A       ; ask for CRC mode first
+        LD      A,1
+        LD      (XBLK),A
+        LD      HL,MXGO
+        CALL    PSTR
+        CALL    XPURGE
+        LD      A,XRETRY+XRETRY ; 'C' attempts, then NAK attempts
+        LD      (XCNT),A
+
+;--- ask for a block, then take whatever arrives ---
+XRLOOP: LD      A,(XCRCM)
+        OR      A
+        LD      A,CRCC
+        JP      NZ,XRL1
+        LD      A,NAK
+XRL1:   CALL    PSEND
+XRWAIT: CALL    XCHKAB
+        JP      C,XUSER
+        LD      A,XLONG
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      NC,XRGOT
+        LD      A,(XCNT)        ; silence: ask again, and after half the
+        DEC     A               ; attempts stop asking for CRC mode
+        LD      (XCNT),A
+        JP      Z,XFAIL
+        CP      XRETRY
+        JP      NZ,XRLOOP
+        XOR     A
+        LD      (XCRCM),A       ; fall back to checksum
+        JP      XRLOOP
+XRGOT:  CP      SOH
+        JP      Z,XRBLK
+        CP      EOT
+        JP      Z,XRDONE
+        CP      CAN
+        JP      Z,XABORT
+        LD      A,(XNCNT)       ; noise: same generous, separate budget
+        DEC     A
+        LD      (XNCNT),A
+        JP      Z,XFAIL
+        JP      XRWAIT
+
+;--- a block header arrived: read it, check it, write it ---
+XRBLK:  LD      A,XSHORT        ; the rest of a block must arrive promptly
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      C,XRBAD
+        LD      (XGOTBL),A      ; block number as sent
+        CALL    XGETB
+        JP      C,XRBAD
+        LD      HL,XGOTBL       ; ...and its complement must agree
+        CPL
+        CP      (HL)
+        JP      NZ,XRBAD
+        LD      HL,0
+        LD      (XCRC),HL
+        XOR     A
+        LD      (XSUM),A
+        LD      HL,XBUF
+        LD      B,128
+XRB1:   CALL    XGETB
+        JP      C,XRBAD
+        LD      (HL),A
+        CALL    XACCUM
+        INC     HL
+        DEC     B
+        JP      NZ,XRB1
+        LD      A,(XCRCM)
+        OR      A
+        JP      Z,XRB2
+        CALL    XGETB           ; CRC-16: two bytes, high first
+        JP      C,XRBAD
+        LD      HL,(XCRC)
+        CP      H
+        JP      NZ,XRBAD
+        CALL    XGETB
+        JP      C,XRBAD
+        LD      HL,(XCRC)
+        CP      L
+        JP      NZ,XRBAD
+        JP      XRGOOD
+XRB2:   CALL    XGETB
+        JP      C,XRBAD
+        LD      HL,XSUM
+        CP      (HL)
+        JP      NZ,XRBAD
+
+;--- the block is sound: is it the one we expect? ---
+XRGOOD: LD      HL,XBLK
+        LD      A,(XGOTBL)
+        CP      (HL)
+        JP      Z,XRSAVE
+        ; Not the expected block.  If it is the PREVIOUS one, the sender
+        ; never saw our ACK and has resent it: acknowledge again and do
+        ; NOT write it a second time.  Anything else means the two ends
+        ; have lost step, which is a bad block.
+        ;
+        ; Note the register work: the comparison result has to survive
+        ; until the branch, so "expected minus one" is computed in A
+        ; rather than by DEC/CP/INC on the counter in memory - INC (HL)
+        ; sets the flags itself and would overwrite the very answer the
+        ; branch is waiting for.
+        LD      A,(HL)
+        DEC     A               ; the block before the one we want
+        LD      HL,XGOTBL
+        CP      (HL)
+        JP      NZ,XRBAD        ; a different block entirely: out of step
+        LD      A,ACK
+        CALL    PSEND
+        JP      XRRSET
+XRSAVE: LD      DE,XBUF
+        LD      C,BSETDMA
+        CALL    BDOS
+        LD      DE,XFCB
+        LD      C,BWRITS
+        CALL    BDOS
+        OR      A
+        JP      NZ,XRDISK       ; disk full: stop rather than lose data
+        LD      A,ACK
+        CALL    PSEND
+        LD      A,'.'
+        CALL    COUT
+        LD      HL,XBLK
+        INC     (HL)
+XRRSET: LD      A,XRETRY        ; progress: a fresh budget of retries
+        LD      (XCNT),A
+        LD      A,XNOISE        ; ...and of tolerance for junk
+        LD      (XNCNT),A
+        JP      XRWAIT
+
+;--- a bad block: drain the line, NAK, try again ---
+XRBAD:  LD      A,'?'
+        CALL    COUT
+        CALL    XPURGE
+        LD      A,(XCNT)
+        DEC     A
+        LD      (XCNT),A
+        JP      Z,XFAIL
+        LD      A,NAK
+        CALL    PSEND
+        JP      XRWAIT
+
+;--- EOT: acknowledge, close, done ---
+XRDONE: LD      A,ACK
+        CALL    PSEND
+        XOR     A
+        LD      (XRXACT),A      ; complete: it is a real file now
+        LD      DE,XFCB
+        LD      C,BCLOSE
+        CALL    BDOS
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXRECVD
+        CALL    PSTR
+        RET
+
+XRDISK: CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXDISK
+        CALL    PSTR
+        JP      XSCRAP           ; deleting it also gives the space back
+
+;-----------------------------------------------------------------------
+; XACCUM - fold the byte in A into both the CRC and the checksum, so the
+; block loops need not care which check mode is in force.
+;
+; CRC-16 with polynomial 1021H, one bit at a time: the byte goes into the
+; high half of the accumulator, then eight shifts, XORing the polynomial
+; back in whenever a 1 falls off the top.
+;-----------------------------------------------------------------------
+XACCUM: PUSH    BC              ; the block loops count 128 bytes in B and
+        PUSH    HL              ; walk the buffer with HL; this routine needs
+        LD      E,A             ; both, so it borrows and gives them back
+        LD      HL,XSUM
+        ADD     A,(HL)
+        LD      (HL),A          ; checksum: a plain 8-bit sum
+        LD      HL,(XCRC)
+        LD      A,H
+        XOR     E
+        LD      H,A
+        LD      B,8
+XACC1:  ADD     HL,HL
+        JP      NC,XACC2
+        LD      A,H
+        XOR     10H
+        LD      H,A
+        LD      A,L
+        XOR     21H
+        LD      L,A
+XACC2:  DEC     B
+        JP      NZ,XACC1
+        LD      (XCRC),HL
+        POP     HL
+        POP     BC
+        LD      A,E
+        RET
+
+;-----------------------------------------------------------------------
+; XGETB - wait for a byte from the port.  Byte in A, carry clear; carry
+; set if nothing came within (XTMO) passes of a 65536-poll loop.
+;
+; A poll loop is the only clock a CP/M program can count on - there is no
+; timer service in CP/M 2.2 - so the wait is measured in polls, which
+; makes it faster on a faster machine.  That is acceptable here: both
+; bounds are generous multiples of the time a byte actually takes, and the
+; retry counts do the real work of bounding a transfer.
+;-----------------------------------------------------------------------
+XGETB:  PUSH    BC              ; BC is this routine's poll counter, and the
+        LD      A,(XTMO)        ; block loops are counting in B - hand it back
+        LD      (XTMOC),A
+XGETB0: LD      BC,0
+XGETB1: PUSH    BC
+        CALL    PST
+        POP     BC
+        JP      NZ,XGETB2
+        DEC     BC
+        LD      A,B
+        OR      C
+        JP      NZ,XGETB1
+        LD      A,(XTMOC)
+        DEC     A
+        LD      (XTMOC),A
+        JP      NZ,XGETB0
+        POP     BC
+        SCF                     ; nothing arrived
+        RET
+XGETB2: CALL    PIN
+        POP     BC
+        OR      A               ; carry clear: a byte is in A
+        RET
+
+;-----------------------------------------------------------------------
+; XHUP - hang up on the way out, the only way a terminal can.
+;
+; There is no DTR line to drop here: the SIO and ACIA drivers do not touch
+; the modem-control bits, HBIOS does not expose them, and CP/M AUX: has no
+; notion of them.  So the modem has to be *asked*, which means the Hayes
+; escape - and the escape only counts if the line was idle before it.
+; Hence: settle, '+++', settle, ATH.
+;
+; The settle is a drain, not a busy-wait, so it doubles as tidying up
+; whatever the far end was still saying.  It runs four timeout passes
+; rather than one because the one-second guard has to be cleared on a fast
+; machine too: a poll loop that takes a second on a 4 MHz Z80 takes a
+; fifth of that on an 18 MHz Z180, and an escape sent too early is not an
+; escape - it is three plus signs typed at the far end.
+;
+; If there is no modem on the port at all - a null-modem cable to another
+; machine - the far end receives these characters as text.  That is the
+; price of not being able to tell, and it is smaller than walking away
+; from a live call: the gateway would hold the session open, and on a real
+; phone line it would hold the line.
+;-----------------------------------------------------------------------
+XHUP:   LD      A,(PKIND)
+        OR      A
+        RET     Z               ; no port selected: nothing to hang up
+        LD      HL,MHUP
+        CALL    PSTR
+        LD      A,4             ; the guard proper: long enough to clear one
+        CALL    XHGRD           ; second even on a fast machine
+        LD      A,'+'
+        CALL    PSEND
+        LD      A,'+'
+        CALL    PSEND
+        LD      A,'+'
+        CALL    PSEND
+        LD      A,1             ; just swallow the OK - the guard is already met
+        CALL    XHGRD
+        LD      A,'A'
+        CALL    PSEND
+        LD      A,'T'
+        CALL    PSEND
+        LD      A,'H'
+        CALL    PSEND
+        LD      A,CR
+        CALL    PSEND
+        LD      A,1             ; and the NO CARRIER
+        CALL    XHGRD
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; XHGRD - wait for the line to fall quiet, draining what arrives.
+;
+; A = how many timeout passes count as "quiet".  Returns when nothing has
+; arrived for that long, when the user presses ^C, or after three drains -
+; whichever comes first.  The bound matters: an exit path must terminate
+; whatever the far end does, and the first version waited for silence that
+; a talkative peer never provided, so "Hanging up..." was the last thing
+; the program ever printed.
+;-----------------------------------------------------------------------
+XHGRD:  LD      (XTMO),A        ; A = timeout passes per attempt
+        LD      A,3
+        LD      (XHCNT),A
+XHGRD1: CALL    XCHKAB          ; ^C, ESC or the menu key abandons the wait
+        RET     C
+        CALL    XGETB
+        RET     C               ; nothing came: the line is quiet, done
+        LD      A,(XHCNT)       ; something came - drain again, but a bounded
+        DEC     A               ; number of times.  This used to loop until
+        LD      (XHCNT),A       ; the line fell quiet, which is a promise the
+        JP      NZ,XHGRD1       ; far end need not keep: a talkative peer hung
+        RET                     ; the exit and the machine had to be reset.
+
+;-----------------------------------------------------------------------
+; XSETL - settle the line after a transfer, before the session resumes.
+;
+; The far end starts talking the moment the last block is acknowledged: a
+; BBS prints its own "press any key" and then redraws its menu.  This end
+; is meanwhile closing the file - a BDOS close is disk I/O - and printing
+; its result, and a polled UART holds exactly one byte.  Every byte that
+; arrives in that window is overwritten and lost, so what survives is a
+; fragment; an ESC [ 2 J whose first two bytes went missing arrives as the
+; text "2J", which prints as litter while the screen does not clear.  It
+; looks like a broken terminal and is nothing of the kind.
+;
+; So discard whatever is in flight until the line goes quiet, and clear any
+; half-seen escape sequence out of the filter, so the session resumes on a
+; boundary the far end will send whole.  This is what a terminal has to do
+; at the end of a transfer; the alternative is litter no setting can fix.
+;-----------------------------------------------------------------------
+XSETL:  CALL    XPURGE
+        XOR     A
+        LD      (FSTATE),A      ; no half-finished sequence on either
+        LD      (ESTATE),A      ; stream
+        RET
+
+;-----------------------------------------------------------------------
+; XPURGE - swallow whatever is still coming until the line goes quiet,
+; so a retry starts from a known state instead of half-way through the
+; block that just failed.
+;-----------------------------------------------------------------------
+XPURGE: LD      A,XSHORT
+        LD      (XTMO),A
+        CALL    XGETB
+        JP      NC,XPURGE
+        RET
+
+;-----------------------------------------------------------------------
+; XREADY - refuse a transfer when no port is selected, with the same
+; wording the terminal uses, rather than "transferring" into nothing.
+;-----------------------------------------------------------------------
+XREADY: LD      A,(PKIND)
+        OR      A
+        JP      Z,XRDY1
+        XOR     A               ; a fresh diagnosis for this transfer: the
+        LD      (PDEAD),A       ; flag may be left over from a past session
+        RET                     ; carry clear: good to go
+XRDY1: CALL   CRLF
+        LD      HL,MNOPRT
+        CALL    PSTR
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XCANC / XABORT / XFAIL - the ways a transfer ends badly.  Two CANs are
+; how XMODEM says "stop"; one can be line noise, which is why the
+; protocol asks for two and why we send two.
+;-----------------------------------------------------------------------
+XCANC:  LD      A,CAN
+        CALL    PSEND
+        LD      A,CAN
+        JP      PSEND
+
+;-----------------------------------------------------------------------
+; XSCRAP - throw away a partly received file.
+;
+; A download that stops early has written real records to a real file:
+; the directory entry exists and its contents are a prefix of the truth.
+; Leaving that on disk is the worst outcome, because it looks like a
+; file - the same silent-truncation trap the gateway's own Kermit
+; receiver refuses.  So an incomplete download is deleted, and the user
+; is told.  XRXACT marks the window in which an output file exists;
+; nothing is deleted outside it, so a failed *upload* never touches the
+; file it was reading.
+;-----------------------------------------------------------------------
+XSCRAP: LD      A,(XRXACT)
+        OR      A
+        RET     Z               ; no download in progress: nothing to undo
+        XOR     A
+        LD      (XRXACT),A
+        LD      DE,XFCB
+        LD      C,BDELET
+        CALL    BDOS
+        LD      HL,MXSCRAP
+        JP      PSTR
+XABORT: CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXCAN
+        CALL    PSTR
+        JP      XSCRAP
+XFAIL:  CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      A,(PDEAD)       ; did the PORT stop taking characters?
+        OR      A
+        JP      NZ,XFAILP
+        LD      HL,MXFAIL
+        CALL    PSTR
+        JP      XSCRAP
+XFAILP: LD      HL,MDEAD        ; then give the port diagnosis, not a vague
+        CALL    PSTR            ; "the other end stopped answering"
+        CALL    SHPORT
+        LD      HL,MDEAD2
+        CALL    PSTR
+        JP      XSCRAP
+
+;-----------------------------------------------------------------------
+; XCHKAB - has the user asked to stop?  Carry set if so.
+;
+; Checked once per block rather than per byte: a block is milliseconds of
+; work, and this way the cost is nothing while the transfer still answers
+; a keypress.  Without it, a transfer whose peer has walked away can only
+; be waited out through every retry - which is the one moment a person is
+; most likely to want out.
+;
+; ESC or the menu key stop it; any other key is swallowed, because a
+; stray keystroke during a transfer should not end it.
+;-----------------------------------------------------------------------
+XCHKAB: CALL    CST
+        RET     Z               ; nothing typed: carry clear
+        CALL    CIN
+        CP      03H             ; ^C - what a user reaches for to back out
+        JP      Z,XCHKA1
+        CP      ESC
+        JP      Z,XCHKA1
+        LD      HL,ESCCH
+        CP      (HL)
+        JP      Z,XCHKA1
+        XOR     A               ; some other key: ignore it
+        RET
+XCHKA1: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XUSER - the user stopped it.  Tell the far end with the protocol's own
+; cancel, then clean up exactly as a failure does.
+;-----------------------------------------------------------------------
+XUSER:  CALL    XCANC
+        CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MXUSER
+        CALL    PSTR
+        JP      XSCRAP
+
+;-----------------------------------------------------------------------
+; XFNAME - prompt for a filename and build an FCB from it.
+;
+; Accepts an optional drive letter (B:PROG.COM), folds to upper case, and
+; pads the name and type with spaces the way CP/M expects.  Carry set if
+; the user typed nothing, so RETURN always means "never mind".
+;
+; XFN4 checks B before reading, and that check is load-bearing.  BDOS 10
+; reports how many characters were typed but leaves the rest of the buffer
+; holding the PREVIOUS line, so reading one byte past the count reads the
+; last prompt's text.  A name longer than eight characters that ends in a
+; dot ("LONGFILENAME.") consumed its dot in the skip-to-the-dot loop and
+; arrived here with B at zero; the stale byte was then tested as the
+; separator, and if it happened to be a dot, B went 0 -> 0FFH and the type
+; field was filled from whatever the user typed last.  Demonstrated: typing
+; "ABCDEFGHIJKLM.TXT" and then "LONGFILENAME." opened LONGFILE.TXT - a file
+; the user never named.  Bounded (three bytes into an FCB field that is
+; three bytes long, so nothing was corrupted) but wrong, and on a download
+; it would have offered to overwrite the wrong file.
+;-----------------------------------------------------------------------
+XFNAME: LD      A,20            ; room for drive + 8.3 + slack
+        LD      (XLINE),A
+        LD      DE,XLINE
+        LD      C,BRDBUF
+        CALL    BDOS
+        CALL    CRLF
+        LD      A,(XLINE+1)     ; how many characters were typed
+        OR      A
+        JP      Z,XFNBAD        ; bare RETURN: never mind
+        LD      B,A
+        LD      HL,XLINE+2
+        ; ^C anywhere in the line cancels as well.  A user who has thought
+        ; better of a transfer reaches for ^C, not RETURN, and without this the
+        ; 03H is taken as part of a filename - opening some other file, or
+        ; creating one with a control character in its name.
+XFNCC:  LD      A,(HL)
+        CP      03H
+        JP      Z,XFNBAD
+        INC     HL
+        DEC     B
+        JP      NZ,XFNCC
+        LD      A,(XLINE+1)     ; rewind for the parse proper
+        LD      B,A
+        LD      HL,XLINE+2
+        XOR     A               ; clear the FCB: drive 0, spaces, no extent
+        LD      (XFCB),A
+        LD      DE,XFCB+1
+        LD      A,' '
+        LD      C,11
+XFN1:   LD      (DE),A
+        INC     DE
+        DEC     C
+        JP      NZ,XFN1
+        XOR     A
+        LD      (XFCB+12),A
+        LD      (XFCB+13),A
+        LD      (XFCB+14),A
+        LD      (XFCB+15),A
+        LD      (XFCB+32),A     ; current record
+        ; a drive letter?
+        LD      A,B
+        CP      2
+        JP      C,XFN2
+        LD      A,(XLINE+3)
+        CP      ':'
+        JP      NZ,XFN2
+        LD      A,(XLINE+2)
+        CALL    UPCASE
+        SUB     'A'-1           ; FCB drive is 1-based (1 = A:)
+        LD      (XFCB),A
+        INC     HL
+        INC     HL
+        DEC     B
+        DEC     B
+        ; name, up to 8 characters, then the type after a dot
+XFN2:   LD      DE,XFCB+1
+        LD      C,8
+XFN3:   LD      A,B
+        OR      A
+        JP      Z,XFNOK
+        LD      A,(HL)
+        CP      '.'
+        JP      Z,XFN4
+        CALL    XWILD           ; one file, named exactly
+        JP      C,XFNBAD
+        CALL    UPCASE
+        LD      (DE),A
+        INC     DE
+        INC     HL
+        DEC     B
+        DEC     C
+        JP      NZ,XFN3
+XFN3A:  LD      A,B             ; name full: skip to the dot
+        OR      A
+        JP      Z,XFNOK
+        LD      A,(HL)
+        INC     HL
+        DEC     B
+        CP      '.'
+        JP      NZ,XFN3A
+XFN4:   LD      A,B             ; nothing typed past the name?  Then the
+        OR      A               ; type is empty and there is no dot to step
+        JP      Z,XFNOK         ; over - see below
+        LD      A,(HL)          ; step over the dot itself
+        CP      '.'
+        JP      NZ,XFN5
+        INC     HL
+        DEC     B
+XFN5:   LD      DE,XFCB+9
+        LD      C,3
+XFN6:   LD      A,B
+        OR      A
+        JP      Z,XFNOK
+        LD      A,(HL)
+        CALL    XWILD
+        JP      C,XFNBAD
+        CALL    UPCASE
+        LD      (DE),A
+        INC     DE
+        INC     HL
+        DEC     B
+        DEC     C
+        JP      NZ,XFN6
+XFNOK:  LD      A,(XFCB+1)      ; a name of nothing but spaces is no name
+        CP      ' '
+        JP      Z,XFNBAD
+        XOR     A               ; carry clear: the FCB is ready
+        RET
+XFNBAD: CALL    CRLF
+        LD      HL,MXNONAM
+        CALL    PSTR
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XWILD - carry set if the character in A is a wildcard.
+;
+; XMODEM moves one file with no name of its own, so '*' and '?' have
+; nothing to match against: passed into an FCB they would open some
+; arbitrary file to send, or create a file literally called '?' on a
+; receive.  Refusing them is kinder than either.
+;-----------------------------------------------------------------------
+XWILD:  CP      '*'
+        JP      Z,XWILD1
+        CP      '?'
+        JP      Z,XWILD1
+        RET                     ; carry clear from CP with no match
+XWILD1: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; XDIRTS / XDIRTC - mark and clear "changed but not saved".
+;
+; Every setting takes effect the moment it is chosen, which is what makes
+; the menus feel right - but nothing is written to disk until V.  Without
+; a marker that is easy to misread as "my settings are not being saved",
+; so the menu says so plainly while a change is pending.
+;-----------------------------------------------------------------------
+XDIRTS: LD      A,1
+        LD      (XDIRTY),A
+        RET
+XDIRTC: XOR     A
+        LD      (XDIRTY),A
+        RET
+
+;=======================================================================
+; SETTINGS PERSISTENCE
+;
+; The settings live in a block inside this .COM, and saving them means
+; writing that part of the file back over itself.  No second file to
+; carry around, and a copy of EGT80.COM taken to another machine brings
+; its settings with it - the way period software did it.
+;
+; Only the ONE 128-byte record holding the block is rewritten, using
+; random-record write.  The record's contents are simply the memory it was
+; loaded from, so the DMA address is pointed straight at the aligned image
+; address and nothing has to be copied.
+;
+; CP/M never tells a program its own name, so the filename below is fixed:
+; if EGT80.COM has been renamed, or is not on the current drive, the save
+; is refused with a message rather than writing to something else.
+;=======================================================================
+SAVCFG: LD      DE,CFGFCB
+        LD      C,BOPEN
+        CALL    BDOS
+        INC     A               ; 0FFH = not found
+        JP      Z,SAVERR
+        LD      A,CFGREC        ; which record the block sits in
+        LD      (CFGFCB+33),A   ; random-record number, low byte
+        XOR     A
+        LD      (CFGFCB+34),A
+        LD      (CFGFCB+35),A
+        LD      DE,CFGADR       ; the aligned image address = the record
+        LD      C,BSETDMA
+        CALL    BDOS
+        LD      DE,CFGFCB
+        LD      C,BWRRAN
+        CALL    BDOS
+        OR      A
+        JP      NZ,SAVERR
+        LD      DE,CFGFCB
+        LD      C,BCLOSE
+        CALL    BDOS
+        CALL    RSTDMA
+        CALL    XDIRTC          ; what is on disk now matches what is in RAM
+        CALL    CRLF
+        LD      HL,MSAVED
+        CALL    PSTR
+        RET
+SAVERR: CALL    RSTDMA
+        CALL    CRLF
+        LD      HL,MSAVERR
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; RSTDMA - put the DMA address back where CP/M left it (0080H).  A
+; program that moves it and does not restore it leaves the next BDOS file
+; call writing into whatever it pointed at.
+;-----------------------------------------------------------------------
+RSTDMA: LD      DE,0080H
+        LD      C,BSETDMA
+        JP      BDOS
+
+;-----------------------------------------------------------------------
+; CFGCHK - validate the settings block at startup.
+;
+; The signature guards against a patch written by something else, and the
+; values are range-checked because a plausible-looking block with a
+; nonsense port kind would send PORTST somewhere it should not go.  Any
+; failure falls back to the defaults, so a damaged or hand-edited copy of
+; EGT80.COM still starts in a usable state instead of misbehaving.
+;-----------------------------------------------------------------------
+CFGCHK: LD      HL,CFGSIG
+        LD      DE,CFGREF
+        LD      B,8
+CFGCH1: LD      A,(DE)
+        CP      (HL)
+        JP      NZ,CFGBAD
+        INC     HL
+        INC     DE
+        DEC     B
+        JP      NZ,CFGCH1
+        LD      A,(PKIND)       ; a kind we actually have a driver for
+        CP      PKS88+1
+        JP      NC,CFGBAD
+        LD      A,(FLTMOD)      ; the flags are booleans
+        CP      2
+        JP      NC,CFGBAD
+        LD      A,(ECHOFL)
+        CP      2
+        JP      NC,CFGBAD
+        LD      A,(CRLFFL)
+        CP      2
+        JP      NC,CFGBAD
+        LD      A,(PABASE)      ; an ASCI base whose registers would run off
+        CP      0F0H            ; the end of the I/O space is not usable
+        JP      NC,CFGBAD
+        LD      A,(CLSMOD)      ; one of the three clear-screen dialects
+        CP      3
+        JP      NC,CFGBAD
+        LD      A,(LBAUD)       ; the line settings, each within its table
+        CP      RATEN
+        JP      NC,CFGBAD
+        LD      A,(LBITS)
+        CP      7
+        JP      C,CFGBAD
+        CP      9
+        JP      NC,CFGBAD
+        LD      A,(LPAR)
+        CP      3
+        JP      NC,CFGBAD
+        LD      A,(LSTOP)
+        OR      A
+        JP      Z,CFGBAD
+        CP      3
+        JP      NC,CFGBAD
+        LD      A,(LADIV)
+        CP      3
+        JP      NC,CFGBAD
+        LD      A,(LSAPP)
+        CP      2
+        JP      NC,CFGBAD
+        LD      A,(ESCCH)       ; a menu key that is not a usable control key
+        CALL    ESCOK           ; would trap that key for ever - and a letter
+        JP      C,CFGBAD        ; would swallow ordinary typing
+        RET
+CFGBAD: LD      HL,DEFBLK       ; one table, copied over the whole block
+        LD      DE,PKIND
+        LD      BC,DEFLEN
+CFGCPY: LD      A,(HL)          ; LDIR by hand: the 8080 has no block move,
+        LD      (DE),A          ; and DEC BC sets no flags, so the count is
+        INC     HL              ; tested with LD A,B / OR C
+        INC     DE
+        DEC     BC
+        LD      A,B
+        OR      C
+        JP      NZ,CFGCPY
+        CALL    CRLF
+        LD      HL,MCFGBAD
+        CALL    PSTR
+        JP      TWAIT           ; the menu clears the screen: make sure this
+                                ; is read before it goes
+
+;-----------------------------------------------------------------------
+; DEFBLK - the fallback settings, in the block's own field order.
+;
+; A table rather than a run of loads, because the run of loads shared one
+; accumulator between fields and that is a trap: the value left in A for one
+; field silently became the default for the next.  Both settings changed on
+; 2026-07-31 hit it - the ASCII display mode and the ADM-3A clear were each
+; about to be undone by an XOR A meant for a different field, and each needed
+; its own patch to survive a damaged block.  Copying a table cannot go wrong
+; that way, and a new setting added to the block above shows up here as a
+; missing byte rather than as a field that quietly keeps the wrong value.
+;
+; It matches the shipped defaults above in every field but one: PKIND is
+; PKNONE, because a block we have just rejected is no reason to believe any
+; particular port is present.  DEFLEN is computed, so the two cannot
+; disagree about length.
+;-----------------------------------------------------------------------
+DEFBLK: DB      PKNONE          ; PKIND  - nothing selected (see above)
+        DB      82H             ; PBASE  - SIO/2 board 1 channel B
+        DB      0               ; PCHAN  - ASCI channel 0
+        DB      0               ; PABASE - unmoved Z180 I/O base
+        DB      1               ; FLTMOD - ASCII (colour is opt-in)
+        DB      0               ; ECHOFL - the remote echoes
+        DB      0               ; CRLFFL - no LF added to a typed CR
+        DB      19H             ; ESCCH  - ^Y
+        DB      5               ; LBAUD  - 9600
+        DB      8               ; LBITS
+        DB      0               ; LPAR   - none
+        DB      1               ; LSTOP
+        DB      1               ; LADIV  - /16
+        DB      0               ; LSAPP  - never program the port
+        DB      0               ; CLSMOD - the ADM-3A ^Z clear
+DEFLEN  EQU     $-DEFBLK
+
+;-----------------------------------------------------------------------
+; ESCOK - is A a usable menu key?  Carry clear if it is.
+;
+; It has to be a control key: a letter would be swallowed the moment the
+; user typed it in terminal mode.  Four control keys are refused for
+; reasons of their own - ^C backs out of every screen here, CR and LF are
+; ordinary typing, TAB is wanted by full-screen software, and ESC begins
+; the arrow-key sequences, so it would fire on a cursor key.
+;-----------------------------------------------------------------------
+ESCOK:  OR      A
+        JP      Z,ESCNO         ; NUL is not a key anyone can press
+        CP      20H
+        JP      NC,ESCNO        ; not a control key at all
+        CP      03H
+        JP      Z,ESCNO
+        CP      TAB
+        JP      Z,ESCNO
+        CP      LF
+        JP      Z,ESCNO
+        CP      CR
+        JP      Z,ESCNO
+        CP      ESC
+        JP      Z,ESCNO
+        OR      A               ; A is known non-zero, so this only clears
+        RET                     ; carry - which a CP does NOT do: every CP
+                                ; above a control code leaves it set
+ESCNO:  SCF
+        RET
+
+;=======================================================================
+; SCREENS
+;=======================================================================
+
+;-----------------------------------------------------------------------
+; CLS - clear the screen, in whichever dialect this console understands.
+;
+; CP/M has no standard for this: the terminal is not the computer's, and
+; the BIOS offers nothing.  Period software therefore either asked or was
+; built per terminal.  EGT80 asks, and defaults to the ADM-3A's ^Z, which
+; is the widest answer - most CP/M-era terminals took it, and the gateway's
+; own terminal translation recognises it and re-renders the clear for
+; whatever is really connected, PETSCII C64 included.  A VT100 or a modern
+; emulator wants the ANSI form instead, and `off` is there for a printing
+; terminal, where clearing the screen means feeding paper.
+;-----------------------------------------------------------------------
+CLS:    LD      A,(CLSMOD)
+        OR      A
+        JP      NZ,CLSANS
+        LD      A,1AH           ; ADM-3A: clear screen and home the cursor
+        JP      COUT
+CLSANS: DEC     A
+        RET     NZ              ; 2 = off: leave the screen alone
+        LD      HL,MANSCL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; SCTTL - the title, on a freshly cleared screen.
+;
+; Plain text on purpose beyond the clear itself: the user may not have
+; told us yet whether this console understands ANSI, and a title screen
+; that sprays escape sequences at a dumb terminal is a poor first
+; impression.
+;-----------------------------------------------------------------------
+SCTTL:  CALL    CLS
+        CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
+        LD      HL,MTITLE
+        CALL    PSTR
+        LD      HL,MRULE
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        LD      HL,MVER
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; SCMENU - the main menu, with the current settings above it.
+;
+; The port and the filter mode are shown every time because they are the
+; two settings that decide whether the program appears to work at all.
+;-----------------------------------------------------------------------
+SCMENU: CALL    SCTTL           ; cleared screen + banner, every time round
+        CALL    CRLF
+        LD      A,CLLBL
+        CALL    CCOL
+        LD      HL,MPORT
+        CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
+        CALL    SHPORT
+        LD      A,CLLBL
+        CALL    CCOL
+        LD      HL,MMODE
+        CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
+        CALL    SHMODE
+        LD      A,CLLBL
+        CALL    CCOL
+        LD      HL,MMKEY        ; say how to get back before they go in
+        CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
+        CALL    SHESC
+        LD      A,CLLBL
+        CALL    CCOL
+        LD      HL,MMKEY2
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        CALL    CRLF
+        LD      HL,MMENU
+        CALL    PSTRK
+        LD      A,(XDIRTY)      ; say so while a change is only in memory
+        OR      A
+        RET     Z
+        LD      HL,MUNSAVE
+        CALL    PSTR
+        RET
+
+;-----------------------------------------------------------------------
+; SHPORT - describe the selected port in the words the board's own
+; documentation uses, followed by the actual addresses.
+;-----------------------------------------------------------------------
+SHPORT: LD      A,(PKIND)
+        CP      PKSIO
+        JP      Z,SHPSIO
+        CP      PKACIA
+        JP      Z,SHPACI
+        CP      PKHBIO
+        JP      Z,SHPHB
+        CP      PKASCI
+        JP      Z,SHPASC
+        CP      PKAUX
+        JP      Z,SHPAUX
+        CP      PKS88
+        JP      Z,SHPS88
+        LD      HL,MPNONE
+        CALL    PSTR
+        JP      CRLF
+SHPSIO: LD      HL,MPSIO
+        CALL    PSTR
+        JP      SHPADR
+SHPACI: LD      HL,MPACIA
+        CALL    PSTR
+        JP      SHPADR
+SHPHB:  LD      HL,MPHBIO
+        CALL    PSTR
+        LD      A,(PBASE)
+        ADD     A,'0'           ; the unit number, not an address
+        CALL    COUT
+        JP      CRLF
+SHPASC: LD      HL,MPASCI
+        CALL    PSTR
+        LD      A,(PCHAN)
+        ADD     A,'0'
+        CALL    COUT
+        LD      HL,MPBASE
+        CALL    PSTR
+        LD      A,(PABASE)
+        CALL    PHEX
+        JP      CRLF
+SHPS88: LD      HL,MPS88
+        CALL    PSTR
+        JP      SHPADR
+SHPAUX: LD      HL,MPAUX
+        CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHPADR - the shared "nn/nn" tail for the families that live at a pair
+; of I/O addresses, printed in the form the board's documentation uses.
+;-----------------------------------------------------------------------
+SHPADR: LD      A,(PBASE)
+        CALL    PHEX
+        LD      A,'/'
+        CALL    COUT
+        LD      A,(PBASE)
+        INC     A
+        CALL    PHEX
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHMODE - the filter mode, plus the two toggles that surprise people
+; when they are set the other way.
+;-----------------------------------------------------------------------
+SHMODE: LD      A,(FLTMOD)
+        OR      A
+        LD      HL,MMANSI
+        JP      Z,SHMOD1
+        LD      HL,MMASC
+SHMOD1: CALL    PSTR
+        LD      A,(ECHOFL)
+        OR      A
+        JP      Z,SHMOD2
+        LD      HL,MMECHO
+        CALL    PSTR
+SHMOD2: LD      A,(CRLFFL)
+        OR      A
+        JP      Z,SHMOD3
+        LD      HL,MMCRLF
+        CALL    PSTR
+SHMOD3: JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHESC - name the escape key as a caret pair, e.g. ^Y.
+;-----------------------------------------------------------------------
+SHESC:  LD      A,'^'
+        CALL    COUT
+        LD      A,(ESCCH)
+        ADD     A,40H           ; control code to its printable letter
+        JP      COUT
+
+
+;-----------------------------------------------------------------------
+; SCPORT - port selection, in two steps: the family, then which one.
+;
+; Families are listed with the machines they belong to rather than by
+; chip name alone, because the user knows what they are sitting at.  The
+; wrong choice produces silence rather than an error, so the help says so
+; and the menu names real machines.
+;-----------------------------------------------------------------------
+SCPORT: CALL    CLS
+        CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
+        LD      HL,MPTTL
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        LD      HL,MPNOW        ; what is in force right now
+        CALL    PSTR
+        CALL    SHPORT
+        CALL    CRLF
+        LD      A,(0008H)       ; two facts are knowable: is there firmware
+        CP      0C3H            ; to ask, and is this a Z180?  Say which key
+        LD      HL,MHINT1       ; follows from them, so nobody has to know a
+        JP      Z,SCPORH        ; chip name to get started
+        CALL    ISZ180
+        LD      HL,MHINT2
+        JP      NC,SCPORH
+        LD      HL,MHINT3
+SCPORH: LD      A,CLHINT
+        CALL    CCOL
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        LD      HL,MPORTS
+        CALL    PSTRK
+SCPOR1: CALL    CIN
+        CALL    UPCASE
+        CP      'D'
+        JP      Z,SCPDEF
+        CP      '1'
+        JP      Z,SCPDEF        ; the gateway's own emulated port
+        CP      '2'
+        JP      Z,SCPHB         ; the firmware, on any RomWBW machine
+        CP      '3'
+        JP      Z,SCPACI        ; Altair 88-2SIO (a 6850)
+        CP      '4'
+        JP      Z,SCP88         ; Altair 88-SIO (the original board)
+        CP      '5'
+        JP      Z,SCPOTH        ; anything else: chip, then address
+        CP      '6'
+        JP      Z,SCPAUX
+        CP      'N'
+        JP      Z,SCPONO
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPOR1
+SCPONO: XOR     A
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPOTH - "other hardware": which chip, and then where.
+;
+; This is the old top-level menu, one level down.  The chips are the answer
+; to a question only someone who knows their board can answer, and most
+; people do not need to: a RomWBW machine and an Altair are named on the
+; screen before this one.  What is left here is everything else - and for
+; those, naming the chip is exactly right, because the register layout is
+; what the driver has to know.
+;-----------------------------------------------------------------------
+SCPOTH: CALL    CLS
+        CALL    CRLF
+        LD      HL,MPOTHM
+        CALL    PSTRK
+SCPOT1: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JP      Z,SCPSIO
+        CP      '2'
+        JP      Z,SCPACI
+        CP      '3'
+        JP      Z,SCPASC
+        CP      '4'
+        JP      Z,SCP88
+        CP      'Q'
+        JP      Z,SCPORT        ; back to the machine list
+        CP      03H
+        JP      Z,SCPORT
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPOT1
+
+;-----------------------------------------------------------------------
+; SCPDEF - the default port: Z80 SIO/2 board 1 channel B, 82/83.
+;
+; This is the pairing that works with the Ethernet Gateway out of the box
+; (its own default virtual-modem port is the same one), so it is the answer
+; to "I changed something and now nothing connects".  It resets the whole
+; port group - kind, address, ASCI channel and I/O base - so no leftover
+; from another family can be left pointing somewhere odd.
+;-----------------------------------------------------------------------
+SCPDEF: LD      A,PKSIO
+        LD      (PKIND),A
+        LD      A,82H
+        LD      (PBASE),A
+        XOR     A
+        LD      (PCHAN),A
+        LD      (PABASE),A
+        CALL    CRLF
+        LD      HL,MPDEF
+        CALL    PSTR
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPSIO - Z80 SIO/2: four channels across two boards, or any address.
+;-----------------------------------------------------------------------
+SCPSIO: CALL    CLS
+        CALL    CRLF
+        LD      HL,MPSIOM
+        CALL    PSTRK
+SCPSI1: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JP      Z,SCPS80
+        CP      '2'
+        JP      Z,SCPS82
+        CP      '3'
+        JP      Z,SCPS84
+        CP      '4'
+        JP      Z,SCPS86
+        CP      'B'
+        JP      Z,SCPSBA
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPSI1
+SCPS80: LD      A,80H
+        JP      SCPSSE
+SCPS82: LD      A,82H
+        JP      SCPSSE
+SCPS84: LD      A,84H
+        JP      SCPSSE
+SCPS86: LD      A,86H
+        JP      SCPSSE
+SCPSBA: CALL    HEXASK          ; any address the board happens to use
+        RET     C               ; cancelled: leave the port alone
+SCPSSE: LD      (PBASE),A
+        LD      A,PKSIO
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPACI - 6850 ACIA: the two Altair 88-2SIO ports, or any address.
+;-----------------------------------------------------------------------
+SCPACI: CALL    CLS
+        CALL    CRLF
+        LD      HL,MPACIM
+        CALL    PSTRK
+SCPAC1: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JP      Z,SCPA10
+        CP      '2'
+        JP      Z,SCPA12
+        CP      'B'
+        JP      Z,SCPABA
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPAC1
+SCPA10: LD      A,10H
+        JP      SCPASE
+SCPA12: LD      A,12H
+        JP      SCPASE
+SCPABA: CALL    HEXASK
+        RET     C
+SCPASE: LD      (PBASE),A
+        LD      A,PKACIA
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCP88 - Altair 88-SIO: the standard pair, or any address.
+;
+; A separate item from the 88-2SIO because it is a different board with the
+; opposite status polarity - the addresses are not the only difference, and
+; picking the wrong one of the two is the mistake this menu exists to make
+; impossible.
+;-----------------------------------------------------------------------
+SCP88:  CALL    CLS
+        CALL    CRLF
+        LD      HL,MP88M
+        CALL    PSTRK
+SCP881: CALL    CIN
+        CALL    UPCASE
+        CP      '1'
+        JP      Z,SCP8800
+        CP      'B'
+        JP      Z,SCP88B
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCP881
+SCP8800: XOR    A               ; status 00, data 01
+        JP      SCP88S
+SCP88B: CALL    HEXASK
+        RET     C
+SCP88S: LD      (PBASE),A
+        LD      A,PKS88
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPHB - RomWBW HBIOS: a unit number, not an address.
+;
+; Checked before it is accepted: HBIOS is reached by RST 8, and on a
+; machine without it that instruction lands in unused memory and takes
+; the program with it.  A RomWBW system puts a JP there, so the absence
+; of one is a reliable "this is not a RomWBW machine" - far better to say
+; so than to hang on the first keystroke.
+;-----------------------------------------------------------------------
+SCPHB:  LD      A,(0008H)       ; the RST 8 vector
+        CP      0C3H            ; a JP instruction?
+        JP      Z,SCPHB1
+        CALL    CRLF
+        LD      HL,MNOHB
+        CALL    PSTR
+        JP      TWAIT           ; Settings clears on return: hold it here
+SCPHB1: CALL    CLS
+        CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
+        LD      HL,MHBUNM       ; heading, then one line per unit
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        CALL    HBCNT           ; how many units does the firmware have?
+        JP      NC,SCPHBC
+        LD      A,4             ; it would not say: offer the four we can pick
+SCPHBC: CP      5
+        JP      C,SCPHBD
+        LD      A,4             ; more than the menu can address
+SCPHBD: LD      (HBMAX),A
+        OR      A
+        JP      Z,SCPHBP        ; none at all: straight to the prompt
+        XOR     A
+        LD      (HBSCAN),A
+SCPHBL: LD      HL,MHBIND       ; '  n  '
+        CALL    PSTR
+        LD      A,(HBSCAN)
+        ADD     A,'0'
+        CALL    COUT
+        LD      A,' '
+        CALL    COUT
+        LD      A,' '
+        CALL    COUT
+        LD      A,(HBSCAN)
+        CALL    HBDEV           ; ask the firmware what this unit is
+        JP      C,SCPHBN
+        CALL    SHTYPE
+        LD      HL,MHBBAS
+        CALL    PSTR
+        LD      A,(HBBASE)
+        CALL    PHEX
+        CALL    CRLF
+        JP      SCPHBI
+SCPHBN: LD      HL,MHBNON       ; refused: not present on this machine
+        CALL    PSTR
+SCPHBI: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        LD      HL,HBMAX
+        CP      (HL)
+        JP      C,SCPHBL
+SCPHBP: LD      HL,MPHBM        ; the prompt itself
+        CALL    PSTR
+SCPHB2: CALL    CIN
+        CALL    UPCASE
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        SUB     '0'
+        LD      HL,HBMAX        ; only a unit the firmware listed
+        CP      (HL)
+        JP      C,SCPHBS
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPHB2
+SCPHBS: LD      (PBASE),A
+        LD      A,PKHBIO
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPASC - Z180 ASCI: a channel, and the internal I/O base if the system
+; has moved it (RomWBW does on some boards).
+;-----------------------------------------------------------------------
+SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
+        JP      NC,SCPASF
+        CALL    CRLF
+        LD      HL,MNOZ180
+        CALL    PSTR
+        JP      TWAIT           ; as above: read before the screen clears
+SCPASF: CALL    ASCAUT          ; let the firmware fill the base in, if it can
+; Deliberately does not clear: the base setters (R, C, B) print what they
+; found and then come back here, and a clear would wipe the answer before it
+; could be read.  The screen is short enough to redraw under it.
+SCPAS2: CALL    CRLF
+        LD      HL,MPASCM
+        CALL    PSTRK
+        LD      HL,MASCBAS      ; the base in force, so it is never a mystery
+        CALL    PSTR
+        LD      A,(PABASE)
+        CALL    PHEX
+        CALL    CRLF
+        LD      HL,MASCPR
+        CALL    PSTR
+SCPAS1: CALL    CIN
+        CALL    UPCASE
+        CP      '0'
+        JP      Z,SCPAS0
+        CP      '1'
+        JP      Z,SCPASA
+        CP      'C'
+        JP      Z,SCASC0
+        CP      'R'
+        JP      Z,SCASCR
+        CP      'B'
+        JP      Z,SCPASB
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCPAS1
+SCPAS0: XOR     A
+        JP      SCPASS
+SCPASA: LD      A,1
+        JP      SCPASS
+;-----------------------------------------------------------------------
+; SCASC0 - the base RomWBW uses on Small Computer Central boards.
+;
+; The Z180's serial registers are inside the CPU, and the whole internal
+; register block is relocatable - the ICR decides where it lands.  RomWBW
+; moves it to C0 on these boards, so a driver that pokes the registers
+; directly has to be told; the 00 this program defaults to addresses
+; nothing there, and the symptom is the family's usual silence.  It is
+; offered as a named choice because "C0" is knowledge about someone else's
+; firmware, not something a user should have to look up to type into a hex
+; prompt.  (Reaching the port through HBIOS instead avoids the question
+; entirely: the firmware knows where its own registers are.)
+;-----------------------------------------------------------------------
+SCASC0: LD      A,0C0H
+        LD      (PABASE),A
+        CALL    XDIRTS
+        CALL    CRLF
+        LD      HL,MASCC0
+        CALL    PSTR
+        LD      HL,MASCPIK      ; setting a base selects no port on its own
+        CALL    PSTR
+        JP      SCPAS2
+
+;-----------------------------------------------------------------------
+; ASCAUT - fill in the I/O base from RomWBW on the way into this menu.
+;
+; The base was a step the user had to know existed: pick the family, then
+; realise the registers are somewhere else, then find the right number.  On
+; a RomWBW machine none of that is necessary - the firmware will say - so it
+; is asked here and the answer used, silently, before the menu is drawn.
+; Nothing is reported because there is nothing to decide; the menu shows the
+; base in force, and R re-asks with an explanation if anyone wants to see it.
+;-----------------------------------------------------------------------
+ASCAUT: CALL    ASCFND          ; carry set: no HBIOS, or no ASCI unit listed
+        RET     C
+        LD      HL,PABASE
+        CP      (HL)
+        RET     Z               ; already right: leave the dirty flag alone
+        LD      (HL),A
+        JP      XDIRTS
+
+;-----------------------------------------------------------------------
+; ASCFND - scan the HBIOS character units for an ASCI one and return the
+; base of its register block in A.  Carry set if there is nothing to ask or
+; no ASCI unit among them.
+;
+; The base HBIOS reports belongs to a physical channel, and channel 1 sits
+; one address above channel 0 (RomWBW: ASCI1_BASE = Z180_BASE + 1), so the
+; channel it also reports is subtracted to recover the block base - the
+; number this program adds the channel back to when it addresses a
+; register.  Off by one there would put every register one byte out.
+;-----------------------------------------------------------------------
+ASCFND: XOR     A
+        LD      (HBSCAN),A
+ASCFN1: LD      A,(HBSCAN)
+        CALL    HBDEV
+        JP      C,ASCFN2
+        LD      A,(HBTYPE)
+        CP      01H             ; the published ASCI device type
+        JP      Z,ASCFN3
+ASCFN2: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4
+        JP      C,ASCFN1
+        SCF
+        RET
+ASCFN3: LD      A,(HBBASE)
+        LD      E,A
+        LD      A,(HBPHYS)
+        CP      E               ; a channel above its own base is nonsense
+        JP      Z,ASCFN4
+        JP      NC,ASCFN2
+ASCFN4: LD      A,E
+        LD      HL,HBPHYS
+        SUB     (HL)
+        CP      0F0H            ; base+9 must stay inside the I/O space
+        JP      NC,ASCFN2
+        OR      A               ; carry clear: A holds the block base
+        RET
+
+;-----------------------------------------------------------------------
+; ASCHBU - which HBIOS unit serves ASCI channel A?  Unit in A, carry set if
+; the firmware does not serve that channel (or is not there at all).
+;
+; Matching is on both the device type and the physical channel the firmware
+; reports, so channel 1 gets unit 1's port and not unit 0's console.
+;-----------------------------------------------------------------------
+ASCHBU: LD      (HBWANT),A
+        XOR     A
+        LD      (HBSCAN),A
+ASCHB1: LD      A,(HBSCAN)
+        CALL    HBDEV
+        JP      C,ASCHB2
+        LD      A,(HBTYPE)
+        CP      01H             ; the published ASCI device type
+        JP      NZ,ASCHB2
+        LD      A,(HBPHYS)
+        LD      HL,HBWANT
+        CP      (HL)            ; the channel the user asked for?
+        JP      Z,ASCHB3
+ASCHB2: LD      A,(HBSCAN)
+        INC     A
+        LD      (HBSCAN),A
+        CP      4
+        JP      C,ASCHB1
+        SCF
+        RET
+ASCHB3: LD      A,(HBSCAN)      ; carry clear: A is the unit to use
+        OR      A
+        RET
+
+;-----------------------------------------------------------------------
+; SCASCR - ask RomWBW where the ASCI registers are, rather than assume.
+;
+; C0 is right for most RomWBW Z180 platforms but not all - the N8, MK4 and
+; RPH configurations put the block at 40 - so guessing a constant is only
+; ever nearly right.  The firmware knows: CIODEVICE reports each unit's
+; device type and base address, so scan the units for an ASCI one and take
+; the base it names.
+;
+; The reported base belongs to that *physical channel*, and channel 1 sits
+; one address above channel 0 (RomWBW: ASCI1_BASE = Z180_BASE + 1), so the
+; channel number it also reports is subtracted to recover the block base -
+; which is what this program adds the channel to when it addresses a
+; register.  Getting that wrong would put every register one byte out.
+;-----------------------------------------------------------------------
+SCASCR: CALL    ASCFND
+        JP      C,SCASRN
+        LD      (PABASE),A
+        CALL    XDIRTS
+        CALL    CRLF
+        LD      HL,MASCGOT
+        CALL    PSTR
+        LD      A,(PABASE)
+        CALL    PHEX
+        CALL    CRLF
+        LD      HL,MASCPIK
+        CALL    PSTR
+        JP      SCPAS2
+SCASRN: CALL    CRLF            ; nothing to ask, or no ASCI unit listed
+        LD      HL,MASCNOR
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCPAS2
+SCPASB: CALL    HEXASK          ; internal I/O base
+        RET     C
+        CP      0F0H            ; base+9 must not run off the top of the
+        JP      NC,SCPASB       ; I/O space: ask again
+        LD      (PABASE),A
+        JP      SCPAS2          ; then still ask for the channel
+;-----------------------------------------------------------------------
+; SCPASS - a channel has been chosen.  Now decide *how* to reach it.
+;
+; On a RomWBW machine the firmware owns these ports: its build for an SC126
+; enables the ASCI driver with interrupts in mode 2, so an interrupt handler
+; is draining the receiver into RomWBW's own buffer continuously.  A program
+; that polls the same registers is not merely addressing them - it is racing
+; that handler, which reads the data register first.  The symptom is a few
+; random characters and no error, because the transmitter still accepts
+; bytes.  This is exactly why QTERM ships a separate RomWBW build.
+;
+; So when the firmware serves this channel, EGT80 reaches it the way QTERM's
+; RomWBW build does, through HBIOS, and says so.  Direct register access
+; stays for a Z180 whose ports the firmware is *not* driving - a plain
+; monitor, or a RomWBW built without the ASCI driver - where it is the only
+; way in.  Choosing between them is not something a user should have to
+; know, so it is not asked: the machine is asked instead.
+;-----------------------------------------------------------------------
+SCPASS: LD      (PCHAN),A
+        CALL    ASCHBU          ; does the firmware serve this channel?
+        JP      C,SCPASD
+        LD      (PBASE),A       ; yes: use it, as QTERMH1 does
+        LD      A,PKHBIO
+        LD      (PKIND),A
+        CALL    CRLF
+        LD      HL,MASCHB
+        CALL    PSTR
+        LD      A,(PBASE)
+        ADD     A,'0'
+        CALL    COUT
+        CALL    CRLF
+        LD      HL,MASCH2
+        CALL    PSTR
+        CALL    TWAIT
+        JP      PDONE
+SCPASD: LD      A,PKASCI        ; no firmware here: drive the chip ourselves
+        LD      (PKIND),A
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; SCPAUX - the CP/M AUX device: nothing to configure.
+;-----------------------------------------------------------------------
+SCPAUX: LD      A,PKAUX
+        LD      (PKIND),A
+        CALL    CRLF
+        LD      HL,MAUXW
+        CALL    PSTR
+        CALL    TWAIT           ; a caveat worth reading, not flashing past
+        JP      PDONE
+
+;-----------------------------------------------------------------------
+; PDONE - re-point the vectors at the new selection and show it.
+;-----------------------------------------------------------------------
+PDONE:  CALL    XDIRTS          ; the port changed but is not on disk yet
+        CALL    PORTST
+        CALL    CRLF
+        LD      HL,MPSET
+        CALL    PSTR
+        JP      SHPORT
+
+;-----------------------------------------------------------------------
+; HEXASK - read a two-digit hex byte.  Returns it in A, or carry set if
+; the user gave up (RETURN or a bad digit), so a mistake never leaves a
+; half-entered address behind.
+;-----------------------------------------------------------------------
+HEXASK: LD      HL,MHEXA
+        CALL    PSTR
+        CALL    HEXDIG
+        RET     C
+        ADD     A,A
+        ADD     A,A
+        ADD     A,A
+        ADD     A,A             ; high nibble
+        LD      (HEXACC),A
+        CALL    HEXDIG
+        RET     C
+        LD      HL,HEXACC
+        OR      (HL)
+        RET                     ; carry clear: A holds the byte
+
+;-----------------------------------------------------------------------
+; HEXDIG - read one hex digit, echo it, return its value in A.  Carry set
+; on anything that is not a hex digit.
+;-----------------------------------------------------------------------
+HEXDIG: CALL    CIN
+        CALL    UPCASE
+        CP      '0'
+        JP      C,HEXBAD
+        CP      '9'+1
+        JP      C,HEXNUM
+        CP      'A'
+        JP      C,HEXBAD
+        CP      'F'+1
+        JP      NC,HEXBAD
+        CALL    COUT
+        SUB     'A'-10
+        RET                     ; carry clear from SUB of a smaller value
+HEXNUM: CALL    COUT
+        SUB     '0'
+        RET
+HEXBAD: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; SCSETT - settings.  Each key toggles and the screen redraws, so the
+; effect of a keypress is always visible.
+;-----------------------------------------------------------------------
+SCSETT: CALL    CLS
+        CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
+        LD      HL,MSETT
+        CALL    PSTR
+        LD      A,CLVAL
+        CALL    CCOL
+        CALL    SHMODE
+        LD      HL,MSPORT       ; the port lives here now, so show it here
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MSKEY
+        CALL    PSTR
+        CALL    SHESC
+        CALL    CRLF            ; SHESC names the key and stops there
+        LD      HL,MSCLS
+        CALL    PSTR
+        CALL    SHCLS
+        LD      HL,MSETT2
+        CALL    PSTRK
+SCSET1: CALL    CIN
+        CALL    UPCASE
+        CP      'P'
+        JP      Z,DOSPRT
+        CP      'A'
+        JP      Z,TOGANS
+        CP      'E'
+        JP      Z,TOGECH
+        CP      'L'
+        JP      Z,TOGCRL
+        CP      'K'
+        JP      Z,CHGESC
+        CP      'B'
+        JP      Z,DOSLIN
+        CP      'C'
+        JP      Z,CYCCLS
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCSET1
+DOSPRT: CALL    SCPORT
+        JP      SCSETT          ; back to Settings, showing the new port
+DOSLIN: CALL    SCLINE
+        JP      SCSETT
+TOGANS: LD      HL,FLTMOD
+        CALL    TOGGLE
+        JP      SCSETT
+TOGECH: LD      HL,ECHOFL
+        CALL    TOGGLE
+        JP      SCSETT
+TOGCRL: LD      HL,CRLFFL
+        CALL    TOGGLE
+        JP      SCSETT
+TOGGLE: LD      A,(HL)
+        XOR     1
+        LD      (HL),A
+        JP      XDIRTS          ; a toggle is a change too
+
+;-----------------------------------------------------------------------
+; CHGESC - set the menu key to whichever control key the user presses.
+;
+; A cycle through three fixed choices was not enough: which key is free
+; depends on the remote system, not on us (^Y is WordStar's delete-line,
+; ^] is telnet's escape, ^\ is Kermit's, and something wants each of
+; them).  So the user presses the key they want and we take it, subject to
+; ESCOK, which refuses the handful that cannot work.  An unusable key is
+; explained rather than beeped at: "nothing happened" is indistinguishable
+; from a broken keyboard.
+;-----------------------------------------------------------------------
+CHGESC: CALL    CRLF
+        LD      HL,MESCAS
+        CALL    PSTR
+        CALL    CIN
+        CP      03H             ; ^C: changed my mind
+        JP      Z,SCSETT
+        CALL    ESCOK
+        JP      C,ESCREF
+        LD      (ESCCH),A
+        CALL    XDIRTS
+        JP      SCSETT          ; the redraw names the new key
+ESCREF: CALL    CRLF
+        LD      HL,MESCNO
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; CYCCLS - step the clear-screen dialect: ADM-3A ^Z, ANSI, off.
+;
+; A cycle rather than a submenu: there are only three answers, and the
+; effect shows on the very next redraw - which is the quickest way to find
+; the one a given terminal understands.
+;-----------------------------------------------------------------------
+CYCCLS: LD      A,(CLSMOD)
+        INC     A
+        CP      3
+        JP      C,CYCCL1
+        XOR     A
+CYCCL1: LD      (CLSMOD),A
+        CALL    XDIRTS
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; SHCLS - name the clear-screen dialect in force.
+;-----------------------------------------------------------------------
+SHCLS:  LD      A,(CLSMOD)
+        OR      A
+        LD      HL,MCLSZ
+        JP      Z,SHCLS1
+        DEC     A
+        LD      HL,MCLSAN
+        JP      Z,SHCLS1
+        LD      HL,MCLSOF
+SHCLS1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SCLINE - line settings: speed and framing.
+;
+; What a terminal can actually set depends entirely on the family, and
+; this screen says so rather than offering knobs that do nothing:
+;
+;   RomWBW HBIOS  a firmware call sets speed AND framing (CIOINIT).
+;   Z180 ASCI     the rate really is in the CPU's own registers.
+;   6850 ACIA     framing is in the control register; the rate is only
+;                 the board clock divided by 1, 16 or 64.
+;   Z80 SIO/2     nothing: the SIO has no baud generator at all.  The bit
+;                 rate comes from the board's clock or CTC, and the chip's
+;                 registers are write-only, so we cannot even read what
+;                 the ROM chose - reprogramming it would be a guess with a
+;                 dead port as the prize.
+;   CP/M AUX:     nothing: the operating system owns the port.
+;
+; And against the Ethernet Gateway's own virtual modem none of it applies
+; either way - a TCP connection has no bit rate.  Hence R: EGT80 programs
+; nothing at all unless asked, which is both the shipped state and the way
+; back from a setting that made a real port stop answering.
+;-----------------------------------------------------------------------
+SCLINE: CALL    CLS
+        CALL    CRLF
+        LD      A,CLHEAD
+        CALL    CCOL
+        LD      HL,MLINE
+        CALL    PSTR
+        LD      A,CLRST
+        CALL    CCOL
+        LD      HL,MSPORT
+        CALL    PSTR
+        CALL    SHPORT
+        LD      HL,MLRATE
+        CALL    PSTR
+        CALL    SHRATE
+        LD      HL,MLFMT
+        CALL    PSTR
+        CALL    SHFMT
+        CALL    SHAPP
+        LD      HL,MLINE2
+        CALL    PSTRK
+SCLIN1: CALL    CIN
+        CALL    UPCASE
+        CP      'B'
+        JP      Z,SCBAUD
+        CP      'D'
+        JP      Z,SCFMT
+        CP      'A'
+        JP      Z,SCLAPP
+        CP      'R'
+        JP      Z,SCLDEF
+        CP      'Q'
+        RET     Z
+        CP      03H             ; ^C backs out too
+        RET     Z
+        LD      A,BEL
+        CALL    COUT
+        JP      SCLIN1
+SCLAPP: CALL    LSAPLY          ; apply, and say what happened
+        CALL    TWAIT
+        JP      SCLINE
+SCLDEF: XOR     A
+        LD      (LSAPP),A       ; stop programming the port
+        LD      (LPAR),A
+        LD      A,5
+        LD      (LBAUD),A       ; 9600 8N1 as the displayed starting point
+        LD      A,8
+        LD      (LBITS),A
+        LD      A,1
+        LD      (LSTOP),A
+        LD      (LADIV),A
+        CALL    XDIRTS
+        CALL    CRLF
+        LD      HL,MLDEF
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCLINE
+
+;-----------------------------------------------------------------------
+; SHRATE - the speed, in the only terms that are true for this family.
+;-----------------------------------------------------------------------
+SHRATE: LD      A,(PKIND)
+        CP      PKSIO
+        JP      Z,SHRSIO
+        CP      PKS88
+        JP      Z,SHR88
+        CP      PKAUX
+        JP      Z,SHRAUX
+        CP      PKACIA
+        JP      Z,SHRACI
+        CP      PKNONE
+        JP      Z,SHRNON
+        CALL    PRATE           ; HBIOS and ASCI: a real number of bits/s
+        LD      A,(PKIND)
+        CP      PKASCI
+        JP      NZ,SHRAT1
+        LD      HL,MLASCLK      ; ...on the clock the table assumes
+        CALL    PSTR
+SHRAT1: JP      CRLF
+SHRSIO: LD      HL,MLRSIO
+        CALL    PSTR
+        JP      CRLF
+SHR88:  LD      HL,MLR88
+        CALL    PSTR
+        JP      CRLF
+SHRAUX: LD      HL,MLRAUX
+        CALL    PSTR
+        JP      CRLF
+SHRNON: LD      HL,MLRNON
+        CALL    PSTR
+        JP      CRLF
+SHRACI: LD      HL,MLRACI       ; a divider, not a rate: say divider
+        CALL    PSTR
+        LD      A,(LADIV)
+        OR      A
+        LD      HL,MLD1
+        JP      Z,SHRAC1
+        DEC     A
+        LD      HL,MLD16
+        JP      Z,SHRAC1
+        LD      HL,MLD64
+SHRAC1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; PRATE - print the selected rate from the table.
+;-----------------------------------------------------------------------
+PRATE:  LD      A,(LBAUD)
+        ADD     A,A             ; two bytes per pointer
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEPT
+        ADD     HL,DE
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; SHFMT - the framing, in words rather than a code.
+;-----------------------------------------------------------------------
+SHFMT:  LD      A,(LBITS)
+        ADD     A,'0'
+        CALL    COUT
+        LD      HL,MFDATA
+        CALL    PSTR
+        LD      A,(LPAR)
+        OR      A
+        LD      HL,MFPNO
+        JP      Z,SHFMT1
+        DEC     A
+        LD      HL,MFPEV
+        JP      Z,SHFMT1
+        LD      HL,MFPOD
+SHFMT1: CALL    PSTR
+        LD      A,(LSTOP)
+        ADD     A,'0'
+        CALL    COUT
+        LD      HL,MFSTOP
+        CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SHAPP - whether any of it is actually being written to the port.  This
+; is the line that answers "I set 9600 and nothing changed".
+;-----------------------------------------------------------------------
+SHAPP:  LD      A,(LSAPP)
+        OR      A
+        LD      HL,MLAPPN
+        JP      Z,SHAPP1
+        LD      HL,MLAPPY
+SHAPP1: CALL    PSTR
+        JP      CRLF
+
+;-----------------------------------------------------------------------
+; SCBAUD - pick the speed.  The list is the family's list: real rates
+; where the family has a rate to set, the three 6850 dividers where that
+; is all the chip has, and an explanation where there is nothing.
+;-----------------------------------------------------------------------
+SCBAUD: LD      A,(PKIND)
+        CP      PKACIA
+        JP      Z,SCBACI
+        CP      PKHBIO
+        JP      Z,SCBRAT
+        CP      PKASCI
+        JP      Z,SCBRAT
+        CALL    CRLF            ; SIO, AUX or nothing selected
+        LD      HL,MLNOSET
+        CALL    PSTR
+        CALL    TWAIT
+        JP      SCLINE
+SCBRAT: CALL    CLS
+        CALL    CRLF
+        LD      HL,MBAUDM
+        CALL    PSTRK
+SCBRA1: CALL    CIN
+        CALL    UPCASE
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        SUB     'A'
+        CP      RATEN           ; A..J, one per table entry
+        JP      NC,SCBRA2
+        LD      (LBAUD),A
+        CALL    XDIRTS
+        JP      SCLINE
+SCBRA2: LD      A,BEL
+        CALL    COUT
+        JP      SCBRA1
+SCBACI: CALL    CLS
+        CALL    CRLF
+        LD      HL,MACIDM
+        CALL    PSTRK
+SCBAC1: CALL    CIN
+        CALL    UPCASE
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        CP      '1'
+        JP      Z,SCBAC2
+        CP      '2'
+        JP      Z,SCBAC3
+        CP      '3'
+        JP      Z,SCBAC4
+        LD      A,BEL
+        CALL    COUT
+        JP      SCBAC1
+SCBAC2: XOR     A               ; /1
+        JP      SCBAC5
+SCBAC3: LD      A,1             ; /16
+        JP      SCBAC5
+SCBAC4: LD      A,2             ; /64
+SCBAC5: LD      (LADIV),A
+        CALL    XDIRTS
+        JP      SCLINE
+
+;-----------------------------------------------------------------------
+; SCFMT - data bits, parity and stop bits.  One key each, and the screen
+; redraws, so the current framing is always the thing on the screen.
+;-----------------------------------------------------------------------
+SCFMT:  CALL    CLS
+        CALL    CRLF
+        LD      HL,MFMTM
+        CALL    PSTR
+        CALL    SHFMT
+        LD      HL,MFMTM2
+        CALL    PSTRK
+SCFMT2: CALL    CIN
+        CALL    UPCASE
+        CP      '7'
+        JP      Z,SCFMT7
+        CP      '8'
+        JP      Z,SCFMT8
+        CP      'N'
+        JP      Z,SCFMTN
+        CP      'E'
+        JP      Z,SCFMTE
+        CP      'O'
+        JP      Z,SCFMTO
+        CP      '1'
+        JP      Z,SCFMS1
+        CP      '2'
+        JP      Z,SCFMS2
+        CP      'Q'
+        JP      Z,SCLINE
+        CP      03H
+        JP      Z,SCLINE
+        LD      A,BEL
+        CALL    COUT
+        JP      SCFMT2
+SCFMT7: LD      A,7
+        LD      (LBITS),A
+        JP      SCFMTD
+SCFMT8: LD      A,8
+        LD      (LBITS),A
+        JP      SCFMTD
+SCFMTN: XOR     A
+        LD      (LPAR),A
+        JP      SCFMTD
+SCFMTE: LD      A,1
+        LD      (LPAR),A
+        JP      SCFMTD
+SCFMTO: LD      A,2
+        LD      (LPAR),A
+        JP      SCFMTD
+SCFMS1: LD      A,1
+        LD      (LSTOP),A
+        JP      SCFMTD
+SCFMS2: LD      A,2
+        LD      (LSTOP),A
+SCFMTD: CALL    XDIRTS
+        JP      SCFMT
+
+;-----------------------------------------------------------------------
+; LSAUTO - apply the line settings if the user has asked for them to be
+; applied, silently.  Called from PORTST, so it runs at startup and again
+; whenever the port is re-selected - which is what makes this a setting
+; rather than a one-shot command.  Silent because at startup the menu is
+; about to clear the screen, and because a failure is visible on the Line
+; settings screen, which reports it properly when A is pressed there.
+;-----------------------------------------------------------------------
+LSAUTO: LD      A,(LSAPP)
+        OR      A
+        RET     Z
+        LD      A,1             ; ask LSAPP1 not to print
+        LD      (LSQUIT),A
+        CALL    LSAPP1
+        XOR     A
+        LD      (LSQUIT),A
+        RET
+
+;-----------------------------------------------------------------------
+; LSAPLY - apply now, from the Line settings screen, and report.  A
+; successful apply is also what turns programming on for good.
+;-----------------------------------------------------------------------
+LSAPLY: XOR     A
+        LD      (LSQUIT),A
+        CALL    LSAPP1
+        RET     C               ; it could not be done: leave LSAPP alone
+        LD      A,1
+        LD      (LSAPP),A
+        JP      XDIRTS
+
+;-----------------------------------------------------------------------
+; LSAPP1 - the apply itself, per family.  Carry set if nothing was done.
+;-----------------------------------------------------------------------
+LSAPP1: LD      A,(PKIND)
+        CP      PKHBIO
+        JP      Z,LSHB
+        CP      PKACIA
+        JP      Z,LSACIA
+        CP      PKASCI
+        JP      Z,LSASCI
+        LD      HL,MLNOSET      ; SIO, AUX, or nothing selected
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSMSG - print a message unless we were asked to be quiet.
+;-----------------------------------------------------------------------
+LSMSG:  LD      A,(LSQUIT)
+        OR      A
+        RET     NZ
+        PUSH    HL
+        CALL    CRLF
+        POP     HL
+        JP      PSTR
+
+;-----------------------------------------------------------------------
+; LSHB - RomWBW HBIOS: one firmware call sets speed and framing together.
+;
+; The line-characteristics word is the published HBIOS layout: bit 13 RTS,
+; bits 12-8 the baud code, bit 7 DTR, bit 4 even parity, bit 3 parity
+; enable, bit 2 two stop bits, bits 1-0 the data bits as 5-8 = 0-3.  RTS
+; and DTR are asserted rather than left clear, because clearing DTR on a
+; real modem drops the call - the one setting here that could hang up the
+; line it is being used on.
+;
+; The baud code is not a rate but an exponent pair: the published rule is
+; V = 75 * 2^X * 3^Y with the bits laid out YXXXX, which is why the table
+; jumps from 9 (38400) to 24 (57600) - 57600 is 75 * 2^8 * 3, so Y is set
+; and X restarts.  RATEHB holds the codes so the arithmetic is done once,
+; here, and not in the head of whoever reads this next.
+;-----------------------------------------------------------------------
+LSHB:   LD      A,(0008H)       ; a saved HBIOS setting can arrive on a
+        CP      0C3H            ; machine that has no RST 8 at all - and this
+        JP      NZ,LSHBNO       ; runs at startup, before the user asks for
+        LD      A,(LBAUD)       ; anything, so it must check for itself
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEHB
+        ADD     HL,DE
+        LD      A,(HL)
+        OR      20H             ; bit 13 of the word: RTS asserted
+        LD      D,A
+        CALL    LSFRAM          ; the framing bits, in A
+        OR      80H             ; bit 7: DTR asserted
+        LD      E,A
+        LD      A,(PBASE)
+        LD      C,A             ; the character unit
+        LD      B,04H           ; CIOINIT
+        RST     8
+        OR      A               ; 0 = OK, anything else is a refusal
+        JP      NZ,LSHBNO
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear: done
+        RET
+LSHBNO: LD      HL,MLHBNO
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSFRAM - the HBIOS framing bits for the current format, in A.
+;-----------------------------------------------------------------------
+LSFRAM: LD      A,(LBITS)
+        SUB     5               ; 5-8 data bits encode as 0-3
+        LD      E,A
+        LD      A,(LSTOP)
+        CP      2
+        JP      NZ,LSFRA1
+        LD      A,E
+        OR      04H             ; bit 2: two stop bits
+        LD      E,A
+LSFRA1: LD      A,(LPAR)
+        OR      A
+        JP      Z,LSFRA3        ; no parity: bits 4-3 stay clear
+        LD      A,E
+        OR      08H             ; bit 3: parity enabled
+        LD      E,A
+        LD      A,(LPAR)
+        CP      1
+        JP      NZ,LSFRA3       ; odd leaves bit 4 clear
+        LD      A,E
+        OR      10H             ; bit 4: even parity
+        LD      E,A
+LSFRA3: LD      A,E
+        RET
+
+;-----------------------------------------------------------------------
+; LSACIA - 6850 ACIA: master reset, then the control register.
+;
+; The 6850 does not offer every combination - its word-select field has
+; eight entries and 7 bits with no parity, or 8 bits with parity and two
+; stop bits, are not among them.  An unavailable combination is refused
+; and named rather than quietly turned into the nearest one, because a
+; framing mismatch shows up as garbage characters, which is exactly the
+; symptom the user came here to fix.
+;-----------------------------------------------------------------------
+LSACIA: CALL    LSAWRD          ; the word-select field, or carry set
+        JP      C,LSACNO
+        LD      E,A             ; hold it: bits 4-2 of the control byte
+        LD      A,(LADIV)       ; the divider is bits 1-0, same order
+        OR      E
+        LD      E,A
+        LD      A,(PBASE)
+        LD      (IOP15+1),A     ; as ACINIT: one port, two writes, both
+        LD      (IOP16+1),A     ; operands patched first
+        LD      A,03H           ; master reset first, as the data sheet
+IOP15:  OUT     (0),A           ; requires before a control write
+        LD      A,E
+IOP16:  OUT     (0),A
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear
+        RET
+LSACNO: LD      HL,MLACNO
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSAWRD - the 6850 word-select bits (already shifted into 4-2) for the
+; current format, or carry set if the chip has no such combination.
+;
+; The eight the chip does have, in its own order: 7E2 7O2 7E1 7O1 8N2
+; 8N1 8E1 8O1.
+;-----------------------------------------------------------------------
+LSAWRD: LD      A,(LBITS)
+        CP      8
+        JP      Z,LSAW8
+        LD      A,(LPAR)        ; 7 bits: parity is compulsory here
+        OR      A
+        JP      Z,LSAWNO
+        LD      A,(LSTOP)
+        CP      2
+        JP      Z,LSAW72
+        LD      A,(LPAR)        ; 7 bits, 1 stop
+        CP      1
+        LD      A,08H           ; 010 = 7E1
+        JP      Z,LSAWOK
+        LD      A,0CH           ; 011 = 7O1
+        JP      LSAWOK
+LSAW72: LD      A,(LPAR)        ; 7 bits, 2 stop
+        CP      1
+        LD      A,00H           ; 000 = 7E2
+        JP      Z,LSAWOK
+        LD      A,04H           ; 001 = 7O2
+        JP      LSAWOK
+LSAW8:  LD      A,(LPAR)
+        OR      A
+        JP      NZ,LSAW8P
+        LD      A,(LSTOP)       ; 8 bits, no parity: both stop counts exist
+        CP      2
+        LD      A,10H           ; 100 = 8N2
+        JP      Z,LSAWOK
+        LD      A,14H           ; 101 = 8N1
+        JP      LSAWOK
+LSAW8P: LD      A,(LSTOP)       ; 8 bits with parity: only 1 stop bit
+        CP      2
+        JP      Z,LSAWNO
+        LD      A,(LPAR)
+        CP      1
+        LD      A,18H           ; 110 = 8E1
+        JP      Z,LSAWOK
+        LD      A,1CH           ; 111 = 8O1
+LSAWOK: OR      A               ; carry clear, A holds the field
+        RET
+LSAWNO: SCF
+        RET
+
+;-----------------------------------------------------------------------
+; LSASCI - Z180 ASCI: the rate divider in CNTLB, the framing in CNTLA.
+;
+; Both are read-modify-write, because those registers hold bits that must
+; not be disturbed - CNTLA carries the receiver and transmitter enables,
+; and clearing either would silence the port we are configuring.  CNTLA
+; bit 3 is written as 0 on purpose: that resets the latched receive error
+; flags, which is harmless here and is what the error path does too.
+;
+; One caveat is in the silicon, not in this code: CNTLB bit 5 reads back
+; as the CTS input but writes the prescaler select, so it cannot be
+; preserved by a read - it is always taken from the table.
+;
+; The rate table assumes the 18.432 MHz crystal Z180 boards use precisely
+; because it divides to the standard rates (an SC126 has one).  On a
+; different clock every entry scales by the same ratio, and the screen
+; says so rather than printing a number that would be wrong.
+;
+; REASONED, NOT RUN: our emulator's Z80 core has no IN0/OUT0, so this
+; path cannot be exercised here - the same standing limitation as the rest
+; of the ASCI driver.
+;-----------------------------------------------------------------------
+LSASCI: CALL    ISZ180          ; likewise: never execute IN0/OUT0 on a
+        JP      C,LSASNO        ; processor that has no such instruction
+        CALL    ASCPAT          ; make sure the operands match the channel
+        LD      A,(LBAUD)
+        LD      E,A
+        LD      D,0
+        LD      HL,RATEAS
+        ADD     HL,DE
+        LD      A,(HL)
+        LD      E,A             ; E = PS, DR and SS bits for this rate
+        LD      A,(LPAR)
+        CP      2
+        JP      NZ,LSASC1
+        LD      A,E
+        OR      10H             ; CNTLB bit 4: odd parity
+        LD      E,A
+LSASC1: DB      0EDH,38H
+LSASB1: DB      00H             ; IN0 A,(CNTLBn) - operand patched
+        AND     0C0H            ; keep MPBT and MP; bit 5 must not be kept
+        OR      E
+        DB      0EDH,39H
+LSASB2: DB      00H             ; OUT0 (CNTLBn),A
+        LD      A,(LBITS)       ; CNTLA: MOD2 data bits, MOD1 parity,
+        CP      8               ; MOD0 stop bits
+        LD      E,0
+        JP      NZ,LSASC2
+        LD      E,04H           ; 8 data bits
+LSASC2: LD      A,(LPAR)
+        OR      A
+        JP      Z,LSASC3
+        LD      A,E
+        OR      02H             ; parity enabled
+        LD      E,A
+LSASC3: LD      A,(LSTOP)
+        CP      2
+        JP      NZ,LSASC4
+        LD      A,E
+        OR      01H             ; two stop bits
+        LD      E,A
+LSASC4: DB      0EDH,38H
+LSASA1: DB      00H             ; IN0 A,(CNTLAn)
+        AND     0F0H            ; keep MPE, RE, TE and RTS0; clear EFR
+        OR      E
+        DB      0EDH,39H
+LSASA2: DB      00H             ; OUT0 (CNTLAn),A
+        LD      HL,MLOK
+        CALL    LSMSG
+        OR      A               ; carry clear
+        RET
+LSASNO: LD      HL,MNOZ180
+        CALL    LSMSG
+        SCF
+        RET
+
+;-----------------------------------------------------------------------
+; Rate tables.  One row per entry, and the three columns must stay in
+; step: the label, the HBIOS baud code, and the Z180 CNTLB divider bits.
+;-----------------------------------------------------------------------
+RATEN   EQU     10              ; entries in each table below
+
+; Character-device driver names, five bytes each, indexed by the device
+; type HBIOS reports.  The order is the published one and must not be
+; rearranged; HBTMAX is one past the last entry.
+HBTNAM: DB      'UART ','ASCI ','TERM ','PRP  ','PPP  '
+        DB      'SIO  ','ACIA ','PIO  ','UF   ','DUART'
+        DB      'Z2U  ','LPT  ','ESPC ','ESPS ','SCON '
+        DB      'SSER ','EZ80U'
+HBTMAX  EQU     17
+
+RATEPT: DW      MR300,MR600,MR1200,MR2400,MR4800
+        DW      MR9600,MR19K,MR38K,MR57K,MR115K
+RATEHB: DB      2,3,4,5,6,7,8,9,24,25
+RATEAS: DB      2DH,2CH,2BH,2AH,29H,28H,21H,20H,01H,00H
+
+;-----------------------------------------------------------------------
+; SCHELP - help.  The port choice is the one thing that decides whether
+; this program works, so the help says so plainly and in the same terms
+; the hardware documentation uses.
+;-----------------------------------------------------------------------
+SCHELP: CALL    CLS
+        LD      HL,MHELP
+        CALL    PSTR
+        CALL    TWAIT
+        CALL    CLS             ; a page per screen: pages 2 and 3 used to
+        LD      HL,MHELP2       ; scroll on below page 1, so on a 24-row
+        CALL    PSTR            ; terminal the top of each was already gone
+        CALL    TWAIT
+        CALL    CLS
+        LD      HL,MHELP3
+        CALL    PSTR
+        JP      TWAIT
+
+;=======================================================================
+; TEXT
+;
+; All user-visible text lives here.  In a program this size the strings
+; are the largest single part, so keeping them together makes that cost
+; visible and the wording easy to review.
+;=======================================================================
+MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
+MRULE:  DB      '-------------------------',CR,LF,0
+MVER:   DB      'EGT8080 v0.7  CP/M 2.2 / CP/M 3  8080',CR,LF,0
+
+MPORT:  DB      'Port: ',0
+MMKEY:  DB      'Keys: ',0
+MMKEY2: DB      ' leaves terminal mode for the menu; then E',CR,LF
+        DB      '      returns here.',CR,LF,0
+MMODE:  DB      'Mode: ',0
+MPNONE: DB      'none selected - press S then P',0
+MPSIO:  DB      'Z80 SIO/2 at ',0
+MPACIA: DB      '6850 ACIA at ',0
+MPHBIO: DB      'RomWBW HBIOS unit ',0
+MPASCI: DB      'Z180 ASCI channel ',0
+MPBASE: DB      ', I/O base ',0
+MPAUX:  DB      'CP/M AUX: device (BDOS 3/4)',0
+MPS88:  DB      'Altair 88-SIO at ',0
+MMANSI: DB      'ANSI (pass escape sequences)',0
+MMASC:  DB      'ASCII (strip escape sequences)',0
+MMECHO: DB      ' +echo',0
+MMCRLF: DB      ' +CR/LF',0
+
+MMENU:  DB      CR,LF
+        DB      '  T  Terminal mode',CR,LF
+        DB      '  S  Settings  (serial port, line, display)',CR,LF
+        DB      '  U  Upload a file   (XMODEM, to the far end)',CR,LF
+        DB      '  D  Download a file (XMODEM, from the far end)',CR,LF
+        DB      '  H  Help',CR,LF
+        DB      '  V  Save settings into EGT8080.COM',CR,LF
+        DB      '  X  Exit to CP/M',CR,LF
+        DB      CR,LF,'Choice: ',0
+
+MPORTS: DB      CR,LF
+        DB      '  1  Ethernet Gateway  - its own emulated port, 82/83',CR,LF
+        DB      '  2  RomWBW firmware   - any RomWBW machine',CR,LF
+        DB      '  3  Altair 88-2SIO    - 6850 ACIA at 10/11 or 12/13',CR,LF
+        DB      '  4  Altair 88-SIO     - the original MITS board, 00/01',CR,LF
+        DB      '  5  Other hardware    - the chip, then the address',CR,LF
+        DB      '  6  CP/M AUX: device  - portable, see Help',CR,LF,CR,LF
+        DB      '  D  Default - the same as 1, and clears the rest',CR,LF
+        DB      '  N  None      Q  Leave unchanged  (^C backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MPOTHM: DB      'Other hardware',CR,LF
+        DB      '--------------',CR,LF
+        DB      'Which serial chip does this machine use?',CR,LF,CR,LF
+        DB      '  1  Z80 SIO/2   - RC2014 and most Z80 boards',CR,LF
+        DB      '  2  6850 ACIA   - RC2014 ACIA, Altair 88-2SIO',CR,LF
+        DB      '  3  Z180 ASCI   - the ports inside a Z180 CPU',CR,LF
+        DB      '  4  Altair 88-SIO - the original MITS board',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MP88M:  DB      'Altair 88-SIO - which address?',CR,LF
+        DB      '------------------------------',CR,LF
+        DB      '  1  the standard pair - status 00, data 01',CR,LF
+        DB      '  B  some other address',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MHINT1: DB      'This machine has RomWBW - press 2.',CR,LF,0
+MHINT2: DB      'This is a Z180 without RomWBW - press 5, then 3.',CR,LF,0
+MHINT3: DB      'Running under the gateway? Press 1.  Otherwise 3 or',CR,LF
+        DB      '4 for an Altair, or 5 to name your chip.',CR,LF,0
+MPDEF:  DB      'Set to the gateway port: Z80 SIO/2 at 82/83.',CR,LF,0
+MPTTL:  DB      'Select serial port',CR,LF
+        DB      '------------------',CR,LF,0
+MPNOW:  DB      'Now: ',0
+MPSIOM: DB      'Z80 SIO/2 channel',CR,LF
+        DB      '  1  board 1 channel A - 80/81',CR,LF
+        DB      '  2  board 1 channel B - 82/83  (usual AUX: port)',CR,LF
+        DB      '  3  board 2 channel A - 84/85',CR,LF
+        DB      '  4  board 2 channel B - 86/87',CR,LF
+        DB      '  B  some other address',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MPACIM: DB      '6850 ACIA - which port?',CR,LF
+        DB      '-----------------------',CR,LF
+        DB      '  1  Altair 88-2SIO port 1 - 10/11',CR,LF
+        DB      '  2  Altair 88-2SIO port 2 - 12/13',CR,LF
+        DB      '  B  some other address',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MPHBM:  DB      CR,LF,'Which unit, or Q to go back: ',0
+MNOHB:  DB      'This machine has no RST 8 vector, so it is not',CR,LF
+        DB      'running RomWBW - HBIOS is not available here.',CR,LF
+        DB      'Pick the chip your board uses instead.',CR,LF,0
+MNOZ180: DB     'This processor is not a Z180, so it has no ASCI',CR,LF
+        DB      'ports.  Pick the serial chip your board uses.',CR,LF,0
+MPASCM: DB      'Z180 ASCI channel',CR,LF
+        DB      'Pick a channel: nothing is selected until you do.',CR,LF
+        DB      '  0  channel 0  (ASCI0 - usually the console)',CR,LF
+        DB      '  1  channel 1  (ASCI1 - the second port)',CR,LF
+        DB      '  R  re-read the I/O base from RomWBW',CR,LF
+        DB      '  C  I/O base C0 - RomWBW on Small Computer',CR,LF
+        DB      '     boards (SC126 and friends)',CR,LF
+        DB      '  B  set the internal I/O base by hand',CR,LF
+        DB      '  Q  Back, leaving the port as it is',CR,LF
+        DB      '     (^C also backs out)',CR,LF,0
+MASCBAS: DB     'I/O base in force: ',0
+MASCPR: DB      CR,LF,'Channel (0/1), or R C B Q: ',0
+MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
+MASCGOT: DB     'RomWBW reports the ASCI block at base ',0
+MASCPIK: DB     'Now pick the channel: 0 or 1.',CR,LF,0
+MASCHB: DB      'RomWBW drives this port itself, with interrupts, so',CR,LF
+        DB      'EGT8080 will reach it through the firmware instead of',CR,LF
+        DB      'the registers - the way QTERM RomWBW builds do.',CR,LF
+        DB      'HBIOS unit ',0
+MASCH2: DB     'Polling the chip directly here would race the',CR,LF
+        DB      'firmware for each byte and read noise.',CR,LF,0
+MASCNOR: DB     'There is no RomWBW here to ask, or it lists no ASCI',CR,LF
+        DB      'port.  Press C for C0 (what RomWBW uses on Small',CR,LF
+        DB      'Computer boards) or B to enter the base yourself.',CR,LF,0
+MHBUNM: DB      'RomWBW HBIOS serial units',CR,LF
+        DB      '-------------------------',CR,LF,0
+MHBIND: DB      '  ',0
+MHBBAS: DB      '   base ',0
+MHBNON: DB      '(not present)',CR,LF,0
+MAUXW:  DB      'CP/M AUX: selected.  Note that CP/M 2.2 has no way',CR,LF
+        DB      'to ask whether a byte is waiting, so this family',CR,LF
+        DB      'reads ahead and cannot receive a literal ^Z.  Use a',CR,LF
+        DB      'chip family instead when one fits the machine.',CR,LF,0
+MHEXA:  DB      CR,LF,'Address in hex (two digits): ',0
+MPSET:  DB      'Port is now: ',0
+
+MSETT:  DB      'Settings',CR,LF
+        DB      '--------',CR,LF
+        DB      'Mode:     ',0
+MSPORT: DB      'Port:     ',0
+MSKEY:  DB      'Menu key: ',0
+MSCLS:  DB      'Clear:    ',0
+MSETT2: DB      CR,LF
+        DB      '  P  Serial port - which chip, which address',CR,LF
+        DB      '  A  ANSI / ASCII output',CR,LF
+        DB      '  E  Local echo on / off',CR,LF
+        DB      '  L  Send LF after a typed CR',CR,LF
+        DB      '  K  Change the menu key',CR,LF
+        DB      '  B  Line settings - baud, bits, parity',CR,LF
+        DB      '  C  Clear Screen',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MESCAS: DB      'Press the control key you want as the menu key.',CR,LF
+        DB      '(^C cancels and keeps the present one.) ',0
+MESCNO: DB      'That key cannot be the menu key.  It has to be a',CR,LF
+        DB      'control key, and not ^C, RETURN, LINEFEED, TAB or',CR,LF
+        DB      'ESC - ^C backs out of these screens, the first',CR,LF
+        DB      'three are ordinary typing, and ESC begins the',CR,LF
+        DB      'arrow-key sequences, so a cursor key would open',CR,LF
+        DB      'the menu.',CR,LF,0
+MLINE:  DB      'Line settings',CR,LF
+        DB      '-------------',CR,LF,0
+MLRATE: DB      'Rate:     ',0
+MLFMT:  DB      'Format:   ',0
+MLINE2: DB      CR,LF
+        DB      '  B  Baud rate',CR,LF
+        DB      '  D  Data bits / parity / stop bits',CR,LF
+        DB      '  A  Apply to the port now',CR,LF
+        DB      '  R  Default - program nothing',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MLRSIO: DB      'set by the board clock or CTC',0
+MLR88:  DB      'set by the board - no rate register',0
+MLRAUX: DB      'set by CP/M - the OS owns this port',0
+MLRNON: DB      'no port selected',0
+MLRACI: DB      'board clock ',0
+MLD1:   DB      '/ 1',0
+MLD16:  DB      '/ 16  (the usual setting)',0
+MLD64:  DB      '/ 64',0
+MLASCLK: DB     '  (at 18.432 MHz)',0
+MFDATA: DB      ' data, ',0
+MFPNO:  DB      'no parity, ',0
+MFPEV:  DB      'even parity, ',0
+MFPOD:  DB      'odd parity, ',0
+MFSTOP: DB      ' stop',0
+MLAPPY: DB      'EGT8080 sets this on the port when it is selected.',0
+MLAPPN: DB      'EGT8080 programs nothing: the system setting stands.',0
+MLDEF:  DB      'Back to programming nothing - 9600 8N1 shown, but',CR,LF
+        DB      'not written to any port.  A chip already',CR,LF
+        DB      'programmed keeps what it was given until the',CR,LF
+        DB      'machine is reset.',CR,LF,0
+MLOK:   DB      'Applied to the port.',CR,LF,0
+MLHBNO: DB      'The firmware refused those line characteristics,',CR,LF
+        DB      'or there is no RomWBW here to ask.',CR,LF,0
+MLACNO: DB      'The 6850 has no such combination.  It offers 7',CR,LF
+        DB      'data bits only with parity, and 8 data bits with',CR,LF
+        DB      'parity only with one stop bit.',CR,LF,0
+MLNOSET: DB     'This port has no line settings EGT8080 can write.',CR,LF
+        DB      'Neither a Z80 SIO/2 nor an Altair 88-SIO has a rate',CR,LF
+        DB      'generator in it at all -',CR,LF
+        DB      'the bit rate comes from the board clock or its',CR,LF
+        DB      'CTC - and its registers cannot be read back, so',CR,LF
+        DB      'EGT8080 will not guess at them.  CP/M AUX: belongs',CR,LF
+        DB      'to the operating system.  Set the rate where the',CR,LF
+        DB      'machine sets it, or use HBIOS if this is a RomWBW',CR,LF
+        DB      'system.  (Against the gateway itself nothing is',CR,LF
+        DB      'needed: a TCP connection has no bit rate.)',CR,LF,0
+MBAUDM: DB      'Baud rate',CR,LF
+        DB      '---------',CR,LF
+        DB      '  A  300      F  9600',CR,LF
+        DB      '  B  600      G  19200',CR,LF
+        DB      '  C  1200     H  38400',CR,LF
+        DB      '  D  2400     I  57600',CR,LF
+        DB      '  E  4800     J  115200',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MACIDM: DB      '6850 clock divider',CR,LF
+        DB      '------------------',CR,LF
+        DB      'A 6850 has no rate of its own: it divides the',CR,LF
+        DB      'clock the board gives it.',CR,LF,CR,LF
+        DB      '  1  / 1   (a synchronous clock only)',CR,LF
+        DB      '  2  / 16  (the usual setting)',CR,LF
+        DB      '  3  / 64  (a quarter of the / 16 rate)',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MFMTM:  DB      'Data bits, parity and stop bits',CR,LF
+        DB      '-------------------------------',CR,LF
+        DB      'Now: ',0
+MFMTM2: DB      CR,LF
+        DB      '  7  7 data bits      N  No parity',CR,LF
+        DB      '  8  8 data bits      E  Even parity',CR,LF
+        DB      '                      O  Odd parity',CR,LF
+        DB      '  1  1 stop bit',CR,LF
+        DB      '  2  2 stop bits',CR,LF
+        DB      '  Q  Back  (^C also backs out)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MR300:  DB      '300',0
+MR600:  DB      '600',0
+MR1200: DB      '1200',0
+MR2400: DB      '2400',0
+MR4800: DB      '4800',0
+MR9600: DB      '9600',0
+MR19K:  DB      '19200',0
+MR38K:  DB      '38400',0
+MR57K:  DB      '57600',0
+MR115K: DB      '115200',0
+MCLSZ:  DB      'ADM-3A ^Z  (works through the gateway)',0
+MCLSAN: DB      'ANSI ESC [ 2 J  (VT100 and modern terminals)',0
+MCLSOF: DB      'off  (printing terminal - do not clear)',0
+MANSCL: DB      ESC,'[2J',ESC,'[H',0
+
+MTERM:  DB      'Terminal mode.  Press ',0
+MTERM2: DB      ' for the terminal menu.',CR,LF
+        DB      'To return to the main menu, press ',0
+MTERM3: DB      ' then E.',CR,LF,CR,LF,0
+MTEXIT: DB      'Leaving terminal mode.',CR,LF,0
+MESCMN: DB      'Menu: E)xit  H)elp  U)pload  D)ownload',CR,LF
+        DB      '      ',0
+MESCM2: DB      ' again sends ',0
+MESCM3: DB      ' itself.   Choice: ',0
+MNOPRT: DB      CR,LF,'No serial port is selected yet.',CR,LF
+        DB      'Press S for Settings, then P, and pick the one',CR,LF
+        DB      'your machine uses.',CR,LF,0
+
+MDEAD:  DB      'Nothing was sent: the port did not accept the',CR,LF
+        DB      'character.  Selected port is ',0
+MDEAD2: DB      'Either no serial chip answers at that address,',CR,LF
+        DB      'or it is held off by flow control.  Go to the',CR,LF
+        DB      'main menu, press S for Settings, then P, to pick',CR,LF
+        DB      'a different port.',CR,LF,0
+
+MXSFIL: DB      CR,LF,'Send which file? ',0
+MXRFIL: DB      CR,LF,'Receive as which file? ',0
+MXNONAM: DB     'No filename given - nothing done.',CR,LF,0
+MXNOFIL: DB     CR,LF,'No such file on that drive.',CR,LF,0
+MXEXIST: DB     CR,LF,'That file exists.  Replace it (Y/N)?  The old',CR,LF
+        DB      'one is deleted before the transfer starts. ',0
+MXKEEP: DB      'Kept the existing file - nothing done.',CR,LF,0
+MXNOMK: DB      CR,LF,'Could not create the file (directory full?).',CR,LF,0
+MXWAIT: DB      CR,LF,'Waiting for the other end to start receiving...',CR,LF,0
+MXGO:   DB      CR,LF,'Transferring ( . = block, ? = retry, ^C aborts )',CR,LF,0
+MXSENT: DB      'Sent.',CR,LF,0
+MXRECVD: DB     'Received.',CR,LF,0
+MXFAIL: DB      'Transfer failed - the other end stopped answering.',CR,LF,0
+MXCAN:  DB      'The other end cancelled the transfer.',CR,LF,0
+MXSCRAP: DB     'The incomplete file has been deleted.',CR,LF,0
+MXUSER: DB      'Stopped at this end.',CR,LF,0
+MXBACK: DB      'Back in the session - press a key if the far end',CR,LF
+        DB      'is waiting for one.',CR,LF,0
+MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
+
+MUNSAVE: DB    CR,LF,'  (changed - press V to keep it for next time)',CR,LF
+        DB      CR,LF,'Choice: ',0
+MSAVED: DB      'Settings saved into EGT8080.COM.',CR,LF,0
+MSAVERR: DB     'Could not save: EGT8080.COM must be on the current',CR,LF
+        DB      'drive under its own name.  Settings still apply',CR,LF
+        DB      'for this run.',CR,LF,0
+MCFGBAD: DB     'Saved settings were not valid - defaults restored.',CR,LF,0
+CFGREF: DB      'EGT80CFG'      ; what CFGSIG must contain
+
+;-----------------------------------------------------------------------
+; CFGFCB - a fixed FCB for our own file.  CP/M never tells a program its
+; own name, so this is the one place EGT80.COM is hard-coded; a renamed or
+; off-drive copy makes the save fail with a message instead of writing to
+; the wrong file.  Drive byte 0 = whichever drive is current.
+;-----------------------------------------------------------------------
+CFGFCB: DB      0
+        DB      'EGT8080 '
+        DB      'COM'
+        DB      0,0,0,0
+        DB      0,0,0,0,0,0,0,0
+        DB      0,0,0,0,0,0,0,0
+        DB      0               ; cr
+        DB      0,0,0           ; r0/r1/r2 - the random record number
+
+MKEY:   DB      CR,LF,'Press any key. ',0
+MCTRLC: DB      CR,LF,'Press Ctrl-C for the menu.  Anything else you',CR,LF
+        DB      'type here is ignored, so a half-typed line cannot',CR,LF
+        DB      'run a menu command by accident. ',0
+MHUP:   DB      'Hanging up...',0
+MBYE:   DB      'EGT8080 done.',CR,LF,0
+
+; Printed on the way out, after the sign-off and before CP/M takes the screen
+; back.  Wrapped to fit FORTY columns rather than the eighty this program's
+; other text assumes: the C64s that reach it through the gateway have half a
+; screen, and a verse that wraps mid-word is not much of a parting word.
+MVERSE: DB      CR,LF
+        DB      'For the wages of sin is death; but',CR,LF
+        DB      'the gift of God is eternal life',CR,LF
+        DB      'through Jesus Christ our Lord.',CR,LF
+        DB      '        - Romans 6:23, KJV',CR,LF,0
+
+MHELP:  DB      'Help - the serial port',CR,LF
+        DB      '----------------------',CR,LF,CR,LF
+        DB      'The port menu names machines rather than chips, so',CR,LF
+        DB      'pick the one you are sitting at.  Get it wrong and',CR,LF
+        DB      'nothing is sent, nothing arrives - just silence.',CR,LF,CR,LF
+        DB      '1 Gateway   Its own emulated port, 82/83.  This is',CR,LF
+        DB      '            the default, so EGT8080 and the gateway',CR,LF
+        DB      '            work together untouched.',CR,LF
+        DB      '2 RomWBW    Asks the firmware to move the byte, so',CR,LF
+        DB      '            it works on any RomWBW machine whatever',CR,LF
+        DB      '            the chip: SC126, RC2014, N8 and more.',CR,LF
+        DB      '3 88-2SIO   Altair 88-2SIO - a 6850 at 10/11 or',CR,LF
+        DB      '            12/13.',CR,LF
+        DB      '4 88-SIO    The original MITS board at 00/01.  Its',CR,LF
+        DB      '            status bits are inverted, so it and the',CR,LF
+        DB      '            88-2SIO cannot be swapped.',CR,LF
+        DB      '5 Other     Name the chip, then the address:',CR,LF
+        DB      '            SIO/2, 6850, Z180 ASCI, 88-SIO.',CR,LF
+        DB      '6 AUX:      Portable fallback - read help page 3.',CR,LF,0
+MHELP2: DB      'Help - using the terminal',CR,LF
+        DB      '-------------------------',CR,LF,CR,LF
+        DB      'Terminal mode passes what you type to the port and',CR,LF
+        DB      'what arrives to your screen.  The menu key',CR,LF
+        DB      'interrupts it; pressing it twice sends it to the',CR,LF
+        DB      'remote end instead.',CR,LF
+        DB      'Settings holds the rest: the serial port, the line',CR,LF
+        DB      'settings (speed and framing, where the hardware has',CR,LF
+        DB      'any to set - a Z80 SIO/2 has none), the menu key',CR,LF
+        DB      '(any control key you press), and how to clear the',CR,LF
+        DB      'screen, which CP/M has no standard way to do.',CR,LF,CR,LF
+        DB      'ANSI mode passes escape sequences through to your',CR,LF
+        DB      'terminal.  ASCII mode strips them, drops the high',CR,LF
+        DB      'bit and discards control codes that are not CR, LF,',CR,LF
+        DB      'TAB, BS or BEL - which suits a printing terminal or',CR,LF
+        DB      'a console with no cursor addressing: a remote menu',CR,LF
+        DB      'drawn with graphics still reads as text.',CR,LF,CR,LF
+        DB      'Settings are saved into EGT8080.COM itself, so a copy',CR,LF
+        DB      'carries them to another disk - the file must be on',CR,LF
+        DB      'the current drive under its own name.',CR,LF,0
+MHELP3: DB      'Help - two things to know',CR,LF
+        DB      '-------------------------',CR,LF,CR,LF
+        DB      'CP/M AUX: has no way to ask whether a byte is',CR,LF
+        DB      'waiting - the OS offers no such call - so EGT8080',CR,LF
+        DB      'reads one byte ahead.  This family therefore cannot',CR,LF
+        DB      'receive a literal ^Z, and on real CP/M 2.2 the read',CR,LF
+        DB      'waits instead of returning.  Against the gateway it',CR,LF
+        DB      'works well; on real hardware prefer the family that',CR,LF
+        DB      'matches your serial chip.',CR,LF,CR,LF
+        DB      'The Z180 ASCI registers live inside the CPU, and',CR,LF
+        DB      'the block moves.  On a RomWBW machine EGT8080 asks',CR,LF
+        DB      'the firmware where it is; otherwise press C for C0',CR,LF
+        DB      'or B to type it, then pick the channel.',CR,LF,CR,LF
+        DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF
+        DB      'with the checksum fallback an older peer may want.',CR,LF
+        DB      'Start the far end first, then press U or D - from',CR,LF
+        DB      'the menu or the terminal-mode menu key, which does',CR,LF
+        DB      'not hang up.  A dot is a block, a ? a retry.  ^C',CR,LF
+        DB      'stops a transfer at any point, and at the filename',CR,LF
+        DB      'prompt too; an incomplete download is deleted',CR,LF
+        DB      'rather than left looking like a file.',CR,LF,0
+
+;=======================================================================
+; VECTORS AND VARIABLES
+;
+; The vectors are JP instructions rewritten at run time; the 0 operands
+; below are placeholders that CONSET and PORTST fill in before anything
+; can call them.
+;=======================================================================
+VCST:   JP      0               ; console status
+VCIN:   JP      0               ; console input
+VCOUT:  JP      0               ; console output
+VPST:   JP      0               ; port receive status
+VPIN:   JP      0               ; port input
+VPOST:  JP      0               ; port transmit status
+VPOUT:  JP      0               ; port output
+
+CPMVER: DB      0               ; BDOS version, from CONSET
+FSTATE: DB      0               ; inbound escape-sequence state
+ESTATE: DB      0               ; local-echo escape-sequence state
+SENDCH: DB      0               ; byte in flight in PSEND
+PTRIES: DB      0               ; PSEND give-up counter
+PDEAD:  DB      0               ; set when the transmitter never freed
+TYPECH: DB      0               ; byte in flight in TSEND
+HEXACC: DB      0               ; high nibble held while HEXASK reads the low
+XBLK:   DB      0               ; block number being sent / expected
+XGOTBL: DB      0               ; block number as it arrived
+XCRCM:  DB      0               ; non-zero = CRC mode, zero = checksum
+XCRC:   DW      0               ; CRC-16 accumulator
+XSUM:   DB      0               ; checksum accumulator
+XCNT:   DB      0               ; retries left
+XNCNT:  DB      0               ; junk bytes still tolerated
+XRXACT: DB      0               ; non-zero while a download's file exists
+XDIRTY: DB      0               ; non-zero when settings differ from the file
+XTMO:   DB      0               ; XGETB timeout, in 65536-poll passes
+XTMOC:  DB      0               ; ...and its working copy
+XLINE:  DS      24              ; console line buffer for a filename
+XFCB:   DS      36              ; FCB for the file being transferred
+XBUF:   DS      128             ; the block, which is also the CP/M record
+LSQUIT: DB      0               ; non-zero while an apply must not print
+HBUNIT: DB      0               ; unit number handed to HBDEV
+HBTYPE: DB      0               ; device type it reported
+HBPHYS: DB      0               ; physical channel it reported
+HBBASE: DB      0               ; base I/O address it reported
+HBSCAN: DB      0               ; unit being listed / scanned
+HBWANT: DB      0               ; ASCI channel being looked for
+HBMAX:  DB      0               ; units the firmware says it has (menu cap 4)
+XHCNT:  DB      0               ; drain attempts left while hanging up
+AUXHLD: DB      0               ; byte read ahead by the AUX status call
+AUXFLG: DB      0               ; non-zero while AUXHLD holds a byte
+
+; Stack.  128 bytes = 64 levels, which is more than this program's own
+; call depth needs (about a dozen levels at the deepest, inside a
+; transfer) - the margin is for the system underneath: a real CP/M BIOS
+; may use the CALLER's stack, and the BDOS file calls a transfer makes
+; are exactly where that would bite.  It matters here because the stack
+; grows down towards XBUF, so an overflow would quietly corrupt the block
+; being transferred rather than crashing where it happened.
+        DS      128
+STKTOP  EQU     $
+
+        END     START

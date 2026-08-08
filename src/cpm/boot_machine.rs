@@ -250,12 +250,14 @@ impl BootMachine {
     /// commonly fitted with Z80 upgrade boards, and the CP/M emulator next door
     /// is on the same setting.
     ///
-    /// The deciding case is our own: EGT80 is Z80 code and declares itself so.
-    /// On an 8080 core it loads, executes a Z80-only opcode as something else,
-    /// and takes CP/M down with it — the sign-on comes back corrupted on the
-    /// warm boot.  That is what makes this the *default* rather than the only
-    /// answer; an operator running period 8080 software can say so with
-    /// `cpm_cpu`, and [`BootMachine::new_cpu_for`] is how the session asks.
+    /// This used to be settled by our own terminal: `EGT80.COM` is Z80 code,
+    /// so on an 8080 core it loaded, executed a Z80-only opcode as something
+    /// else, and took CP/M down with it — the sign-on came back corrupted on
+    /// the warm boot.  `EGT8080.COM` runs on either processor and is placed
+    /// beside it, so that argument is gone and the Z80 stays the default on
+    /// the milder ones above.  An operator running period 8080 software says
+    /// so with `cpm_cpu`, and [`BootMachine::new_cpu_for`] is how the session
+    /// asks.
     ///
     /// Test-only now that the session passes the setting: a live boot must
     /// never quietly take the default when the operator has chosen otherwise,
@@ -2414,13 +2416,17 @@ mod tests {
         printable(&run_until_quiet(m, cpu, budget))
     }
 
-    /// Boot a disk, pull EGT80 onto it with the guest's own `PCGET`, and hand
-    /// back the resulting image.
+    /// Boot a disk, pull a terminal onto it with the guest's own `PCGET`, and
+    /// hand back the resulting image.
     ///
     /// Done once and reused, because it is the slow part and every case below
     /// wants the same disk.
+    ///
+    /// `name` because there are two terminals now, and `PCGET` is told the
+    /// filename: putting EGT8080 on the disk under EGT80's name would leave
+    /// the 8080 gate running the Z80 build and reporting success.
     #[cfg(test)]
-    fn image_with_egt80(path: &str, egt80: &[u8]) -> Vec<u8> {
+    fn image_with_terminal(path: &str, name: &str, egt80: &[u8]) -> Vec<u8> {
         let mut m = BootMachine::new();
         m.insert(0, std::fs::read(path).unwrap(), false).expect("an 88-DCDD image");
         assert_eq!(
@@ -2431,11 +2437,104 @@ mod tests {
         let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
         run_until_quiet(&mut m, &mut cpu, 60_000_000);
-        type_at(&mut m, &mut cpu, b"PCGET EGT80.COM B\r", 200_000_000);
+        type_at(&mut m, &mut cpu, format!("PCGET {name} B\r").as_bytes(), 200_000_000);
         let (done, _) = xmodem_send_to_guest(&mut m, &mut cpu, egt80, 4_000_000_000);
-        assert!(done, "could not put EGT80 on the disk");
+        assert!(done, "could not put {name} on the disk");
         run_until_quiet(&mut m, &mut cpu, 400_000_000);
         m.take_dirty().pop().expect("the guest wrote the image").1
+    }
+
+    /// **EGT8080 runs on the 8080 core, and its DAA path is right there.**
+    ///
+    /// The gate for the 8080 build. `cpm_cpu = 8080` shipped with the cost that
+    /// the bundled terminal was Z80 code and crashed the machine it was on;
+    /// EGT8080 removes that, and this is what says so with a real 8080.
+    ///
+    /// Three things are checked at once, and the third is the one that could
+    /// not be reasoned about:
+    ///
+    /// * **It starts.** A single stray Z80 opcode anywhere on the path from
+    ///   `0100H` to the sign-on would put an 8080 into the weeds instead.
+    ///   `tools/check8080.py` makes that impossible at build time; this proves
+    ///   the built artifact on the actual core.
+    /// * **The port menu works**, which walks a long way further into the
+    ///   program — the settings screens, the vector patching, `PSSET2`'s
+    ///   `EX DE,HL` where the Z80 build has `LD (nn),DE`.
+    /// * **`DAA` agrees with the Z80.** `PHEXD` prints a hex digit with
+    ///   `AND 0FH / ADD A,90H / DAA / ADC A,40H / DAA`, and DAA is the one
+    ///   instruction whose behaviour genuinely differs between the two CPUs —
+    ///   the Z80's N flag makes it adjust downward after a subtraction. Both
+    ///   of these follow additions, so it *should* be identical, and "should"
+    ///   is why this is a test. The `12` in `at 12` is that routine's output:
+    ///   get DAA wrong and the address reads as `0C` or as punctuation.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
+    #[test]
+    #[ignore]
+    fn test_egt8080_runs_on_an_8080() {
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT80/EGT8080.COM");
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
+            return;
+        };
+        // Placed with the Z80 core because that is only a file transfer run by
+        // the disk's own PCGET; what is under test is EGT8080 *running*.
+        let disk = image_with_terminal(&path, "EGT8080.COM", EGT8080_COM);
+
+        // Both cores, because that is the claim: 8080 opcodes are a strict
+        // subset of the Z80's, so the 8080 build is the one that runs
+        // everywhere and the reason it can be the default. Running it only on
+        // an 8080 would leave the *other* half of that untested — and the
+        // half that would break silently, since the Z80 core is what every
+        // default gateway uses.
+        for which in [crate::cpm::cpu::CPU_8080, crate::cpm::cpu::CPU_Z80] {
+            let mut m = BootMachine::new();
+            m.insert(0, disk.clone(), true).unwrap();
+            assert!(matches!(
+                m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+                ModemAttach::Ports(0x12, 0x13)
+            ));
+            m.modem().set_carrier(true);
+
+            let mut cpu = BootMachine::new_cpu_for(which);
+            m.boot(&mut cpu, 0).expect("boots");
+            run_until_quiet(&mut m, &mut cpu, 60_000_000);
+
+            let start = type_at(&mut m, &mut cpu, b"EGT8080\r", 400_000_000);
+            assert!(
+                start.contains("Ethernet Gateway Terminal"),
+                "EGT8080 did not start on the {which}: {start:?}"
+            );
+            assert!(
+                start.contains("EGT8080"),
+                "the Z80 build seems to be running under the 8080 build's \
+                 name on the {which}: {start:?}"
+            );
+
+            // Settings -> Serial port -> 6850 ACIA -> Altair 88-2SIO port 2.
+            // One key at a time: a four-key burst that half-lands looks
+            // exactly like a menu that did not take.
+            let mut picked = String::new();
+            for k in b"SP32" {
+                picked.push_str(&type_at(&mut m, &mut cpu, &[*k], 400_000_000));
+            }
+            if !picked.contains("6850 ACIA at 12") {
+                println!("--- EGT8080 on the {which}, after SP32 ---\n{picked}");
+                panic!("EGT8080 does not report the selected port on the {which}");
+            }
+
+            // And it moves bytes both ways over it, which is what a terminal is.
+            type_at(&mut m, &mut cpu, b"Q", 100_000_000);
+            type_at(&mut m, &mut cpu, b"T", 100_000_000);
+            m.modem().queue_rx(b"PING-FROM-GATEWAY");
+            let seen = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+            let _ = m.modem().drain_tx();
+            type_at(&mut m, &mut cpu, b"xyz", 100_000_000);
+            let sent = String::from_utf8_lossy(&m.modem().drain_tx()).to_string();
+            assert!(seen.contains("PING-FROM-GATEWAY"), "nothing reached EGT8080 on the {which}: {seen:?}");
+            assert!(sent.contains("xyz"), "nothing left EGT8080 on the {which}: {sent:?}");
+            println!("  {which}: sign-on, port menu, DAA, and bytes both ways.");
+        }
     }
 
     /// **Every comms port EGT80 offers, driven from inside a booted disk.**
@@ -2460,7 +2559,7 @@ mod tests {
             eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
             return;
         };
-        let disk = image_with_egt80(&path, EGT80_COM);
+        let disk = image_with_terminal(&path, "EGT80.COM", EGT80_COM);
         println!("EGT80 is on the disk; now testing its ports.\n");
 
         // (gateway profile, EGT80 menu keys, what its Port: line should say,
@@ -2573,7 +2672,7 @@ mod tests {
         // it lands in the wrong place.
         let payload: Vec<u8> = (0..4096u32).map(|i| (i as u8) ^ 0x5A).collect();
 
-        let disk = image_with_egt80(&path, EGT80_COM);
+        let disk = image_with_terminal(&path, "EGT80.COM", EGT80_COM);
         let mut m = BootMachine::new();
         m.insert(0, disk, false).unwrap();
         assert_eq!(

@@ -2197,8 +2197,10 @@ fn render_more_popups(cfg: &Config) -> String {
              emulator as well as to a booted disk. The Z80 runs the 8080 \
              software these disks are made of; the 8080 is the processor the \
              Altair shipped with, and is what period diagnostics that identify \
-             the CPU from DCR A expect. EGT80, the terminal placed on drive A:, \
-             is Z80 code and will crash an 8080.</span>",
+             the CPU from DCR A expect. Two terminals are placed on drive A:: \
+             <b>EGT8080.COM</b> is built to the 8080's instruction set and runs \
+             on either setting, so it is the one to reach for; EGT80.COM is the \
+             Z80 build and will crash an 8080.</span>",
         ),
         cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
 

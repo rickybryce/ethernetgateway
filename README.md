@@ -75,8 +75,9 @@ options, and the full AT command set.
   CCP built-ins, `SUBMIT` batch jobs, and drives A:–P: as folders under the
   transfer directory — or as mounted **`.dsk` disk images** (Altair 88-HDSK,
   and the 8" single-density format used by Tarbell, Cromemco and
-  IMSAI/z80pack). Ships **EGT80**, this project's own CP/M terminal in Z80
-  assembly, and a virtual modem so guest software can dial out. On by default
+  IMSAI/z80pack). Ships **EGT80**, this project's own CP/M terminal in period
+  assembly — in two builds, `EGT8080.COM` for either processor and `EGT80.COM`
+  for the Z80 — and a virtual modem so guest software can dial out. On by default
   and bounded three ways: every file call jailed under `transfer_dir/CPM`, a
   runaway stopped by an instruction ceiling, and a double-`ESC` always returning
   to `A>`. `cpm_emu_enabled = false` shuts it off; `cpm_emu_uart = off` keeps it

@@ -1439,10 +1439,10 @@ impl App {
              8080 is the processor the Altair actually shipped with, and is \
              what period diagnostics that identify the CPU from DCR A setting \
              parity rather than overflow expect -- those are RIGHT to fail on a \
-             Z80.  What the 8080 costs: EGT80, the terminal placed on CP/M \
-             drive A:, is Z80 code and declares itself so, and on an 8080 it \
-             runs a Z80-only opcode as something else and takes CP/M down with \
-             it.",
+             Z80.  Two terminals are placed on CP/M drive A:: EGT8080.COM is \
+             built to the 8080's instruction set and runs on EITHER setting, \
+             so it is the one to reach for; EGT80.COM is the Z80 build and \
+             takes CP/M down with it on an 8080.",
         );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.

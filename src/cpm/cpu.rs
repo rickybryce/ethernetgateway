@@ -16,14 +16,19 @@
 //!
 //! The Altair shipped with an 8080 and every MITS disk in the sample set is
 //! 8080 code, so the 8080 is the more literal machine. The Z80 is the default
-//! anyway because it is a strict superset that runs all of that, Altairs were
-//! very commonly fitted with Z80 upgrade boards, and — the deciding case —
-//! **EGT80 is Z80 code and declares itself so**. It is placed on drive A: on
-//! first launch, so on an 8080 core the terminal we ship with the gateway
-//! loads, executes a Z80-only opcode as something else, and takes CP/M down
-//! with it. That is a real cost of this setting, not a reason to withhold it:
-//! the operator who wants an 8080 usually wants it *because* they are running
-//! period 8080 software, and the label says what they give up.
+//! anyway because it is a strict superset that runs all of that, and Altairs
+//! were very commonly fitted with Z80 upgrade boards.
+//!
+//! **This setting used to cost the terminal**, and that is worth recording
+//! because it was the deciding argument for the default and is no longer
+//! true. `EGT80.COM` is Z80 code; placed on drive A: on first launch, it
+//! executed a Z80-only opcode as something else on an 8080 and took CP/M down
+//! with it. `EGT8080.COM` is the same terminal built to the 8080's
+//! instruction set — 8080 opcodes being a strict subset, it runs on *either*
+//! setting — and it is the one the emulator leads with. Choosing the 8080 now
+//! costs the `hbios_*` modem profiles' usual clientele (RomWBW software is
+//! Z80/Z180 code, though our HBIOS itself answers an 8080 perfectly well) and
+//! nothing else we ship.
 //!
 //! iz80's 8080 mode is a faithful one rather than a relabelled Z80 — real
 //! parity instead of overflow, the 8080's subtract half-carry, its own `DAA`,
@@ -50,19 +55,23 @@ pub const DEFAULT_CPU: &str = CPU_Z80;
 
 /// The choices for `cpm_cpu`, `(value, label)`.
 ///
-/// Both labels are 24 characters, because the telnet screen truncates to 26 on
-/// a 40-column PETSCII terminal and a label that arrives cut in half cannot say
-/// what it costs.
+/// Both labels fit 26 characters, because the telnet screen truncates to that
+/// on a 40-column PETSCII terminal and a label that arrives cut in half cannot
+/// say what it means.
+///
+/// Neither names a cost any more: `EGT8080.COM` runs on both, so the choice is
+/// now only about which processor the software you are running expects.
 pub const CPU_CHOICES: &[(&str, &str)] = &[
     (CPU_Z80, "Z80 (runs 8080 code too)"),
-    (CPU_8080, "8080 (EGT80 needs a Z80)"),
+    (CPU_8080, "8080 (what MITS shipped)"),
 ];
 
 /// Whether `value` selects the 8080.
 ///
 /// Anything unrecognised reads as the Z80 rather than refusing: this is
-/// hand-editable in `egateway.conf`, and a typo that silently dropped the
-/// machine to an 8080 would present as our own terminal crashing CP/M.
+/// hand-editable in `egateway.conf`, and the Z80 is the setting that runs
+/// every disk here, so a typo costs nothing rather than silently narrowing
+/// what the machine can execute.
 pub fn is_8080(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case(CPU_8080)
 }

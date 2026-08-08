@@ -7252,7 +7252,7 @@ fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
 
 /// **Both lines of the emulator's sign-on fit a C64 row.**
 ///
-/// The 8080 note is the one at risk: it carries a warning as well as the
+/// The 8080 note is the one at risk: it names a second thing as well as the
 /// processor, and it is drawn only when a non-default CPU is configured — so an
 /// overflow here would wrap the screen for exactly the operators who are
 /// already doing something unusual, and nobody else would ever see it.
@@ -7272,9 +7272,11 @@ fn test_cpm_banner_lines_fit_petscii() {
     // is — an earlier version spent those columns on the 8080 warning, which
     // took HELP away from the screen where a new operator meets the emulator.
     assert!(crate::telnet::cpm_emu::CPM_BANNER.contains("HELP"));
-    // And the note has to name the processor and say what it costs.
+    // And the note has to name the processor and the terminal that runs on
+    // it.  `EGT8080`, not `EGT80`: both files are on drive A:, and naming the
+    // Z80 one here would send an 8080 operator to the build that crashes.
     assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("8080"));
-    assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("EGT80"));
+    assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("EGT8080"));
 }
 
 /// The emulator's out-of-band drain probes the wire once per CPU batch — and a
