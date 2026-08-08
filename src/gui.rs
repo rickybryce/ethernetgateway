@@ -561,18 +561,22 @@ struct App {
     /// a boot image is configured (which decides whether slots are named for a
     /// board at all).
     cpm_slot_labels_from: (Vec<String>, bool),
-    /// The `CP/M runs:` label, with `(missing)` on it when the configured image
-    /// is not there: `(label, the setting it came from, when it was resolved)`,
-    /// and `None` until the first frame asks.
+    /// Cache behind [`App::cpm_boot_label`]: `(label, the setting it was
+    /// resolved from, when)`, and `None` until the first frame asks.
     ///
-    /// Cached because this one is on the *server panel*, not inside a window an
-    /// operator opens: it is drawn for as long as the desktop UI is up, so the
-    /// `stat` behind the marker cannot be per-frame. Keyed on the setting **and
-    /// a one-second age**, because the setting is not the only thing that can
-    /// change the answer — deleting the `.dsk` in a file manager leaves the
-    /// string alone, and a cache keyed on the string alone would go on claiming
-    /// the disk was there until the operator next touched the combo.
-    cpm_boot_label: Option<(String, String, std::time::Instant)>,
+    /// Cached because that row is on the *server panel*, not inside a window an
+    /// operator opens: the panel redraws on a 250 ms heartbeat for as long as
+    /// the desktop UI is up, so an unconditional resolve would be two syscalls
+    /// four times a second forever, for a string that almost never changes.
+    ///
+    /// Keyed on the setting **and** a one-second age, because the setting is
+    /// not the only thing that can change the answer — deleting the `.dsk` in a
+    /// file manager leaves the string alone, and a cache keyed on the string
+    /// would go on claiming the disk was there until the combo was next
+    /// touched. One second against a 250 ms heartbeat means the row corrects
+    /// itself without anybody touching the window, which is how it was
+    /// verified.
+    cpm_boot_label_cache: Option<(String, String, std::time::Instant)>,
     /// What the last apply reported, shown under the rows.
     cpm_mount_notice: String,
     /// Format token selected in the "new blank disk" row.
@@ -730,7 +734,7 @@ impl App {
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_slot_labels: Vec::new(),
             cpm_slot_labels_from: (Vec::new(), false),
-            cpm_boot_label: None,
+            cpm_boot_label_cache: None,
             cpm_mount_notice: String::new(),
             cpm_new_format: String::new(),
             cpm_new_name: String::new(),
@@ -1029,22 +1033,21 @@ impl App {
 
     /// The `CP/M runs:` label, resolved at most once a second.
     ///
-    /// The marker matters because this row is where an operator finds out that
-    /// the gateway is running the emulator when they asked for a disk — but the
-    /// row is on the always-drawn server panel, so the `stat` behind it has to
-    /// be paid on a schedule rather than per frame. A second is short enough
-    /// that deleting the image and looking at the window reads as instant, and
-    /// long enough that the cost does not scale with egui's repaint rate.
+    /// The marker matters because this row is where an operator finds out the
+    /// gateway is running the emulator when they asked for a disk — but the row
+    /// is on the always-drawn server panel, so the resolve behind it is paid on
+    /// a schedule rather than every repaint. See [`App::cpm_boot_label_cache`]
+    /// for why the age is part of the key and not just the setting.
     fn cpm_boot_label(&mut self) -> String {
         const TTL: std::time::Duration = std::time::Duration::from_secs(1);
-        if let Some((label, from, at)) = &self.cpm_boot_label {
+        if let Some((label, from, at)) = &self.cpm_boot_label_cache {
             if *from == self.cfg.cpm_boot_image && at.elapsed() < TTL {
                 return label.clone();
             }
         }
         let target = crate::cpm::boot::boot_target(&self.cfg.transfer_dir, &self.cfg.cpm_boot_image);
         let label = crate::cpm::boot::boot_setting_label(&target, &self.cfg.cpm_boot_image);
-        self.cpm_boot_label = Some((
+        self.cpm_boot_label_cache = Some((
             label.clone(),
             self.cfg.cpm_boot_image.clone(),
             std::time::Instant::now(),

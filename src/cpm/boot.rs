@@ -164,11 +164,12 @@ pub enum SlotNaming {
 /// rule written in two places and held in one; this is the compiler holding it
 /// instead.
 ///
-/// **Nothing here logs.** A screen resolves this every time it draws — sixty
-/// times a second in the desktop window — and a fallback that announced itself
-/// from there would fill the console log with one operator's config typo. The
-/// emulator entry point resolves it once per session and does the announcing,
-/// which is also the only place with a session to announce it *to*.
+/// **Nothing here logs.** A screen resolves this every time it draws — and the
+/// desktop redraws on a 250 ms heartbeat whether or not anybody is touching it
+/// — so a fallback that announced itself from here would fill the console log
+/// with one operator's config typo, four lines a second, forever. The emulator
+/// entry point resolves it once per session and does the announcing, which is
+/// also the only place with a session to announce it *to*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootTarget {
     /// Nothing is configured to boot — the emulator, as asked for.
@@ -208,11 +209,13 @@ impl BootTarget {
 
 /// Resolve `cpm_boot_image` against the images folder under `transfer_dir`.
 ///
-/// One `stat`, and a caller drawing a screen wants exactly one of these for the
-/// whole screen rather than one per row. It is cheaper than what these screens
-/// already do — each lists the images folder before it draws — but it is still
-/// a syscall, and the shape that stays cheap is to resolve once and pass the
-/// answer down.
+/// **Two syscalls, not one** — [`super::layout::cpm_dir`] canonicalizes the
+/// container and then the image is `stat`ed. Nothing here is expensive, but a
+/// caller drawing a screen wants exactly one of these for the whole screen
+/// rather than one per row: the mount screens are already listing the images
+/// folder beside this, while the two telnet `Runs:` rows are not, and the
+/// desktop's is on a panel that redraws four times a second forever. The shape
+/// that stays cheap on all three is to resolve once and pass the answer down.
 pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
     let name = boot_image.trim();
     if name.is_empty() {
@@ -807,16 +810,6 @@ mod tests {
         assert_eq!(boot_choice_label("vanished.dsk"), "Boot vanished.dsk");
     }
 
-    /// **A setting is not an outcome.** `cpm_boot_image` can name a disk that
-    /// has been deleted since, or a string that could never be a filename, and
-    /// in both cases the emulator is what starts — so both must resolve to the
-    /// emulator's naming, not the string's.
-    ///
-    /// That was a real defect: the screens read the key, so a stale one named
-    /// the rows `drive 1` for a board nobody was going to boot, and hid the
-    /// `(R/O)` marker on an image our BDOS was about to refuse a write to.
-    /// The label beside it kept saying `Boot vanished.dsk`, which is correct
-    /// for a *setting* and is why the mismatch read as deliberate.
     /// The four surfaces that show `cpm_boot_image` must mark an unrunnable
     /// setting, and mark it the same way.
     ///
@@ -855,6 +848,16 @@ mod tests {
         assert_eq!(boot_setting_label(&BootTarget::Emulator, ""), BOOT_EMULATOR_LABEL);
     }
 
+    /// **A setting is not an outcome.** `cpm_boot_image` can name a disk that
+    /// has been deleted since, or a string that could never be a filename, and
+    /// in both cases the emulator is what starts — so both must resolve to the
+    /// emulator's naming, not the string's.
+    ///
+    /// That was a real defect: the screens read the key, so a stale one named
+    /// the rows `drive 1` for a board nobody was going to boot, and hid the
+    /// `(R/O)` marker on an image our BDOS was about to refuse a write to.
+    /// The label beside it kept saying `Boot vanished.dsk`, which is correct
+    /// for a *setting* and is why the mismatch read as deliberate.
     #[test]
     fn test_a_boot_image_that_is_not_there_names_the_emulators_drives() {
         use super::{boot_target, mount_refuses_writes, slot_name, BootTarget, SlotNaming};

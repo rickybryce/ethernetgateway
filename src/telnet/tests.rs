@@ -2607,31 +2607,31 @@ fn test_the_runs_row_keeps_its_marker_when_the_row_is_too_narrow() {
     let nowhere = "/nonexistent-egw-transfer-dir";
     const PETSCII_W: usize = 26;
 
-    let row = cpm_runs_row("vanished.dsk", nowhere, PETSCII_W);
+    let row = cpm_runs_row(nowhere, "vanished.dsk", PETSCII_W);
     assert!(row.ends_with(" (missing)"), "the marker must survive: {row:?}");
     assert!(row.chars().count() <= PETSCII_W, "{} columns: {row:?}", row.chars().count());
     assert!(row.starts_with("Boot"), "and it is still recognisably the setting: {row:?}");
 
     // A name long enough that the filename must give way, and the marker still
     // does not.
-    let long = cpm_runs_row("a-very-long-disk-image-name-indeed.dsk", nowhere, PETSCII_W);
+    let long = cpm_runs_row(nowhere, "a-very-long-disk-image-name-indeed.dsk", PETSCII_W);
     assert!(long.ends_with(" (missing)"), "{long:?}");
     assert!(long.chars().count() <= PETSCII_W, "{} columns: {long:?}", long.chars().count());
 
     // A value that could never be a filename says so differently, because it is
     // a different mistake to fix.
-    let bad = cpm_runs_row("../../etc/passwd", nowhere, 60);
+    let bad = cpm_runs_row(nowhere, "../../etc/passwd", 60);
     assert!(bad.ends_with(" (invalid name)"), "{bad:?}");
 
     // The emulator carries no marker at all, and neither does a disk that is
     // really there — checked on a wide row so nothing can be blamed on fitting.
-    assert_eq!(cpm_runs_row("", nowhere, 60), crate::cpm::boot::BOOT_EMULATOR_LABEL);
+    assert_eq!(cpm_runs_row(nowhere, "", 60), crate::cpm::boot::BOOT_EMULATOR_LABEL);
     let dir = std::env::temp_dir().join("egw_runs_row_test");
     let _ = std::fs::remove_dir_all(&dir);
     let images = dir.join("CPM").join(crate::cpm::image::IMAGES_DIR);
     std::fs::create_dir_all(&images).unwrap();
     std::fs::write(images.join("real.dsk"), [0u8; 8]).unwrap();
-    assert_eq!(cpm_runs_row("real.dsk", &dir.to_string_lossy(), 60), "Boot real.dsk");
+    assert_eq!(cpm_runs_row(&dir.to_string_lossy(), "real.dsk", 60), "Boot real.dsk");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

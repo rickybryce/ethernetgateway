@@ -53,8 +53,19 @@ pub(in crate::telnet) fn numeric_confirmation_lines(
 /// filename gives way to the marker instead, because a truncated name is still
 /// recognisable and a truncated marker is noise.
 ///
-/// One `stat`, once per screen draw — see [`crate::cpm::boot::boot_target`].
-pub(in crate::telnet) fn cpm_runs_row(boot_image: &str, transfer_dir: &str, width: usize) -> String {
+/// `width` is assumed to leave room for the marker itself — both callers pass a
+/// screen constant (26 or 60) and the longest marker is 15. Below that the
+/// marker alone would overrun, which is not worth branching on for a width no
+/// screen has.
+///
+/// Resolves once per screen draw — see [`crate::cpm::boot::boot_target`], which
+/// is two syscalls. These screens redraw on a keypress, so that is nothing.
+///
+/// The argument order is [`crate::cpm::boot::boot_target`]'s, deliberately:
+/// this takes the same two strings and hands them straight on, and two
+/// same-typed parameters in opposite orders across one call would compile
+/// perfectly while stat'ing nonsense.
+pub(in crate::telnet) fn cpm_runs_row(transfer_dir: &str, boot_image: &str, width: usize) -> String {
     let target = crate::cpm::boot::boot_target(transfer_dir, boot_image);
     let mark = crate::cpm::boot::boot_setting_mark(&target);
     let label = crate::cpm::boot::boot_choice_label(boot_image);
@@ -641,7 +652,7 @@ impl TelnetSession {
             // asking here — our emulator, or somebody's disk.
             self.send_line(&format!(
                 "  Runs:      {}",
-                self.amber(&cpm_runs_row(&cfg.cpm_boot_image, &cfg.transfer_dir, modem_w))
+                self.amber(&cpm_runs_row(&cfg.transfer_dir, &cfg.cpm_boot_image, modem_w))
             ))
             .await?;
             self.send_line("").await?;
@@ -925,7 +936,7 @@ impl TelnetSession {
             let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
             self.send_line(&format!(
                 "  Runs:      {}",
-                self.amber(&cpm_runs_row(&cfg.cpm_boot_image, &cfg.transfer_dir, w))
+                self.amber(&cpm_runs_row(&cfg.transfer_dir, &cfg.cpm_boot_image, w))
             ))
             .await?;
             self.send_line(&format!(
