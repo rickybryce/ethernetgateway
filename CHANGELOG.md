@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Opening a file at an extent opened the wrong one, so every file was a 16 KB
+  file.** CP/M 2.2's way of reaching past the first 16 KB is to put the extent
+  number in the FCB and call Open; the BDOS positions to it and reports that
+  extent's record count. Ours forced the extent, module and record-count fields
+  to zero, so a caller asking for extent 1 was handed extent 0 — and because
+  sequential reads then returned the right *number* of bytes from the wrong
+  place, nothing ever errored. The data was simply wrong.
+
+  Found by running WordStar 3.0 under the emulator: its print overlay is 34 KB,
+  it opens `WSOVLY1.OVR` at extent 1 and then 2, and it reported
+  `E39 BAD OVERLAY FILE, OR WRONG VERSION OVERLAY FILE` — an error message about
+  the *disk*, for a fault in the BDOS underneath it. The same WordStar on the
+  same image printed perfectly when the disk was **booted** and its own CP/M did
+  the reading, and that is what identified the fault as ours rather than the
+  disk's. WordStar prints correctly under the emulator now.
+
+  Anything reading a file over 16 KB by extent was affected, not only WordStar.
+
 - **The images-folder readme is refreshed on upgrade instead of being frozen
   at whatever version you first ran.** It was written once and never touched
   again, on the reasoning that an operator might have annotated it — but the

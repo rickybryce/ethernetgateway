@@ -969,16 +969,47 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             cpm.set_current_disk(fs.current_drive(), fs.current_user());
             Some(0)
         }
+        // Open File.  **The extent in the FCB selects which extent to open**,
+        // and honouring it is the whole of this function's difficulty.
+        //
+        // This used to force `ex`, `s2` and `rc` to zero, which quietly made
+        // every file a 16 KB file: CP/M 2.2's way of reaching further into one
+        // is to put the extent number in the FCB and open it, and a caller that
+        // did so was silently handed extent 0 instead.  Sequential reads then
+        // returned the right *number* of bytes from the wrong place, so nothing
+        // errored -- the data was just wrong.
+        //
+        // Found by running WordStar 3.0, whose print overlay is 34 KB: it opens
+        // `WSOVLY1.OVR` at extent 1, then 2, reading a few records from each,
+        // and got extent 0 every time.  It reported `E39 BAD OVERLAY FILE, OR
+        // WRONG VERSION OVERLAY FILE` -- an error message about the *disk*, for
+        // a fault in the BDOS underneath it.  The same WordStar on the same
+        // image printed perfectly when the disk was booted and its own CP/M did
+        // the reading, which is what said the fault was ours.
+        //
+        // `cr` is still zeroed.  The Interface Guide puts that on the caller
+        // ("the current record field must be zeroed by the calling program if
+        // the file is to be accessed sequentially from the first record"), so
+        // doing it here is a superset that can only help software which forgot;
+        // WordStar sets `cr` itself after opening and does not care either way.
         15 => Some(with_fcb(cpm, |_cpm, fcb| {
-            if fs.open_existing(fcb) {
-                fcb.ex = 0;
-                fcb.s2 = 0;
-                fcb.cr = 0;
-                fcb.rc = 0;
-                0x00
-            } else {
-                0xFF
+            if !fs.open_existing(fcb) {
+                return 0xFF;
             }
+            let extent = ((fcb.s2 as u32 & 0x3F) << 5) | (fcb.ex as u32 & 0x1F);
+            let total = fs.file_size_records(fcb).unwrap_or(0);
+            let start = extent * 128;
+            // An extent past the end of the file is not there to be opened.
+            // Extent 0 always is, even of an empty file.
+            if extent > 0 && start >= total {
+                return 0xFF;
+            }
+            // Records in *this* extent: a full one is 128, the last holds the
+            // remainder.  Guests read `rc` to find how much of an extent is
+            // live, so it has to describe the extent that was opened.
+            fcb.rc = total.saturating_sub(start).min(128) as u8;
+            fcb.cr = 0;
+            0x00
         })),
         16 => Some(with_fcb(cpm, |_cpm, fcb| {
             // Close: writes here are write-through and there is no directory to
@@ -1931,6 +1962,103 @@ mod tests {
 
     /// End-to-end: a Z80 program MAKEs a file, WRITEs a record from the
     /// DMA buffer, CLOSEs, re-OPENs, READs the record back into a different
+    /// **Opening an extent must open *that* extent.**
+    ///
+    /// CP/M 2.2's way of reaching past the first 16 KB of a file is to put the
+    /// extent number in the FCB and call Open; the BDOS positions to it and
+    /// reports that extent's record count. This used to force `ex`, `s2` and
+    /// `rc` to zero, which made every file a 16 KB file — a caller asking for
+    /// extent 1 was handed extent 0, and sequential reads then returned the
+    /// right *number* of bytes from the wrong place, so nothing ever errored.
+    ///
+    /// Found by running WordStar 3.0, whose print overlay is 34 KB: it opens
+    /// `WSOVLY1.OVR` at extent 1 and then 2, and reported `E39 BAD OVERLAY
+    /// FILE` — an error about the disk, for a fault in the BDOS beneath it. The
+    /// same WordStar on the same image printed perfectly when the disk was
+    /// booted and its own CP/M did the reading, which is what identified the
+    /// fault as ours.
+    #[test]
+    fn test_open_honours_the_extent_it_is_given() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = std::env::temp_dir().join(format!("xmodem_cpm_extent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+
+        // Three extents and a bit: every 128-byte record starts with its own
+        // number, so a record read from the wrong place names where it came
+        // from instead of merely looking wrong.
+        const RECORDS: u32 = 300;
+        let mut body = Vec::with_capacity(RECORDS as usize * 128);
+        for r in 0..RECORDS {
+            let mut rec = [b' '; 128];
+            let tag = format!("RECORD {r:04}");
+            rec[..tag.len()].copy_from_slice(tag.as_bytes());
+            body.extend_from_slice(&rec);
+        }
+        std::fs::write(base.join("A").join("BIG.DAT"), &body).unwrap();
+
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        let read_first_record_of = |cpm: &mut Cpm, fs: &mut CpmFs, extent: u8| -> String {
+            let mut fcb = [0u8; FCB_SIZE];
+            fcb[1..9].copy_from_slice(b"BIG     ");
+            fcb[9..12].copy_from_slice(b"DAT");
+            fcb[12] = extent; // EX -- the extent being asked for
+            cpm.write_block(0x005C, &fcb);
+            cpm.set_reg16(Reg16::DE, 0x005C);
+            assert_eq!(
+                service_disk_bdos(cpm, fs, 15),
+                Some(0x00),
+                "extent {extent} would not open"
+            );
+            // Read one record from wherever the open positioned us.
+            cpm.set_reg16(Reg16::DE, 0x005C);
+            assert_eq!(service_disk_bdos(cpm, fs, 20), Some(0x00), "read failed");
+            let buf = cpm.read_block(0x0080, 16);
+            String::from_utf8_lossy(&buf).trim().to_string()
+        };
+
+        assert_eq!(read_first_record_of(&mut cpm, &mut fs, 0), "RECORD 0000");
+        assert_eq!(
+            read_first_record_of(&mut cpm, &mut fs, 1),
+            "RECORD 0128",
+            "extent 1 must start at record 128, not at the beginning of the file"
+        );
+        assert_eq!(read_first_record_of(&mut cpm, &mut fs, 2), "RECORD 0256");
+
+        // `rc` describes the extent that was opened: full ones hold 128
+        // records, the last holds the remainder.
+        let rc_of = |cpm: &mut Cpm, fs: &mut CpmFs, extent: u8| -> u8 {
+            let mut fcb = [0u8; FCB_SIZE];
+            fcb[1..9].copy_from_slice(b"BIG     ");
+            fcb[9..12].copy_from_slice(b"DAT");
+            fcb[12] = extent;
+            cpm.write_block(0x005C, &fcb);
+            cpm.set_reg16(Reg16::DE, 0x005C);
+            service_disk_bdos(cpm, fs, 15);
+            cpm.read_block(0x005C, FCB_SIZE)[15]
+        };
+        assert_eq!(rc_of(&mut cpm, &mut fs, 0), 128);
+        assert_eq!(rc_of(&mut cpm, &mut fs, 1), 128);
+        assert_eq!(rc_of(&mut cpm, &mut fs, 2), (RECORDS - 256) as u8);
+
+        // An extent past the end of the file is not there to be opened.
+        let mut fcb = [0u8; FCB_SIZE];
+        fcb[1..9].copy_from_slice(b"BIG     ");
+        fcb[9..12].copy_from_slice(b"DAT");
+        fcb[12] = 9;
+        cpm.write_block(0x005C, &fcb);
+        cpm.set_reg16(Reg16::DE, 0x005C);
+        assert_eq!(
+            service_disk_bdos(&mut cpm, &mut fs, 15),
+            Some(0xFF),
+            "an extent beyond the file must not open"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// DMA buffer, and prints it — driven through the real BDOS file calls
     /// against a temp `CPM/` drive.  Exercises the FCB↔memory↔host-file glue
     /// (read_block/write_block/store_position/seq_record) the driver relies
