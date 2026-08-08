@@ -203,6 +203,67 @@ Renaming with a prefix is therefore an override, not a requirement: it says
 \"I know what this is\" and skips the inspection.
 
 
+HOW TO MOUNT ONE
+----------------
+
+Mounting puts the image on one of the sixteen CP/M drives.  You keep the
+gateway's own CP/M, its A> prompt and its terminals; the drive you mount on
+reads and writes the filesystem inside the image instead of its folder.
+
+  Telnet or SSH   main menu C (Configuration), then O (Other Settings),
+                  then E (CP/M settings), then I (Mount/unmount disk
+                  images), then M (Mount an image).  Pick a drive
+                  letter, then a file.  N makes a blank disk instead.
+  Web UI          the \"AI, Browser, Weather & CP/M - More...\" panel, then
+                  the \"Mount CP/M Drives\" button.
+  Desktop         the \"Mount CP/M Drives...\" button, which opens a window
+                  with a row per drive.
+
+Then, inside CP/M, change to that drive the way you always would:
+
+    B:
+    DIR
+
+Mounts are saved in cpm_mounts and survive a restart, and they take effect
+in every session at once.  Unmount from the same screen.
+
+Two things worth knowing before you choose a drive.  Mounting on A: hides
+both bundled terminals, because EGT8080.COM and EGT80.COM live in the A:
+folder - so B: or later is usually what you want.  And a drive somebody is
+using cannot have its disk changed; the screens show which are in use.
+
+
+HOW TO BOOT ONE
+---------------
+
+Booting runs the disk's own operating system on the whole machine.  There
+is no A> from us, no jail, no EGT80 and no EXIT - press ESC twice to come
+back to the gateway.
+
+For a single visit, from telnet or SSH:
+
+  C (Configuration), O (Other Settings), E (CP/M settings), I (Mount/
+  unmount disk images), then B (Boot an image, runs its own OS).  Pick
+  the disk.  This changes no settings - it boots that disk once, now.
+
+To make a disk what the CP/M menu item always runs, set cpm_boot_image:
+
+  Telnet or SSH   C, O, E, then B (Boot settings), then R (Cycle what
+                  CP/M runs).
+  Web UI          the \"CP/M runs:\" list in the CP/M panel.
+  Desktop         the \"CP/M runs:\" list.
+
+Leave that setting empty and the CP/M menu item runs the emulator, which
+is the default.  Two more settings sit beside it and are worth leaving
+alone unless something misbehaves: the machine (auto - the disk is asked)
+and the processor.
+
+A booted image is held by ONE session at a time, and one disk cannot be
+booted and mounted at the same moment.  It opens READ-ONLY unless the
+picker is told otherwise.  Whatever you have mounted comes along for the
+ride, each disk at the controller slot its drive letter names.
+
+
 FORMATS YOU CAN MOUNT
 ---------------------
 
@@ -302,8 +363,10 @@ and are worth getting from the source.
   Altair 8800 Simulator - David Hansel
     https://github.com/dhansel/Altair8800
     The  disks  folder holds the MITS Altair, Tarbell and Cromemco
-    collections.  All of them boot.  For mounting, the TDISKnn disks
-    are ibm3740; the CDISKnn ones are Cromemco and boot only.
+    collections.  All of them boot, and all but the BASIC and DOS ones
+    mount: the DISKnn floppies are altair8, TDISKnn are ibm3740, and
+    the three CDISKnn are Cromemco - single density, and the two
+    double-density formats added by measuring the disks themselves.
 
   Altair-Duino-Disks - J.P. McNeely
     https://github.com/jpmcneely/AltairDuino-Disks
@@ -333,17 +396,19 @@ are sure about was refused, and you want to overrule that.
 
   BE CAREFUL WITH THE SECOND ONE.  A prefix SKIPS the inspection, so it
   turns a read-only refusal into a writable mount — including when the
-  refusal was right.  CDISK01.DSK is exactly that trap: it is 256,256
-  bytes, so it looks like an ibm3740 disk, but it holds CROMEMCO CDOS
-  and not a CP/M filesystem at all.  Naming it ibm3740_ would let the
-  gateway write CP/M structures over a filesystem it cannot read.  It
-  boots perfectly as it stands.
+  refusal was right.  A UCSD p-System disk is exactly that trap: it is
+  256,256 bytes, so it looks like an ibm3740 disk, and it holds no CP/M
+  filesystem at all.  Naming it ibm3740_ would let the gateway write
+  CP/M structures over a filesystem it cannot read.  It boots perfectly
+  as it stands.
 
 Disks that are not CP/M can only be booted, and that is correct rather
 than a fault — mounting one shows no files because there is no CP/M
 directory in it to read.  In the collections above that means Altair
 DOS, Altair Disk Extended BASIC, Time Sharing BASIC, Hard Disk BASIC,
-the minidisks, the UCSD p-System disks and Cromemco CDOS.
+the minidisks and the UCSD p-System disks.  Cromemco CDOS is NOT in
+that list: CDOS keeps a CP/M-compatible filesystem, so those disks
+mount and read like any other.
 
 The mount screen always says which way a disk was taken, and when it is
 read-only it says what was wrong.
@@ -359,8 +424,7 @@ refuses to mount those rather than show you a directory made of file data.
 The MITS naming you may already have — DISK01.DSK, TDISK01.DSK, CDISK01.DSK,
 HDSK01.DSK — is NOT what the gateway keys off.  Those names say which
 emulated controller the disk belonged to, not how the data is laid out.
-Rename a copy with a format prefix from the list above to mount it
-read-write.
+They do not need changing: the file is inspected either way.
 
 A drive someone is currently using cannot have its disk changed.  The mount
 screens show which drives are in use.
