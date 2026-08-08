@@ -366,26 +366,39 @@ mod tests {
             eprintln!("set CPM_DETECT_DIR to run this");
             return;
         };
-        // What each disk is known to need, from having been booted on it.
-        let expect: &[(&str, &str)] = &[
-            ("TDISK01.DSK", "altair_2sio"),
-            ("TDISK02.DSK", "altair_2sio"),
-            ("TDISK03.DSK", "z80pack"),
-            ("TDISK04.DSK", "console_04"),
-            ("TDISK05.DSK", "console_04_cuter"),
-            ("DISK01.DSK", "altair_2sio"),
-            ("HDSK03.DSK", "altair_2sio"),
-            ("cpm22-1.dsk", "z80pack"),
-            ("mpm-1.dsk", "z80pack"),
-            ("ucsd-iv-1.dsk", "z80pack"),
-            ("cpm13.dsk", "z80pack"),
+        // What each disk is known to need, from having been booted on it —
+        // keyed by the **CRC-32 of its contents**, with the name kept only so a
+        // failure is readable.
+        //
+        // Keyed on content because a filename is not an identity. Three
+        // basenames collide across the sample sets — `cpm13.dsk`, `cpm14.dsk`
+        // and `cpm22.dsk` each exist in two z80pack libraries as *different
+        // disks* — and keying on the name failed this test on a folder it was
+        // never written for: z80pack altairsim's `cpm13.dsk` is
+        // "TARBELL 62K CPM V1.3", boots correctly, and was reported as a
+        // detection bug because cpmsim's unrelated `cpm13.dsk` sits in this
+        // table. The disks this project reads are renamed by their owners as a
+        // matter of course, which is the whole reason the product identifies an
+        // image by inspection; the test that guards it should not do worse.
+        let expect: &[(u32, &str, &str)] = &[
+            (0x2739_6D2F, "TDISK01.DSK", "altair_2sio"),
+            (0x9E67_A3D1, "TDISK02.DSK", "altair_2sio"),
+            (0xF779_6AF5, "TDISK03.DSK", "z80pack"),
+            (0xAFDA_1589, "TDISK04.DSK", "console_04"),
+            (0xE9DE_0744, "TDISK05.DSK", "console_04_cuter"),
+            (0xB88F_A5FB, "DISK01.DSK", "altair_2sio"),
+            (0x7A6D_D0E7, "HDSK03.DSK", "altair_2sio"),
+            (0xAFA7_7247, "cpm22-1.dsk", "z80pack"),
+            (0xF27B_9631, "mpm-1.dsk", "z80pack"),
+            (0xD4A4_132F, "ucsd-iv-1.dsk", "z80pack"),
+            (0xDB32_6D36, "cpm13.dsk (cpmsim)", "z80pack"),
             // All three Cromemco disks reach a prompt and take a `DIR` on this
             // machine. CDISK01 is the one that matters most here: it is 256,256
             // bytes, so a size can never choose it — only its boot loader's
             // registers can.
-            ("CDISK01.DSK", "cromemco"),
-            ("CDISK02.DSK", "cromemco"),
-            ("CDISK03.DSK", "cromemco"),
+            (0x76D8_3B8A, "CDISK01.DSK", "cromemco"),
+            (0x77D0_8B46, "CDISK02.DSK", "cromemco"),
+            (0x8C92_11D3, "CDISK03.DSK", "cromemco"),
         ];
         let mut names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -395,10 +408,16 @@ mod tests {
             .collect();
         names.sort();
         let mut wrong = Vec::new();
+        let mut checked = 0usize;
         for name in &names {
             let bytes = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
             let got = detect_machine(&bytes);
-            let want = expect.iter().find(|(n, _)| n == name).map(|(_, m)| *m);
+            let crc = crate::zmodem::crc32(&bytes);
+            let want = expect.iter().find(|(c, _, _)| *c == crc).map(|(_, l, m)| (*l, *m));
+            if want.is_some() {
+                checked += 1;
+            }
+            let want = want.map(|(_, m)| m);
             let shown = match &got {
                 Detected::Machine(m) => (*m).to_string(),
                 Detected::Unclear(why) => format!("unclear ({why})"),
@@ -418,5 +437,8 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "detection disagreed with what works:\n  {}", wrong.join("\n  "));
+        // A folder none of the known disks is in proves nothing, and used to
+        // *look* like a pass.  Say so instead.
+        println!("  ({checked} of {} images had a recorded expectation)", names.len());
     }
 }

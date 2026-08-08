@@ -62,13 +62,49 @@ pub fn ensure_cpm_tree(transfer_dir: &str) -> std::io::Result<()> {
 /// convenience, and it must not stop the drives from being usable.
 fn write_images_readme(images: &Path) {
     let path = images.join("readme.txt");
-    if path.exists() {
-        return;
-    }
-    if let Err(e) = std::fs::write(&path, images_readme()) {
-        crate::glog!("CP/M: could not write {}: {}", path.display(), e);
+    let current = images_readme();
+    match std::fs::read_to_string(&path) {
+        // Ours, and out of date: refresh it.
+        //
+        // "Never overwrite" was the original rule and it was wrong in the one
+        // way that matters — this file is *instructions*, and an operator who
+        // has ever launched the gateway keeps whichever version they first ran,
+        // for ever. The copy in this repo's own working tree was written on
+        // 1 August and still told the reader that an image without a format
+        // prefix mounts READ-ONLY and must be renamed to be writable. That
+        // stopped being true when identification learned to verify a
+        // filesystem, and the stale advice is why this project's own images
+        // folder was full of hand-renamed disks. It was also missing the entire
+        // "MOUNTING IS NOT BOOTING" section, which is most of what a reader
+        // needs.
+        //
+        // A file that no longer starts with our header is the operator's, not
+        // ours, and is never touched — which is the case
+        // [`test_never_overwrites_existing_content`] is really about.
+        Ok(existing) if existing != current && existing.starts_with(README_HEADER) => {
+            if let Err(e) = std::fs::write(&path, &current) {
+                crate::glog!("CP/M: could not refresh {}: {}", path.display(), e);
+            } else {
+                crate::glog!("CP/M: refreshed {} for this version", path.display());
+            }
+        }
+        // Ours and already current, or somebody else's: leave it alone.
+        Ok(_) => {}
+        Err(_) => {
+            if let Err(e) = std::fs::write(&path, &current) {
+                crate::glog!("CP/M: could not write {}: {}", path.display(), e);
+            }
+        }
     }
 }
+
+/// The first line of every readme this project has generated.
+///
+/// The marker for "this file is ours to update". Deliberately the *existing*
+/// header rather than a new version stamp: a stamp would only identify readmes
+/// written after the stamp was added, and the readmes that need refreshing are
+/// precisely the ones written before it.
+const README_HEADER: &str = "CP/M DISK IMAGES\n================";
 
 /// The text of the images-folder readme.
 ///
@@ -395,6 +431,49 @@ mod tests {
             b"my own notes",
             "an annotated readme must survive"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A readme we wrote is refreshed; one the operator wrote is not.**
+    ///
+    /// The file is instructions, and the original "never overwrite" rule meant
+    /// an operator kept whichever version they first ran for ever. This repo's
+    /// own working copy was three months stale: it still said an unprefixed
+    /// image mounts read-only and must be renamed — untrue since identification
+    /// learned to verify a filesystem, and the reason this project's images
+    /// folder was full of hand-renamed disks.
+    #[test]
+    fn test_a_stale_generated_readme_is_refreshed() {
+        let dir = temp("refresh");
+        let t = dir.to_string_lossy().to_string();
+        ensure_cpm_tree(&t).unwrap();
+        let readme = cpm_dir(&t).join(IMAGES_DIR).join("readme.txt");
+
+        // An older generated readme: our header, but text that has moved on.
+        let stale = format!("{README_HEADER}\n\nsomething we used to say.\n");
+        std::fs::write(&readme, &stale).unwrap();
+        ensure_cpm_tree(&t).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&readme).unwrap(),
+            images_readme(),
+            "a generated readme that has fallen behind must be brought up to date"
+        );
+
+        // The operator's own file keeps its content, even in this folder.
+        std::fs::write(&readme, b"MY NOTES\n========\n\nhands off.\n").unwrap();
+        ensure_cpm_tree(&t).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&readme).unwrap(),
+            "MY NOTES\n========\n\nhands off.\n",
+            "a file that is not one of ours must never be rewritten"
+        );
+
+        // And a current one is not rewritten needlessly.
+        std::fs::write(&readme, images_readme()).unwrap();
+        let before = std::fs::metadata(&readme).unwrap().modified().unwrap();
+        ensure_cpm_tree(&t).unwrap();
+        assert_eq!(std::fs::metadata(&readme).unwrap().modified().unwrap(), before);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

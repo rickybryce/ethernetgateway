@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The images-folder readme is refreshed on upgrade instead of being frozen
+  at whatever version you first ran.** It was written once and never touched
+  again, on the reasoning that an operator might have annotated it — but the
+  file is *instructions*, and this project's own copy was three months stale:
+  it still said an image without a format prefix mounts READ-ONLY and must be
+  renamed to be writable. That stopped being true when identification learned
+  to verify a filesystem — an unprefixed image whose CP/M directory checks out
+  mounts read-write just the same — and the stale advice is exactly why this
+  repository's own images folder had accumulated hand-renamed disks. It was
+  also missing the entire "MOUNTING IS NOT BOOTING" section, which is most of
+  what a reader needs. A readme that still starts with our own header is now
+  brought up to date and the refresh is logged; a file that does not is the
+  operator's and is never touched.
+
+- **The detection survey identified disks by filename, and filenames are not
+  unique.** `test_detect_every_real_image` keyed its expectations on the bare
+  name, and three basenames collide across the sample sets — `cpm13.dsk`,
+  `cpm14.dsk` and `cpm22.dsk` each exist in two z80pack libraries as *different
+  disks*. Pointed at a folder it was not written for, it failed on a disk that
+  works perfectly: z80pack altairsim's `cpm13.dsk` is "TARBELL 62K CPM V1.3",
+  boots correctly, and was reported as a detection bug because cpmsim's
+  unrelated `cpm13.dsk` sits in the table. Expectations are keyed on the CRC-32
+  of the contents now, and the survey prints how many of the images it scanned
+  it actually had an expectation for — a folder none of them is in used to look
+  like a pass.
+
 - **The backspace key inside a booted disk is now yours to set.** Type
   `TESTING` into a booted Altair disk, backspace over it, and the screen used to
   read `TESTINGGNIT`. Your terminal's Backspace key sends DEL (0x7F) and most of

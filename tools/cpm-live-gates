@@ -79,7 +79,12 @@ export CPM_GT_DIR="$WORK/ground-truth"
 # Written to, so a temp dir rather than anything of the operator's.
 export CPM_LAYOUT_DIR="$WORK/layout"
 export CPM_LIVE_BASE="$REPO/transfer/CPM"
-export CPM_DUMP_IMAGE="$REPO/transfer/CPM/images/altair8_cpm22.dsk"
+# The pristine repo name, not a renamed copy.  This folder used to hold
+# hand-renamed images (`altair8_cpm22.dsk` was this file) and the prefix was
+# doing nothing a gate needed: an unprefixed image whose filesystem checks out
+# mounts read-write just the same.  Renaming the corpus only hid which path was
+# being exercised.
+export CPM_DUMP_IMAGE="$REPO/transfer/CPM/images/DISK01.DSK"
 export CPM_DUMP_FILE=PIP.COM
 # The CPU exerciser: 8080PRE if it has been extracted from z80pack's
 # i8080tests.dsk (cpmcp -f ibm-3740), otherwise the gate skips itself.
