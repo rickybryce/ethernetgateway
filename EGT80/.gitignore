@@ -5,4 +5,13 @@ build/
 
 # zxcc is copied in from the RomWBW distribution by `make tools`; it is
 # third-party GPL software with its own upstream, not part of EGT80.
-tools/
+#
+# Named exactly, not as `tools/`.  The broad form said "third-party" and
+# meant it, but `tools/` is also where this project's OWN build scripts
+# live - so when port8080.py and check8080.py arrived they were silently
+# untracked, and EGT8080.Z80 shipped as a 180 KB generated file with no
+# generator and no checker in the repository.  `make` on a fresh clone
+# stopped with "No rule to make target 'tools/check8080.py'", and three
+# documents promised a safety mechanism that was not there.  An ignore
+# rule should exclude what it names.
+tools/zxcc-src/

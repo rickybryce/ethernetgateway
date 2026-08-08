@@ -1819,7 +1819,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             note.push_str(if booting {
                 " <span class=\"sub\">the booted disk is here</span>"
             } else {
-                " <span class=\"sub\">A: hides EGT80 while mounted</span>"
+                " <span class=\"sub\">A: hides the terminals while mounted</span>"
             });
         }
         rows.push_str(&format!(

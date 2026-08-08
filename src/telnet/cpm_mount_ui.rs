@@ -621,7 +621,13 @@ impl TelnetSession {
                 // Two different facts about slot 0, and which one is true
                 // depends on what is running.  EGT80 lives in the gateway's own
                 // drive A: folder, which a booted disk never sees.
-                note.push_str(if booting { " - booted disk here" } else { " - hides EGT80" });
+                // "the terminals", plural: drive A: carries EGT8080.COM and
+                // EGT80.COM, and a mount hides both.
+                note.push_str(if booting {
+                    " - booted disk here"
+                } else {
+                    " - hides the terminals"
+                });
             }
             // The *note* is bounded, not the finished line.  `truncate_to_width`
             // counts characters, and a coloured line is mostly escape bytes — so
@@ -707,9 +713,11 @@ impl TelnetSession {
             .await?;
         if drive0 == 0 {
             self.send_line("").await?;
-            self.send_line(&format!("  {}", self.amber("EGT80 lives in CPM/A and will be")))
+            // Both terminals live there, so the plural is the true statement
+            // and it costs no rows: still two, which a 40-column screen needs.
+            self.send_line(&format!("  {}", self.amber("Both terminals live in CPM/A and")))
                 .await?;
-            self.send_line(&format!("  {}", self.amber("hidden while this is mounted.")))
+            self.send_line(&format!("  {}", self.amber("are hidden while this is mounted.")))
                 .await?;
         }
         self.send_line("").await?;

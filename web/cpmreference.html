@@ -624,12 +624,13 @@
                     Reaching it: from the main menu choose <strong>K &mdash; CP/M System</strong>. The
                     emulator is enabled by default (<code>cpm_emu_enabled</code>); the drive folders
                     <code>transfer_dir/CPM/A</code> &hellip; <code>P</code> are created on first launch, and the
-                    bundled <a href="#egt80">EGT80</a> terminal is placed on drive A: at the same time.
+                    bundled <a href="#egt80">EGT80</a> terminal is placed on drive A: at the same time &mdash; in
+                    both its builds, <code>EGT8080.COM</code> and <code>EGT80.COM</code>.
                 </p>
                 <p>
                     <strong>Getting your own files onto a drive:</strong> the drives are ordinary folders, so
                     in the gateway's <strong>File Transfer</strong> menu change directory to <code>CPM/A</code>
-                    and upload there &mdash; the file is on drive A: the moment it lands, no import step. EGT80
+                    and upload there &mdash; the file is on drive A: the moment it lands, no import step. EGT8080
                     can also fetch one over the virtual modem from inside the emulator. The emulator's
                     <code>HELP</code> says both.
                 </p>
@@ -872,9 +873,10 @@ altairhd_cobol.dsk</code></pre>
                 </p>
                 <div class="callout">
                     <p>
-                        Mounting an image on <strong>drive A:</strong> hides EGT80, since EGT80
-                        lives in the A: folder. Moving files in and out of a mounted image is done
-                        with XMODEM from inside EGT80, so mounting over A: costs you the tool you
+                        Mounting an image on <strong>drive A:</strong> hides <em>both</em>
+                        terminals, since <code>EGT8080.COM</code> and <code>EGT80.COM</code> live
+                        in the A: folder. Moving files in and out of a mounted image is done with
+                        XMODEM from inside the terminal, so mounting over A: costs you the tool you
                         would use to populate the image. Prefer B: or later.
                     </p>
                 </div>

@@ -327,10 +327,12 @@ read-write.
 A drive someone is currently using cannot have its disk changed.  The mount
 screens show which drives are in use.
 
-Mounting an image on drive A: hides EGT80, the bundled terminal, because
-EGT80 lives in the A: folder.  Since transferring files in and out of a
-mounted image is done with XMODEM from inside EGT80, you usually want to
-mount images on B: or later and leave A: as it is.
+Mounting an image on drive A: hides BOTH bundled terminals, because
+EGT8080.COM and EGT80.COM live in the A: folder.  Since transferring
+files in and out of a mounted image is done with XMODEM from inside the
+terminal, you usually want to mount images on B: or later and leave A:
+as it is.  (EGT8080 is the one to run: it is built to the 8080's
+instruction set, so it works whichever processor cpm_cpu selects.)
 ",
     );
     s

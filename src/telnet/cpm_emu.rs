@@ -233,8 +233,13 @@ const EGT8080_NAME: &str = "EGT8080.COM";
 /// cannot come to differ between them. A third build is one row.
 ///
 /// **Order is not cosmetic.** EGT8080 is first because it is the one that runs
-/// on both processors, and the emulator's help and messages lead with whatever
-/// is first here.
+/// on both processors, and it is the name the emulator's own text should lead
+/// with. That text is written out as literals rather than built from this
+/// table, so the connection is held by a test —
+/// `test_the_emulator_names_the_terminal_that_runs_on_both` — and not by this
+/// sentence. It had to be: the help still said `EGT80` after everything else
+/// had been changed, which under `cpm_cpu = 8080` is the gateway telling an
+/// operator to type the one command that crashes their machine.
 const BUNDLED_TERMINALS: &[(&str, &[u8])] =
     &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
 
@@ -519,9 +524,9 @@ impl TelnetSession {
         Ok(())
     }
 
-    /// Put EGT80 on drive A: if it is not already there.
+    /// Put the bundled terminals on drive A: if they are not already there.
     ///
-    /// **Only when absent, never overwriting.** EGT80 saves its settings — the
+    /// **Only when absent, never overwriting.** Each saves its settings — the
     /// selected serial port, the ANSI/ASCII choice, the menu key — into a patch
     /// area inside its own `.COM` file, so refreshing the copy on every launch
     /// would silently throw away the user's configuration. It also means a user
@@ -1188,8 +1193,8 @@ impl TelnetSession {
                 "  transfer directory: CPM/A..CPM/P.",
                 "  In File Transfer, change to CPM/A",
                 "  and upload - it is on drive A: at",
-                "  once.  EGT80 can also fetch one",
-                "  over the virtual modem.",
+                "  once.  EGT8080 can also fetch",
+                "  one over the virtual modem.",
                 "",
                 "  The drives are SHARED with other",
                 "  sessions.  A file one session is",
@@ -1223,7 +1228,7 @@ impl TelnetSession {
                 "  directory, CPM/A .. CPM/P.  In the gateway's",
                 "  File Transfer menu, change directory to",
                 "  CPM/A and upload there - the file is on",
-                "  drive A: as soon as it lands.  EGT80 can",
+                "  drive A: as soon as it lands.  EGT8080 can",
                 "  also fetch one over the virtual modem.",
                 "",
                 "  The drives are SHARED with any other session",
@@ -2613,6 +2618,34 @@ mod egt80_tests {
         }
     }
 
+    /// **Every terminal name the emulator prints is the one that runs on both.**
+    ///
+    /// The help text and the banner note are static literals — nothing builds
+    /// them from [`BUNDLED_TERMINALS`], so nothing but this stops them naming
+    /// the Z80 build. Under `cpm_cpu = 8080` that is the gateway telling an
+    /// operator to type the one command that takes CP/M down, on the screen
+    /// they opened *because* they did not know what to type.
+    ///
+    /// A whole-word check, because `EGT8080` contains `EGT80`: a substring
+    /// test would pass on either name and prove nothing.
+    #[test]
+    fn test_the_emulator_names_the_terminal_that_runs_on_both() {
+        use super::{TelnetSession, CPM_NOTE_8080};
+
+        let mut lines: Vec<&str> = vec![CPM_NOTE_8080];
+        for petscii in [true, false] {
+            lines.extend(TelnetSession::cpmemu_help_lines(petscii));
+        }
+        for line in lines {
+            for word in line.split(|c: char| !c.is_ascii_alphanumeric()) {
+                assert_ne!(
+                    word, "EGT80",
+                    "this line names the Z80-only build, which crashes an 8080: {line:?}"
+                );
+            }
+        }
+    }
+
     /// **The one that runs on both processors is offered first.**
     ///
     /// Not cosmetic: the placement log and the emulator's help lead with
@@ -2728,18 +2761,36 @@ mod egt80_tests {
     /// top, which is the part naming what you are looking at.
     ///
     /// This is a source-level check on purpose: it parses the `DB` strings out
-    /// of `EGT80.Z80`, so it needs no assembler and runs in CI, unlike the
-    /// binary itself.  It caught help page 3 having been over the limit since
-    /// it was written, and page 2 going over when line settings were described
-    /// in it.  Two rows are reserved for the "Press any key" prompt that
-    /// follows a full-screen page.
+    /// of the sources, so it needs no assembler and runs in CI, unlike the
+    /// binaries themselves.  It caught help page 3 having been over the limit
+    /// since it was written, and page 2 going over when line settings were
+    /// described in it.  Two rows are reserved for the "Press any key" prompt
+    /// that follows a full-screen page.
+    ///
+    /// **Both sources**, and that is the one that needed adding: the 8080
+    /// build renames fourteen strings from `EGT80` to `EGT8080`, so every
+    /// message carrying the program's name is two columns wider than the one
+    /// this test was written against.  A block already near the limit would
+    /// wrap with nothing failing.  `port8080.py` also refuses to emit a line
+    /// over 80 columns, but that bounds the *source* line, not the rendered
+    /// screen — two different limits, and only this one is about the display.
     #[test]
     fn test_egt80_screens_fit_a_24_by_80_terminal() {
+        for (name, src) in [
+            ("EGT80.Z80", include_str!("../../EGT80/EGT80.Z80")),
+            ("EGT8080.Z80", include_str!("../../EGT80/EGT8080.Z80")),
+        ] {
+            check_screens_fit(name, src);
+        }
+    }
+
+    /// One source's screens, for [`test_egt80_screens_fit_a_24_by_80_terminal`].
+    #[cfg(test)]
+    fn check_screens_fit(src_name: &str, src: &str) {
         const ROWS: usize = 24;
         const COLS: usize = 80;
         const PROMPT_ROWS: usize = 2; // blank line + "Press any key."
 
-        let src = include_str!("../../EGT80/EGT80.Z80");
         let mut label = String::new();
         let mut text = String::new();
         // Only *printable* blocks are screens.  Every string EGT80 prints ends
@@ -2760,13 +2811,13 @@ mod egt80_tests {
                 .unwrap_or(0);
             assert!(
                 rows + PROMPT_ROWS <= ROWS,
-                "EGT80 screen {label} is {rows} rows; with the key prompt that \
-                 scrolls its heading off a {ROWS}-row terminal"
+                "{src_name}: screen {label} is {rows} rows; with the key prompt \
+                 that scrolls its heading off a {ROWS}-row terminal"
             );
             assert!(
                 widest <= COLS - 2,
-                "EGT80 screen {label} has a {widest}-column line; it would wrap \
-                 on an {COLS}-column terminal"
+                "{src_name}: screen {label} has a {widest}-column line; it would \
+                 wrap on an {COLS}-column terminal"
             );
         };
 
@@ -2851,11 +2902,19 @@ mod egt80_tests {
         // would notice them drifting apart — the symptom would be a fresh
         // install where the bundled terminal cannot reach the modem, which is
         // exactly the confusion this pairing exists to prevent.
-        let src = include_str!("../../EGT80/EGT80.Z80");
+        //
+        // Asked of both sources.  The 8080 build is derived, so its defaults
+        // *should* be the same — but "should" is what a test is for, and the
+        // one on drive A: under `cpm_cpu = 8080` is the one an operator
+        // actually runs.
+        for (src_name, src) in [
+            ("EGT80.Z80", include_str!("../../EGT80/EGT80.Z80")),
+            ("EGT8080.Z80", include_str!("../../EGT80/EGT8080.Z80")),
+        ] {
         let field = |name: &str| -> String {
             src.lines()
                 .find(|l| l.trim_start().starts_with(&format!("{name}:")))
-                .unwrap_or_else(|| panic!("EGT80.Z80 should declare {name}"))
+                .unwrap_or_else(|| panic!("{src_name} should declare {name}"))
                 .split_whitespace()
                 .nth(2)
                 .unwrap_or_else(|| panic!("{name} should have a DB value"))
@@ -2879,6 +2938,7 @@ mod egt80_tests {
             ),
             other => panic!("the default UART profile should be a port profile, got {other:?}"),
         }
+        }
     }
 
     /// The shipped settings block and the damaged-block fallback must not
@@ -2896,11 +2956,24 @@ mod egt80_tests {
     /// clear to the ADM-3A `^Z` each left the fallback quietly restoring the
     /// old value. The table replaced the register dance; this keeps the table
     /// honest. Source-level, so it runs in CI, which cannot rebuild EGT80.
+    ///
+    /// Both sources: the 8080 build rewrote `CFGBAD`'s `LDIR` into a copy
+    /// loop, which is precisely the code that puts this table over that block.
     #[test]
     fn test_egt80_fallback_defaults_match_the_shipped_block() {
-        // Normalised to LF: a Windows checkout has CRLF endings and every line
-        // here would otherwise carry a trailing \r into the parsed value.
-        let src = include_str!("../../EGT80/EGT80.Z80").replace("\r\n", "\n");
+        for src in [
+            include_str!("../../EGT80/EGT80.Z80"),
+            include_str!("../../EGT80/EGT8080.Z80"),
+        ] {
+            check_fallback_defaults(&src.replace("\r\n", "\n"));
+        }
+    }
+
+    /// One source's two default blocks, compared field by field.
+    #[cfg(test)]
+    fn check_fallback_defaults(src: &str) {
+        // The caller normalises to LF: a Windows checkout has CRLF endings and
+        // every line here would otherwise carry a trailing \r into the value.
 
         /// `LABEL: DB value ; comment` -> (label, value), resolving the two
         /// port-kind equates the table uses by name.

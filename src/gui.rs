@@ -1124,7 +1124,7 @@ impl App {
                             ui.label(if booting {
                                 "(the booted disk is here)"
                             } else {
-                                "(A: hides EGT80 while mounted)"
+                                "(A: hides the terminals while mounted)"
                             });
                         }
                         ui.end_row();

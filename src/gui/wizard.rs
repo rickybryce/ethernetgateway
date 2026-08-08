@@ -568,8 +568,8 @@ impl Wizard {
             "Gateways — dial out to SSH or telnet hosts, or bridge a real serial port.",
             "Serial modem emulator — Hayes AT commands over a real UART, so vintage \
              terminal software can \"dial\" the internet.",
-            "CP/M emulator — runs real Z80 .COM software, and ships with our own EGT80 \
-             terminal program.",
+            "CP/M emulator — runs real Z80 or 8080 .COM software, and ships with our \
+             own EGT80 terminal program in a build for each.",
             "Gateway Shell — a CP/M-style file manager over the transfer directory.",
             "Extras — a text-mode web browser, a weather service and an AI chat client.",
         ] {
@@ -781,9 +781,10 @@ impl Wizard {
         note(
             ui,
             &format!(
-                "EGT80.COM — our own CP/M terminal program, with XMODEM in both directions — \
-                 is placed on drive A: for you ({}/CPM/A). It saves its settings inside its \
-                 own .COM file, so it is never overwritten once it's there.",
+                "EGT8080.COM and EGT80.COM — our own CP/M terminal program, with XMODEM in \
+                 both directions — are placed on drive A: for you ({}/CPM/A). EGT8080 runs on \
+                 either processor, so reach for that one. Each saves its settings inside its \
+                 own .COM file, so neither is overwritten once it's there.",
                 self.transfer_dir.trim()
             ),
         );
