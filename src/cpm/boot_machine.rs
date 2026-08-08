@@ -998,6 +998,14 @@ impl BootMachine {
         if port == self.console.status_port || port == self.console.data_port {
             return Some("the console");
         }
+        // The MMU, on the machine that has one.  Nothing in `uart.rs` lands on
+        // 14h-17h today, so this is not reachable -- but the console case above
+        // exists because a modem that is *present in the config and mute in the
+        // machine* is the worst way for this to fail, and the MMU would shadow
+        // one exactly the same way.
+        if self.has_mmu && super::mmu::Mmu::owns_port(port) {
+            return Some("the memory-bank controller");
+        }
         match port {
             SENSE_SWITCH_PORT => Some("the front panel"),
             _ => None,

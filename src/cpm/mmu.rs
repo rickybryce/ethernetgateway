@@ -220,6 +220,24 @@ mod tests {
         assert_eq!(m.read(&bank0, 0x0100), 0x42);
     }
 
+    /// No UART profile may land on the MMU, or a modem would be accepted into
+    /// the config and be mute in the machine — the failure the console check in
+    /// `reserved_port` exists to prevent.
+    #[test]
+    fn test_no_uart_profile_collides_with_the_mmu() {
+        for u in crate::cpm::uart::UART_CHOICES {
+            if let crate::cpm::ModemAccess::Ports(p) = u.access {
+                for port in [p.status_port, p.data_port] {
+                    assert!(
+                        !Mmu::owns_port(port),
+                        "uart profile {} claims {port:#04x}, which is the MMU's",
+                        u.key
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_ports_claimed() {
         for p in 0x14..=0x17u8 {
