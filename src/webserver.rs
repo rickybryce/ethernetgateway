@@ -2110,7 +2110,7 @@ fn render_more_popups(cfg: &Config) -> String {
     // in, so the two cannot present different lists.
     let cpm_printer_port_options: String = std::iter::once((
         crate::cpm::printer::PORT_OFF,
-        "No printer on a booted disk",
+        crate::cpm::printer::PORT_OFF_LABEL,
     ))
     .chain(crate::cpm::printer::PORT_CHOICES.iter().map(|p| (p.key, p.label)))
     .map(|(value, label)| {

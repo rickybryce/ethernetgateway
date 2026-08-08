@@ -613,10 +613,17 @@ impl TelnetSession {
             // needed a key and this screen was already exactly on the 22-row
             // PETSCII budget — and of every row here these are the two that read
             // as one fact ("the emulator, and how long a program gets"), so
-            // joining them costs the least.  37 columns at the longest, inside
-            // the 40 a Commodore has; pinned by `test_cpm_settings_row_count`.
+            // joining them costs the least.
+            //
+            // `M` rather than ` M-instr`, which is what the row said when it was
+            // first merged: `cpm_emu_max_minstr` is a `u32` with no upper bound,
+            // so the longest this row can be is not the 37 columns the default
+            // produces but 43 — and 43 wraps a Commodore, which would also push
+            // this screen past the 22 rows it is pinned to. Held at the worst
+            // case by `test_cpm_settings_ceiling_row_fits_petscii`, which reads
+            // the format string out of this file rather than restating it.
             self.send_line(&format!(
-                "  Emulator:  {}, ceiling {} M-instr",
+                "  Emulator:  {}, ceiling {}M",
                 status,
                 self.amber(&cfg.cpm_emu_max_minstr.to_string())
             ))
@@ -944,19 +951,13 @@ impl TelnetSession {
             self.send_line("").await?;
 
             let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
-            let printer_label = crate::cpm::printer::PRINTER_CHOICES
-                .iter()
-                .find(|(v, _)| *v == cfg.cpm_printer.trim())
-                .map(|(_, l)| *l)
-                .unwrap_or("Off - printer output goes to the screen");
+            let printer_label = crate::cpm::printer::printer_label(&cfg.cpm_printer);
             self.send_line(&format!(
                 "  Output:    {}",
                 self.amber(&truncate_to_width(printer_label, w))
             ))
             .await?;
-            let port_label = crate::cpm::printer::port_for(&cfg.cpm_printer_port)
-                .map(|p| p.label)
-                .unwrap_or("No printer on a booted disk");
+            let port_label = crate::cpm::printer::port_label(&cfg.cpm_printer_port);
             self.send_line(&format!(
                 "  Board:     {}",
                 self.amber(&truncate_to_width(port_label, w))
@@ -974,8 +975,9 @@ impl TelnetSession {
             } else {
                 // Names the folder: the operator has to go somewhere to fetch
                 // this, and "the transfer folder" would send them to the root,
-                // where it is not.  26 columns at the widest, inside the 40 a
-                // Commodore has.
+                // where it is not.  The widths of every fixed row on this screen
+                // are held by `test_cpm_printer_screen_literals_fit_petscii`
+                // rather than by a number in a comment here.
                 self.send_line(&format!("  {}", self.dim("A document lands in your"))).await?;
                 self.send_line(&format!("  {}", self.dim("transfer printer/ folder, 5s"))).await?;
                 self.send_line(&format!("  {}", self.dim("after the last character."))).await?;

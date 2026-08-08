@@ -1536,13 +1536,7 @@ impl App {
             ui.label("CP/M printer:");
             egui::ComboBox::from_id_salt("cpm_printer_combo")
                 .width(320.0)
-                .selected_text(
-                    crate::cpm::printer::PRINTER_CHOICES
-                        .iter()
-                        .find(|(v, _)| *v == self.cfg.cpm_printer.trim())
-                        .map(|(_, l)| *l)
-                        .unwrap_or("Off - printer output goes to the screen"),
-                )
+                .selected_text(crate::cpm::printer::printer_label(&self.cfg.cpm_printer))
                 .show_ui(ui, |ui| {
                     for (value, label) in crate::cpm::printer::PRINTER_CHOICES {
                         ui.selectable_value(
@@ -1579,16 +1573,12 @@ impl App {
             ui.label("Booted disk's printer:");
             egui::ComboBox::from_id_salt("cpm_printer_port_combo")
                 .width(320.0)
-                .selected_text(
-                    crate::cpm::printer::port_for(&self.cfg.cpm_printer_port)
-                        .map(|p| p.label)
-                        .unwrap_or("No printer on a booted disk"),
-                )
+                .selected_text(crate::cpm::printer::port_label(&self.cfg.cpm_printer_port))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.cfg.cpm_printer_port,
                         crate::cpm::printer::PORT_OFF.to_string(),
-                        "No printer on a booted disk",
+                        crate::cpm::printer::PORT_OFF_LABEL,
                     );
                     for p in crate::cpm::printer::PORT_CHOICES {
                         ui.selectable_value(

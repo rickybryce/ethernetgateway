@@ -2261,6 +2261,114 @@ fn test_cpm_printer_settings_row_count() {
     assert!(rows <= 22, "CP/M printer settings is {rows} rows, exceeds 22");
 }
 
+/// The CP/M settings screen's merged Emulator/ceiling row must fit 40 columns
+/// **at the worst value the config can hold**, not at the default.
+///
+/// `cpm_emu_max_minstr` is a `u32` and the parser bounds it only below (`>= 1`),
+/// so the row's real longest form uses ten digits, not four. When the two rows
+/// were merged to make room for the printer key the comment claimed 37 columns
+/// — true of the default and wrong by six of the worst case, which would wrap a
+/// Commodore and push a screen pinned at exactly 22 rows past its budget.
+///
+/// The format string is read out of `config_ui.rs` rather than restated here:
+/// a test that models a string the code does not use is the kind that stays
+/// green through the change that breaks it.
+#[test]
+fn test_cpm_settings_ceiling_row_fits_petscii() {
+    let src = include_str!("config_ui.rs").replace('\r', "");
+    let marker = "\"  Emulator:  {}, ceiling ";
+    let i = src.find(marker).expect(
+        "the Emulator/ceiling row changed shape — re-measure it here rather than \
+         deleting this test",
+    );
+    let rest = &src[i + 1..];
+    let fmt = &rest[..rest.find('"').expect("the end of the format string")];
+
+    // The two `{}`: the on/off word, and the ceiling.  Longest of each.
+    let status = "off"; // 3 columns; "ON" is 2 — colour codes do not advance the
+                        // cursor on any of the three terminal types.
+    let ceiling = u32::MAX.to_string(); // 10 digits, what the parser will accept
+    let rendered = fmt.replacen("{}", status, 1).replacen("{}", &ceiling, 1);
+
+    assert!(
+        !rendered.contains("{}"),
+        "the row grew a third field this test does not know how to fill: {rendered:?}"
+    );
+    assert!(
+        rendered.chars().count() <= PETSCII_WIDTH,
+        "the Emulator/ceiling row is {} cols at cpm_emu_max_minstr = {}, which \
+         wraps a 40-column screen and costs this screen a row it does not have: \
+         {rendered:?}",
+        rendered.chars().count(),
+        u32::MAX
+    );
+}
+
+/// Every fixed line of the CP/M printer screen has to fit a Commodore's 40
+/// columns.
+///
+/// The screen lives in `config_ui.rs`, which
+/// [`test_cpm_disk_screen_literals_fit_petscii`] does not scan — that one covers
+/// the disk screens' own files — so without this its width was an *assertion in
+/// a comment*, and the comment was wrong: it claimed 26 columns at the widest
+/// when the widest row is 30. A number nothing measures drifts from the code
+/// the moment either changes, so the number lives here instead — and the first
+/// thing it did was catch the comment's replacement being wrong too, because a
+/// key row is `"  K  "` and not `"  "`.
+///
+/// Scanned, not listed: a hand-copied list keeps asserting about strings the
+/// code no longer prints. The `Back` row is measured only as far as its key,
+/// since `action_prompt` builds it; it is the shortest row on the screen and
+/// the same helper is width-checked wherever else it is used.
+#[test]
+fn test_cpm_printer_screen_literals_fit_petscii() {
+    let src = include_str!("config_ui.rs").replace('\r', "");
+    let start = src.find("pub(in crate::telnet) async fn cpm_printer_settings").expect("the fn");
+    let end = src[start..].find("\n    /// Boot settings, reached from").expect("the next fn") + start;
+    let body = &src[start..end];
+
+    // Both shapes this screen prints: `"  {}"` wrapping a colour helper (the
+    // note lines) and `"  {}  Some text"` (the action rows), where the `{}` is
+    // one key character.
+    let mut widths: Vec<(usize, String)> = Vec::new();
+    for (i, _) in body.match_indices("&format!(\"") {
+        let rest = &body[i + "&format!(\"".len()..];
+        let Some(end) = rest.find('"') else { continue };
+        let fmt = &rest[..end];
+        if fmt.contains('\\') {
+            continue; // an escape we would not measure correctly
+        }
+        // The widest a `{}` can render on this screen: a colour helper's payload
+        // for the note rows, one character for a key.
+        let rendered = if fmt.trim_end() == "  {}" {
+            // The literal inside the helper call that follows.
+            let after = &rest[end..];
+            let Some(q) = after.find("(\"") else { continue };
+            let lit = &after[q + 2..];
+            let Some(e) = lit.find('"') else { continue };
+            format!("  {}", &lit[..e])
+        } else {
+            fmt.replace("{}", "K")
+        };
+        widths.push((rendered.chars().count(), rendered));
+    }
+
+    assert!(
+        widths.len() >= 7,
+        "the scan found only {} lines — it has stopped matching this screen",
+        widths.len()
+    );
+    for (w, line) in &widths {
+        assert!(*w <= PETSCII_WIDTH, "{w} cols wraps on a 40-column screen: {line:?}");
+    }
+    let widest = widths.iter().map(|(w, _)| *w).max().unwrap();
+    assert_eq!(
+        widest, 32,
+        "the widest fixed row on the CP/M printer screen is now {widest} columns, \
+         not 32 — fine if it still fits, but the number is documented"
+    );
+}
+
 /// Every key the CP/M printer screen displays must also be one it handles and
 /// one its error hint names — the same three-way drift the CP/M settings screen
 /// suffered twice, guarded the same way.

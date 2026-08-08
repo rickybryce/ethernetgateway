@@ -130,6 +130,33 @@ pub const PORT_CHOICES: &[PrinterPort] = &[PrinterPort {
     auto_lf: true,
 }];
 
+/// What an operator reads when `cpm_printer_port` names no board.
+///
+/// Beside the boards rather than in each menu, for the same reason
+/// [`PRINTER_CHOICES`] is one list: this label was hand-copied into the telnet
+/// screen, the web page and the desktop, and three copies of a string are three
+/// chances to describe the same setting differently.
+pub const PORT_OFF_LABEL: &str = "No printer on a booted disk";
+
+/// The label for a `cpm_printer` value, falling back to the `off` one.
+///
+/// The fallback is the point: every surface has to describe an unrecognised
+/// value the way [`format_for`] *treats* it, which is as off. Doing that in
+/// three places worked only by everyone remembering to.
+pub fn printer_label(value: &str) -> &'static str {
+    let v = value.trim();
+    PRINTER_CHOICES
+        .iter()
+        .find(|(k, _)| *k == v)
+        .map(|(_, l)| *l)
+        .unwrap_or(PRINTER_CHOICES[0].1)
+}
+
+/// The label for a `cpm_printer_port` value, falling back to [`PORT_OFF_LABEL`].
+pub fn port_label(value: &str) -> &'static str {
+    port_for(value).map(|p| p.label).unwrap_or(PORT_OFF_LABEL)
+}
+
 /// Resolve `cpm_printer_port` to the port a booted guest prints to.
 ///
 /// `None` for `off` and for anything unrecognised — a hand-edited typo turns
@@ -206,6 +233,21 @@ pub const IDLE_CLOSE: Duration = Duration::from_secs(5);
 /// prints deliberately will ever reach it, and reaching it splits the document
 /// rather than discarding anything.
 pub const MAX_JOB_BYTES: usize = 4 * 1024 * 1024;
+
+/// Most pages one job may hold, after which it is closed the same way
+/// [`MAX_JOB_BYTES`] closes it.
+///
+/// A second bound because the byte bound does not imply it: a form feed is one
+/// byte and a whole page, so a guest emitting nothing but `0C` reaches four
+/// million *pages* before it reaches four million bytes. **Measured, not
+/// feared** — a probe run to the byte bound held 4,194,305 pages, and at forty
+/// bytes of bookkeeping each that is 160 MB of memory for a document with
+/// nothing on it. This gateway runs on a Pi Zero.
+///
+/// 4096 is far above the ~900 pages the byte bound allows a real document at 64
+/// columns by 66 lines, so nothing anybody prints deliberately reaches it, and a
+/// job that does is closed and continued rather than truncated.
+pub const MAX_JOB_PAGES: usize = 4096;
 
 /// Columns before the printer wraps to the next line.
 ///
@@ -415,9 +457,12 @@ impl SpoolJob {
         !self.is_empty() && now.duration_since(self.last_byte) >= IDLE_CLOSE
     }
 
-    /// Is the job at its size bound?
+    /// Is the job at either of its bounds?
+    ///
+    /// Two bounds, because neither implies the other: a page of text is
+    /// thousands of bytes, but a form feed is one byte and a whole page.
     pub fn is_full(&self) -> bool {
-        self.bytes >= MAX_JOB_BYTES
+        self.bytes >= MAX_JOB_BYTES || self.pages.len() >= MAX_JOB_PAGES
     }
 
     /// Accept one byte from the guest.
@@ -494,42 +539,65 @@ impl SpoolJob {
     /// image writes follow — a reader who lists the folder while a long job is
     /// being rendered must not find a half-written document that looks
     /// finished.
+    ///
+    /// **Two sessions can print at once**, and the timestamp only resolves to a
+    /// second, so neither name may be assumed unique. The staging name carries a
+    /// process-wide counter so two jobs cannot write over each other's
+    /// half-finished bytes, and the final name is probed for a free one — which
+    /// also matters because `fs::rename` **fails on Windows** when the target
+    /// exists rather than replacing it, so relying on overwrite would have made
+    /// a same-second collision an error on one platform and a lost document on
+    /// the others.
     pub fn write(&self, transfer_dir: &str, format: Format) -> std::io::Result<String> {
         let dir = Path::new(transfer_dir).join(SPOOL_DIR);
         std::fs::create_dir_all(&dir)?;
-        let name = self.file_name(format);
+        let (stem, ext) = self.file_stem_and_ext(format);
         let body = match format {
             Format::Odt => build_odt(&self.pages),
             Format::Text => self.plain_text().into_bytes(),
         };
-        let staged = dir.join(format!(".{name}.part"));
+
+        // Unique per call, so concurrent jobs cannot share a staging file.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staged = dir.join(format!(".{stem}.{}.{seq}.part", std::process::id()));
         std::fs::write(&staged, &body)?;
-        std::fs::rename(&staged, dir.join(&name))?;
+
+        // The first free name: `PRINT-…`, then `PRINT-…-2` and so on. Bounded
+        // rather than looping forever if the folder is somehow unwritable.
+        let mut name = format!("{stem}.{ext}");
+        for n in 2..=99 {
+            if !dir.join(&name).exists() {
+                break;
+            }
+            name = format!("{stem}-{n}.{ext}");
+        }
+        if let Err(e) = std::fs::rename(&staged, dir.join(&name)) {
+            // Do not leave the staging file behind to be collected by a puzzled
+            // operator as though it were their document.
+            let _ = std::fs::remove_file(&staged);
+            return Err(e);
+        }
         // Reported with the folder in front of it.  The operator has to go
         // somewhere to fetch this, and a bare file name would send them looking
         // in the transfer root where it is not.
         Ok(format!("{SPOOL_DIR}/{name}"))
     }
 
-    /// `PRINT-YYYYMMDD-HHMMSS.<ext>` from the host's own clock, without the
-    /// folder — [`SpoolJob::write`] puts that in front of what it returns.
+    /// `("PRINT-YYYYMMDD-HHMMSS", "odt")` from the host's own clock, without the
+    /// folder — [`SpoolJob::write`] puts that in front of what it returns, and
+    /// keeps the two apart so it can disambiguate a collision in the middle.
     ///
     /// A timestamp rather than a counter because a counter has to remember, and
     /// the thing it would have to remember lives across restarts. Seconds are
-    /// enough: the idle close means two jobs cannot finish in the same second
-    /// unless something else already went wrong, and a collision overwrites
-    /// nothing that a reader would not also consider one document.
-    fn file_name(&self, format: Format) -> String {
+    /// enough to name a job; they are **not** enough to be unique, which is why
+    /// the caller probes — two sessions printing at once is ordinary, and the
+    /// idle close makes them likelier to finish together, not less.
+    fn file_stem_and_ext(&self, format: Format) -> (String, &'static str) {
         let (y, m, d, h, mi, s) = super::host_clock_parts();
-        format!(
-            "PRINT-{:04}{:02}{:02}-{:02}{:02}{:02}.{}",
-            y,
-            m,
-            d,
-            h,
-            mi,
-            s,
-            format.extension()
+        (
+            format!("PRINT-{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}"),
+            format.extension(),
         )
     }
 
@@ -588,20 +656,22 @@ fn live_pages(pages: &[Page]) -> Vec<&Page> {
 /// The `mimetype` an ODF text document declares.
 const ODT_MIME: &str = "application/vnd.oasis.opendocument.text";
 
-/// Escape the five characters XML will not take literally.
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
+/// Append one character, escaped if XML will not take it literally.
+///
+/// A character at a time rather than a string at a time, because the caller has
+/// characters: it is walking the line to count runs of spaces anyway, and the
+/// string form meant allocating two `String`s per character of the document —
+/// millions of them at the size bound, to escape five characters that almost
+/// never appear.
+fn push_escaped(out: &mut String, c: char) {
+    match c {
+        '&' => out.push_str("&amp;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '"' => out.push_str("&quot;"),
+        '\'' => out.push_str("&apos;"),
+        _ => out.push(c),
     }
-    out
 }
 
 /// One paragraph of printer output.
@@ -634,7 +704,7 @@ fn odt_paragraph(style: &str, row: &str) -> String {
             body.push_str(&format!("<text:s text:c=\"{run}\"/>"));
         }
         run = 0;
-        body.push_str(&xml_escape(&c.to_string()));
+        push_escaped(&mut body, c);
     }
     format!("<text:p text:style-name=\"{style}\">{body}</text:p>")
 }
@@ -1137,6 +1207,28 @@ mod tests {
         assert!(!job.is_empty(), "it did print something");
     }
 
+    /// **The page bound, which the byte bound does not imply.** A form feed is
+    /// one byte and a whole page, so a guest emitting nothing but `0C` reaches
+    /// four million pages before four million bytes — measured at 4,194,305
+    /// pages, about 160 MB of bookkeeping for a document with nothing on it, on
+    /// a gateway that runs on a Pi Zero.
+    #[test]
+    fn test_is_full_at_the_page_bound() {
+        let mut job = SpoolJob::new();
+        for _ in 0..MAX_JOB_PAGES {
+            job.push(0x0C);
+        }
+        assert!(job.is_full(), "a form-feed runaway is not bounded by page count");
+        assert!(
+            job.len() < MAX_JOB_BYTES,
+            "this must bind long before the byte bound, or it is not doing anything"
+        );
+        assert!(job.pages.len() <= MAX_JOB_PAGES + 1, "held {} pages", job.pages.len());
+        // And it is still not a document: nothing printable was ever sent, so
+        // the close path drops it rather than writing a stack of blank sheets.
+        assert!(job.is_empty());
+    }
+
     // ── writing the file out ─────────────────────────────────────────────────
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -1193,6 +1285,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Two jobs finishing in the same second must both survive.  The timestamp
+    /// resolves to a second and two sessions printing at once is ordinary, so
+    /// the second document has to get a name of its own rather than overwrite
+    /// the first — and on Windows the plain rename would not even overwrite, it
+    /// would fail.
+    #[test]
+    fn test_two_jobs_in_the_same_second_both_survive() {
+        let dir = temp_dir("collide");
+        let mut first = SpoolJob::new();
+        for &b in b"FIRST\r\n" {
+            first.push(b);
+        }
+        let mut second = SpoolJob::new();
+        for &b in b"SECOND\r\n" {
+            second.push(b);
+        }
+        let a = first.write(dir.to_str().unwrap(), Format::Text).expect("first");
+        let b = second.write(dir.to_str().unwrap(), Format::Text).expect("second");
+
+        assert_ne!(a, b, "the second job overwrote the first");
+        assert_eq!(std::fs::read_to_string(dir.join(&a)).unwrap(), "FIRST\n");
+        assert_eq!(std::fs::read_to_string(dir.join(&b)).unwrap(), "SECOND\n");
+        // And nothing half-written was left lying about under either name.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.join(SPOOL_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_write_creates_the_folders_it_needs() {
         let root = temp_dir("mkdir");
@@ -1215,8 +1339,16 @@ mod tests {
 
     #[test]
     fn test_xml_escape_covers_the_five() {
-        assert_eq!(xml_escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
-        assert_eq!(xml_escape("plain"), "plain");
+        let mut out = String::new();
+        for c in "a&b<c>d\"e'f".chars() {
+            push_escaped(&mut out, c);
+        }
+        assert_eq!(out, "a&amp;b&lt;c&gt;d&quot;e&apos;f");
+        let mut plain = String::new();
+        for c in "plain".chars() {
+            push_escaped(&mut plain, c);
+        }
+        assert_eq!(plain, "plain");
     }
 
     /// XML collapses runs of whitespace, so leading and interior spaces go out
