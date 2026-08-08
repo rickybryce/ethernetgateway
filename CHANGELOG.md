@@ -114,6 +114,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CP/M can print now, and you get a document out of it.** New `cpm_printer`
+  (`off` — the default — `odt` or `text`) captures what CP/M software sends to
+  its `LST:` device and leaves an **OpenDocument** or plain-text file in a
+  `printer` folder inside the transfer directory, ready to collect over XMODEM,
+  ZMODEM, Kermit or any of the others. On all three configuration surfaces:
+  telnet Other Settings → `E` → `P`, the web "AI, Browser, Weather & CP/M —
+  More" panel, and the GUI.
+
+  Like `cpm_cpu` it reaches **both** CP/M machines, and like that one it gets
+  there by two completely different roads. In the emulator the printer is an
+  operating-system *service* — BDOS function 5 and the BIOS `LIST` vector — so
+  WordStar, MBASIC's `LPRINT` and `PIP LST:=FILE.TXT` all arrive without
+  anything to configure. A **booted** disk owns the machine and drives a printer
+  *board*, so the gateway has to be one: `cpm_printer_port` says which, and
+  today that is the Altair line printer at data register `03h`.
+
+  A job ends after **five seconds of silence**. CP/M has no end-of-print signal
+  — a printer is a stream of bytes with no "close", and on real hardware the
+  person standing there decided it was finished — so silence is the only signal
+  there is. The emulator has a second, exact one: returning to `A>` closes the
+  job immediately, so a program that prints and exits does not make you wait out
+  a timeout.
+
+  **The awkward part was measured, not reasoned, and it had to be.** Whether a
+  bare carriage return advances the paper is not something the byte stream can
+  say: a CR that returns the head *without* advancing is how period software
+  makes bold and underline, by overstriking; a CR that advances is how a great
+  deal of other software ends a line. Real Centronics interfaces carried a DIP
+  switch for exactly this. Booting Altair Hard Disk BASIC and watching the port
+  settled it — two `LPRINT`s send `ALPHA<CR>BETA<CR>` and no line feed anywhere,
+  so with the switch off `BETA` prints on top of `ALPHA` and an entire report
+  collapses onto one line. `altair_c` therefore has it **on**, and absorbs the
+  line feed of a CR LF pair rather than double-spacing. That measurement is a
+  live gate, so a disk that ever disagrees says so.
+
+  Merely *initialising* a printer does not produce a document: answering
+  `LINEPRINTER? C` writes a handshake byte to the data port before anything is
+  printed, and a job with no printable character in it is dropped rather than
+  handed over as an empty file with a notice to match.
+
+  No bold or underline yet — the overstrike is resolved into correct, complete
+  *text* rather than into styling, which is the order that cannot silently lose
+  content on the way to producing real bold later.
+
 - **The CP/M machines run a Z80 or an 8080, your choice.** New `cpm_cpu`
   (`z80` — the default — or `8080`) on all three configuration surfaces: telnet
   Other Settings → `E` → `B`, the web "AI, Browser, Weather & CP/M — More"

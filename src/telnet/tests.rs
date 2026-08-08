@@ -2194,7 +2194,7 @@ fn test_modem_emulator_row_count() {
 }
 
 /// CP/M emulator settings: header(3) + blank + 2 warning lines + blank
-/// + 5 status rows + blank + 6 actions + blank + Back + prompt = 22.
+/// + 4 status rows + blank + 7 actions + blank + Back + prompt = 22.
 ///
 /// **The screen is full.** It sits exactly on the PETSCII budget, so the next
 /// row added here has to displace one or move to a submenu of its own — which
@@ -2205,8 +2205,10 @@ fn test_modem_emulator_row_count() {
 fn test_cpm_settings_row_count() {
     let header = 3;
     let warning = 1 + 2; // blank + "be sure you trust..." over two lines
-    let status = 1 + 5; // blank + Emulator/Ceiling/Modem/Images/Runs
-    let actions = 1 + 6; // blank + E, C, U, D, I, B
+    // Emulator+ceiling share a row: the printer needed a key and the screen was
+    // already exactly on budget.  Emulator/Modem/Images/Runs.
+    let status = 1 + 4;
+    let actions = 1 + 7; // blank + E, C, U, D, I, B, P
     let footer = 1 + 1 + 1; // blank + Back + prompt
     let rows = header + warning + status + actions + footer;
     assert_eq!(rows, 22, "the CP/M settings screen is {rows} rows");
@@ -2225,9 +2227,9 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
     let body = &src[start..end];
 
-    let hint = "Press E, C, D, U, I, B, or Q.";
+    let hint = "Press E, C, D, U, I, B, P, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["E", "C", "U", "D", "I", "B"] {
+    for key in ["E", "C", "U", "D", "I", "B", "P"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -2240,22 +2242,82 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
-/// CP/M boot settings: header(3) + blank + 3 status + blank + up to 3 note
-/// lines + blank + 3 actions + blank + Back + prompt = 18.
+/// The CP/M printer screen: header(3) + blank + 2 status + blank + up to 3
+/// note lines + blank + 2 actions + blank + Back + prompt = 16.
+///
+/// The third screen to be split off the CP/M settings menu, for the same reason
+/// as the other two: that menu sits exactly on the 22-row PETSCII budget, so a
+/// new question has to bring its own screen.  Six rows spare here, which is
+/// where a second printer board goes when one turns up.
+#[test]
+fn test_cpm_printer_settings_row_count() {
+    let header = 3;
+    let status = 1 + 2; // blank + Output/Board
+    let note = 1 + 3; // blank + the longer of the two explanations
+    let actions = 1 + 2; // blank + P, B
+    let footer = 1 + 1 + 1; // blank + Back + prompt
+    let rows = header + status + note + actions + footer;
+    assert_eq!(rows, 16, "the CP/M printer screen is {rows} rows");
+    assert!(rows <= 22, "CP/M printer settings is {rows} rows, exceeds 22");
+}
+
+/// Every key the CP/M printer screen displays must also be one it handles and
+/// one its error hint names — the same three-way drift the CP/M settings screen
+/// suffered twice, guarded the same way.
+#[test]
+fn test_cpm_printer_settings_keys_are_displayed_handled_and_hinted() {
+    let src = include_str!("config_ui.rs");
+    let start = src.find("pub(in crate::telnet) async fn cpm_printer_settings").expect("the fn");
+    let end = src[start..].find("\n    /// Boot settings, reached from").expect("the next fn") + start;
+    let body = &src[start..end];
+
+    let hint = "Press P, B, or Q.";
+    assert!(body.contains(hint), "the error hint changed: it must list every key");
+    for key in ["P", "B"] {
+        assert!(
+            body.contains(&format!("self.cyan(\"{key}\")")),
+            "{key} must be a displayed menu item"
+        );
+        assert!(
+            body.contains(&format!("\"{}\" => ", key.to_ascii_lowercase())),
+            "{key} is displayed but never handled — pressing it would just error"
+        );
+        assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
+    }
+}
+
+/// The screen has to be reachable, and from the menu that advertises it.  A
+/// submenu nothing opens is the defect `I` was for a whole release.
+#[test]
+fn test_cpm_settings_opens_the_printer_screen() {
+    let src = include_str!("config_ui.rs");
+    let start = src.find("pub(in crate::telnet) async fn cpm_settings").expect("the fn");
+    let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
+    assert!(
+        src[start..end].contains("self.cpm_printer_settings()"),
+        "the CP/M settings screen displays P but never opens the printer screen"
+    );
+}
+
+/// CP/M boot settings: header(3) + blank + 4 status + blank + up to 3 note
+/// lines + 2 CPU note lines + blank + 4 actions + blank + Back + prompt = 22.
 ///
 /// This screen exists *because* the CP/M settings screen is full, so the point
 /// of counting it is to know how much room the next question has — and there is
 /// a known next question: which controller takes an image whose size two boards
-/// both claim.  Four rows left for it.
+/// both claim.  **There is no room left for it**: the CPU selector took the
+/// last four rows, so that question needs a screen of its own, the way the
+/// printer's did.
 #[test]
 fn test_cpm_boot_settings_row_count() {
     let header = 3;
-    let status = 1 + 3; // blank + Runs/Machine/Backspace
+    let status = 1 + 4; // blank + Runs/Machine/Backspace/CPU
     let note = 1 + 3; // blank + the longest of the two explanations
-    let actions = 1 + 3; // blank + R, M, B
+    let cpu_note = 2; // "The CPU applies to both. Run EGT8080 on the 8080."
+    let actions = 1 + 4; // blank + R, M, B, C
     let footer = 1 + 1 + 1; // blank + Back + prompt
-    let rows = header + status + note + actions + footer;
-    assert_eq!(rows, 18, "the CP/M boot settings screen is {rows} rows");
+    let rows = header + status + note + cpu_note + actions + footer;
+    assert_eq!(rows, 22, "the CP/M boot settings screen is {rows} rows");
     assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
 }
 

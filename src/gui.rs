@@ -1529,6 +1529,89 @@ impl App {
              so it is the one to reach for; EGT80.COM is the Z80 build and \
              takes CP/M down with it on an 8080.",
         );
+        // Where CP/M printer output goes.  Beside the CPU because it is the
+        // other setting that reaches both machines, and immediately above the
+        // board it depends on.
+        ui.horizontal(|ui| {
+            ui.label("CP/M printer:");
+            egui::ComboBox::from_id_salt("cpm_printer_combo")
+                .width(320.0)
+                .selected_text(
+                    crate::cpm::printer::PRINTER_CHOICES
+                        .iter()
+                        .find(|(v, _)| *v == self.cfg.cpm_printer.trim())
+                        .map(|(_, l)| *l)
+                        .unwrap_or("Off - printer output goes to the screen"),
+                )
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::cpm::printer::PRINTER_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_printer,
+                            value.to_string(),
+                            *label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Where CP/M printer output goes.  Reaches both CP/M machines, by two \
+             different routes: in the emulator the printer is an operating-system \
+             service (BDOS function 5 and the BIOS LIST vector), so WordStar, \
+             MBASIC's LPRINT and PIP LST:=FILE.TXT all arrive there; a booted \
+             disk instead drives the printer board selected below.  Either way \
+             one document is written into a \"printer\" folder inside the \
+             transfer directory -- its own folder so a printer left on does not \
+             scatter documents through your own files, and NOT onto a CP/M \
+             drive, because it is for you rather than for the guest.  The \
+             file-transfer menu reaches it by changing directory into \
+             \"printer\".  It is \
+             named PRINT-YYYYMMDD-HHMMSS from this machine's clock.  A job is \
+             finished 5 seconds after the last character printed, CP/M having no \
+             end-of-print signal of its own, and in the emulator also the moment \
+             the program returns to the A> prompt, which is exact.  Off means \
+             printer output appears on the terminal, which is where it has \
+             always gone.  No bold or underline yet: period software makes those \
+             by overstriking, and that is resolved into correct text rather than \
+             into styling.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Booted disk's printer:");
+            egui::ComboBox::from_id_salt("cpm_printer_port_combo")
+                .width(320.0)
+                .selected_text(
+                    crate::cpm::printer::port_for(&self.cfg.cpm_printer_port)
+                        .map(|p| p.label)
+                        .unwrap_or("No printer on a booted disk"),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.cfg.cpm_printer_port,
+                        crate::cpm::printer::PORT_OFF.to_string(),
+                        "No printer on a booted disk",
+                    );
+                    for p in crate::cpm::printer::PORT_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_printer_port,
+                            p.key.to_string(),
+                            p.label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Which printer board a BOOTED disk finds.  Ignored by the emulator, \
+             whose printer is a BDOS service with no port at all, and ignored \
+             entirely when the printer above is off.  Measured rather than \
+             reasoned: Altair Hard Disk BASIC answering LINEPRINTER? C \
+             initialises with OUT 03h<-11h / OUT 02h<-00h and then sends one \
+             7-bit ASCII character per byte to 03h, ending each line with a bare \
+             carriage return.  The status register is deliberately not emulated \
+             -- an unclaimed port reads 0xFF here and every period convention \
+             reads a high bit as ready, which is why BASIC printed at full speed \
+             into a board that was not there.",
+        );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
         ui.horizontal(|ui| {

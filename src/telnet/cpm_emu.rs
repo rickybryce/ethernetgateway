@@ -492,6 +492,81 @@ impl TelnetSession {
         self.cpmemu_repl(&mut fs, &cpu_setting).await
     }
 
+    /// One byte from the guest's `LST:` device — BDOS 5 or the BIOS `LIST`
+    /// vector, which are the same device reached two ways.
+    ///
+    /// With `cpm_printer` off this is the terminal, which is where printer
+    /// output has always gone here; nothing an existing operator relies on
+    /// changes when they upgrade. With it on, the byte joins the spool and
+    /// **nothing is echoed**: a document being written to disk and simultaneously
+    /// sprayed over the screen would make a WordStar print look like a crash.
+    ///
+    /// The size bound closes the job and starts another rather than dropping the
+    /// byte, so a runaway prints many documents instead of one enormous one and
+    /// nothing is silently lost.
+    ///
+    /// `format` and `transfer_dir` are **passed in, not read here**: this is
+    /// called once per printed character, and `config::get_config()` clones the
+    /// whole `Config` — some twenty owned `String`s — under a mutex. A 60 KB
+    /// document would have paid that sixty thousand times. The setting is
+    /// sampled once when the program starts instead, which is still finer
+    /// grained than the boot path, where it is sampled once per boot.
+    async fn cpmemu_print(
+        &mut self,
+        spool: &mut Option<crate::cpm::printer::SpoolJob>,
+        term: &mut Adm3a,
+        byte: u8,
+        format: Option<crate::cpm::printer::Format>,
+        transfer_dir: &str,
+    ) -> Result<(), std::io::Error> {
+        let Some(format) = format else {
+            return self.cpmemu_emit(term, &[byte]).await;
+        };
+        let job = spool.get_or_insert_with(crate::cpm::printer::SpoolJob::new);
+        job.push(byte);
+        if job.is_full() {
+            self.cpmemu_spool_close(spool, format, transfer_dir).await?;
+        }
+        Ok(())
+    }
+
+    /// Write a finished job out and say where it went.
+    ///
+    /// The notice matters: a print that leaves no mark on the screen is
+    /// indistinguishable from a print that did not happen, and the operator has
+    /// no other way to learn the file name. Failure is reported to the session
+    /// *and* the log, because this is the one part of printing the user cannot
+    /// see for themselves.
+    async fn cpmemu_spool_close(
+        &mut self,
+        spool: &mut Option<crate::cpm::printer::SpoolJob>,
+        format: crate::cpm::printer::Format,
+        transfer_dir: &str,
+    ) -> Result<(), std::io::Error> {
+        let Some(job) = spool.take() else { return Ok(()) };
+        if job.is_empty() {
+            return Ok(());
+        }
+        let bytes = job.len();
+        match job.write(transfer_dir, format) {
+            Ok(name) => {
+                self.send_line("").await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.green(&format!("[printed {bytes} bytes to {name}]"))
+                ))
+                .await?;
+            }
+            Err(e) => {
+                glog!("CP/M printer: could not write the spool file: {e}");
+                self.send_line("").await?;
+                self.send_line(&format!("  {}", self.red(&format!("[printer: {e}]"))))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// The disk `cpm_boot_image` names, if it names one that is really there.
     ///
     /// A missing or malformed name falls back to the emulator and says so in
@@ -1277,11 +1352,21 @@ impl TelnetSession {
         }
     }
 
-    /// Run a loaded program on the emulated CPU, servicing the console BDOS
-    /// group against the live session, until it warm-boots, the user breaks
-    /// out, or the instruction ceiling is hit.  Returns `Ok(false)` if the
-    /// session disconnected (the caller should leave the emulator), else
-    /// `Ok(true)` (return to the `A>` prompt).
+    /// Run one transient, and close its print job however it ends.
+    ///
+    /// A wrapper purely so the spool outlives the many `return`s inside — the
+    /// program can end by finishing, by exhausting its budget, by `ESC ESC` or
+    /// by the user hanging up, and a document that only appeared on the tidiest
+    /// of those paths would be the worst kind of unreliable.
+    ///
+    /// **Returning to `A>` is CP/M's only exact end-of-job**, which is why this
+    /// exists at all: the five-second idle close still runs inside the loop for
+    /// a program that prints and then keeps working, but a program that prints
+    /// and exits should not make its user wait out a timeout.
+    ///
+    /// The close cannot change what the program returned. Its file is already
+    /// written by the time anything could fail, so a failed notice — the session
+    /// hung up mid-print, most likely — costs the message and not the document.
     async fn cpmemu_run_program(
         &mut self,
         cpm: &mut Cpm,
@@ -1289,6 +1374,48 @@ impl TelnetSession {
         program: &[u8],
         tail: &str,
         fs: &mut CpmFs,
+    ) -> Result<bool, std::io::Error> {
+        // Sampled once, here, and threaded down: the alternative is a full
+        // `Config` clone per printed character.  See `cpmemu_print`.
+        let cfg = config::get_config();
+        let print_format = crate::cpm::printer::format_for(&cfg.cpm_printer);
+        let transfer_dir = cfg.transfer_dir.clone();
+        drop(cfg);
+        let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
+        let result = self
+            .cpmemu_run_program_inner(
+                cpm,
+                modem,
+                program,
+                tail,
+                fs,
+                &mut spool,
+                print_format,
+                &transfer_dir,
+            )
+            .await;
+        if let Some(format) = print_format {
+            let _ = self.cpmemu_spool_close(&mut spool, format, &transfer_dir).await;
+        }
+        result
+    }
+
+    /// Run a loaded program on the emulated CPU, servicing the console BDOS
+    /// group against the live session, until it warm-boots, the user breaks
+    /// out, or the instruction ceiling is hit.  Returns `Ok(false)` if the
+    /// session disconnected (the caller should leave the emulator), else
+    /// `Ok(true)` (return to the `A>` prompt).
+    #[allow(clippy::too_many_arguments)]
+    async fn cpmemu_run_program_inner(
+        &mut self,
+        cpm: &mut Cpm,
+        modem: &mut CpmModem,
+        program: &[u8],
+        tail: &str,
+        fs: &mut CpmFs,
+        spool: &mut Option<crate::cpm::printer::SpoolJob>,
+        print_format: Option<crate::cpm::printer::Format>,
+        transfer_dir: &str,
     ) -> Result<bool, std::io::Error> {
         cpm.load_com(program);
         // Lay down page zero (command tail + default FCBs) so a real `.COM`
@@ -1377,6 +1504,15 @@ impl TelnetSession {
             // Defaults to "this pass did real work", so an unrecognised call is
             // never throttled by mistake — only calls proven idle are.
             let mut idle_poll = false;
+            // A job that has gone quiet is finished.  Checked here as well as on
+            // the way out because a program can print a report and then carry on
+            // running for an hour — a spreadsheet, a BBS — and its operator
+            // should not have to quit the program to be given the document.
+            if let Some(format) = print_format
+                && spool.as_ref().is_some_and(|j| j.idle_expired())
+            {
+                self.cpmemu_spool_close(spool, format, transfer_dir).await?;
+            }
             // Runaway guard, checked every batch regardless of why run()
             // returned.  A BDOS-frequent loop (e.g. polling console status,
             // `LD C,11 / CALL 5 / JR Z`) returns Stop::Bdos each batch and
@@ -1414,12 +1550,20 @@ impl TelnetSession {
                             cpm.bdos_return(0);
                         }
                         5 => {
-                            // List (printer / LST:) output, char in E.  There
-                            // is no physical printer, so route it to the console
-                            // — a program's printer output stays visible instead
-                            // of vanishing (previously the call returned 0 and
-                            // dropped the byte).
-                            self.cpmemu_emit(&mut term, &[cpm.arg_e()]).await?;
+                            // List (printer / LST:) output, char in E — the
+                            // path WordStar, MBASIC's `LPRINT` and
+                            // `PIP LST:=X.TXT` take.
+                            //
+                            // This used to route to the console unconditionally,
+                            // on the grounds that there was no physical printer:
+                            // better a visible byte than a dropped one. There is
+                            // a printer now, and `cpmemu_print` still routes to
+                            // the console when `cpm_printer` is off — so that
+                            // reasoning is preserved as the default rather than
+                            // overruled.
+                            let e = cpm.arg_e();
+                            self.cpmemu_print(spool, &mut term, e, print_format, transfer_dir)
+                                .await?;
                             cpm.bdos_return(0);
                         }
                         6 => {
@@ -1561,10 +1705,21 @@ impl TelnetSession {
                             }
                             ConIn::Disconnect => return Ok(false),
                         },
-                        // CONOUT / LIST: character in C to the console.
-                        4 | 5 => {
+                        // CONOUT: character in C to the console.
+                        4 => {
                             let c = cpm.arg_c();
                             self.cpmemu_emit(&mut term, &[c]).await?;
+                            cpm.bios_return(0);
+                        }
+                        // LIST: character in C to the printer.  Shared this arm
+                        // with CONOUT until the printer existed, which is why
+                        // printer output has always appeared on the terminal —
+                        // and still does when `cpm_printer` is off, so nothing
+                        // an existing operator relies on changes.
+                        5 => {
+                            let c = cpm.arg_c();
+                            self.cpmemu_print(spool, &mut term, c, print_format, transfer_dir)
+                                .await?;
                             cpm.bios_return(0);
                         }
                         // PUNCH (AUX out): character in C to the virtual modem.

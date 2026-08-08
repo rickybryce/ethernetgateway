@@ -890,6 +890,19 @@ pub struct Config {
     /// rather than a config edit.  See
     /// [`crate::telnet::cpm_boot_ui::boot_key_for_guest`].
     pub cpm_boot_backspace: String,
+    /// What to do with CP/M printer output: `off`, `odt` or `text`.
+    ///
+    /// Reaches the emulator *and* a booted disk, like `cpm_cpu` — the two get
+    /// there by completely different routes (our BDOS/BIOS `LIST` service, and
+    /// a printer port a booted guest drives itself) but they produce one
+    /// document either way. See [`crate::cpm::printer`].
+    pub cpm_printer: String,
+    /// Which printer board a BOOTED disk finds: `off`, or a key from
+    /// [`crate::cpm::printer::PORT_CHOICES`].
+    ///
+    /// Only meaningful alongside `cpm_printer`, and only for a booted disk —
+    /// the emulator's printer is a BDOS service and has no port at all.
+    pub cpm_printer_port: String,
     /// Which processor both CP/M machines run: `z80` or `8080`.
     ///
     /// The one CP/M setting that reaches the emulator *and* a booted disk —
@@ -1033,6 +1046,8 @@ impl Default for Config {
             cpm_boot_image: String::new(),
             cpm_boot_machine: crate::cpm::console::AUTO_MACHINE.to_string(),
             cpm_boot_backspace: crate::cpm::boot::DEFAULT_BACKSPACE.to_string(),
+            cpm_printer: crate::cpm::printer::DEFAULT_PRINTER.to_string(),
+            cpm_printer_port: crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string(),
             cpm_cpu: crate::cpm::cpu::DEFAULT_CPU.to_string(),
             cpm_emu_modem: CpmModemProfile::default(),
             serial_a: SerialPortConfig::default(),
@@ -1646,6 +1661,16 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_backspace")
             .cloned()
             .unwrap_or_else(|| crate::cpm::boot::DEFAULT_BACKSPACE.to_string()),
+        // Missing means OFF, so an upgrade never starts writing files into
+        // somebody's transfer folder because they installed a new version.
+        cpm_printer: map
+            .get("cpm_printer")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER.to_string()),
+        cpm_printer_port: map
+            .get("cpm_printer_port")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string()),
         // Missing means the Z80, which is what every config written before this
         // key existed was already running -- so an upgrade changes nothing.
         cpm_cpu: map
@@ -2446,6 +2471,42 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_boot_backspace", &cfg.cpm_boot_backspace);
     content.push_str("\
+# cpm_printer: where CP/M printer output goes.  Reaches BOTH CP/M machines,
+#   like cpm_cpu, but by two different routes: in the emulator the printer is
+#   an OS service (BDOS function 5 and the BIOS LIST vector), and a booted disk
+#   drives a printer PORT itself (see cpm_printer_port).  Either way one
+#   document is written into the transfer folder for you to print.
+#     off    DEFAULT - printer output appears on your terminal, as it always
+#            has.  Nothing is written to disk.
+#     odt    an OpenDocument text file (.odt), monospaced, one page per form
+#            feed - opens in LibreOffice, Word or Google Docs
+#     text   plain text (.txt), form feeds kept
+#   The file is named PRINT-YYYYMMDD-HHMMSS from this machine's clock and lands
+#   in a `printer' folder inside the transfer directory - its own folder so a
+#   printer left on does not scatter documents through your files, and NOT on a
+#   CP/M drive: it is for you, not for the guest, and the file-transfer menu
+#   reaches it by changing directory into `printer'.
+#   A job is finished after 5 SECONDS with nothing printed - CP/M has no
+#   end-of-print signal, so silence is the only one there is - and in the
+#   emulator also when the program returns to the A> prompt, which is exact.
+#   No bold or underline yet: period software makes them by overstriking, and
+#   that is resolved into correct TEXT rather than into styling.
+");
+    write_kv(&mut content, "cpm_printer", &cfg.cpm_printer);
+    content.push_str("\
+# cpm_printer_port: which printer board a BOOTED disk finds.  Ignored by the
+#   emulator, whose printer is a BDOS service with no port at all, and ignored
+#   entirely when cpm_printer = off.
+#     altair_c  DEFAULT - Altair line printer, data register 03h
+#     off       a booted disk has no printer
+#   Measured, not reasoned: Altair Hard Disk BASIC answering LINEPRINTER? C
+#   initialises with OUT 03h<-11h / OUT 02h<-00h and then sends one 7-bit ASCII
+#   character per byte to 03h, ending each line with a bare CR.  The status
+#   register is not emulated because it does not need to be - an unclaimed port
+#   reads 0xFF here, and every period convention reads a high bit as ready.
+");
+    write_kv(&mut content, "cpm_printer_port", &cfg.cpm_printer_port);
+    content.push_str("\
 # cpm_cpu: which processor BOTH CP/M machines run - the emulator's transient
 #   programs and a booted disk's whole operating system.  The only CP/M setting
 #   that reaches both.
@@ -3031,6 +3092,25 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // a setting the gateway is not honouring.
             if crate::cpm::boot::BACKSPACE_CHOICES.iter().any(|(v, _)| *v == value) {
                 cfg.cpm_boot_backspace = value.to_string();
+            }
+        }
+        "cpm_printer" => {
+            // Only one of the three offered values.  Same reason as the keys
+            // above, with one extra: `format_for` reads anything it does not
+            // recognise as OFF, so an unchecked write could leave the file
+            // promising documents that were never going to be written.
+            if crate::cpm::printer::PRINTER_CHOICES.iter().any(|(v, _)| *v == value) {
+                cfg.cpm_printer = value.to_string();
+            }
+        }
+        "cpm_printer_port" => {
+            // `off` plus the board keys.  A wrong port here would capture
+            // bytes meant for another device, so an unrecognised value is
+            // refused rather than defaulted.
+            if value == crate::cpm::printer::PORT_OFF
+                || crate::cpm::printer::PORT_CHOICES.iter().any(|p| p.key == value)
+            {
+                cfg.cpm_printer_port = value.to_string();
             }
         }
         "cpm_cpu" => {
@@ -3842,6 +3922,8 @@ mod tests {
             // Likewise not the default: `rubout` is what a CP/M 1.x operator
             // sets, and it has to survive a write/read cycle to be worth having.
             cpm_boot_backspace: crate::cpm::boot::BACKSPACE_RUBOUT.to_string(),
+            cpm_printer: crate::cpm::printer::PRINTER_ODT.to_string(),
+            cpm_printer_port: crate::cpm::printer::PORT_OFF.to_string(),
             // Likewise not the default: the 8080 is the setting an operator
             // running period diagnostics picks, and it has to survive the cycle.
             cpm_cpu: crate::cpm::cpu::CPU_8080.to_string(),

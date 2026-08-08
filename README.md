@@ -82,6 +82,14 @@ options, and the full AT command set.
   runaway stopped by an instruction ceiling, and a double-`ESC` always returning
   to `A>`. `cpm_emu_enabled = false` shuts it off; `cpm_emu_uart = off` keeps it
   while denying guest code any network access.
+- **CP/M printer** — `cpm_printer` captures what CP/M software sends to `LST:`
+  and leaves an **OpenDocument** (`.odt`) or plain-text file in a `printer`
+  folder inside the transfer directory, ready to collect over any of the file
+  transfer protocols. Serves both CP/M machines by two different routes: in the
+  emulator the printer is an OS service (BDOS 5 and the BIOS `LIST` vector), so
+  WordStar, MBASIC's `LPRINT` and `PIP LST:=FILE.TXT` all arrive; a booted disk
+  drives a printer **board** instead (`cpm_printer_port`). Off by default, in
+  which case printer output goes to your terminal as it always has.
 - **Modem emulator** — Hayes-compatible AT command set on **two physically
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.

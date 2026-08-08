@@ -737,6 +737,17 @@ impl TelnetSession {
         // guest brings its own of both.
         let access = crate::cpm::resolve_access(&config::get_config().cpm_emu_uart);
         let attach = machine.attach_modem(access);
+        // The printer, after the modem for the same reason the modem comes
+        // after `set_machine`: the port it claims must not be one this
+        // machine's console or modem already answers, and both of those are
+        // settled by now.  Off unless `cpm_printer` is on *and* a board is
+        // named — two keys, because a port claimed by nobody's printer would
+        // still be a port taken away from the guest.
+        let printer_cfg = config::get_config();
+        let printer_port = crate::cpm::printer::format_for(&printer_cfg.cpm_printer)
+            .and(crate::cpm::printer::port_for(&printer_cfg.cpm_printer_port))
+            .map(|p| p.data);
+        machine.attach_printer(printer_port);
         let mut modem = CpmModem::new(matches!(attach, ModemAttach::Ports(_, _)));
         modem.set_menu_context(self.shutdown.clone(), self.restart.clone(), self.lockouts.clone());
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
@@ -890,13 +901,103 @@ impl TelnetSession {
         result
     }
 
-    /// The run loop: step the CPU, move console bytes both ways.
+    /// Drive the booted guest, and close its print job however the visit ends.
+    ///
+    /// The wrapper is here for the same reason the emulator has one: the loop
+    /// leaves by `ESC ESC` or by the user hanging up, and a document that only
+    /// survived one of those would be worse than no document. There is no
+    /// third, tidy exit on this path — a booted operating system never
+    /// "finishes" — so both of them have to work.
     async fn cpm_boot_run(
         &mut self,
         cpu: &mut Cpu,
         machine: &mut BootMachine,
         modem: &mut CpmModem,
         erase: bool,
+    ) -> Result<(), std::io::Error> {
+        let cfg = config::get_config();
+        let transfer_dir = cfg.transfer_dir.clone();
+        let print_format = crate::cpm::printer::format_for(&cfg.cpm_printer);
+        // The board as well as the format: a job on a booted disk has to be
+        // built for the *interface* it is coming from, because whether a bare
+        // CR ends the line is the board's auto-line-feed switch and not
+        // anything the bytes can say.  Resolved the same way the port was
+        // claimed above, so the two cannot disagree about which board this is.
+        let printer_board = print_format.and(crate::cpm::printer::port_for(&cfg.cpm_printer_port));
+        let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
+        let result = self
+            .cpm_boot_run_inner(
+                cpu,
+                machine,
+                modem,
+                erase,
+                &mut spool,
+                print_format,
+                printer_board,
+                &transfer_dir,
+            )
+            .await;
+        // Whatever the guest left on the platen is still a print.  The file is
+        // written before anything here can fail, so a hung-up session loses the
+        // notice and keeps the document.
+        let _ = self.cpm_boot_spool_close(&mut spool, print_format, &transfer_dir).await;
+        result
+    }
+
+    /// Write a finished booted-disk print job out and name it on screen.
+    ///
+    /// Deliberately not shared with the emulator's `cpmemu_spool_close`: that
+    /// one reports through the emulator's own coloured-notice style at a point
+    /// where the guest is stopped, while this one interrupts a live serial
+    /// console mid-session and has to leave the guest's own display alone. The
+    /// spool and document logic *is* shared, in `crate::cpm::printer` — which is
+    /// the part that would actually hurt to have twice.
+    async fn cpm_boot_spool_close(
+        &mut self,
+        spool: &mut Option<crate::cpm::printer::SpoolJob>,
+        format: Option<crate::cpm::printer::Format>,
+        transfer_dir: &str,
+    ) -> Result<(), std::io::Error> {
+        let Some(job) = spool.take() else { return Ok(()) };
+        let Some(format) = format else { return Ok(()) };
+        if job.is_empty() {
+            return Ok(());
+        }
+        let bytes = job.len();
+        match job.write(transfer_dir, format) {
+            Ok(name) => {
+                self.send_raw(b"\r\n").await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.green(&format!("[printed {bytes} bytes to {name}]"))
+                ))
+                .await?;
+                self.flush().await?;
+            }
+            Err(e) => {
+                glog!("CP/M printer: could not write the spool file: {e}");
+                self.send_raw(b"\r\n").await?;
+                self.send_line(&format!("  {}", self.red(&format!("[printer: {e}]"))))
+                    .await?;
+                self.flush().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The run loop: step the CPU, move console bytes both ways — and printer
+    /// bytes out to the spool.
+    #[allow(clippy::too_many_arguments)]
+    async fn cpm_boot_run_inner(
+        &mut self,
+        cpu: &mut Cpu,
+        machine: &mut BootMachine,
+        modem: &mut CpmModem,
+        erase: bool,
+        spool: &mut Option<crate::cpm::printer::SpoolJob>,
+        print_format: Option<crate::cpm::printer::Format>,
+        printer_board: Option<&'static crate::cpm::printer::PrinterPort>,
+        transfer_dir: &str,
     ) -> Result<(), std::io::Error> {
         let mut executed: u64 = 0;
         let mut esc_run = 0u8;
@@ -951,6 +1052,35 @@ impl TelnetSession {
                     }
                     self.flush().await?;
                     printed = true;
+                }
+
+                // The printer, at the same seam and by the same reasoning — but
+                // to a spool rather than to the wire, and with no PETSCII
+                // folding: this is going into a document for a person on a
+                // modern machine, not onto a Commodore's screen.
+                let printed_bytes = machine.take_print();
+                if !printed_bytes.is_empty() {
+                    let job = spool.get_or_insert_with(|| match printer_board {
+                        Some(board) => crate::cpm::printer::SpoolJob::new_for(board),
+                        // Unreachable while the port is claimed from the same
+                        // board, but a plain job is the harmless answer rather
+                        // than an unwrap on a config-shaped value.
+                        None => crate::cpm::printer::SpoolJob::new(),
+                    });
+                    for b in printed_bytes {
+                        job.push(b);
+                    }
+                    if job.is_full() {
+                        self.cpm_boot_spool_close(spool, print_format, transfer_dir)
+                            .await?;
+                    }
+                }
+                // A booted disk has no "returned to the prompt" for us to see —
+                // its operating system *is* the session — so silence is the only
+                // end-of-job signal there is on this path.
+                if spool.as_ref().is_some_and(|j| j.idle_expired()) {
+                    self.cpm_boot_spool_close(spool, print_format, transfer_dir)
+                        .await?;
                 }
 
                 let mut keys = 0usize;

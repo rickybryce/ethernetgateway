@@ -44,6 +44,7 @@ pub mod image;
 pub mod layout;
 mod machine;
 pub mod modem_port;
+pub mod printer;
 pub mod tarbell;
 pub mod uart;
 pub mod wd1771;
@@ -89,6 +90,19 @@ const CDISK_ADDR: u16 = 0x0004;
 /// than adding a dependency for one call; the difference is documented, and
 /// the gateway's own deployments are Unix.
 pub fn host_clock_bcd() -> [u8; 6] {
+    let (y, m, d, h, mi, s) = host_clock_parts();
+    clock_bcd_from_parts(y, m, d, h, mi, s)
+}
+
+/// The host wall clock as plain numbers: `(year, month, day, hour, min, sec)`.
+///
+/// Extracted from [`host_clock_bcd`] rather than written twice, because the
+/// printer names its spool files from the same clock and "local time where the
+/// platform can tell us, UTC elsewhere" is a rule this project would otherwise
+/// be stating in two places — the shape of defect it has produced more than
+/// once. The year is the full four digits here; only the BCD packing truncates
+/// it to two.
+pub fn host_clock_parts() -> (i64, i64, i64, i64, i64, i64) {
     #[cfg(unix)]
     {
         // SAFETY: `time` with a null argument returns the value rather than
@@ -97,7 +111,7 @@ pub fn host_clock_bcd() -> [u8; 6] {
         let secs = unsafe { libc::time(std::ptr::null_mut()) };
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         if !unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
-            return clock_bcd_from_parts(
+            return (
                 tm.tm_year as i64 + 1900,
                 tm.tm_mon as i64 + 1,
                 tm.tm_mday as i64,
@@ -115,7 +129,7 @@ pub fn host_clock_bcd() -> [u8; 6] {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    clock_bcd_from_parts(y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
+    (y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
 /// Pack a date and time into the six BCD bytes the buffer wants.

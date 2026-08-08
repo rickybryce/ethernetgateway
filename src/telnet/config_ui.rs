@@ -609,9 +609,15 @@ impl TelnetSession {
             } else {
                 self.dim("off")
             };
-            self.send_line(&format!("  Emulator:  {}", status)).await?;
+            // Emulator and ceiling on one row.  They were two until the printer
+            // needed a key and this screen was already exactly on the 22-row
+            // PETSCII budget — and of every row here these are the two that read
+            // as one fact ("the emulator, and how long a program gets"), so
+            // joining them costs the least.  37 columns at the longest, inside
+            // the 40 a Commodore has; pinned by `test_cpm_settings_row_count`.
             self.send_line(&format!(
-                "  Ceiling:   {} M-instr",
+                "  Emulator:  {}, ceiling {} M-instr",
+                status,
                 self.amber(&cfg.cpm_emu_max_minstr.to_string())
             ))
             .await?;
@@ -687,6 +693,11 @@ impl TelnetSession {
                 self.cyan("B")
             ))
             .await?;
+            self.send_line(&format!(
+                "  {}  Printer (LST: to a document)",
+                self.cyan("P")
+            ))
+            .await?;
             self.send_line("").await?;
             self.send_line(&format!(
                 "  {}",
@@ -749,6 +760,7 @@ impl TelnetSession {
                     .ok();
                 }
                 "b" => self.cpm_boot_settings().await?,
+                "p" => self.cpm_printer_settings().await?,
                 "i" => {
                     // Displayed on this screen since the mount feature shipped,
                     // but only ever handled on the parent menu — so pressing it
@@ -759,7 +771,7 @@ impl TelnetSession {
                 _ => {
                     // Every displayed key belongs in this hint; I and B were
                     // each missing from it once.
-                    self.show_error("Press E, C, D, U, I, B, or Q.").await?;
+                    self.show_error("Press E, C, D, U, I, B, P, or Q.").await?;
                 }
             }
         }
@@ -907,6 +919,118 @@ impl TelnetSession {
                 "q" => return Ok(()),
                 _ => {
                     self.show_error("Press E, F, S, K, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    /// The CP/M printer submenu: where `LST:` output goes, and which board a
+    /// booted disk finds.
+    ///
+    /// Its own screen because both parents were exactly on the 22-row PETSCII
+    /// budget — the same reason the boot screen exists. Two keys here rather
+    /// than one on each parent, because the pair only makes sense read together:
+    /// the port does nothing unless the format is on, and saying so needs a row
+    /// neither parent had.
+    pub(in crate::telnet) async fn cpm_printer_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("CP/M PRINTER"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
+            let printer_label = crate::cpm::printer::PRINTER_CHOICES
+                .iter()
+                .find(|(v, _)| *v == cfg.cpm_printer.trim())
+                .map(|(_, l)| *l)
+                .unwrap_or("Off - printer output goes to the screen");
+            self.send_line(&format!(
+                "  Output:    {}",
+                self.amber(&truncate_to_width(printer_label, w))
+            ))
+            .await?;
+            let port_label = crate::cpm::printer::port_for(&cfg.cpm_printer_port)
+                .map(|p| p.label)
+                .unwrap_or("No printer on a booted disk");
+            self.send_line(&format!(
+                "  Board:     {}",
+                self.amber(&truncate_to_width(port_label, w))
+            ))
+            .await?;
+            self.send_line("").await?;
+
+            // What the two rows above actually mean, in the configuration the
+            // operator is looking at.  A setting that does nothing right now is
+            // worse than no setting — the same rule the boot screen follows for
+            // the machine.
+            if crate::cpm::printer::format_for(&cfg.cpm_printer).is_none() {
+                self.send_line(&format!("  {}", self.dim("Printer output goes to your"))).await?;
+                self.send_line(&format!("  {}", self.dim("screen, as it always has."))).await?;
+            } else {
+                // Names the folder: the operator has to go somewhere to fetch
+                // this, and "the transfer folder" would send them to the root,
+                // where it is not.  26 columns at the widest, inside the 40 a
+                // Commodore has.
+                self.send_line(&format!("  {}", self.dim("A document lands in your"))).await?;
+                self.send_line(&format!("  {}", self.dim("transfer printer/ folder, 5s"))).await?;
+                self.send_line(&format!("  {}", self.dim("after the last character."))).await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}  Cycle where printing goes", self.cyan("P"))).await?;
+            self.send_line(&format!("  {}  Cycle the booted-disk board", self.cyan("B"))).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/printer"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "p" => {
+                    let keys: Vec<&str> =
+                        crate::cpm::printer::PRINTER_CHOICES.iter().map(|(v, _)| *v).collect();
+                    // An unrecognised value lands on the next one after `off`,
+                    // which is both the safe answer and the one that clears it —
+                    // the same rule the machine and backspace keys follow.
+                    let idx = keys
+                        .iter()
+                        .position(|k| *k == cfg.cpm_printer.trim())
+                        .unwrap_or(keys.len() - 1);
+                    let next = keys[(idx + 1) % keys.len()].to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_printer", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "b" => {
+                    // `off` first, then each board — so cycling from an
+                    // unrecognised value reaches `off` next.
+                    let mut keys = vec![crate::cpm::printer::PORT_OFF];
+                    keys.extend(crate::cpm::printer::PORT_CHOICES.iter().map(|p| p.key));
+                    let idx = keys
+                        .iter()
+                        .position(|k| *k == cfg.cpm_printer_port.trim())
+                        .unwrap_or(keys.len() - 1);
+                    let next = keys[(idx + 1) % keys.len()].to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_printer_port", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press P, B, or Q.").await?;
                 }
             }
         }

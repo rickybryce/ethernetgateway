@@ -163,8 +163,16 @@ pub struct BootMachine {
     /// dispatch.  One entry today.
     controllers: Vec<Box<dyn Controller>>,
     disks: Vec<Option<Mounted>>,
-    /// Bytes the guest has printed.
+    /// Bytes the guest has written to the console.
     tx: Vec<u8>,
+    /// Bytes the guest has written to the printer, if it has one.
+    print: Vec<u8>,
+    /// The printer's data register, when `cpm_printer_port` names one.
+    ///
+    /// `None` means the port is unclaimed and behaves exactly as it did before
+    /// printing existed — offered to the modem and then discarded — so a
+    /// gateway with printing off is byte-for-byte the machine it always was.
+    printer_port: Option<u8>,
     /// Bytes waiting for the guest to read.
     rx: std::collections::VecDeque<u8>,
     /// Instructions left before the next received character has "arrived".
@@ -235,6 +243,8 @@ impl BootMachine {
             console_blocked: false,
             console: super::console::resolve_console(super::console::DEFAULT_MACHINE),
             modem: ModemPort::new(),
+            print: Vec::new(),
+            printer_port: None,
             disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
@@ -662,9 +672,35 @@ impl BootMachine {
         }
     }
 
-    /// Take everything the guest has printed.
+    /// Take everything the guest has printed *to the console*.
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.tx)
+    }
+
+    /// Give this machine a printer at `data_port`, or take it away with `None`.
+    ///
+    /// Set before the guest runs, from `cpm_printer_port` — see
+    /// [`crate::cpm::printer::PORT_CHOICES`], where the Altair port is recorded
+    /// with the measurement it came from.
+    ///
+    /// Only the data register. A real interface also has a status register the
+    /// guest polls, and we deliberately do not answer it: an unclaimed port
+    /// reads `0xFF` here, which every period convention reads as ready, and
+    /// that is why Altair BASIC printed at full speed into a board that did not
+    /// exist. Claiming the status port to say the same thing would be code that
+    /// changes nothing.
+    pub fn attach_printer(&mut self, data_port: Option<u8>) {
+        self.printer_port = data_port;
+    }
+
+    /// Take everything the guest has printed *to the printer*.
+    ///
+    /// Kept apart from [`BootMachine::take_output`] because they are two
+    /// devices: the console goes to the user's terminal and the printer goes to
+    /// a file, and a single buffer would put a report on the screen and the
+    /// user's typing in the document.
+    pub fn take_print(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.print)
     }
 
     /// Console status reads since anything last happened.
@@ -1090,6 +1126,17 @@ impl Machine for BootMachine {
             // real terminal without anything in this dispatch knowing it exists.
             p if p == self.console.data_port => {
                 self.tx.push(value & 0x7F);
+                self.idle_status_reads = 0;
+            }
+            // The printer's data register, if this machine has a printer.
+            //
+            // Checked after the disk controllers and the console but before the
+            // modem, because those two are hardware the guest's own BIOS
+            // depends on and the printer is a port we have volunteered to
+            // claim: a profile that collided with a real device would break the
+            // guest, so the devices that make the machine work go first.
+            p if Some(p) == self.printer_port => {
+                self.print.push(value);
                 self.idle_status_reads = 0;
             }
             // The control register and anything else: offered to the modem,
@@ -4719,4 +4766,132 @@ mod tests {
         assert!(asked > 0, "no image in {dir} reached a prompt with a companion mounted");
     }
 
+    /// **What a booted guest actually sends to its printer, byte for byte.**
+    ///
+    /// The whole `src/cpm/printer.rs` page model rests on one question this
+    /// answers and nothing else can: how a period program *ends a line*. If
+    /// Altair BASIC terminates with a bare CR then a CR has to advance the
+    /// paper, and the overstrike rule — a CR returns the head to column 0 of
+    /// the line it is on — would collapse an entire report onto one line. If it
+    /// sends CR LF, overstrike is safe and means what WordStar means by it.
+    ///
+    /// Reasoning cannot settle that: both are period-correct, real interfaces
+    /// had an "auto line feed on CR" switch precisely because software
+    /// disagreed, and the answer is a property of *this* disk. So this prints
+    /// two known lines from the guest's own BASIC and dumps what arrived at the
+    /// data port.
+    ///
+    /// Ignored — set `CPM_HDSK_BASIC` to `HDSK01` (Altair Hard Disk BASIC).
+    #[test]
+    #[ignore]
+    fn test_measure_what_altair_basic_sends_to_the_printer() {
+        let Ok(basic) = std::env::var("CPM_HDSK_BASIC") else {
+            eprintln!("set CPM_HDSK_BASIC to run this");
+            return;
+        };
+
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&basic).unwrap(), true).expect("the hard disk");
+        // The board the printer lives on, before the guest runs — the same
+        // thing `cpm_boot_ui` does from `cpm_printer_port`.
+        m.attach_printer(Some(
+            crate::cpm::printer::port_for("altair_c").expect("the Altair board").data,
+        ));
+        // 8080: this is a 1979 MITS disk and the machine it ran on had no Z80.
+        let mut cpu = BootMachine::new_cpu_for(crate::cpm::cpu::CPU_8080);
+        m.boot(&mut cpu, 0).expect("boots");
+        assert!(
+            run_until_quiet(&mut m, &mut cpu, 200_000_000).contains(&b'?'),
+            "{basic} never asked its first question"
+        );
+        // `LINEPRINTER?` rejects `N` and every digit and re-asks; `C` is
+        // accepted.  Answering it is the point — this is the dialog that makes
+        // the guest drive the port at all.
+        for answer in ["", "C", "0", "", "1", "1", "79"] {
+            type_at(&mut m, &mut cpu, format!("{answer}\r").as_bytes(), 200_000_000);
+        }
+        // Everything sent while answering the sign-on: the driver's own
+        // initialisation, which must not read as a document.
+        let handshake = m.take_print();
+
+        for line in ["LPRINT \"ALPHA\"", "LPRINT \"BETA\""] {
+            type_at(&mut m, &mut cpu, format!("{line}\r").as_bytes(), 800_000_000);
+        }
+        let printed = m.take_print();
+
+        let show = |b: &[u8]| -> String {
+            b.iter()
+                .map(|&c| match c {
+                    b'\r' => "<CR>".to_string(),
+                    b'\n' => "<LF>".to_string(),
+                    0x0C => "<FF>".to_string(),
+                    0x20..=0x7E => (c as char).to_string(),
+                    _ => format!("<{c:02X}>"),
+                })
+                .collect()
+        };
+        println!("sign-on wrote to the data port: {}", show(&handshake));
+        println!("LPRINT wrote to the data port:  {}", show(&printed));
+
+        assert!(
+            !printed.is_empty(),
+            "nothing reached the printer port — the guest never drove it, so \
+             everything `printer.rs` says about this disk is unmeasured"
+        );
+        assert!(
+            printed.iter().any(|&b| b & 0x7F == b'A'),
+            "the text did not arrive: {}",
+            show(&printed)
+        );
+
+        // **The measurement, pinned.**  What came back was
+        // `ALPHA<CR>BETA<CR>` — a bare CR and no line feed anywhere — which is
+        // why `altair_c` carries `auto_lf: true`.  Asserted rather than
+        // described, so the day a disk disagrees this says so instead of the
+        // gateway quietly printing every report on one line.
+        let text: Vec<u8> = printed.iter().map(|&b| b & 0x7F).collect();
+        assert!(
+            !text.contains(&b'\n'),
+            "this disk now sends a line feed, so `altair_c`'s auto-line-feed \
+             switch would double-space it — see PrinterPort::auto_lf: {}",
+            show(&printed)
+        );
+        assert!(
+            text.windows(6).any(|w| w == b"ALPHA\r"),
+            "expected ALPHA terminated by a bare CR: {}",
+            show(&printed)
+        );
+        assert!(
+            text.windows(5).any(|w| w == b"BETA\r"),
+            "expected BETA terminated by a bare CR: {}",
+            show(&printed)
+        );
+
+        // The handshake, likewise: it is bytes, it is not a document, and
+        // `SpoolJob::is_empty` exists because of it.
+        assert!(!handshake.is_empty(), "the driver initialisation was not seen at all");
+        let mut job = crate::cpm::printer::SpoolJob::new_for(
+            crate::cpm::printer::port_for("altair_c").expect("the board"),
+        );
+        for &b in &handshake {
+            job.push(b);
+        }
+        assert!(
+            job.is_empty(),
+            "the sign-on handshake ({}) reads as a print job, so merely \
+             answering LINEPRINTER? would hand the operator an empty document",
+            show(&handshake)
+        );
+
+        // And end to end: the board's own switch, through the real spool, gives
+        // two lines rather than BETA printed on top of ALPHA.
+        for &b in &printed {
+            job.push(b);
+        }
+        let doc = job.plain_text();
+        assert_eq!(
+            doc, "ALPHA\nBETA\n",
+            "the page model does not reproduce what this disk printed"
+        );
+    }
 }

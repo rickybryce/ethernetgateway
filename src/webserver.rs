@@ -1021,6 +1021,7 @@ fn collect_form_updates(
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
         "cpm_boot_backspace", "cpm_cpu",
+        "cpm_printer", "cpm_printer_port",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
         "cpm_emu_x_code", "cpm_emu_dcd_mode", "cpm_emu_s_regs",
@@ -2094,6 +2095,33 @@ fn render_more_popups(cfg: &Config) -> String {
             )
         })
         .collect();
+    let cpm_printer_options: String = crate::cpm::printer::PRINTER_CHOICES
+        .iter()
+        .map(|(value, label)| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                value,
+                if *value == cfg.cpm_printer.trim() { " selected" } else { "" },
+                html_escape(label),
+            )
+        })
+        .collect();
+    // `off` first, then each board -- the same order the telnet screen cycles
+    // in, so the two cannot present different lists.
+    let cpm_printer_port_options: String = std::iter::once((
+        crate::cpm::printer::PORT_OFF,
+        "No printer on a booted disk",
+    ))
+    .chain(crate::cpm::printer::PORT_CHOICES.iter().map(|p| (p.key, p.label)))
+    .map(|(value, label)| {
+        format!(
+            "<option value=\"{}\"{}>{}</option>",
+            value,
+            if value == cfg.cpm_printer_port.trim() { " selected" } else { "" },
+            html_escape(label),
+        )
+    })
+    .collect();
     let cpm_cpu_options: String = crate::cpm::cpu::CPU_CHOICES
         .iter()
         .map(|(value, label)| {
@@ -2201,6 +2229,27 @@ fn render_more_popups(cfg: &Config) -> String {
              the opposite: the rubout is its editing key and BS prints a literal \
              ^H. The telnet boot picker asks again per disk and starts from \
              this.</span>\
+             <span class=\"label\">Printer output:</span>\
+             <select name=\"cpm_printer\">{cpm_printer_options}</select>\
+             <span class=\"hint\">Where CP/M printer output goes. Reaches both \
+             CP/M machines: in the emulator the printer is an OS service (BDOS 5 \
+             and the BIOS LIST vector), and a booted disk drives the board below. \
+             A document lands in a &quot;printer&quot; folder inside the transfer \
+             directory \u{2014} its own folder so a printer left on does not \
+             scatter files through yours \u{2014} named \
+             PRINT-YYYYMMDD-HHMMSS, five seconds after the last character printed \
+             \u{2014} and in the emulator also the moment the program returns to \
+             A&gt;, which is exact. Off means printer output appears on the \
+             terminal, as it always has. No bold or underline yet: period \
+             software makes them by overstriking, which is resolved into correct \
+             text rather than into styling.</span>\
+             <span class=\"label\">Booted disk's printer board:</span>\
+             <select name=\"cpm_printer_port\">{cpm_printer_port_options}</select>\
+             <span class=\"hint\">Ignored by the emulator, whose printer is a \
+             BDOS service with no port at all, and ignored entirely when printer \
+             output is off. Measured against real software: Altair Hard Disk \
+             BASIC answering LINEPRINTER? C sends one character per byte to data \
+             register 03h.</span>\
              <span class=\"label\">CPU:</span>\
              <select name=\"cpm_cpu\">{cpm_cpu_options}</select>\
              <span class=\"hint\">The one setting here that applies to the \

@@ -568,6 +568,7 @@
             <a href="#ccp">CCP Commands</a>
             <a href="#disks">Disk Images</a>
             <a href="#booting">Booting</a>
+            <a href="#printing">Printing</a>
             <a href="#uart">UART Profiles</a>
             <a href="#egt80">EGT80</a>
             <a href="#machines">Which Driver</a>
@@ -681,6 +682,8 @@
                         <tr><td><code>cpm_boot_machine</code></td><td><code>altair_2sio</code></td><td>Which machine a <em>booted</em> disk thinks it is on &mdash; specifically where it finds its console. Ignored by the emulator, which has no console to place. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_backspace</code></td><td><code>backspace</code></td><td>What a <em>booted</em> disk is handed when you press Backspace &mdash; <code>backspace</code> (BS, <code>08h</code>) or <code>rubout</code> (DEL, <code>7Fh</code>). Ignored by the emulator, which reads its own console line and accepts either. The telnet boot picker asks again per disk and starts from this. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. Two terminals are placed on drive A:: <strong><code>EGT8080.COM</code></strong> is built to the 8080's instruction set and so runs on <em>either</em> setting, which is why it is the one to reach for; <code>EGT80.COM</code> is the Z80 build and will crash an 8080. The <code>hbios_*</code> modem profiles emulate RomWBW &mdash; Z80/Z180 firmware &mdash; so other people's software that looks for it is generally Z80 code and will not run on an 8080, though our HBIOS itself answers an 8080 perfectly well (<code>RST 8</code> is an 8080 instruction). See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_printer</code></td><td><code>off</code></td><td>Where CP/M printer output goes &mdash; <code>off</code> (your terminal, as it always has), <code>odt</code> (an OpenDocument text file) or <code>text</code>. Reaches <strong>both</strong> CP/M machines, by two different routes: in the emulator the printer is an OS <em>service</em> (BDOS function 5 and the BIOS <code>LIST</code> vector), so WordStar, MBASIC's <code>LPRINT</code> and <code>PIP LST:=FILE.TXT</code> all arrive; a booted disk drives the <em>board</em> below. The document lands in a <code>printer</code> folder inside the transfer directory, named <code>PRINT-YYYYMMDD-HHMMSS</code>, 5&nbsp;seconds after the last character printed &mdash; and in the emulator also the moment the program returns to <code>A&gt;</code>, which is exact. See <a href="#printing">Printing</a>.</td></tr>
+                        <tr><td><code>cpm_printer_port</code></td><td><code>altair_c</code></td><td>Which printer board a <em>booted</em> disk finds: <code>altair_c</code> (Altair line printer, data register <code>03h</code>) or <code>off</code>. Ignored by the emulator, whose printer is a BDOS service with no port at all, and ignored entirely when <code>cpm_printer</code> is off. See <a href="#printing">Printing</a>.</td></tr>
                         <tr><td><code>cpm_emu_uart</code></td><td><code>rc2014_1b</code></td><td>How the guest reaches the virtual modem &mdash; a machine port, the BDOS <code>AUX:</code> device, or RomWBW HBIOS. See <a href="#uart">UART Profiles</a>.</td></tr>
                         <tr><td><code>cpm_emu_echo</code></td><td><code>true</code></td><td>Virtual modem <code>ATE</code> &mdash; echo command-mode characters.</td></tr>
                         <tr><td><code>cpm_emu_verbose</code></td><td><code>true</code></td><td>Virtual modem <code>ATV</code> &mdash; word result codes rather than numeric.</td></tr>
@@ -1168,6 +1171,97 @@ altairhd_cobol.dsk</code></pre>
                     <code>0xFF</code> &mdash; a valid reading meaning "88-SIO" &mdash; Altair DOS
                     booted perfectly and wrote its sign-on to a board that was not there, which
                     looked exactly like a disk that would not boot.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="printing">
+                <div class="section-title">Printing &mdash; <code>cpm_printer</code></div>
+                <p class="intro">CP/M software prints to a device called <code>LST:</code>. Turn <code>cpm_printer</code> on and what it sends is captured and left in your transfer directory as a document you can collect over XMODEM, ZMODEM, Kermit or any of the others &mdash; an <strong>OpenDocument</strong> file that opens in LibreOffice, Word or Google Docs, or plain text.</p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two machines, two routes, one document</h3>
+                <p>
+                    This is one of only two settings that reach <em>both</em> CP/M machines &mdash;
+                    <code>cpm_cpu</code> is the other &mdash; and, like that one, they get there by
+                    completely different roads.
+                </p>
+                <ul class="bullet-list">
+                    <li><strong>The emulator.</strong> Our own BDOS and BIOS sit underneath the
+                    guest, so the printer is a <em>service</em>: BDOS function 5 (List Output) and
+                    the BIOS <code>LIST</code> vector. Every program that prints through the
+                    operating system arrives here &mdash; WordStar, MBASIC's <code>LPRINT</code>,
+                    <code>PIP LST:=FILE.TXT</code>. No hardware is involved and there is nothing to
+                    configure beyond turning it on.</li>
+                    <li><strong>A booted disk.</strong> The guest owns the machine and drives a
+                    printer <em>board</em>, so the gateway has to be one. Which board is
+                    <code>cpm_printer_port</code>; today there is one, the Altair line printer with
+                    its data register at <code>03h</code>.</li>
+                </ul>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Where the file goes, and when</h3>
+                <p>
+                    Into a <code>printer</code> folder inside your transfer directory &mdash; its own
+                    folder, so a printer left switched on does not scatter documents through your
+                    own files &mdash; named <code>PRINT-YYYYMMDD-HHMMSS</code> from this machine's
+                    clock. Deliberately <em>not</em> onto a CP/M drive: the printout is for you, not
+                    for the guest, and putting it on a drive would hand it back to the guest as a
+                    file it could open.
+                </p>
+                <p>
+                    <strong>A job ends after five seconds of silence.</strong> CP/M has no
+                    end-of-print signal &mdash; a printer is a stream of bytes with no "close", and
+                    on real hardware the person standing there decided the job was finished &mdash;
+                    so silence is the only signal there is. In the emulator there is a second,
+                    exact one: returning to the <code>A&gt;</code> prompt ends the job immediately,
+                    so a program that prints and exits does not make you wait out the timeout. A
+                    booted operating system never "finishes", so there the five seconds are the
+                    whole answer.
+                </p>
+                <p>
+                    Merely <em>initialising</em> a printer does not create a document. Altair Hard
+                    Disk BASIC answering <code>LINEPRINTER? C</code> writes a handshake byte to the
+                    data port before anything is printed; a job with no printable character in it is
+                    dropped rather than written out as an empty file.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The auto-line-feed switch</h3>
+                <p>
+                    Real Centronics-type interfaces carried a DIP switch for this, and they
+                    carried it because the byte stream genuinely cannot say. A carriage return
+                    that returns the head <em>without</em> advancing the paper is how
+                    <strong>overstrike</strong> works &mdash; it is how period software makes bold
+                    and underline. A carriage return that advances is how a great deal of other
+                    software ends a line. Same byte, two meanings, and only the hardware settles it.
+                </p>
+                <p>
+                    So it is settled per board, by measurement. Two <code>LPRINT</code>s from Altair
+                    Hard Disk BASIC put <code>ALPHA&lt;CR&gt;BETA&lt;CR&gt;</code> on the wire and
+                    nothing else &mdash; a bare CR, no line feed anywhere. With the switch off,
+                    <code>BETA</code> prints on top of <code>ALPHA</code> and an entire report
+                    collapses onto a single line, so <code>altair_c</code> has it <strong>on</strong>.
+                    A CR LF pair sent to that board has its line feed absorbed rather than
+                    double-spacing the document, which is what the real interfaces did and what made
+                    the switch usable by software that sent both.
+                </p>
+                <p>
+                    The emulator's printer has it <strong>off</strong>, and that was measured to
+                    the same standard: <code>PIP LST:=DEMO.ASM</code> run against the CP/M&nbsp;2.2
+                    distribution disk sent 2745&nbsp;bytes carrying <strong>65 CR and 65 LF</strong>,
+                    and the document that came out matched the source file line for line. So CR LF
+                    is what arrives through BDOS&nbsp;5, and overstrike keeps its meaning there.
+                </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">What it does not do yet</h3>
+                <p>
+                    <strong>No bold or underline.</strong> Period software does not ask for them, it
+                    <em>overstrikes</em>: WordStar prints a line, returns the carriage with a bare CR
+                    and prints it again for double-strike, or overprints a letter with <code>_</code>
+                    for underline. Those are resolved into correct, readable <em>text</em> &mdash;
+                    the letter wins over the underscore, a line printed twice is not doubled &mdash;
+                    rather than into styling. Getting the text right first means a later pass that
+                    recognises the overstrike patterns, or an Epson <code>ESC E</code> driver, cannot
+                    silently lose content on the way to producing real bold.
                 </p>
             </div>
 

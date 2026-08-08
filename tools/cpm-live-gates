@@ -56,6 +56,9 @@ export CPM_HD_BOOT="$DISKS/HDSK03.DSK"
 # 88-HDSK image to put on the fixed platter.  HDSK02 is the Accounting System,
 # so the two directories have nothing in common and "did it read the other
 # disk" has an unambiguous answer.
+# HDSK01 serves a second gate as well: it is the only software here that drives
+# a printer, so it is what measured the Altair line printer's ports AND its
+# auto-line-feed switch (`LPRINT` sends a bare CR, no line feed).
 export CPM_HDSK_BASIC="$DISKS/HDSK01.DSK"
 export CPM_HDSK_DATA="$DISKS/HDSK02.DSK"
 export CPM_TARBELL_IMAGE="$DISKS/TDISK02.DSK"
