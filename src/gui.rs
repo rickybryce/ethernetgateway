@@ -1018,7 +1018,14 @@ impl App {
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         let cpm_base = base.clone();
-        let naming = crate::cpm::boot::slot_naming(&self.cfg.cpm_boot_image);
+        // What will actually run, not what the key says: a `cpm_boot_image`
+        // naming a disk that is no longer in the images folder falls back to
+        // the emulator, and these rows describe the machine that starts.
+        // Resolved once for the whole window — one `stat` beside the folder
+        // listing on the next line, not one per row.
+        let naming =
+            crate::cpm::boot::boot_target(&self.cfg.transfer_dir, &self.cfg.cpm_boot_image)
+                .slot_naming();
         let booting = naming == crate::cpm::boot::SlotNaming::Boards;
         let images = crate::cpm::image::available_images(&base);
         let mounts = crate::cpm::image::registry::all();

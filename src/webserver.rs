@@ -1737,7 +1737,12 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     let mounts = crate::cpm::image::registry::all();
     let usage = crate::cpm::image::registry::usage();
 
-    let naming = crate::cpm::boot::slot_naming(&cfg.cpm_boot_image);
+    // Resolved, not read off the key — a `cpm_boot_image` naming a disk that is
+    // no longer there runs the emulator, and this page has to name the slots
+    // the machine that starts will have.  Once per request, beside the folder
+    // listing above.
+    let naming =
+        crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
     let booting = naming == crate::cpm::boot::SlotNaming::Boards;
     let mut rows = String::new();
     for drive0 in 0..crate::cpm::NUM_DRIVES {

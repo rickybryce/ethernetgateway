@@ -2396,6 +2396,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   for the 88-HDSK CP/M the fixed platter as its B:.  Disks are opened
 #   READ-ONLY unless the boot picker is told otherwise, and that answer covers
 #   the mounted disks as well as the booted one.
+#   A name that is no longer in CPM/images runs the EMULATOR instead and says
+#   so in the log: this is a preference about which machine to run, so deleting
+#   an image costs you the boot and not the whole feature.  The disk screens
+#   follow what will really start, naming drives A:-P: again rather than the
+#   slots of a board nobody is going to get.
 ");
     write_kv(&mut content, "cpm_boot_image", &cfg.cpm_boot_image);
     content.push_str("\

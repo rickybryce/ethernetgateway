@@ -26,6 +26,7 @@
 //! CP/M directory is found on these disks.
 
 use super::dcdd::{Dcdd, Request, SECTOR_LEN};
+use std::path::PathBuf;
 
 /// What `cpm_boot_image` holds when CP/M means our own emulator.
 ///
@@ -113,24 +114,89 @@ pub enum SlotNaming {
     Boards,
 }
 
-/// Which naming a given configuration calls for.
+/// What CP/M is *actually* going to run for a given configuration.
 ///
-/// **Known gap: this reads the configured *string*, not what will actually
-/// run.** `cpmemu_boot_target` also falls back to the emulator when the named
-/// image has an unsafe name or is no longer in `CPM/images`, and this does not
-/// — so with a stale `cpm_boot_image` the three disks screens describe a
-/// booted machine while the emulator is what starts. Two consequences, both
-/// cosmetic: the rows are named for a board instead of `A:`-`P:`, and
-/// [`mount_refuses_writes`] answers with the host's verdict where our BDOS's
-/// applies, so an image we have write-protected shows no `(R/O)` marker. The
-/// emulator still refuses the write, with its reason, so nothing is lost —
-/// it just is not foretold.
+/// `cpm_boot_image` is a preference, not an outcome. An operator can delete the
+/// image it names, or hand-edit the key to something that could never be a
+/// filename, and in both cases the gateway runs the emulator rather than
+/// refusing to open CP/M at all — the setting is about which machine to run,
+/// and losing an image should lose the boot, not the whole feature.
 ///
-/// Not fixed here because the fix is a filesystem probe, and this is called
-/// once per drive per *frame* in the desktop UI. Resolving it once per screen
-/// draw and passing the answer in is the shape that would work.
-pub fn slot_naming(boot_image: &str) -> SlotNaming {
-    if boot_image.trim().is_empty() { SlotNaming::Drives } else { SlotNaming::Boards }
+/// Every screen that describes the machine has to describe *that* answer, and
+/// for a while they did not: they read the configured string, so a stale key
+/// named the drive rows for a board while our BDOS was what started, and
+/// [`mount_refuses_writes`] gave the host's verdict where our BDOS's applied —
+/// an image our BDOS write-protects showed no `(R/O)` marker until the write
+/// was refused.
+///
+/// So the resolution lives here, once, and a [`SlotNaming`] can only be had
+/// **from a resolved target**: there is deliberately no function that will
+/// answer the question from the string alone. This project has twice shipped a
+/// rule written in two places and held in one; this is the compiler holding it
+/// instead.
+///
+/// **Nothing here logs.** A screen resolves this every time it draws — sixty
+/// times a second in the desktop window — and a fallback that announced itself
+/// from there would fill the console log with one operator's config typo. The
+/// emulator entry point resolves it once per session and does the announcing,
+/// which is also the only place with a session to announce it *to*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootTarget {
+    /// Nothing is configured to boot — the emulator, as asked for.
+    Emulator,
+    /// A value that could never name a file in `CPM/images`; the emulator runs.
+    UnsafeName(String),
+    /// A name that is not in `CPM/images` any more; the emulator runs.
+    Missing(String),
+    /// The image that will be booted.
+    Image(PathBuf),
+}
+
+impl BootTarget {
+    /// The image that will be booted, if one will be.
+    ///
+    /// By value because the one caller is starting a boot session with it, and
+    /// a borrowing twin would be a second way to ask the same question with
+    /// nobody asking it.
+    pub fn into_image(self) -> Option<PathBuf> {
+        match self {
+            BootTarget::Image(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// What a mount slot is called on the machine this target starts.
+    ///
+    /// Both fallbacks name drives, because both of them run the emulator. That
+    /// is the whole point of routing the question through here.
+    pub fn slot_naming(&self) -> SlotNaming {
+        match self {
+            BootTarget::Image(_) => SlotNaming::Boards,
+            _ => SlotNaming::Drives,
+        }
+    }
+}
+
+/// Resolve `cpm_boot_image` against the images folder under `transfer_dir`.
+///
+/// One `stat`, and a caller drawing a screen wants exactly one of these for the
+/// whole screen rather than one per row. It is cheaper than what these screens
+/// already do — each lists the images folder before it draws — but it is still
+/// a syscall, and the shape that stays cheap is to resolve once and pass the
+/// answer down.
+pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
+    let name = boot_image.trim();
+    if name.is_empty() {
+        return BootTarget::Emulator;
+    }
+    if !super::image::is_safe_image_name(name) {
+        return BootTarget::UnsafeName(name.to_string());
+    }
+    let path = super::image::images_dir(&super::layout::cpm_dir(transfer_dir)).join(name);
+    if std::fs::metadata(&path).is_err() {
+        return BootTarget::Missing(name.to_string());
+    }
+    BootTarget::Image(path)
 }
 
 /// Name slot `slot`, for an image of `image_len` bytes if that is known.
@@ -527,10 +593,12 @@ mod tests {
     /// reach, so a letter there would be us answering for the guest.
     #[test]
     fn test_a_slot_is_named_for_whatever_cpm_is_set_to_run() {
-        use super::{slot_name, slot_naming, SlotNaming};
-        assert_eq!(slot_naming(""), SlotNaming::Drives, "no boot image = the emulator");
-        assert_eq!(slot_naming("   "), SlotNaming::Drives, "and whitespace is empty");
-        assert_eq!(slot_naming("altair8_cpm22.dsk"), SlotNaming::Boards);
+        use super::{slot_name, BootTarget, SlotNaming};
+        assert_eq!(BootTarget::Emulator.slot_naming(), SlotNaming::Drives);
+        assert_eq!(
+            BootTarget::Image("altair8_cpm22.dsk".into()).slot_naming(),
+            SlotNaming::Boards
+        );
 
         // The emulator's names never mention a board — its drives are ours.
         assert_eq!(slot_name(&SlotNaming::Drives, 0, None), "A:");
@@ -602,7 +670,7 @@ mod tests {
     /// filename, inside 40 columns.
     #[test]
     fn test_a_slot_name_leaves_room_for_the_filename() {
-        use super::{slot_name, slot_naming, SlotNaming};
+        use super::{slot_name, BootTarget, SlotNaming};
         use crate::cpm::boot_machine::BootMachine;
 
         const INDENT: usize = 3;
@@ -629,7 +697,7 @@ mod tests {
             }
         }
         // And the naming helper agrees with what the rows are built from.
-        assert_eq!(slot_naming(""), SlotNaming::Drives);
+        assert_eq!(BootTarget::Emulator.slot_naming(), SlotNaming::Drives);
     }
     use super::super::dcdd::{Disk, Geometry};
     use super::*;
@@ -708,6 +776,97 @@ mod tests {
     fn test_a_label_exists_for_a_setting_whose_disk_is_gone() {
         assert_eq!(boot_choice_label(""), BOOT_EMULATOR_LABEL);
         assert_eq!(boot_choice_label("vanished.dsk"), "Boot vanished.dsk");
+    }
+
+    /// **A setting is not an outcome.** `cpm_boot_image` can name a disk that
+    /// has been deleted since, or a string that could never be a filename, and
+    /// in both cases the emulator is what starts — so both must resolve to the
+    /// emulator's naming, not the string's.
+    ///
+    /// That was a real defect: the screens read the key, so a stale one named
+    /// the rows `drive 1` for a board nobody was going to boot, and hid the
+    /// `(R/O)` marker on an image our BDOS was about to refuse a write to.
+    /// The label beside it kept saying `Boot vanished.dsk`, which is correct
+    /// for a *setting* and is why the mismatch read as deliberate.
+    #[test]
+    fn test_a_boot_image_that_is_not_there_names_the_emulators_drives() {
+        use super::{boot_target, mount_refuses_writes, slot_name, BootTarget, SlotNaming};
+
+        let dir = std::env::temp_dir().join("egw_boot_target_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("CPM").join(super::super::image::IMAGES_DIR)).unwrap();
+        let transfer = dir.to_string_lossy().to_string();
+        // Through `cpm_dir`, which canonicalizes — the folder has to exist
+        // first or this and `boot_target` would disagree on a platform whose
+        // temp dir is a symlink (macOS `/tmp` is `/private/tmp`).
+        let images =
+            super::super::image::images_dir(&super::super::layout::cpm_dir(&transfer));
+
+        // Nothing configured, and whitespace, are both the emulator as asked for.
+        assert_eq!(boot_target(&transfer, ""), BootTarget::Emulator);
+        assert_eq!(boot_target(&transfer, "   "), BootTarget::Emulator);
+
+        // The two fallbacks — the defect this test exists for.
+        assert_eq!(
+            boot_target(&transfer, "gone.dsk"),
+            BootTarget::Missing("gone.dsk".to_string()),
+            "a disk that is not in the folder cannot be booted"
+        );
+        assert_eq!(
+            boot_target(&transfer, "../../etc/passwd"),
+            BootTarget::UnsafeName("../../etc/passwd".to_string()),
+            "and a name that escapes the folder is refused before it is stat'ed"
+        );
+        for stale in ["gone.dsk", "../../etc/passwd"] {
+            let naming = boot_target(&transfer, stale).slot_naming();
+            assert_eq!(naming, SlotNaming::Drives, "{stale} runs the emulator");
+            // The consequence on the rows themselves, not just on the enum.
+            assert_eq!(slot_name(&naming, 1, Some(337_568)), "B:");
+        }
+
+        // And the disk that *is* there boots, at the path the session opens.
+        std::fs::write(images.join("altair8_cpm22.dsk"), [0u8; 8]).unwrap();
+        let target = boot_target(&transfer, "altair8_cpm22.dsk");
+        assert_eq!(target.slot_naming(), SlotNaming::Boards);
+        assert_eq!(
+            target.clone().into_image().as_deref(),
+            Some(images.join("altair8_cpm22.dsk").as_path()),
+            "the emulator entry point boots this exact file"
+        );
+        // Trimmed, so a config file with a trailing space still boots.
+        assert_eq!(boot_target(&transfer, " altair8_cpm22.dsk "), target);
+
+        // The second half of the defect: whose read-only verdict applies.  Our
+        // BDOS refuses this image; the host would allow the write.  Under a
+        // stale key the screens asked the host and showed no marker at all.
+        let mount = crate::cpm::image::registry::Mount {
+            path: images.join("altair8_cpm22.dsk"),
+            filename: "altair8_cpm22.dsk".to_string(),
+            format: "altair8",
+            read_only: true,
+            read_only_reason: "directory does not add up".to_string(),
+            host_read_only: false,
+            fs: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cpm::image::fs::ImageFs::mount(
+                    Box::new(crate::cpm::image::media::MemMedia::new(
+                        crate::cpm::image::format::by_token("altair8").unwrap().blank_image().unwrap(),
+                    )),
+                    crate::cpm::image::format::by_token("altair8").unwrap(),
+                    true,
+                )
+                .unwrap(),
+            )),
+        };
+        assert!(
+            mount_refuses_writes(&boot_target(&transfer, "gone.dsk").slot_naming(), &mount),
+            "a stale key runs our BDOS, so our BDOS's verdict is the one to show"
+        );
+        assert!(
+            !mount_refuses_writes(&boot_target(&transfer, "altair8_cpm22.dsk").slot_naming(), &mount),
+            "and a disk that really boots owns its own format — only the tab stops it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -68,7 +68,14 @@ impl TelnetSession {
             // slot is a number on a *board*, and whether the guest reaches it is
             // its own BIOS's business — calling it `B:` there would be us making
             // a promise on the guest's behalf.
-            let naming = crate::cpm::boot::slot_naming(&config::get_config().cpm_boot_image);
+            //
+            // Resolved against the images folder rather than read off the key:
+            // a `cpm_boot_image` naming a disk that has since been deleted runs
+            // the emulator, and a screen that named board slots there would be
+            // describing a machine nobody is going to get.
+            let cfg = config::get_config();
+            let naming =
+                crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
             let lent = image::registry::boot_loans();
             let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
             if any {
@@ -603,7 +610,9 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        let naming = crate::cpm::boot::slot_naming(&config::get_config().cpm_boot_image);
+        let cfg = config::get_config();
+        let naming =
+            crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
         let booting = naming == crate::cpm::boot::SlotNaming::Boards;
         self.send_line(&format!(
             "  {}",

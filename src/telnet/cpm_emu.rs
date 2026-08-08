@@ -498,24 +498,29 @@ impl TelnetSession {
     /// the log rather than refusing to open CP/M at all: the setting is a
     /// preference about which machine to run, and an operator who deletes an
     /// image should lose the boot, not the whole feature.
+    ///
+    /// **The fallback is [`crate::cpm::boot::boot_target`]'s and not ours**, so
+    /// that the three disks screens — which describe the machine this decides —
+    /// cannot answer differently from the code that starts it. What is left
+    /// here is the announcing: this is the one caller with a session behind it,
+    /// and it runs once per visit rather than once per frame.
+    ///
+    /// The `stat` is synchronous. It is a single one at session entry, on the
+    /// same local folder this path is about to read a whole disk image out of,
+    /// and every other CP/M screen here already stats from an async fn.
     async fn cpmemu_boot_target(&mut self) -> Option<PathBuf> {
         let cfg = config::get_config();
-        let name = cfg.cpm_boot_image.trim().to_string();
-        if name.is_empty() {
-            return None;
+        let target = crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image);
+        match &target {
+            crate::cpm::boot::BootTarget::UnsafeName(name) => {
+                glog!("CP/M: cpm_boot_image '{}' is not a valid image name — running the emulator", name);
+            }
+            crate::cpm::boot::BootTarget::Missing(name) => {
+                glog!("CP/M: cpm_boot_image '{}' is not in CPM/images — running the emulator", name);
+            }
+            _ => {}
         }
-        if !crate::cpm::image::is_safe_image_name(&name) {
-            glog!("CP/M: cpm_boot_image '{}' is not a valid image name — running the emulator", name);
-            return None;
-        }
-        let mut base = PathBuf::from(&cfg.transfer_dir);
-        base.push("CPM");
-        let path = crate::cpm::image::images_dir(&base).join(&name);
-        if tokio::fs::metadata(&path).await.is_err() {
-            glog!("CP/M: cpm_boot_image '{}' is not in CPM/images — running the emulator", name);
-            return None;
-        }
-        Some(path)
+        target.into_image()
     }
 
     /// Ensure `CPM/` and each drive folder `CPM/A`..`CPM/P` exist under
