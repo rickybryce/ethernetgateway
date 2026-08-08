@@ -27,9 +27,13 @@ use std::time::{Duration, Instant};
 /// `accept()` has no timeout of its own and the failure it produces is the
 /// worst kind: not a red test but a parked one.
 ///
-/// Generous on purpose. The session's own worst case before it fetches is the
-/// 10 s bind wait plus three 5 s drains, so ~26 s; this is over twice that and
-/// still finite.
+/// Generous on purpose, and counted rather than guessed: the session's worst
+/// case before it fetches is the 10 s bind wait, the four 5 s drains in
+/// `run_session` (`Press BACKSPACE`, `(Y/N)`, `ethernet> `, `ethernet/web> `)
+/// and one 500 ms `drain_for` — 30.5 s. This is roughly double that, which is
+/// margin enough for a slow box without making a real stall tedious to sit
+/// through. Anything that raises a drain timeout or adds a step before the
+/// fetch has to be checked against this number.
 const HTTP_ACCEPT_BACKSTOP: Duration = Duration::from_secs(60);
 
 #[test]
@@ -48,6 +52,7 @@ fn test_binary_telnet_browser_e2e() {
     // watches it so a session that fails before the fetch takes the helper
     // down with it instead of leaving it parked on `accept()`.
     let session_over = Arc::new(AtomicBool::new(false));
+    let session_over_http = Arc::clone(&session_over);
 
     // 2. Spawn the localhost HTTP server in a background thread.
     // It serves one request, sends a response, and exits.
@@ -58,9 +63,7 @@ fn test_binary_telnet_browser_e2e() {
     // now, and the first is the one that makes it fail *fast*: the session
     // cannot reach its fetch without this thread answering, so if the session
     // is over and nothing arrived, nothing is ever going to.
-    let http_thread = {
-        let session_over = Arc::clone(&session_over);
-        std::thread::spawn(move || -> Result<(), String> {
+    let http_thread = std::thread::spawn(move || -> Result<(), String> {
         http_listener
             .set_nonblocking(true)
             .map_err(|e| format!("could not poll the listener: {e}"))?;
@@ -69,7 +72,7 @@ fn test_binary_telnet_browser_e2e() {
             match http_listener.accept() {
                 Ok((s, _)) => break s,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if session_over.load(Ordering::SeqCst) {
+                    if session_over_http.load(Ordering::SeqCst) {
                         return Err(
                             "the session ended without ever fetching the page".to_string()
                         );
@@ -111,8 +114,7 @@ fn test_binary_telnet_browser_e2e() {
         );
         let _ = stream.write_all(resp.as_bytes());
         Ok(())
-        })
-    };
+    });
 
     // 3. Set up an isolated config in a tmpdir.  The binary auto-
     // creates egateway.conf in its CWD if missing; pre-writing it lets

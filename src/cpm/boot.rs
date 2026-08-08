@@ -835,6 +835,24 @@ mod tests {
             "the two fallbacks must not read the same"
         );
 
+        // The budget `cpm_runs_row` reserves out of a 26-column PETSCII row.
+        // Pinned because that doc states the number, and a longer marker would
+        // squeeze the filename toward nothing without anything complaining —
+        // the row would still *fit*, which is why no width test would catch it.
+        for target in [
+            BootTarget::Emulator,
+            BootTarget::Image("real.dsk".into()),
+            BootTarget::Missing("x".into()),
+            BootTarget::UnsafeName("x".into()),
+        ] {
+            let mark = boot_setting_mark(&target);
+            assert!(
+                mark.chars().count() <= 15,
+                "{mark:?} is {} chars; cpm_runs_row's doc reserves 15",
+                mark.chars().count()
+            );
+        }
+
         // The label is the ordinary one with the mark appended, so a surface
         // cannot show the mark without the setting or the setting without it.
         assert_eq!(
