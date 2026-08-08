@@ -111,6 +111,33 @@ const IDLE_NAP_LONG: std::time::Duration = std::time::Duration::from_millis(8);
 /// down, and an idle EGT80 terminal spun the host at **161% CPU**; with this it
 /// measures 1.4%.  Only the demonstrably idle case is paced, so throughput is
 /// untouched: any pass doing real work resets the count to zero.
+/// Consecutive reads of a port nothing answers before the loop is paced.
+///
+/// Generous, because a program that *inventories* the I/O space is exactly the
+/// software the `0xFF` answer exists for — `survey.mac`, the CP/M program
+/// z80pack's changelog names as its reason. A sweep of 256 ports crosses this
+/// four times and pays a few milliseconds, once. A guest stuck on a port that
+/// is not there crosses it forever.
+pub(in crate::telnet) const UNCLAIMED_READS_BEFORE_NAP: u32 = 64;
+
+/// How long to pause when the guest is reading hardware that is not there.
+///
+/// The same treatment [`idle_nap`] gives an idle console poll, for the same
+/// reason and by a different route: there is no work being done, and the host
+/// should not spend a core discovering that. See
+/// [`crate::cpm::CpmMachine::unclaimed_reads`] for the measurement — 52-65% of
+/// a core with `cpm_emu_uart = off` and the bundled terminal at its default
+/// port, which is a *documented* configuration and not a contrived one.
+///
+/// Deliberately not a bigger hammer: this paces the loop, it does not stop it.
+/// The guest still sees `0xFF`, still behaves exactly as it would on a real
+/// machine with no board at that address, and is still bounded by
+/// `cpm_emu_max_minstr` and by a double-`ESC`. What changes is only how much of
+/// the host it costs while it does so.
+pub(in crate::telnet) fn unclaimed_nap(reads: u32) -> Option<std::time::Duration> {
+    (reads > UNCLAIMED_READS_BEFORE_NAP).then_some(IDLE_NAP)
+}
+
 pub(in crate::telnet) fn idle_nap(idle_polls: u32) -> Option<std::time::Duration> {
     if idle_polls > IDLE_POLLS_LONG {
         Some(IDLE_NAP_LONG)
@@ -1656,6 +1683,20 @@ impl TelnetSession {
                 }
             } else {
                 idle_polls = 0;
+            }
+            // And pace a guest reading a port nothing answers.  A separate
+            // count from `idle_polls` because it is a different kind of idle
+            // and the existing one cannot see it: this guest ends every pass
+            // with a console *write*, which is real work by any measure — what
+            // is unreal is where the byte it wrote came from.  A read that IS
+            // answered clears the count inside the machine, so software
+            // talking to a port that exists is never paced.
+            if let Some(nap) = unclaimed_nap(cpm.unclaimed_reads()) {
+                tokio::time::sleep(nap).await;
+                // Cleared after the pause, not left to a claimed read: a burst
+                // of probing then pays once, where a loop pays every time
+                // round.  See `clear_unclaimed_reads`.
+                cpm.clear_unclaimed_reads();
             }
             if pending_input.len() > pending_before {
                 hbios_parked_since = None; // the user is here: not idle

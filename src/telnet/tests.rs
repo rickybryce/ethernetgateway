@@ -7250,6 +7250,35 @@ fn test_cpmemu_tpa_line_reports_real_tpa_and_fits_petscii() {
     );
 }
 
+/// **The unclaimed-port pacing fires on a loop and not on a burst.**
+///
+/// The threshold is the whole design: a program inventorying the I/O space —
+/// `survey.mac`, which is *why* an unclaimed port reads `0xFF` at all — must
+/// sweep 256 ports without being throttled into uselessness, while a guest
+/// stuck on a port that is not there must be paced every time round.
+#[test]
+fn test_unclaimed_port_pacing_bounds_a_loop_not_a_sweep() {
+    use crate::telnet::cpm_emu::{unclaimed_nap, UNCLAIMED_READS_BEFORE_NAP};
+
+    assert_eq!(unclaimed_nap(0), None, "a guest doing no port I/O is never paced");
+    assert_eq!(unclaimed_nap(1), None);
+    assert_eq!(
+        unclaimed_nap(UNCLAIMED_READS_BEFORE_NAP),
+        None,
+        "at the threshold, not past it"
+    );
+    assert!(
+        unclaimed_nap(UNCLAIMED_READS_BEFORE_NAP + 1).is_some(),
+        "past it, the loop is paced"
+    );
+    // A 256-port sweep crosses the threshold a handful of times, not hundreds:
+    // the count is cleared after each nap, so the cost of probing the whole
+    // I/O space is a few milliseconds, once.  A `const` block, because the
+    // whole point is that this is decidable without running anything — a
+    // threshold small enough to nap per port would be a compile error.
+    const { assert!(256 / UNCLAIMED_READS_BEFORE_NAP <= 4) };
+}
+
 /// **Both lines of the emulator's sign-on fit a C64 row.**
 ///
 /// The 8080 note is the one at risk: it names a second thing as well as the

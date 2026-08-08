@@ -548,6 +548,19 @@ struct App {
     /// "use the drive folder".  Edited in the window and applied on Save, so a
     /// half-made choice never reaches a live drive.
     cpm_mount_draft: Vec<String>,
+    /// The board-slot label for each drive row, and the draft it was built
+    /// from — so it is built when the draft changes and not on every frame.
+    ///
+    /// Each label costs a `stat` of the image *and* two constructions of every
+    /// controller this gateway has (`slot_board` and `slot_name` each resolve
+    /// the board from the size). Sixteen rows made that ~16 stats and ~160
+    /// allocations per repaint of a window that is usually just sitting open.
+    /// egui redraws on its own schedule, so "per frame" is not a bounded cost.
+    cpm_slot_labels: Vec<String>,
+    /// What [`App::cpm_slot_labels`] was computed from: the draft, and whether
+    /// a boot image is configured (which decides whether slots are named for a
+    /// board at all).
+    cpm_slot_labels_from: (Vec<String>, bool),
     /// What the last apply reported, shown under the rows.
     cpm_mount_notice: String,
     /// Format token selected in the "new blank disk" row.
@@ -703,6 +716,8 @@ impl App {
             ai_browser_popup_open: false,
             cpm_mount_popup_open: false,
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
+            cpm_slot_labels: Vec::new(),
+            cpm_slot_labels_from: (Vec::new(), false),
             cpm_mount_notice: String::new(),
             cpm_new_format: String::new(),
             cpm_new_name: String::new(),
@@ -1009,6 +1024,36 @@ impl App {
         let mounts = crate::cpm::image::registry::all();
         let usage = crate::cpm::image::registry::usage();
 
+        // Slot labels, rebuilt only when the answer could have changed — see
+        // `cpm_slot_labels`.  Under the emulator there are no board slots to
+        // name, so the work is skipped outright rather than done and ignored.
+        if self.cpm_slot_labels_from.0 != self.cpm_mount_draft
+            || self.cpm_slot_labels_from.1 != booting
+        {
+            self.cpm_slot_labels = if booting {
+                self.cpm_mount_draft
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, name)| {
+                        let len = (!name.is_empty())
+                            .then(|| std::fs::metadata(crate::cpm::image::images_dir(&cpm_base).join(name)).ok())
+                            .flatten()
+                            .map(|md| md.len());
+                        // With the board named: the desktop has room for it
+                        // where a 40-column PETSCII screen does not.
+                        let board = len
+                            .and_then(crate::cpm::boot::slot_board)
+                            .map(|b| format!(" on the {b}"))
+                            .unwrap_or_default();
+                        format!("{}{board}", crate::cpm::boot::slot_name(&naming, idx as u8, len))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.cpm_slot_labels_from = (self.cpm_mount_draft.clone(), booting);
+        }
+
         // These strings are single-line on purpose: a Rust line continuation
         // inside them is easy to lose in editing, and what is left behind is a
         // literal run of spaces that renders as a ragged gap mid-sentence.
@@ -1098,27 +1143,8 @@ impl App {
                         // Under a booted disk the slot is a number on a board,
                         // not one of our drive letters — the same `cpm_mounts`
                         // underneath, named for what is actually running.
-                        if booting {
-                            let len = self.cpm_mount_draft
-                                .get(idx)
-                                .filter(|n| !n.is_empty())
-                                .and_then(|n| {
-                                    std::fs::metadata(
-                                        crate::cpm::image::images_dir(&cpm_base).join(n),
-                                    )
-                                    .ok()
-                                })
-                                .map(|md| md.len());
-                            // With the board named: the desktop has room for it
-                            // where a 40-column PETSCII screen does not.
-                            let board = len
-                                .and_then(crate::cpm::boot::slot_board)
-                                .map(|b| format!(" on the {b}"))
-                                .unwrap_or_default();
-                            ui.label(format!(
-                                "{}{board}",
-                                crate::cpm::boot::slot_name(&naming, drive0, len)
-                            ));
+                        if let Some(label) = self.cpm_slot_labels.get(idx) {
+                            ui.label(label);
                         }
                         if drive0 == 0 {
                             ui.label(if booting {

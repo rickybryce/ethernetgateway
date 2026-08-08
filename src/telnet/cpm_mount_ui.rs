@@ -115,7 +115,16 @@ impl TelnetSession {
             // been mounted first is in none of the tables above, so the screen
             // was offering a disk, refusing it with "being run by a booted
             // session", and showing nothing that accounted for the refusal.
-            let booted = image::registry::booted_image_names();
+            //
+            // "Without having been mounted first" is the whole of it, and this
+            // block used to ignore that clause: a disk that WAS mounted and
+            // then booted is lent, so it is already on the list above with its
+            // slot and a `(booted)` of its own, and repeating it here said the
+            // same thing twice on a screen with no rows to spare.
+            let booted: Vec<String> = image::registry::booted_image_names()
+                .into_iter()
+                .filter(|n| !lent.iter().any(|(_, name)| name == n))
+                .collect();
             if !booted.is_empty() {
                 self.send_line("").await?;
                 self.send_line("  Booted:").await?;
@@ -131,9 +140,10 @@ impl TelnetSession {
                     ))
                     .await?;
                 }
-                self.send_line(&format!("  {}", self.dim("Running its own OS - not on a"))).await?;
-                self.send_line(&format!("  {}", self.dim("drive of ours, and not mountable"))).await?;
-                self.send_line(&format!("  {}", self.dim("until it exits."))).await?;
+                // Two lines, not three: this screen grows with the number of
+                // mounts and has no row budget left to spend on prose.
+                self.send_line(&format!("  {}", self.dim("Running its own OS - not on a drive"))).await?;
+                self.send_line(&format!("  {}", self.dim("of ours, and not mountable yet."))).await?;
             }
             self.send_line("").await?;
 

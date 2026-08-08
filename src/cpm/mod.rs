@@ -521,6 +521,19 @@ impl Cpm {
         self.mem.modem_rx_len()
     }
 
+    /// Consecutive reads of a port no device answers.
+    ///
+    /// See [`CpmMachine::unclaimed_reads`] for what this is protecting against
+    /// — a guest polling hardware that is not there, at the speed of the host.
+    pub fn unclaimed_reads(&self) -> u32 {
+        self.mem.unclaimed_reads()
+    }
+
+    /// Forget the unclaimed-read count, having paced the guest for it.
+    pub fn clear_unclaimed_reads(&mut self) {
+        self.mem.clear_unclaimed_reads();
+    }
+
     /// Room left in the guest's outbound modem ring.
     pub fn modem_tx_free(&self) -> usize {
         self.mem.modem_tx_free()

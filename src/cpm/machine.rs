@@ -23,12 +23,58 @@ pub struct CpmMachine {
     /// the two cannot disagree about backpressure or status bits; see
     /// [`ModemPort`].
     modem: ModemPort,
+    /// Consecutive `IN`s from a port no device answers, since the last one
+    /// that was answered.
+    ///
+    /// Counted because `0xFF` — the honest reading of an unloaded bus, and the
+    /// one ZEXALL folds into its CRC — is also, on a 6850 or an SIO status
+    /// register, "a character is waiting".  So a guest whose port is not there
+    /// reads `0xFF`, believes a byte arrived, reads the data port, gets `0xFF`
+    /// again, prints it, and does that as fast as the host will let it.
+    ///
+    /// Measured with `cpm_emu_uart = off` and EGT80 in terminal mode, which is
+    /// not a contrived setup — that setting is documented as the way to shut
+    /// the emulator's network door, and the terminal's shipped default port is
+    /// the gateway's own: **52-65% of a core**, indefinitely, with *nothing*
+    /// reaching the client, because the terminal's ASCII filter drops the
+    /// bytes.  The only symptom was host CPU, which is why it went unnoticed.
+    ///
+    /// The existing idle pacing cannot see it: that counts BDOS/BIOS status
+    /// calls answering "nothing available", and this guest ends every pass
+    /// with a console *write*, which is real work by any measure.  What is
+    /// unreal is where the byte came from.
+    ///
+    /// A claimed read clears it, so software talking to a port that exists is
+    /// never paced; a burst of probing (`survey.mac` walking the I/O space)
+    /// crosses the threshold a few times and pays a millisecond or two, once.
+    unclaimed_reads: u32,
 }
 
 impl CpmMachine {
     /// A zeroed 64 KB address space with no virtual modem.
     pub fn new() -> CpmMachine {
-        CpmMachine { mem: vec![0u8; 65536], modem: ModemPort::new() }
+        CpmMachine { mem: vec![0u8; 65536], modem: ModemPort::new(), unclaimed_reads: 0 }
+    }
+
+    /// Consecutive reads of a port no device answers — see the field.
+    ///
+    /// Read by the emulator's run loop between CPU batches, which is the only
+    /// place that can pause: `port_in` is called from inside the batch and has
+    /// nowhere to await.
+    pub fn unclaimed_reads(&self) -> u32 {
+        self.unclaimed_reads
+    }
+
+    /// Forget the count, having paced the guest once for it.
+    ///
+    /// Without this the count is cleared only by a read that *is* answered —
+    /// so a program which sweeps the I/O space and then settles down to work
+    /// would carry a large count into a phase with no port reads at all, and
+    /// be paced through every batch of it for nothing. Clearing after each nap
+    /// makes the rule "a burst pays once, a loop pays every time round", which
+    /// is the distinction actually wanted.
+    pub fn clear_unclaimed_reads(&mut self) {
+        self.unclaimed_reads = 0;
     }
 
     /// Select how the guest reaches the virtual modem.
@@ -126,7 +172,16 @@ impl Machine for CpmMachine {
         // It is also load-bearing for conformance: `INI`/`IND` copy the byte a
         // port gives into memory and set `N` from its top bit, so the value
         // lands in ZEXALL's CRC for the `<ini,outi,ind,outd><,r>` group.
-        self.modem.port_in(address as u8).unwrap_or(0xFF)
+        match self.modem.port_in(address as u8) {
+            Some(v) => {
+                self.unclaimed_reads = 0;
+                v
+            }
+            None => {
+                self.unclaimed_reads = self.unclaimed_reads.saturating_add(1);
+                0xFF
+            }
+        }
     }
 
     fn port_out(&mut self, address: u16, value: u8) {
@@ -245,5 +300,48 @@ mod tests {
         assert_eq!(m.modem_rx_pop(), Some(b'a'));
         assert_eq!(m.modem_rx_pop(), Some(b'b'));
         assert_eq!(m.modem_rx_pop(), None);
+    }
+
+    /// **A guest reading hardware that is not there is counted, so the run
+    /// loop can pace it.**
+    ///
+    /// `0xFF` is the right answer for an unclaimed port and stays. The problem
+    /// it creates is that on a 6850 or an SIO status register `0xFF` also
+    /// means "a character is waiting", so a terminal pointed at a port that
+    /// does not exist reads a byte, prints it, and does that forever. Measured
+    /// at 52-65% of a core before this counter existed.
+    #[test]
+    fn test_reads_of_a_port_nothing_answers_are_counted() {
+        let mut m = CpmMachine::new();
+        m.set_access(ModemAccess::Off);
+        assert_eq!(m.unclaimed_reads(), 0, "nothing has been read yet");
+        for want in 1..=5 {
+            assert_eq!(m.port_in(0x82), 0xFF, "an empty bus floats high");
+            assert_eq!(m.unclaimed_reads(), want);
+        }
+        // Paced once, the count starts again: a burst of probing pays once,
+        // a loop pays every time round.
+        m.clear_unclaimed_reads();
+        assert_eq!(m.unclaimed_reads(), 0);
+    }
+
+    /// **A port that IS answered clears the count**, so software talking to
+    /// hardware that exists is never paced — which is the whole population of
+    /// programs this must not slow down.
+    #[test]
+    fn test_an_answered_read_clears_the_unclaimed_count() {
+        let mut m = CpmMachine::new();
+        m.set_access(crate::cpm::resolve_access("rc2014_1b"));
+        for _ in 0..10 {
+            m.port_in(0x00); // nothing there
+        }
+        assert!(m.unclaimed_reads() >= 10);
+        m.port_in(0x82); // the SIO status port, which this profile does claim
+        assert_eq!(
+            m.unclaimed_reads(),
+            0,
+            "a read the modem answered means the guest is talking to real \
+             hardware, and must not be paced"
+        );
     }
 }
