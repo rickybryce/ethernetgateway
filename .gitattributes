@@ -13,3 +13,12 @@ tests/fixtures/*.payload   binary
 # bytes are the product here, and the only thing standing between a checkout
 # that normalized them and a shipped-broken terminal is one hash-pin test.
 EGT80/EGT80.COM            binary
+
+# repodisks.txt is compiled in with include_str! and its *shape* is the
+# product: four line feeds before a collection, two between disks.  A Windows
+# checkout with autocrlf would rewrite every one of those runs and fail
+# `test_the_disk_catalogue_has_the_shape_it_promises` on that platform alone —
+# the same class of trap as the fixtures above, found before it bit rather
+# than after.  Pinned to LF, and `test_the_catalogue_ships_with_unix_line_endings`
+# fails loudly if it ever arrives otherwise.
+src/cpm/repodisks.txt      text eol=lf

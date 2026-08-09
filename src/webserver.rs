@@ -1370,7 +1370,7 @@ fn render_vdm_page(cfg: &Config) -> String {
     let mut out = String::with_capacity(8 * 1024);
     out.push_str("<!doctype html><html lang=\"en\"><head>");
     out.push_str("<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    out.push_str("<title>Ethernet Gateway — VDM-1</title>");
+    out.push_str("<title>Ethernet Gateway — Disk Screen</title>");
     out.push_str(STYLE);
     out.push_str(VDM_STYLE);
     out.push_str("</head><body>");
@@ -1878,20 +1878,25 @@ fn frame_ai_browser(cfg: &Config) -> String {
     // button.  The weather location + units live in the `more-ai` modal
     // (render_more_popups) so this frame stays compact, mirroring the GUI.
     //
-    // The VDM-1 screen sits at the right edge of the middle row, between this
-    // frame's Save and its More…, so the three right-hand controls line up.
-    // It is in *this* frame because it belongs to the CP/M half of it — a
-    // booted disk's display — and it was tried in the header's ports line
-    // first, where it read as one more small italic note rather than
-    // something to click.  An anchor rather than a button: it navigates away,
-    // and a bare `<button>` inside this form would submit it.
+    // The booted disk's screen sits at the right edge of the middle row,
+    // between this frame's Save and its More…, so the three right-hand
+    // controls line up.  It is in *this* frame because it belongs to the CP/M
+    // half of it, and it was tried in the header's ports line first, where it
+    // read as one more small italic note rather than something to click.  An
+    // anchor rather than a button: it navigates away, and a bare `<button>`
+    // inside this form would submit it.
+    //
+    // **Named for the disk, not for a card.**  It said "VDM-1 Screen" while
+    // that was the only card there was; a machine with a Dazzler and no VDM-1
+    // — which `DISK10` is — would have sent the operator looking for a button
+    // named after hardware their guest does not have.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">AI Chat, Browser, Weather &amp; CP/M</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\"><span class=\"label\">API Key:</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
-         <a class=\"row-right linkbtn\" href=\"/vdm\">VDM-1 Screen</a></div>\
+         <a class=\"row-right linkbtn\" href=\"/vdm\">Disk Screen</a></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
          <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
          <button type=\"button\" class=\"more\" data-target=\"more-ai\">More\u{2026}</button></div>\
@@ -3025,7 +3030,7 @@ h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; 
    line of them does not read as a row of buttons. */
 .backlink { color: var(--amber); text-decoration: none; }
 .backlink:hover { text-decoration: underline; }
-/* A link wearing the small button's clothes — the VDM-1 Screen control, which
+/* A link wearing the small button's clothes — the Disk Screen control, which
    lines up under this frame's Save and above its More… and so has to match
    them.  Deliberately an anchor: it navigates away, and a `<button>` in this
    form would want a `type` to avoid submitting it. */

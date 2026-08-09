@@ -55,6 +55,7 @@ pub fn ensure_cpm_tree(transfer_dir: &str) -> std::io::Result<()> {
     let images = base.join(IMAGES_DIR);
     std::fs::create_dir_all(&images)?;
     write_images_readme(&images);
+    write_repo_disks(&images);
     Ok(())
 }
 
@@ -127,6 +128,11 @@ Mount CP/M Drives window (desktop).
 A mounted drive reads and writes the CP/M filesystem INSIDE the image
 instead of its folder under CPM/.  The folder's own files are not touched
 while an image is mounted, and they come straight back when you unmount it.
+
+repodisks.txt beside this file lists what is on every disk in the
+collections this gateway is known to run, so you can tell which one you
+want before you go and find it.  The disks themselves are not ours to
+ship - that file says where each collection comes from.
 
 
 MOUNTING IS NOT BOOTING
@@ -440,6 +446,199 @@ instruction set, so it works whichever processor cpm_cpu selects.)
     s
 }
 
+/// The first line of every `repodisks.txt` this project has generated.
+///
+/// Same job as [`README_HEADER`], and for the same reason: this file is a
+/// *reference*, so a copy that has fallen behind the disks we support should be
+/// refreshed rather than left to mislead. Anything that does not start with
+/// this line is the operator's own and is never touched.
+const REPODISKS_HEADER: &str = "WHAT IS ON THE DISKS\n====================";
+
+/// The catalogue of the disk collections this gateway is known to run, and what
+/// is on each disk.
+///
+/// Shipped in the binary rather than built at run time, because it is a
+/// *reference to disks the operator may not have yet* — the whole point is to
+/// be able to read it before going to find them. It is generated from the real
+/// collections by the `#[ignore]` `record_repodisks` test, which mounts every
+/// image and reads its actual directory, so nothing here is transcribed by
+/// hand.
+pub fn repo_disks() -> &'static str {
+    include_str!("repodisks.txt")
+}
+
+/// Put `repodisks.txt` in the images folder, refreshing our own stale copy.
+///
+/// Failure is logged and ignored, exactly like the readme: a missing reference
+/// must not stop the drives working.
+fn write_repo_disks(images: &Path) {
+    let path = images.join("repodisks.txt");
+    let current = repo_disks();
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing != current && existing.starts_with(REPODISKS_HEADER) => {
+            if let Err(e) = std::fs::write(&path, current) {
+                crate::glog!("CP/M: could not refresh {}: {}", path.display(), e);
+            } else {
+                crate::glog!("CP/M: refreshed {} for this version", path.display());
+            }
+        }
+        Ok(_) => {}
+        Err(_) => {
+            if let Err(e) = std::fs::write(&path, current) {
+                crate::glog!("CP/M: could not write {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod generate {
+    //! Building `repodisks.txt` from the real collections.
+    //!
+    //! A generator rather than a hand-written list, for the reason every other
+    //! table in this project is generated: a catalogue typed out by a person is
+    //! wrong the first time a disk is added, and nobody notices because it
+    //! still *looks* right. This mounts each image through the product's own
+    //! identify-and-mount path and reads the directory the disk really has.
+
+    use super::*;
+    use crate::cpm::image::{fs::ImageFs, identify, media::FileMedia, media::Media};
+
+    /// Where the collections live on the machine that generates this.
+    ///
+    /// Paths rather than a scan, because a *name* for each collection is the
+    /// point — "z80pack cpmsim" tells a reader where to go and a directory
+    /// name would not.
+    const REPOS: &[(&str, &str)] = &[
+        ("Altair-Duino / Altair8800 simulator (David Hansel)", "AltairRepos/Altair8800/disks"),
+        ("z80pack — altairsim library", "z80pack/altairsim/disks/library"),
+        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library"),
+        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library"),
+        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library"),
+        // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
+        // a machine this gateway emulates, and it shows: four of its seven
+        // disks are CP/M that our format table cannot read. Listing a
+        // collection we cannot open would make this file a catalogue of
+        // disappointments rather than of what works.
+    ];
+
+    /// Every file on one image, as the disk's own directory has it.
+    ///
+    /// `None` when the image has no CP/M filesystem we can read — a disk that
+    /// boots its own operating system (Altair DOS, Disk BASIC) keeps its files
+    /// in a layout that is that system's business, not CP/M's. Saying so is
+    /// more use than an empty list, which reads as "an empty disk".
+    fn files_on(path: &std::path::Path) -> Option<Vec<String>> {
+        let size = std::fs::metadata(path).ok()?.len();
+        let filename = path.file_name()?.to_string_lossy().to_string();
+        let mut probe = FileMedia::open(path, true).ok()?;
+        let ident = identify::identify(&filename, size, |fmt| {
+            let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
+            for rec in 0..fmt.dir_records() {
+                let off = fmt.data_record_offset(rec)?;
+                let mut buf = [0u8; 128];
+                Media::read_at(&mut probe, off, &mut buf).ok()?;
+                dir.extend_from_slice(&buf);
+            }
+            (!dir.is_empty()).then_some(dir)
+        })
+        .ok()?;
+        drop(probe);
+        let media = FileMedia::open(path, true).ok()?;
+        let fs = ImageFs::mount(Box::new(media), ident.format, true).ok()?;
+
+        // Every user area, not just 0: a disk that keeps its tools on user 1
+        // would otherwise look half empty. The area is named only when it is
+        // not the ordinary one, so the common case stays uncluttered.
+        let mut names: Vec<String> = Vec::new();
+        for user in 0..16u8 {
+            // `????????.???` — the same wildcard `DIR` builds, through the
+            // same matcher, so this listing cannot disagree with what the
+            // operator sees on the drive.
+            let mut raw = [0u8; 36];
+            raw[1..12].fill(b'?');
+            let fcb = crate::cpm::fcb::Fcb::from_bytes(&raw);
+            for (name, ext) in fs.matching(user, &fcb) {
+                let n = String::from_utf8_lossy(&name).trim_end().to_string();
+                let e = String::from_utf8_lossy(&ext).trim_end().to_string();
+                let full = if e.is_empty() { n } else { format!("{n}.{e}") };
+                names.push(if user == 0 { full } else { format!("{full}  (user {user})") });
+            }
+        }
+        Some(names)
+    }
+
+    /// Regenerate `src/cpm/repodisks.txt` from the collections above.
+    ///
+    /// Ignored: it needs the disks. Set `REPODISKS_HOME` to the folder holding
+    /// them (default `$HOME`), and `REPODISKS_OUT` to write somewhere else.
+    #[test]
+    #[ignore]
+    fn record_repodisks() {
+        let home = std::env::var("REPODISKS_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .expect("a home folder");
+        let out = std::env::var("REPODISKS_OUT")
+            .unwrap_or_else(|_| "src/cpm/repodisks.txt".into());
+
+        let mut s = String::new();
+        s.push_str(REPODISKS_HEADER);
+        s.push_str(
+            "\n\nWhat is on each disk image the gateway is known to run, so you can\n\
+             tell which one you want before going to find it.  These are not\n\
+             shipped with the gateway -- they are other people's collections, and\n\
+             the readme in this folder says how to put one here.\n\n\
+             Each listing is the disk's OWN directory, read through the same\n\
+             mount path the gateway uses.  A disk with no CP/M filesystem says so\n\
+             instead: it boots its own operating system, and where it keeps its\n\
+             files is that system's business.\n",
+        );
+
+        let mut found = 0usize;
+        for (name, rel) in REPOS {
+            let dir = std::path::Path::new(&home).join(rel);
+            if !dir.is_dir() {
+                eprintln!("skipping {name}: no {}", dir.display());
+                continue;
+            }
+            let mut images: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .expect("readable")
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().map(|e| e.eq_ignore_ascii_case("dsk")).unwrap_or(false)
+                })
+                .collect();
+            images.sort();
+            if images.is_empty() {
+                continue;
+            }
+            // Four line feeds before each repo: the separator has to be visible
+            // at a glance in a plain-text file with no other formatting.
+            s.push_str("\n\n\n\n");
+            s.push_str(&format!(">>>>> {name}\n"));
+            for image in images {
+                let disk = image.file_name().unwrap().to_string_lossy().to_string();
+                s.push_str(&format!("\n>> {disk}\n"));
+                match files_on(&image) {
+                    Some(names) if !names.is_empty() => {
+                        for n in names {
+                            s.push_str(&n);
+                            s.push('\n');
+                        }
+                    }
+                    Some(_) => s.push_str("(the CP/M directory is empty)\n"),
+                    None => s.push_str("(no CP/M filesystem -- this disk boots its own system)\n"),
+                }
+                s.push('\n');
+                found += 1;
+            }
+        }
+        assert!(found > 0, "no disks found under {home} — set REPODISKS_HOME");
+        std::fs::write(&out, &s).expect("write");
+        eprintln!("wrote {out}: {found} disks, {} bytes", s.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +697,89 @@ mod tests {
             "an annotated readme must survive"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The disk catalogue lands beside the readme, and follows the same rule:
+    /// ours is refreshed when it falls behind, the operator's is never touched.
+    /// It is a *reference*, so a stale copy misleads in exactly the way a stale
+    /// readme does.
+    #[test]
+    fn test_the_disk_catalogue_is_written_and_kept_current() {
+        let dir = temp("repodisks");
+        let t = dir.to_string_lossy().to_string();
+        ensure_cpm_tree(&t).unwrap();
+        let path = cpm_dir(&t).join(IMAGES_DIR).join("repodisks.txt");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), repo_disks());
+
+        let stale = format!("{REPODISKS_HEADER}\n\nan older catalogue.\n");
+        std::fs::write(&path, &stale).unwrap();
+        ensure_cpm_tree(&t).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), repo_disks(), "ours is refreshed");
+
+        std::fs::write(&path, b"MY DISKS\n\nhands off.\n").unwrap();
+        ensure_cpm_tree(&t).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "MY DISKS\n\nhands off.\n",
+            "a file that is not one of ours must never be rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The catalogue's shape, because it is read by a person in a plain-text
+    /// window and the markers are all the structure it has.
+    #[test]
+    fn test_the_disk_catalogue_has_the_shape_it_promises() {
+        let s = repo_disks();
+        assert!(s.starts_with(REPODISKS_HEADER), "the header is what marks it as ours");
+
+        let repos: Vec<&str> = s.lines().filter(|l| l.starts_with(">>>>> ")).collect();
+        let disks: Vec<&str> = s.lines().filter(|l| l.starts_with(">> ")).collect();
+        assert!(repos.len() >= 4, "every collection we support: {repos:?}");
+        assert!(disks.len() > 80, "one entry per image, got {}", disks.len());
+
+        // Four line feeds before each collection, two between disks — the only
+        // way the eye finds a collection in a file this long.
+        for r in &repos {
+            assert!(s.contains(&format!("\n\n\n\n{r}\n")), "{r} needs its four blank lines");
+        }
+        // Every disk names a `.dsk`, and every one of them says *something*:
+        // a listing, or why there is none.
+        assert!(disks.iter().all(|d| d.to_ascii_lowercase().ends_with(".dsk")), "{disks:?}");
+        for block in s.split("\n>> ").skip(1) {
+            let (name, rest) = block.split_once('\n').expect("a disk block has a body");
+            assert!(!rest.trim().is_empty(), "{name} has an empty entry");
+        }
+
+        // The collection we cannot read must not be advertised as one we run.
+        assert!(!s.contains("intelmds"), "the Intel MDS is not a machine this gateway emulates");
+    }
+
+    /// **The shape is the product, so the line endings are too.** This file is
+    /// compiled in with `include_str!`, and a Windows checkout that normalised
+    /// its line feeds would turn every separator into something the shape test
+    /// does not recognise — on one platform only. Pinned in `.gitattributes`;
+    /// this fails loudly rather than letting the shape test fail obscurely.
+    #[test]
+    fn test_the_catalogue_ships_with_unix_line_endings() {
+        assert!(
+            !repo_disks().contains('\r'),
+            "repodisks.txt has CRLF: the .gitattributes `text eol=lf` pin is missing or lost"
+        );
+    }
+
+    /// A disk with no CP/M filesystem says so rather than showing an empty
+    /// listing — "no files" and "a layout that is not CP/M's" look identical on
+    /// the page and mean completely different things. A third of these images
+    /// are Altair DOS, Disk BASIC, UCSD p-System, Cromix or ISIS.
+    #[test]
+    fn test_the_catalogue_distinguishes_no_files_from_no_filesystem() {
+        let s = repo_disks();
+        assert!(s.contains("no CP/M filesystem"), "the note must exist");
+        // And it is used, not merely defined.
+        assert!(s.matches("no CP/M filesystem -- this disk boots its own system").count() > 10);
+        // A disk that *does* have a filesystem lists real 8.3 names.
+        assert!(s.contains("\nPIP.COM\n"), "a listing looks like a CP/M directory");
     }
 
     /// **A readme we wrote is refreshed; one the operator wrote is not.**

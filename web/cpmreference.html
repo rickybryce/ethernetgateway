@@ -1188,15 +1188,20 @@ altairhd_cobol.dsk</code></pre>
                 <ol class="bullet-list">
                     <li>Turn the web server on (<code>web_enabled</code>, default port
                     <code>8080</code>) &mdash; it is <strong>off by default</strong>.</li>
-                    <li>Boot a disk as usual. If the disk's own system tracks drive the card, the
-                    boot banner says so and prints the address to open.</li>
+                    <li>Boot a disk as usual. If its system tracks drive a <strong>VDM-1</strong>,
+                    the boot banner says so and prints the address to open. There is no such
+                    warning for a Dazzler and there cannot be: its two registers are ordinary
+                    low port numbers that appear by chance all over a disk's data, so a scan
+                    before boot would cry wolf on two images in three. A Dazzler announces
+                    itself when the guest switches one on, and the session list marks it then.</li>
                     <li>Open <code>http://&lt;gateway&gt;:8080/vdm</code>, or press
-                    <strong>VDM-1 Screen</strong> in the configuration page's
+                    <strong>Disk Screen</strong> in the configuration page's
                     <em>AI Chat, Browser, Weather &amp; CP/M</em> frame, and pick the session from
                     the list.</li>
                     <li>Keep typing in your telnet or SSH session. The keyboard is a perfectly
-                    ordinary port &mdash; <code>04h</code>/<code>05h</code> on these disks &mdash;
-                    and only the display was ever memory-mapped.</li>
+                    ordinary port &mdash; <code>04h</code>/<code>05h</code> on the VDM-1 disks, and
+                    a normal serial console on the Dazzler ones &mdash; because only the
+                    <em>display</em> was ever memory-mapped.</li>
                 </ol>
                 <p>
                     <strong>Every booted session offers a screen</strong>, not only the ones known
