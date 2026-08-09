@@ -278,12 +278,14 @@ pub struct BootMachine {
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
-    /// Diagnostic: the first writes to each port, with their values.
+    /// Diagnostic: the writes to each port, with their values.
     ///
     /// A count says a program drove a board; the *value* says how it was
     /// configured, and for a memory-mapped card that value is the only thing
-    /// naming where in memory to look. Bounded, because a console port is
-    /// written thousands of times and only the setup matters.
+    /// naming where in memory to look. Bounded so a runaway cannot grow it
+    /// without limit — but generously, because the cap was 512 once and a
+    /// chatty console filled it before the register under investigation was
+    /// touched a second time, which reads as "the guest only wrote it once".
     #[cfg(test)]
     port_writes: Vec<(u8, u8)>,
 }
@@ -1344,7 +1346,7 @@ impl Machine for BootMachine {
         #[cfg(test)]
         {
             *self.port_hits.entry(port | 0x80).or_insert(0) += 1;
-            if self.port_writes.len() < 512 {
+            if self.port_writes.len() < 200_000 {
                 self.port_writes.push((port, value));
             }
         }
@@ -4628,6 +4630,18 @@ mod tests {
         }
         println!("--- {} ---\n{}", path, text);
         println!("port hits (0x80 bit = OUT): {:?}", m.port_hits);
+        // What a guest actually wrote to a port, in order — a count says a
+        // register was driven, and only the values say how.
+        if let Ok(p) = std::env::var("CPM_BOOT_WATCH") {
+            let want = u8::from_str_radix(p.trim_start_matches("0x"), 16).unwrap();
+            let vals: Vec<String> = m
+                .port_writes
+                .iter()
+                .filter(|(port, _)| *port == want)
+                .map(|(_, v)| format!("{v:#04x}"))
+                .collect();
+            println!("--- writes to {want:#04x} ({} of them) ---\n  {}", vals.len(), vals.join(" "));
+        }
         println!("mem[0..12] = {:02x?}", (0..12).map(|a| m.peek(a)).collect::<Vec<_>>());
         let st = m.port_in(0x08);
         println!("status={st:#04x}  track0 bit={}  moveok bit={}",
