@@ -41,6 +41,41 @@ web/telnetreference.html
 web/punterreference.html     # <title>, .hdr-version, footer
 web/sshreference.html        # <title>, .hdr-version, footer
 web/cpmreference.html        # <title>, .hdr-version, footer
+web/diskreference.html       # <title>, .hdr-version, footer
+#                              ADDED 2026-08-01 and missed by this list until
+#                              2026-08-09.  It said 0.9.0 only because it was
+#                              born during that cycle, not because anyone
+#                              bumped it -- the next bump would have skipped it.
+#                              When you add a page, add it here in the same
+#                              commit; see FILES THAT ARE NOT VERSION STRINGS.
+#
+# ── FILES THAT ARE NOT VERSION STRINGS ──────────────────────────
+#
+# This list answers "what must be BUMPED".  Two kinds of release mistake it
+# cannot catch, both of which have happened:
+#
+#   1. A file that should have been ADDED.  v0.9.0 shipped `EGT80.COM` in the
+#      release tarball and not `EGT8080.COM`, which had existed since
+#      2026-08-07 and is the terminal the manual tells you to reach for.
+#      Nothing was broken -- both are compiled into the binary -- but the loose
+#      copy exists so you can XMODEM it to real hardware without starting the
+#      emulator, and the recommended one was missing.  The packaging step in
+#      `.github/workflows/release.yml` has TWO branches (Unix `cp`, Windows
+#      `Copy-Item`); a file added to one and not the other is worse than one
+#      added to neither, because it ships on some platforms only.
+#
+#      When you add something users are meant to receive, add it there and
+#      say so here.  Currently shipped alongside the binary:
+#        README.md  LICENSE  EGT80/EGT8080.COM  EGT80/EGT80.COM
+#
+#   2. A generated file edited by hand.  THIRD-PARTY-NOTICES.md is produced
+#      wholesale from `about.toml` + `about.hbs` and says so at the top.  Our
+#      own prose in it -- the z80pack and derived-work notices -- lives in
+#      `about.hbs`.  Edit the .md alone and the next regeneration silently
+#      drops it, which is a licence-notice loss, not a cosmetic one.  Edit
+#      `about.hbs`, then regenerate.  `about.hbs` carries no version string of
+#      its own (cargo-about injects it from Cargo.toml), which is why it is
+#      not in the bump list above.
 #
 # ── On release (separate step) ──────────────────────────────────
 CHANGELOG.md            # Pre-release, the next version's notes accumulate under a
@@ -52,7 +87,12 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #                         Then tag vX.Y.Z and merge dev -> master to trigger the Release workflow.
 #
 # Verify after a bump:
-#   grep -rn '<OLD VERSION>' web/ README.md usermanual.html   # expect: none
+#   grep -rnF '<OLD VERSION>' web/ README.md usermanual.html  # expect: none
+#     NOTE THE -F.  Without it the dots are wildcards and `0.8.1` matches
+#     `9600 8N1` in the serial chapter -- two false positives that look
+#     exactly like a missed bump.  (Escaping them, '0\.8\.1', works too.)
+#   ls web/*.html | while read f; do grep -qF '<NEW VERSION>' "$f" || echo "MISSING: $f"; done
+#     Catches a page nobody added to this list -- the failure above.
 #   grep -n  '0\.6\.0' usermanual.html  # expect: ONLY the two historical refs
 #   cargo build                          # confirms Cargo.toml parsed + new version
 #                                        # compiled, and updates Cargo.lock
@@ -72,6 +112,12 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #   until [ "$(gh run view <id> --json status -q .status)" = completed ]; \
 #       do sleep 30; done; gh run view <id> --json conclusion -q .conclusion
 #   gh release view vX.Y.Z --json assets -q '.assets | length'   # expect 24
-#   Then spot-check one artifact: download it with `gh release download`,
-#   `sha256sum -c` its .sha256, and run the extracted binary to confirm it
-#   prints the new version.
+#   Then spot-check one artifact.  Two things bite here every time:
+#     * `gh release download` refuses to run inside this repo -- "Stopping at
+#       filesystem boundary".  Run it from a scratch directory and pass
+#       `-R rickybryce/ethernetgateway`.
+#     * the .sha256 files record the path as `dist/<name>`, so `sha256sum -c`
+#       must be run with the tarball inside a `dist/` subdirectory or it
+#       reports "No such file" -- which reads like a corrupt download.
+#   Then extract and run the binary to confirm it prints the new version, and
+#   check the archive contains everything in the shipped-files list above.
