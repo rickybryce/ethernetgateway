@@ -1361,7 +1361,10 @@ impl App {
             singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
         });
         ui.horizontal(|ui| {
-            labeled_field(ui, "Location:", &mut self.cfg.weather_location, 160.0);
+            // The same words the main frame uses for the same field: this popup
+            // re-shows it, and two names for one control is how a reader ends
+            // up wondering whether they are two settings.
+            labeled_field(ui, "Weather location:", &mut self.cfg.weather_location, 160.0);
         });
         ui.horizontal(|ui| {
             ui.label("Units:");

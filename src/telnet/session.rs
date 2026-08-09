@@ -767,7 +767,7 @@ impl TelnetSession {
                         "2. Create a free account",
                         "3. Generate an API key",
                         "4. Configuration > Other Settings",
-                        "   and set the AI API key",
+                        "   and set the Groq API key",
                     ]).await?;
                 } else {
                     self.ai_chat(&cfg.groq_api_key).await?;

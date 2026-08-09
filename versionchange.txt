@@ -77,6 +77,23 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #      its own (cargo-about injects it from Cargo.toml), which is why it is
 #      not in the bump list above.
 #
+#   3. A generated file that has gone STALE.  `src/cpm/repodisks.txt` is the
+#      catalogue of what is on every disk in the collections this gateway
+#      runs -- compiled in with include_str! and written into CPM/images beside
+#      the readme.  It is produced by the #[ignore] `record_repodisks` test,
+#      which mounts every image through the product's own path and reads its
+#      real directory:
+#
+#        cargo test --bin ethernetgateway -- --ignored --nocapture record_repodisks
+#
+#      Re-run it when a disk format is added (a disk we could not read before
+#      will now list its files instead of saying it has no CP/M filesystem),
+#      when a collection is added to the REPOS table, or when those upstream
+#      repos gain disks.  It carries no version string, so nothing above will
+#      remind you -- and a catalogue that is quietly a year out of date is the
+#      kind of wrong that still looks right.  It is also pinned to LF in
+#      .gitattributes, because its shape is the product.
+#
 # ── On release (separate step) ──────────────────────────────────
 CHANGELOG.md            # Pre-release, the next version's notes accumulate under a
 #                         "## [X.Y.Z] - Unreleased" heading. At release time:

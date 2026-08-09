@@ -1870,13 +1870,22 @@ fn test_all_menu_items_fit_petscii() {
         "  O  Other Settings",
         "  R  Reset Defaults",
         // Other settings menu
-        "  A  Set AI API key (Groq)",
+        //
+        // NOTE: this list is hand-copied, which is exactly the drift this
+        // project distrusts — it held "  A  Set AI API key (Groq)" for a while
+        // after the menu started drawing something else, and passed, because
+        // both strings fit.  A stale row here measures nothing.  Prefer
+        // extracting the lines and iterating them (see the `*_help_lines`
+        // cluster) when a screen's rows are worth guarding properly.
+        "  A  Set Groq API key (optional)",
         "  B  Set browser homepage",
         "  W  Set weather location",
         "  U  Cycle weather units",
         "  V  Toggle verbose transfer logging",
         "  G  Toggle GUI on startup",
         "  E  CP/M settings",
+        // CP/M boot settings menu
+        "  S  Browser typing: off",
         // L shares a row with R — Other Settings is at its 22-row budget, so
         // this is the two-column form and both keys must fit together.
         "  L  Log file         R  Restart server",
