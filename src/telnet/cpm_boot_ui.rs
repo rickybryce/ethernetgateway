@@ -844,7 +844,7 @@ impl TelnetSession {
         // costs the guest nothing — it is a read of its own RAM through its own
         // MMU — so the honest arrangement is to offer every booted session and
         // tell the viewer which ones have actually driven the card.
-        let screen = crate::cpm::vdm::register(screen_label(
+        let screen = crate::cpm::screen::register(screen_label(
             &name,
             self.peer_addr,
             self.is_serial,
@@ -856,7 +856,7 @@ impl TelnetSession {
         // where the rest of that kind of answer already lives.  Printing it
         // into the guest's session would put a line about our web UI on the
         // console of a machine that is about to start painting its own.
-        glog!("CP/M boot: VDM-1 screen {} is {}", screen.id(), name);
+        glog!("CP/M boot: screen {} is {}", screen.id(), name);
 
         self.send_line("").await?;
         self.send_line(&format!("  {} {}", self.green("Booted"), self.amber(&name)))
@@ -1019,7 +1019,7 @@ impl TelnetSession {
         machine: &mut BootMachine,
         modem: &mut CpmModem,
         erase: bool,
-        screen: &crate::cpm::vdm::Screen,
+        screen: &crate::cpm::screen::Screen,
     ) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
         let transfer_dir = cfg.transfer_dir.clone();
@@ -1112,7 +1112,7 @@ impl TelnetSession {
         print_format: Option<crate::cpm::printer::Format>,
         print_auto_lf: bool,
         transfer_dir: &str,
-        screen: &crate::cpm::vdm::Screen,
+        screen: &crate::cpm::screen::Screen,
     ) -> Result<(), std::io::Error> {
         let mut executed: u64 = 0;
         let mut esc_run = 0u8;
@@ -1178,7 +1178,7 @@ impl TelnetSession {
                 // because a memory-mapped card has no such moment: the picture
                 // is a property of the guest's RAM at an instant, and the seam
                 // is the only instant we own.
-                machine.publish_vdm(screen);
+                machine.publish_screen(screen);
 
                 // The printer, at the same seam and by the same reasoning — but
                 // to a spool rather than to the wire, and with no PETSCII

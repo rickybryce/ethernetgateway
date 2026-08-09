@@ -1382,7 +1382,7 @@ The web server respects the same <code>security_enabled</code> /
         a hostile peer.</li>
 </ul>
 
-<h3>6.4.3 The VDM-1 Screen</h3>
+<h3>6.4.3 Screens &mdash; the VDM-1 and the Dazzler</h3>
 
 <p>
 The web server has a second page, <code>/vdm</code>, reached with the
@@ -1427,6 +1427,28 @@ in your terminal session says so and prints the address to open — including
 the case where the web server is switched off, which is worth knowing before
 you spend an evening wondering why a working disk looks dead.
 </p>
+
+<p>
+The same page also shows a <strong>Cromemco Dazzler</strong>, the first colour
+graphics card for microcomputers (1976).  It works the same way — the picture
+is the guest's own memory, read by DMA, with no data port — but it can be
+anywhere in memory rather than at a fixed address, and it is a picture rather
+than characters: 32&times;32 or 64&times;64 in sixteen colours, or 64&times;64
+and 128&times;128 in black-and-white, depending on the mode the program picks.
+A session can have both cards at once, and one Altair disk in the common
+collection (<code>DISK10</code>) is Cromemco's whole software library:
+Kaleidoscope, Dazzle-mation, Life, and a couple of dozen more.
+</p>
+
+<aside class="note">
+<span class="label">Joystick games</span>
+Cromemco's <code>SPACEWAR</code>, <code>GOTCHA</code>, <code>DOGFIGHT</code>,
+<code>TANKWAR</code>, <code>CHASE</code>, <code>AMBUSH</code> and
+<code>TRACK</code> read the D+7A analog board — a pair of joysticks with four
+switches and two analog axes each.  They run, and they draw, but nothing a
+terminal or a browser produces is an X/Y voltage, so they cannot be played.
+That board is deliberately not emulated.
+</aside>
 
 <aside class="note">
 <span class="label">Who can watch</span>

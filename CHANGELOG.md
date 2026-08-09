@@ -43,6 +43,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a CUTER monitor ROM rather than on the disk, and no scan of an image can
   find code that is not in it.
 
+- **The Cromemco Dazzler — colour graphics from 1976, on the same page.** The
+  first colour graphics card for microcomputers, and the VDM-1's problem one
+  card along: it reads its picture out of main memory by DMA and gives the
+  program no data port at all, so software written for one runs here and shows
+  nothing. `/vdm` now paints it too, and a session can have both cards at once
+  — which TDISK04 actually needs, since its console is a VDM-1 and `KSCOPE` on
+  it drives a Dazzler.
+
+  All four modes: 32×32 and 64×64 in sixteen colours with four bits per element
+  in memory, and 64×64 and 128×128 in resolution ×4, where one *bit* is an
+  element and the whole picture takes its colour from the format register. The
+  picture is four 512-byte quadrants — top-left, top-right, bottom-left,
+  bottom-right — which is the part a text-shaped mental model gets wrong, since
+  the second page is the right half of the top rather than the next rows down.
+
+  **Measured first, then read.** Before the manual was found, a harness recorded
+  what four real programs drive: KSCOPE `OUT 0Eh,81 / 0Fh,30`, DMATION `88/30`,
+  SPACEWAR `8C/6C`, GDEMO `EB` and twenty-nine writes of `0Fh`. Every one of
+  those decodes correctly under the manual's tables, which is the cross-check
+  neither source could give alone. GDEMO also reads `IN 0Eh` **58.8 million
+  times** — the card has a readable end-of-frame bit, and a display that
+  handled only the writes would leave it polling a value that never changes.
+  That port is claimed only once a guest has addressed a card, so a machine that
+  has never seen a Dazzler answers exactly as it did before.
+
+  `0Eh` is also a z80pack disk register. The disk controller is matched first
+  and keeps it: a colour card the guest never asked for must not cost it a
+  drive.
+
+  **The joystick games are not supported and that was a decision.** SPACEWAR,
+  GOTCHA, DOGFIGHT, TANKWAR, CHASE, AMBUSH and TRACK read the D+7A analog board
+  on ports `18h`–`1Ch` — measured, 66,000 reads in one run. They draw perfectly
+  and cannot be played, because nothing a terminal or a browser produces is an
+  X/Y voltage. `DISK10.DSK` is Cromemco's whole library and twelve more images
+  carry Dazzler software.
+
 - **A boot that will paint a VDM-1 says so.** A disk whose own system tracks
   write port `C8h` is announced on the boot banner with the address to open —
   and told plainly when the web server is off, which it is by default. Measured

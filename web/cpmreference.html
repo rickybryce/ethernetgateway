@@ -568,7 +568,7 @@
             <a href="#ccp">CCP Commands</a>
             <a href="#disks">Disk Images</a>
             <a href="#booting">Booting</a>
-            <a href="#vdm">VDM-1 Screen</a>
+            <a href="#vdm">Screens</a>
             <a href="#printing">Printing</a>
             <a href="#uart">UART Profiles</a>
             <a href="#egt80">EGT80</a>
@@ -1181,8 +1181,8 @@ altairhd_cobol.dsk</code></pre>
             <hr class="divider">
 
             <div class="section" id="vdm">
-                <div class="section-title">The VDM-1 screen</div>
-                <p class="intro">Some disks do not print to a console at all. The Processor Technology VDM-1 was a 1976 S-100 <em>video card</em>: a character appeared on the screen by being stored into memory at <code>CC00</code>, and there was no data port to intercept. A disk written for one boots here, takes your keystrokes and leaves the session you started it from completely blank &mdash; so its screen is served in the web UI instead, at <code>/vdm</code>.</p>
+                <div class="section-title">Screens &mdash; the VDM-1 and the Dazzler</div>
+                <p class="intro">Some disks do not print to a console at all. Two S-100 <em>video cards</em> of the 1970s put their picture in the computer's own memory and gave the program no data port to write to &mdash; the Processor Technology <strong>VDM-1</strong>, a 64&times;16 character screen at <code>CC00</code>, and the Cromemco <strong>Dazzler</strong>, a colour picture the program can put anywhere. Software written for either boots here, takes your keystrokes and leaves the session you started it from completely blank. Both are served in the web UI instead, at <code>/vdm</code>, and one session can have both.</p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Using it</h3>
                 <ol class="bullet-list">
@@ -1253,12 +1253,52 @@ altairhd_cobol.dsk</code></pre>
                     </p>
                 </div>
                 <p>
-                    Which disks this reaches: <code>TDISK04</code> (CP/M 1.4, <em>VDM VERSION</em>)
-                    and <code>altairsim</code>'s <code>cpm14-vdm</code>. <code>DISK11</code>'s VDM
-                    driver lives in a CUTER monitor ROM rather than on the disk, and that ROM is not
-                    one the gateway has, so it stays dark. See the
+                    Which disks the VDM-1 reaches: <code>TDISK04</code> (CP/M 1.4,
+                    <em>VDM VERSION</em>) and <code>altairsim</code>'s <code>cpm14-vdm</code>.
+                    <code>DISK11</code>'s VDM driver lives in a CUTER monitor ROM rather than on the
+                    disk, and that ROM is not one the gateway has, so it stays dark. See the
                     <a href="diskreference.html">disk reference</a> for the write-up.
                 </p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">The Cromemco Dazzler</h3>
+                <p>
+                    The first colour graphics card for microcomputers, 1976. It reads its picture
+                    out of main memory by DMA &mdash; so, like the VDM-1, watching it costs the
+                    guest nothing &mdash; and it has exactly two registers. Port <code>0Eh</code>
+                    carries an on/off bit and the top seven address bits, so the picture sits on a
+                    512-byte boundary <em>wherever the program put it</em>; port <code>0Fh</code>
+                    is the format. Both are read at every frame rather than once, because software
+                    animates the format as well as the picture.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Format</th><th>Picture</th><th>Colour</th></tr></thead>
+                    <tbody>
+                        <tr><td>Normal, 512 bytes</td><td>32&times;32</td><td rowspan="2">Four bits per element, in memory: red, green, blue and intensity &mdash; or one of sixteen greys in black-and-white mode. Two elements per byte.</td></tr>
+                        <tr><td>Normal, 2 KB</td><td>64&times;64</td></tr>
+                        <tr><td>Resolution &times;4, 512 bytes</td><td>64&times;64</td><td rowspan="2">One <em>bit</em> per element, and the whole picture takes its colour from the format register. Eight elements per byte. Full colour here needs interleaved frames.</td></tr>
+                        <tr><td>Resolution &times;4, 2 KB</td><td>128&times;128</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    <code>DISK10.DSK</code> in the Altair collection is the Cromemco software
+                    library &mdash; two dozen programs including <code>KSCOPE</code>
+                    (Kaleidoscope), <code>DMATION</code> (Dazzle-mation), <code>LIFE</code>,
+                    <code>XLIFE</code>, <code>GDEMO</code>, <code>DAZZPLOT</code> and
+                    <code>COLOR</code>. Twelve more images in the collections carry Dazzler programs.
+                </p>
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>The joystick games are not supported.</strong> Cromemco's
+                        <code>SPACEWAR</code>, <code>GOTCHA</code>, <code>DOGFIGHT</code>,
+                        <code>TANKWAR</code>, <code>CHASE</code>, <code>AMBUSH</code> and
+                        <code>TRACK</code> read the D+7A analog board on ports
+                        <code>18h</code>&ndash;<code>1Ch</code> &mdash; a pair of joysticks with
+                        four switches and two analog axes each. They will run and draw, but nothing
+                        a terminal or a browser produces is an X/Y voltage, so they cannot be
+                        played. That board is a separate piece of work and is deliberately not
+                        attempted here.
+                    </p>
+                </div>
             </div>
 
             <hr class="divider">

@@ -1,0 +1,336 @@
+//! The live screens a booted session offers, and the wiring that gets them to
+//! a viewer.
+//!
+//! Nothing here is a *device*.  The devices are [`super::vdm`] (a character
+//! grid at `CC00`) and [`super::dazzler`] (a colour picture anywhere in the
+//! guest's memory); this module is the plumbing between a guest running on a
+//! session task and a browser that arrives on the HTTP listener, which is the
+//! only reason two things in one process cannot otherwise reach each other.
+//!
+//! **One entry per session, carrying whichever cards that guest has.**  Not one
+//! entry per card, and the reason is a real machine rather than tidiness:
+//! TDISK04 has a VDM-1 as its console *and* runs `KSCOPE`, which drives a
+//! Dazzler.  Listing that session twice would offer the operator two names for
+//! one seat at one computer.
+//!
+//! The whole "don't do work nobody is watching" design lives in one flag.  A
+//! session checks it at every key-poll seam — thousands of times a second, so
+//! it has to be exactly that cheap — and only samples memory when a viewer has
+//! actually asked.  It is also self-pacing: one publish per request means a
+//! browser polling every 150 ms costs seven snapshots a second and no timer
+//! exists anywhere.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// The VDM-1 half of a snapshot: the card's window, and the one piece of state
+/// that is not in memory.
+#[derive(Clone)]
+pub struct VdmPart {
+    pub window: Box<[u8; super::vdm::WINDOW]>,
+    pub scroll: u8,
+    /// Has the guest ever written the scroll register?  A driver's own
+    /// declaration, reported and never used to gate — see `vdm`.
+    pub active: bool,
+}
+
+/// The Dazzler half: the picture's bytes, and the two registers that say how
+/// to read them.
+///
+/// The bytes are carried rather than the rendered pixels because the format
+/// register is *animated* — GDEMO rewrites it twenty-nine times while running —
+/// so the picture and the way to interpret it have to travel together or a
+/// viewer paints one frame's bytes under the next frame's mode.
+#[derive(Clone)]
+pub struct DazzlerPart {
+    pub bytes: Vec<u8>,
+    /// Port `0Eh` as the guest last wrote it: on-bit plus A15..A9.
+    pub address: u8,
+    /// Port `0Fh` as the guest last wrote it: the format.
+    pub format: u8,
+}
+
+/// What a viewer sees in the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    /// Stable for the life of the session; how a viewer names the screen.
+    pub id: u64,
+    /// The image, and where the person typing at it came from.
+    pub label: String,
+    /// This guest has driven the VDM-1's scroll register.
+    pub vdm_active: bool,
+    /// This guest has switched a Dazzler on.
+    pub dazzler_on: bool,
+    /// Has any frame been published yet?
+    pub has_frame: bool,
+}
+
+/// A published screen: everything needed to draw what the guest can see.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub label: String,
+    /// Bumped on every publish, so a viewer can tell a still screen from a
+    /// stopped one without diffing a kilobyte.
+    pub generation: u64,
+    pub vdm: VdmPart,
+    /// `None` until the guest addresses a Dazzler.  Absent rather than blank,
+    /// because "this machine has no colour card" and "the card is showing
+    /// black" are different facts and only one of them is worth a canvas.
+    pub dazzler: Option<DazzlerPart>,
+}
+
+struct Live {
+    label: String,
+    /// Set by a viewer asking for a frame, cleared by the session publishing
+    /// one.
+    wanted: AtomicBool,
+    vdm_active: AtomicBool,
+    dazzler_on: AtomicBool,
+    frame: Mutex<Option<Snapshot>>,
+}
+
+/// Every live screen, in registration order.
+///
+/// A `Vec` rather than a map because the list is short — one entry per booted
+/// session — and the order is the one the viewer's picker should show.
+type ScreenList = Vec<(u64, Arc<Live>)>;
+
+fn screens() -> &'static Mutex<ScreenList> {
+    static S: OnceLock<Mutex<ScreenList>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A session's claim on a slot in the live list.
+///
+/// Removes itself on drop, which is not a tidiness detail: a session ends by
+/// `ESC ESC`, by the user hanging up, or by an error path, and a screen left
+/// behind by any of those would sit in the list for ever showing a frame that
+/// stopped changing.
+pub struct Screen {
+    id: u64,
+    live: Arc<Live>,
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        if let Ok(mut list) = screens().lock() {
+            list.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
+/// Register a live screen for a session, named for the viewer's list.
+pub fn register(label: impl Into<String>) -> Screen {
+    let id = next_id();
+    let live = Arc::new(Live {
+        label: label.into(),
+        wanted: AtomicBool::new(false),
+        vdm_active: AtomicBool::new(false),
+        dazzler_on: AtomicBool::new(false),
+        frame: Mutex::new(None),
+    });
+    if let Ok(mut list) = screens().lock() {
+        list.push((id, live.clone()));
+    }
+    Screen { id, live }
+}
+
+impl Screen {
+    /// This screen's id, as the web UI names it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Has a viewer asked for a frame since the last one was published?
+    ///
+    /// Takes the request as it reports it, so one poll produces one snapshot.
+    pub fn wanted(&self) -> bool {
+        self.live.wanted.swap(false, Ordering::Relaxed)
+    }
+
+    /// Publish what the guest can see.
+    ///
+    /// The caller does the sampling because only it has the machine — and it
+    /// must sample through the machine's own `peek`, so a banked guest is read
+    /// through its MMU rather than out of the array behind it.
+    pub fn publish(&self, vdm: VdmPart, dazzler: Option<DazzlerPart>) {
+        self.live.vdm_active.store(vdm.active, Ordering::Relaxed);
+        self.live.dazzler_on.store(dazzler.is_some(), Ordering::Relaxed);
+        if let Ok(mut slot) = self.live.frame.lock() {
+            let generation = slot.as_ref().map(|s| s.generation + 1).unwrap_or(1);
+            *slot = Some(Snapshot {
+                label: self.live.label.clone(),
+                generation,
+                vdm,
+                dazzler,
+            });
+        }
+    }
+}
+
+/// Every live screen, oldest first.
+pub fn list() -> Vec<Listing> {
+    let Ok(list) = screens().lock() else { return Vec::new() };
+    list.iter()
+        .map(|(id, live)| Listing {
+            id: *id,
+            label: live.label.clone(),
+            vdm_active: live.vdm_active.load(Ordering::Relaxed),
+            dazzler_on: live.dazzler_on.load(Ordering::Relaxed),
+            has_frame: live.frame.lock().map(|f| f.is_some()).unwrap_or(false),
+        })
+        .collect()
+}
+
+/// What asking after a screen can find.
+///
+/// Three outcomes rather than an `Option`, because "this session has ended" and
+/// "this session has not been round its loop yet" want different words on the
+/// screen and would otherwise both read as a blank display — the one state a
+/// viewer cannot tell apart by looking.
+pub enum Look {
+    /// No such screen: the session ended, or never existed.
+    Gone,
+    /// Registered, but no frame published yet.  The next seam will publish one.
+    Waiting { label: String },
+    /// The latest published frame.
+    Frame(Box<Snapshot>),
+}
+
+/// Ask one screen for its latest frame.
+///
+/// Asking is also how a session learns that anybody is watching, so a viewer
+/// that stops polling costs a parked guest one atomic load per seam and nothing
+/// else.  The frame returned is the one published *before* this request; at a
+/// 150 ms poll the display is at most one poll behind, which is the price of
+/// not running a timer for a screen nobody has open.
+pub fn look(id: u64) -> Look {
+    let live = {
+        let Ok(list) = screens().lock() else { return Look::Gone };
+        match list.iter().find(|(sid, _)| *sid == id) {
+            Some((_, l)) => l.clone(),
+            None => return Look::Gone,
+        }
+    };
+    live.wanted.store(true, Ordering::Relaxed);
+    match live.frame.lock().ok().and_then(|f| f.clone()) {
+        Some(s) => Look::Frame(Box::new(s)),
+        None => Look::Waiting { label: live.label.clone() },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank_vdm() -> VdmPart {
+        VdmPart { window: Box::new([b' '; super::super::vdm::WINDOW]), scroll: 0, active: false }
+    }
+
+    #[test]
+    fn test_a_registered_screen_is_listed_and_removed_on_drop() {
+        let screen = register("TEST.DSK from 10.0.0.9");
+        let id = screen.id();
+        let listed = list();
+        let mine = listed.iter().find(|l| l.id == id).expect("just registered");
+        assert_eq!(mine.label, "TEST.DSK from 10.0.0.9");
+        assert!(!mine.has_frame, "nothing published yet");
+        assert!(!mine.vdm_active, "no C8h write seen yet");
+        assert!(!mine.dazzler_on, "no Dazzler addressed yet");
+
+        drop(screen);
+        assert!(list().iter().all(|l| l.id != id), "a finished session leaves no screen");
+    }
+
+    /// The publish/poll handshake: a session that nobody is watching does no
+    /// work, and one request produces exactly one snapshot.
+    #[test]
+    fn test_a_screen_is_only_sampled_when_somebody_asks() {
+        let screen = register("TEST.DSK");
+        assert!(!screen.wanted(), "nobody has asked yet");
+
+        assert!(matches!(look(screen.id()), Look::Waiting { .. }));
+        assert!(screen.wanted(), "the request was heard");
+        assert!(!screen.wanted(), "and taken exactly once");
+
+        screen.publish(blank_vdm(), None);
+        let Look::Frame(snap) = look(screen.id()) else { panic!("published") };
+        assert_eq!(snap.generation, 1);
+        assert!(snap.dazzler.is_none());
+    }
+
+    /// "The session ended" and "the session has not painted yet" are different
+    /// facts and both look like a blank screen, so they are different answers.
+    #[test]
+    fn test_a_screen_that_has_ended_is_not_a_screen_that_is_waiting() {
+        let screen = register("TEST.DSK");
+        let id = screen.id();
+        assert!(matches!(look(id), Look::Waiting { .. }));
+        drop(screen);
+        assert!(matches!(look(id), Look::Gone));
+    }
+
+    #[test]
+    fn test_the_generation_counter_separates_a_still_screen_from_a_stopped_one() {
+        let screen = register("TEST.DSK");
+        let generation_of = |id| match look(id) {
+            Look::Frame(s) => s.generation,
+            _ => panic!("published"),
+        };
+        screen.publish(blank_vdm(), None);
+        let first = generation_of(screen.id());
+        screen.publish(blank_vdm(), None);
+        assert_eq!(
+            generation_of(screen.id()),
+            first + 1,
+            "an identical frame is still a new frame"
+        );
+    }
+
+    /// One session, both cards — the arrangement TDISK04 actually needs, since
+    /// its console is a VDM-1 and `KSCOPE` on it drives a Dazzler.
+    #[test]
+    fn test_one_session_can_carry_both_cards() {
+        let screen = register("TDISK04.DSK");
+        let mut vdm = blank_vdm();
+        vdm.active = true;
+        screen.publish(
+            vdm,
+            Some(DazzlerPart { bytes: vec![0x0F; 512], address: 0x81, format: 0x30 }),
+        );
+        let listed = list();
+        let mine = listed.iter().find(|l| l.id == screen.id()).expect("registered");
+        assert!(mine.vdm_active && mine.dazzler_on, "both cards are reported");
+
+        let Look::Frame(snap) = look(screen.id()) else { panic!("published") };
+        assert!(snap.vdm.active);
+        assert_eq!(snap.dazzler.as_ref().map(|d| d.address), Some(0x81));
+    }
+
+    /// A card switched off between frames must *disappear*, not linger as a
+    /// black picture — a viewer cannot tell those apart by looking.
+    #[test]
+    fn test_a_dazzler_that_goes_away_stops_being_listed() {
+        let screen = register("TEST.DSK");
+        screen.publish(
+            blank_vdm(),
+            Some(DazzlerPart { bytes: vec![0; 512], address: 0x81, format: 0x30 }),
+        );
+        screen.publish(blank_vdm(), None);
+        let listed = list();
+        let mine = listed.iter().find(|l| l.id == screen.id()).expect("registered");
+        assert!(!mine.dazzler_on);
+        let Look::Frame(snap) = look(screen.id()) else { panic!("published") };
+        assert!(snap.dazzler.is_none());
+    }
+
+    #[test]
+    fn test_an_unknown_screen_id_is_not_an_error() {
+        assert!(matches!(look(u64::MAX), Look::Gone), "a closed session's link just stops working");
+    }
+}

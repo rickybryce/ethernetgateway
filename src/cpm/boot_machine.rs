@@ -225,6 +225,29 @@ pub struct BootMachine {
     /// was previously offered to the modem and discarded, so the guest cannot
     /// tell the difference.
     vdm_scroll_latch: u8,
+    /// The Dazzler's address register, as the guest last wrote it: the on-bit
+    /// and A15..A9 of its picture.
+    ///
+    /// `None` until the guest writes it, and that is load-bearing rather than
+    /// tidy: while it is `None` the status port is *not* claimed, so a machine
+    /// that has never seen a Dazzler answers `IN 0Eh` exactly as it did before
+    /// this existed. A card the guest has not addressed is a card that is not
+    /// in the machine.
+    dazzler_address: Option<u8>,
+    /// The Dazzler's format register.
+    ///
+    /// Held separately from the address because it is *animated*: GDEMO
+    /// rewrites it twenty-nine times while running, so it is sampled with each
+    /// frame rather than configured once.
+    dazzler_format: u8,
+    /// Instructions executed, which is this machine's only clock.
+    ///
+    /// Used for one thing: the Dazzler's end-of-frame bit, which software polls
+    /// tens of millions of times and which has to *change* or the guest waits
+    /// for ever. A real card is timed by a crystal; we have no wall clock on
+    /// this path and would not want one, since a paused or slow session must
+    /// still see frames go by in the order the guest expects.
+    instructions: u64,
     /// Has the guest ever written the scroll register?
     ///
     /// The one honest, evidence-based answer to "is this a VDM-1 guest?" that
@@ -283,6 +306,9 @@ impl BootMachine {
             printer_port: None,
             vdm_scroll_latch: 0,
             vdm_seen: false,
+            dazzler_address: None,
+            dazzler_format: 0,
+            instructions: 0,
             mmu: super::mmu::Mmu::default(),
             has_mmu: false,
             disk_accesses: 0,
@@ -442,6 +468,7 @@ impl BootMachine {
     /// CBIOS here uses one for the console, and if one ever does, this needs to
     /// hold the byte back rather than replay the instruction.
     pub fn step(&mut self, cpu: &mut Cpu) {
+        self.instructions = self.instructions.wrapping_add(1);
         let before = cpu.registers().pc();
         self.rx_hold = self.rx_hold.saturating_sub(1);
         cpu.execute_instruction(self);
@@ -772,6 +799,19 @@ impl BootMachine {
         self.vdm_seen
     }
 
+    /// Where this machine is in a Dazzler frame, `0.0..1.0`.
+    ///
+    /// **Instructions rather than seconds, and the rate is an assumption that
+    /// is stated rather than measured** — nothing here can measure a 1976
+    /// crystal. A 2 MHz 8080 averages a few cycles per instruction, so ~400,000
+    /// instructions a second is the right order, and a 60 Hz frame is then
+    /// about 6,700 of them. What the software actually depends on is that the
+    /// bit *changes* at a plausible rate, which is the part a test can hold.
+    fn dazzler_phase(&self) -> f32 {
+        const FRAME_INSTRUCTIONS: u64 = 6_667;
+        (self.instructions % FRAME_INSTRUCTIONS) as f32 / FRAME_INSTRUCTIONS as f32
+    }
+
     /// Hand this machine's screen to a watching viewer, if there is one.
     ///
     /// Costs one relaxed atomic load when nobody is watching, which is what
@@ -783,12 +823,37 @@ impl BootMachine {
     /// already been a real defect on this machine once, in the DMA path, and
     /// the fix is the same one: everything that reads guest memory reads it the
     /// way the guest's own CPU would.
-    pub fn publish_vdm(&mut self, screen: &super::vdm::Screen) {
+    /// Both cards travel together because they are one picture of one machine
+    /// at one instant, and a guest can have both — TDISK04 has a VDM-1 for its
+    /// console and runs `KSCOPE`, which drives a Dazzler.
+    pub fn publish_screen(&mut self, screen: &super::screen::Screen) {
         if !screen.wanted() {
             return;
         }
-        let (scroll, active) = (self.vdm_scroll(), self.vdm_active());
-        screen.publish(|addr| self.peek(addr), scroll, active);
+        let mut window = Box::new([0u8; super::vdm::WINDOW]);
+        for (i, b) in window.iter_mut().enumerate() {
+            *b = self.peek(super::vdm::BASE.wrapping_add(i as u16));
+        }
+        let vdm = super::screen::VdmPart {
+            window,
+            scroll: self.vdm_scroll(),
+            active: self.vdm_active(),
+        };
+
+        // Only when the guest has switched one on.  An addressed-but-off card
+        // is not a black picture, it is no picture, and saying so lets the
+        // viewer tell "this machine has no colour card" from "the card is
+        // showing black" — which cannot be told apart by looking.
+        let dazzler = self.dazzler_address.filter(|a| super::dazzler::is_on(*a)).map(|address| {
+            let format = super::dazzler::Format::from_byte(self.dazzler_format);
+            let base = super::dazzler::base(address);
+            let bytes = (0..format.bytes())
+                .map(|i| self.peek(base.wrapping_add(i as u16)))
+                .collect();
+            super::screen::DazzlerPart { bytes, address, format: self.dazzler_format }
+        });
+
+        screen.publish(vdm, dazzler);
     }
 
     /// Accesses to the disk controller's ports since the machine was made.
@@ -1211,6 +1276,22 @@ impl Machine for BootMachine {
             // The front panel. Input only on real hardware, and the reason
             // every MITS operating system can find its console.
             SENSE_SWITCH_PORT => self.sense_switches,
+            // The Dazzler's status, and **only once a guest has addressed one**
+            // — until then this port is not ours and falls through to the
+            // answer it has always given, so no existing machine changes.
+            //
+            // This exists because GDEMO reads it **58.8 million times** waiting
+            // for the end-of-frame bit (measured, not supposed). An unclaimed
+            // port answers 0xFF here, which holds that bit permanently high and
+            // means "a frame is never over": the guest polls for ever and looks
+            // like a hang. That is the floating-sense-switch mistake exactly —
+            // 0xFF is a *reading*, not the absence of one.
+            super::dazzler::ADDRESS_PORT if self.dazzler_address.is_some() => {
+                // The line parity alternates far faster than the frame does;
+                // deriving both from the one clock keeps them consistent.
+                let even_line = (self.instructions / 13).is_multiple_of(2);
+                super::dazzler::status(self.dazzler_phase(), even_line)
+            }
             // The virtual modem, if the operator gave this machine one. Asked
             // after the fixed hardware above, though `attach_modem` has already
             // refused any profile that could overlap it.
@@ -1278,6 +1359,25 @@ impl Machine for BootMachine {
             super::vdm::SCROLL_PORT => {
                 self.vdm_scroll_latch = value;
                 self.vdm_seen = true;
+            }
+            // The Cromemco Dazzler's two registers.  **Last of the displays and
+            // after the controllers on purpose**: `0Eh` is also a z80pack disk
+            // register, and a machine that really has that board must keep it —
+            // a colour card the guest never asked for must never cost it a
+            // disk.  `controller_for` above has already had its say.
+            //
+            // Not console activity, for the VDM-1's reason: a card painted by
+            // memory writes produces no console bytes, and the pacing is right
+            // that such a guest looks idle.
+            super::dazzler::ADDRESS_PORT => {
+                self.dazzler_address = Some(value);
+            }
+            super::dazzler::FORMAT_PORT => {
+                self.dazzler_format = value;
+                // Addressing is what puts the card in the machine, but a guest
+                // that sets a format first has still declared one, and leaving
+                // it out would lose the format of a picture switched on next.
+                self.dazzler_address.get_or_insert(0);
             }
             // The control register and anything else: offered to the modem,
             // then accepted and discarded.
@@ -1547,7 +1647,7 @@ mod tests {
     /// only reason this can run on every booted session unconditionally.
     #[test]
     fn test_a_machine_publishes_the_screen_its_guest_painted() {
-        use crate::cpm::vdm;
+        use crate::cpm::{screen, vdm};
         let mut m = BootMachine::new();
         for (i, b) in b"HELLO".iter().enumerate() {
             m.poke(vdm::BASE + i as u16, *b);
@@ -1556,23 +1656,142 @@ mod tests {
         // the bottom of the display.
         m.port_out(vdm::SCROLL_PORT as u16, 1);
 
-        let screen = vdm::register("boot_machine unit test");
-        m.publish_vdm(&screen);
+        let screen = screen::register("boot_machine unit test");
+        m.publish_screen(&screen);
         assert!(
-            matches!(vdm::look(screen.id()), vdm::Look::Waiting { .. }),
+            matches!(screen::look(screen.id()), screen::Look::Waiting { .. }),
             "nobody had asked, so nothing was sampled"
         );
 
         // That `look` was a viewer asking, so the next seam publishes.
-        m.publish_vdm(&screen);
-        let vdm::Look::Frame(snap) = vdm::look(screen.id()) else {
+        m.publish_screen(&screen);
+        let screen::Look::Frame(snap) = screen::look(screen.id()) else {
             panic!("a frame was published");
         };
-        assert!(snap.active);
-        assert_eq!(snap.scroll, 1);
-        let text = vdm::frame_text(&snap.frame());
+        assert!(snap.vdm.active);
+        assert_eq!(snap.vdm.scroll, 1);
+        assert!(snap.dazzler.is_none(), "no guest here has addressed a Dazzler");
+        let text = vdm::frame_text(&vdm::frame(&snap.vdm.window, snap.vdm.scroll));
         assert_eq!(text[vdm::ROWS - 1].trim_end(), "HELLO");
         assert!(text[0].trim().is_empty(), "line 1 is at the top and it is blank");
+    }
+
+    /// **A Dazzler must not cost a machine its disk controller.** `0Eh` is the
+    /// card's address register and also a z80pack disk register, and the guest
+    /// that has one of those is not asking for the other. The board is matched
+    /// first; this pins that ordering, because the failure it prevents — a
+    /// machine that boots and then cannot read a sector — looks nothing like a
+    /// graphics card being wrong.
+    #[test]
+    fn test_a_disk_controller_keeps_the_port_the_dazzler_would_take() {
+        use crate::cpm::dazzler;
+        let mut m = BootMachine::new();
+        m.set_machine("z80pack");
+        assert!(
+            m.owns_disk_port(dazzler::ADDRESS_PORT),
+            "this machine's board really does answer there"
+        );
+        m.port_out(dazzler::ADDRESS_PORT as u16, 0x81);
+        let screen = crate::cpm::screen::register("dazzler port collision");
+        // A viewer arrives, then the seam publishes: one request, one snapshot.
+        let _ = crate::cpm::screen::look(screen.id());
+        m.publish_screen(&screen);
+        let crate::cpm::screen::Look::Frame(snap) = crate::cpm::screen::look(screen.id()) else {
+            panic!("published")
+        };
+        assert!(snap.dazzler.is_none(), "the write went to the disk, where it belongs");
+    }
+
+    /// The status port is **not claimed until a guest addresses a card**, so a
+    /// machine that has never seen a Dazzler answers exactly as it always did.
+    /// Adding a device that changes what every other guest reads on a line it
+    /// never asked about is how an emulator breaks working software.
+    #[test]
+    fn test_the_dazzler_status_port_is_silent_until_a_guest_addresses_one() {
+        use crate::cpm::dazzler;
+        let mut m = BootMachine::new();
+        let before = m.port_in(dazzler::ADDRESS_PORT as u16);
+        assert_eq!(before, 0xFF, "an unclaimed port on this machine");
+
+        m.port_out(dazzler::ADDRESS_PORT as u16, 0x81);
+        // Now it answers, and — the whole point — the end-of-frame bit is not
+        // stuck. GDEMO polls this 58.8 million times; a constant reading is a
+        // guest that waits for ever.
+        let mut cpu = BootMachine::new_cpu();
+        let mut seen_low = false;
+        let mut seen_high = false;
+        for _ in 0..20_000u64 {
+            m.step(&mut cpu);
+            if m.port_in(dazzler::ADDRESS_PORT as u16) & 0x40 == 0 {
+                seen_low = true;
+            } else {
+                seen_high = true;
+            }
+        }
+        assert!(seen_low && seen_high, "the end-of-frame bit has to change, or a guest hangs");
+    }
+
+    /// The picture is sampled from wherever the guest put it, at the size its
+    /// format asks for — the two registers together, because either alone
+    /// describes a different picture.
+    #[test]
+    fn test_a_machine_publishes_the_picture_its_guest_addressed() {
+        use crate::cpm::{dazzler, screen};
+        let mut m = BootMachine::new();
+        // KSCOPE's own settings, measured: on at 0200, 64x64 colour in 2K.
+        m.port_out(dazzler::FORMAT_PORT as u16, 0x30);
+        m.port_out(dazzler::ADDRESS_PORT as u16, 0x81);
+        m.poke(0x0200, 0x21);
+
+        let s = screen::register("dazzler publish");
+        let _ = screen::look(s.id());
+        m.publish_screen(&s);
+        let screen::Look::Frame(snap) = screen::look(s.id()) else { panic!("published") };
+        let d = snap.dazzler.expect("the guest switched one on");
+        assert_eq!(d.bytes.len(), dazzler::LARGE, "2K, because the format says so");
+        assert_eq!(d.bytes[0], 0x21, "read from 0200, where the address register points");
+
+        let pic = dazzler::frame(&d.bytes, dazzler::Format::from_byte(d.format));
+        assert_eq!((pic.width, pic.height), (64, 64));
+        assert_eq!((pic.cells[0], pic.cells[1]), (1, 2));
+    }
+
+    /// Switched off is not black: the card leaves the snapshot entirely, so a
+    /// viewer can tell "no colour card here" from "the card is showing black".
+    #[test]
+    fn test_a_dazzler_switched_off_is_absent_rather_than_black() {
+        use crate::cpm::{dazzler, screen};
+        let mut m = BootMachine::new();
+        m.port_out(dazzler::ADDRESS_PORT as u16, 0x81);
+        let s = screen::register("dazzler off");
+        let _ = screen::look(s.id());
+        m.publish_screen(&s);
+        let screen::Look::Frame(on) = screen::look(s.id()) else { panic!("published") };
+        assert!(on.dazzler.is_some());
+
+        m.port_out(dazzler::ADDRESS_PORT as u16, 0x01); // same address, on-bit clear
+        m.publish_screen(&s);
+        let screen::Look::Frame(off) = screen::look(s.id()) else { panic!("published") };
+        assert!(off.dazzler.is_none());
+
+        // But the status port stays claimed — the card is still in the machine,
+        // and a guest that switches it off and on must not lose it in between.
+        //
+        // Checked by *stepping*, not by reading once: a mid-frame reading on an
+        // even line is `0xFF`, exactly what an unclaimed port answers, so a
+        // single read cannot tell a live card from an empty bus. Only the bit
+        // changing proves anybody is home. Worth knowing before writing the
+        // obvious `assert_ne!(…, 0xFF)`, which passes and proves nothing.
+        let mut cpu = BootMachine::new_cpu();
+        let mut seen_low = false;
+        for _ in 0..20_000u64 {
+            m.step(&mut cpu);
+            if m.port_in(dazzler::ADDRESS_PORT as u16) & 0x40 == 0 {
+                seen_low = true;
+                break;
+            }
+        }
+        assert!(seen_low, "the card still answers even with its picture switched off");
     }
 
     /// An unrecognised setting must leave a working console rather than none.
@@ -3953,7 +4172,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_a_vdm_guest_writes_its_signon_into_screen_memory() {
-        use crate::cpm::vdm;
+        use crate::cpm::{screen, vdm};
         let Ok(path) = std::env::var("CPM_VDM_IMAGE") else {
             eprintln!("set CPM_VDM_IMAGE to run this");
             return;
@@ -3978,21 +4197,23 @@ mod tests {
         // booted session does, ask for a frame the way the browser's poll does,
         // publish at a seam the way the driver does, and render with the same
         // function the JSON route calls.
-        let live = vdm::register("live gate");
-        let vdm::Look::Waiting { .. } = vdm::look(live.id()) else {
+        let live = screen::register("live gate");
+        let screen::Look::Waiting { .. } = screen::look(live.id()) else {
             panic!("nothing has been published yet")
         };
-        m.publish_vdm(&live);
-        let vdm::Look::Frame(snap) = vdm::look(live.id()) else {
+        m.publish_screen(&live);
+        let screen::Look::Frame(snap) = screen::look(live.id()) else {
             panic!("the seam published the frame the viewer asked for")
         };
 
-        let screen: String =
-            vdm::frame_text(&snap.frame()).iter().map(|l| format!("{}\n", l.trim_end())).collect();
+        let screen: String = vdm::frame_text(&vdm::frame(&snap.vdm.window, snap.vdm.scroll))
+            .iter()
+            .map(|l| format!("{}\n", l.trim_end()))
+            .collect();
         println!("--- VDM-1 screen at {:#06x} ---\n{screen}", vdm::BASE);
         println!(
             "scroll={:#04x}, driven={} (a guest that has written C8h is running a VDM-1 driver)",
-            snap.scroll, snap.active
+            snap.vdm.scroll, snap.vdm.active
         );
         println!("pc={:#06x} (its CONIN loop, waiting for a key)", cpu.registers().pc());
 

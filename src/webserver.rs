@@ -409,7 +409,7 @@ async fn handle_connection(
             .await?;
         }
         ("GET", "/vdm/list") => {
-            let body = vdm_list_json(&crate::cpm::vdm::list());
+            let body = vdm_list_json(&crate::cpm::screen::list());
             write_response(
                 &mut stream,
                 200,
@@ -428,7 +428,7 @@ async fn handle_connection(
                 .get("id")
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
-            let body = vdm_frame_json(id, &crate::cpm::vdm::look(id));
+            let body = vdm_frame_json(id, &crate::cpm::screen::look(id));
             write_response(
                 &mut stream,
                 200,
@@ -1274,17 +1274,18 @@ fn serial_ports_json(ports: &[crate::serial::DetectedPort]) -> String {
 // operator can see their own screen".
 
 /// The live screen list, for the picker.
-fn vdm_list_json(screens: &[crate::cpm::vdm::Listing]) -> String {
+fn vdm_list_json(screens: &[crate::cpm::screen::Listing]) -> String {
     let mut out = String::from("{\"screens\":[");
     for (i, s) in screens.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"id\":{},\"label\":\"{}\",\"active\":{},\"frame\":{}}}",
+            "{{\"id\":{},\"label\":\"{}\",\"vdm\":{},\"dazzler\":{},\"frame\":{}}}",
             s.id,
             json_escape(&s.label),
-            s.active,
+            s.vdm_active,
+            s.dazzler_on,
             s.has_frame,
         ));
     }
@@ -1298,8 +1299,15 @@ fn vdm_list_json(screens: &[crate::cpm::vdm::Listing]) -> String {
 /// because a session that has ended and one that has not painted yet both look
 /// like a blank 64x16 grid — the one pair of states a viewer cannot tell apart
 /// by looking, so the page has to be told.
-fn vdm_frame_json(id: u64, look: &crate::cpm::vdm::Look) -> String {
-    use crate::cpm::vdm::Look;
+///
+/// The Dazzler travels as its *cells* — one 4-bit value each — rather than as
+/// pixels or a colour string, because the palette belongs to whoever is
+/// painting and because 16,384 of them at 128x128 is still a modest string.
+/// The `colour` flag says whether those four bits are red/green/blue/intensity
+/// or one of sixteen greys; the same nibble means both, and only the format
+/// register separates them.
+fn vdm_frame_json(id: u64, look: &crate::cpm::screen::Look) -> String {
+    use crate::cpm::screen::Look;
     match look {
         Look::Gone => format!("{{\"id\":{id},\"state\":\"gone\"}}"),
         Look::Waiting { label } => format!(
@@ -1307,22 +1315,45 @@ fn vdm_frame_json(id: u64, look: &crate::cpm::vdm::Look) -> String {
             json_escape(label)
         ),
         Look::Frame(snap) => {
-            let frame = snap.frame();
-            let rows = crate::cpm::vdm::frame_text(&frame);
-            let inv = crate::cpm::vdm::frame_inverse(&frame);
+            let grid = crate::cpm::vdm::frame(&snap.vdm.window, snap.vdm.scroll);
+            let rows = crate::cpm::vdm::frame_text(&grid);
+            let inv = crate::cpm::vdm::frame_inverse(&grid);
             let join = |v: &[String]| {
                 v.iter()
                     .map(|s| format!("\"{}\"", json_escape(s)))
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let dazzler = match &snap.dazzler {
+                None => String::from("null"),
+                Some(d) => {
+                    let fmt = crate::cpm::dazzler::Format::from_byte(d.format);
+                    let pic = crate::cpm::dazzler::frame(&d.bytes, fmt);
+                    // One hex digit per cell: a nibble is exactly a hex digit,
+                    // so the wire form is the data rather than an encoding of
+                    // it, and 128x128 costs 16 KB of text.
+                    let cells: String =
+                        pic.cells.iter().map(|c| char::from_digit(*c as u32, 16).unwrap_or('0'))
+                            .collect();
+                    format!(
+                        "{{\"w\":{w},\"h\":{h},\"colour\":{colour},\"base\":{base},\
+                         \"format\":{format},\"cells\":\"{cells}\"}}",
+                        w = pic.width,
+                        h = pic.height,
+                        colour = pic.colour,
+                        base = crate::cpm::dazzler::base(d.address),
+                        format = d.format,
+                    )
+                }
+            };
             format!(
                 "{{\"id\":{id},\"state\":\"live\",\"label\":\"{label}\",\"gen\":{generation},\
-                 \"scroll\":{scroll},\"active\":{active},\"rows\":[{rows}],\"inv\":[{inv}]}}",
+                 \"scroll\":{scroll},\"active\":{active},\"rows\":[{rows}],\"inv\":[{inv}],\
+                 \"dazzler\":{dazzler}}}",
                 label = json_escape(&snap.label),
                 generation = snap.generation,
-                scroll = snap.scroll,
-                active = snap.active,
+                scroll = snap.vdm.scroll,
+                active = snap.vdm.active,
                 rows = join(&rows),
                 inv = join(&inv),
             )
@@ -1345,8 +1376,9 @@ fn render_vdm_page(cfg: &Config) -> String {
     out.push_str("</head><body>");
     out.push_str(&render_header(cfg));
     out.push_str(
-        "<div class=\"hint\">Processor Technology VDM-1 &middot; 64&times;16 &middot; \
-         the screen of a booted disk, sampled from its memory at <code>CC00</code></div>",
+        "<div class=\"hint\">What a booted disk is displaying, sampled from its own memory \
+         &mdash; a Processor Technology <strong>VDM-1</strong> at <code>CC00</code>, \
+         a Cromemco <strong>Dazzler</strong> wherever the guest put it, or both</div>",
     );
     out.push_str("<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">Screen</span>\
@@ -1361,6 +1393,15 @@ fn render_vdm_page(cfg: &Config) -> String {
     // card's memory laid out, not a photograph of a CRT.
     out.push_str("<div id=\"vdm-screen\" class=\"vdm-screen\"></div>");
     out.push_str("<div id=\"vdm-status\" class=\"vdm-status\"></div>");
+    // The colour card, hidden until a guest switches one on — a machine with
+    // no Dazzler should not show an empty black square that looks like one
+    // that is broken.
+    out.push_str(
+        "<div id=\"dz-wrap\" class=\"dz-wrap\" hidden>\
+         <div class=\"title\">Cromemco Dazzler</div>\
+         <canvas id=\"dz\" class=\"dz\" width=\"64\" height=\"64\"></canvas>\
+         <div id=\"dz-status\" class=\"vdm-status\"></div></div>",
+    );
     out.push_str("</section>");
     // The two intervals are Rust constants, so the page cannot drift from the
     // rate this file documents.
@@ -1394,6 +1435,18 @@ const VDM_STYLE: &str = "<style>
    free because on this hardware the cursor IS an inverse-video cell. */
 .vdm-screen i { background: var(--console-text); color: #000; font-style: normal; }
 .vdm-status { color: var(--amber-dim); font-size: 13px; margin-top: 8px; }
+.dz-wrap { margin-top: 14px; }
+/* The picture is 32x32 to 128x128 elements and every one of them is a square
+   the size of a TV's, so it is scaled up on display and *not* smoothed: this
+   is a memory map made visible, not a photograph of a CRT. */
+.dz {
+  image-rendering: pixelated;
+  width: 512px;
+  max-width: 100%;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 </style>";
 
 /// Poll interval for a frame, in milliseconds.
@@ -1429,22 +1482,68 @@ function vdmPaint(d) {
   var status = document.getElementById('vdm-status');
   if (d.state === 'gone') {
     status.textContent = 'That session has ended.';
+    dzPaint(null);
     return;
   }
   if (d.state === 'waiting') {
     status.textContent = d.label + ' — waiting for the first frame\\u2026';
+    dzPaint(null);
     return;
   }
   var html = [];
   for (var r = 0; r < d.rows.length; r++) {
     html.push(vdmLine(d.rows[r], d.inv[r]));
   }
-  screen.innerHTML = html.join('\\n');
-  status.textContent = d.label + ' — frame ' + d.gen + ', scroll ' + d.scroll
+  /* A guest that has never driven the VDM-1 and *is* driving a Dazzler is not
+     using the character screen at all, and what sits at CC00 is its ordinary
+     memory.  Giving that equal space to the picture it is really painting reads
+     as a fault in the picture.  Collapsed rather than removed, because the
+     bytes are still honestly there and the note says so. */
+  var idle = !d.active && d.dazzler;
+  screen.hidden = idle;
+  screen.innerHTML = idle ? '' : html.join('\\n');
+  dzPaint(d.dazzler);
+  status.textContent = d.label + ' — frame ' + d.gen
     + (d.active
-       ? ' — this guest is driving the VDM-1.'
-       : ' — this guest has not written the VDM-1 scroll register; what you see'
-         + ' is whatever is in its memory at CC00.');
+       ? ', scroll ' + d.scroll + ' — this guest is driving the VDM-1.'
+       : idle
+         ? ' — no VDM-1 here: this guest has never written the scroll register.'
+         : ', scroll ' + d.scroll
+           + ' — this guest has not written the VDM-1 scroll register; what you'
+           + ' see is whatever is in its memory at CC00.');
+}
+/* The Dazzler's sixteen colours.  In colour mode a cell is
+   red|green|blue|intensity from bit 0 up, so the palette is generated rather
+   than typed — a 16-entry table would be four transcription mistakes waiting
+   to happen.  In black-and-white the same four bits are one of sixteen greys,
+   which the manual is explicit about, so the palette depends on the format. */
+function dzColour(v, colour) {
+  if (!colour) { var g = Math.round(v * 255 / 15); return [g, g, g]; }
+  var hi = (v & 8) ? 255 : 128;
+  return [(v & 1) ? hi : 0, (v & 2) ? hi : 0, (v & 4) ? hi : 0];
+}
+function dzPaint(d) {
+  var wrap = document.getElementById('dz-wrap');
+  if (!d) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  var cv = document.getElementById('dz');
+  if (cv.width !== d.w || cv.height !== d.h) { cv.width = d.w; cv.height = d.h; }
+  var ctx = cv.getContext('2d');
+  var img = ctx.createImageData(d.w, d.h);
+  for (var i = 0; i < d.w * d.h; i++) {
+    var v = parseInt(d.cells.charAt(i), 16);
+    if (isNaN(v)) { v = 0; }
+    var rgb = dzColour(v, d.colour);
+    img.data[i * 4] = rgb[0];
+    img.data[i * 4 + 1] = rgb[1];
+    img.data[i * 4 + 2] = rgb[2];
+    img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  document.getElementById('dz-status').textContent =
+    d.w + '\\u00d7' + d.h + (d.colour ? ' colour' : ' black-and-white')
+    + ' \\u2014 picture at ' + d.base.toString(16).toUpperCase()
+    + 'h, format ' + d.format.toString(16).toUpperCase() + 'h';
 }
 function vdmPoll() {
   if (vdmCurrent === null) { return; }
@@ -1462,7 +1561,7 @@ function vdmRefreshList() {
     for (var i = 0; i < data.screens.length; i++) {
       var s = data.screens[i];
       built += '<option value=\"' + s.id + '\">' + vdmEsc(s.label)
-             + (s.active ? ' (VDM-1)' : '') + '</option>';
+             + (s.vdm ? ' (VDM-1)' : '') + (s.dazzler ? ' (Dazzler)' : '') + '</option>';
     }
     /* Rebuilt only when it changed, so the list refresh cannot steal a
        selection the operator just made. */
@@ -4646,6 +4745,15 @@ mod tests {
 
     // ─── The VDM-1 screen ───────────────────────────────────────────
 
+    /// A window with a few cells set, the rest blank.
+    fn vdm_part(cells: &[(usize, u8)], active: bool) -> crate::cpm::screen::VdmPart {
+        let mut window = Box::new([b' '; crate::cpm::vdm::WINDOW]);
+        for (i, b) in cells {
+            window[*i] = *b;
+        }
+        crate::cpm::screen::VdmPart { window, scroll: 0, active }
+    }
+
     #[test]
     fn test_vdm_list_json_empty_is_a_list_not_an_error() {
         // The page asks for this every two seconds whether or not anything is
@@ -4655,16 +4763,16 @@ mod tests {
 
     #[test]
     fn test_vdm_list_json_carries_what_the_picker_shows() {
-        use crate::cpm::vdm::Listing;
+        use crate::cpm::screen::Listing;
         let screens = vec![
-            Listing { id: 1, label: "TDISK04.DSK — telnet 10.0.0.9".into(), active: true, has_frame: true },
-            Listing { id: 7, label: "CPM14.DSK — SSH 10.0.0.4".into(), active: false, has_frame: false },
+            Listing { id: 1, label: "TDISK04.DSK — telnet 10.0.0.9".into(), vdm_active: true, dazzler_on: false, has_frame: true },
+            Listing { id: 7, label: "CPM14.DSK — SSH 10.0.0.4".into(), vdm_active: false, dazzler_on: true, has_frame: false },
         ];
         assert_eq!(
             vdm_list_json(&screens),
-            r#"{"screens":[{"id":1,"label":"TDISK04.DSK — telnet 10.0.0.9","active":true,"frame":true},"#
+            r#"{"screens":[{"id":1,"label":"TDISK04.DSK — telnet 10.0.0.9","vdm":true,"dazzler":false,"frame":true},"#
                 .to_string()
-                + r#"{"id":7,"label":"CPM14.DSK — SSH 10.0.0.4","active":false,"frame":false}]}"#
+                + r#"{"id":7,"label":"CPM14.DSK — SSH 10.0.0.4","vdm":false,"dazzler":true,"frame":false}]}"#
         );
     }
 
@@ -4673,7 +4781,7 @@ mod tests {
     /// by looking at the screen.
     #[test]
     fn test_vdm_frame_json_reports_the_three_states_apart() {
-        use crate::cpm::vdm::Look;
+        use crate::cpm::screen::Look;
         assert_eq!(vdm_frame_json(4, &Look::Gone), r#"{"id":4,"state":"gone"}"#);
         assert_eq!(
             vdm_frame_json(4, &Look::Waiting { label: "TDISK04.DSK".into() }),
@@ -4683,20 +4791,12 @@ mod tests {
 
     #[test]
     fn test_vdm_frame_json_renders_the_screen_and_its_inverse_mask() {
-        use crate::cpm::vdm;
-        let screen = vdm::register("webserver unit test — frame json");
+        use crate::cpm::{screen, vdm};
+        let screen = screen::register("webserver unit test — frame json");
         // 'H', then 'I' with bit 7 set: the same letter, lit differently.
-        screen.publish(
-            |addr| match addr - vdm::BASE {
-                0 => b'H',
-                1 => b'I' | 0x80,
-                _ => b' ',
-            },
-            0,
-            true,
-        );
-        let vdm::Look::Frame(_) = vdm::look(screen.id()) else { panic!("published") };
-        let json = vdm_frame_json(9, &vdm::look(screen.id()));
+        screen.publish(vdm_part(&[(0, b'H'), (1, b'I' | 0x80)], true), None);
+        let screen::Look::Frame(_) = screen::look(screen.id()) else { panic!("published") };
+        let json = vdm_frame_json(9, &screen::look(screen.id()));
 
         assert!(json.contains(r#""state":"live""#), "got {json}");
         assert!(json.contains(r#""id":9"#), "the id is the caller's, not the registry's");
@@ -4714,19 +4814,43 @@ mod tests {
     /// hypothetical: a CP/M command line full of quotes is ordinary.
     #[test]
     fn test_vdm_frame_json_escapes_what_a_guest_can_paint() {
-        use crate::cpm::vdm;
-        let screen = vdm::register("webserver unit test — escaping");
-        screen.publish(
-            |addr| match addr - vdm::BASE {
-                0 => b'"',
-                1 => b'\\',
-                _ => b' ',
-            },
-            0,
-            false,
-        );
-        let json = vdm_frame_json(1, &vdm::look(screen.id()));
+        use crate::cpm::screen;
+        let screen = screen::register("webserver unit test — escaping");
+        screen.publish(vdm_part(&[(0, b'"'), (1, b'\\')], false), None);
+        let json = vdm_frame_json(1, &screen::look(screen.id()));
         assert!(json.contains(r#"\"\\"#), "got {json}");
+    }
+
+    /// The Dazzler travels as one hex digit per element — a nibble *is* a hex
+    /// digit, so the wire form is the data rather than an encoding of it.
+    #[test]
+    fn test_vdm_frame_json_carries_the_dazzler_picture() {
+        use crate::cpm::screen;
+        let s = screen::register("webserver unit test — dazzler");
+        // KSCOPE's measured settings: on at 0200, 64x64 colour in 2K.
+        let mut bytes = vec![0u8; crate::cpm::dazzler::LARGE];
+        bytes[0] = 0x21;
+        s.publish(
+            vdm_part(&[], false),
+            Some(screen::DazzlerPart { bytes, address: 0x81, format: 0x30 }),
+        );
+        let json = vdm_frame_json(3, &screen::look(s.id()));
+        assert!(json.contains(r#""w":64,"h":64,"colour":true"#), "got {json}");
+        assert!(json.contains(r#""base":512"#), "the address register decoded, not passed through");
+        assert!(json.contains(r#""cells":"12"#), "low nibble first: 1 then 2");
+        // 64x64 elements, one digit each.
+        let cells = json.split(r#""cells":""#).nth(1).unwrap().split('"').next().unwrap();
+        assert_eq!(cells.len(), 64 * 64);
+    }
+
+    /// A machine with no Dazzler says so with `null`, not with a black picture
+    /// — the page hides the canvas on the strength of it.
+    #[test]
+    fn test_vdm_frame_json_says_null_when_there_is_no_dazzler() {
+        use crate::cpm::screen;
+        let s = screen::register("webserver unit test — no dazzler");
+        s.publish(vdm_part(&[], false), None);
+        assert!(vdm_frame_json(1, &screen::look(s.id())).contains(r#""dazzler":null"#));
     }
 
     /// The page is inert HTML plus two fetches; if the endpoints it names ever
