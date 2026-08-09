@@ -1,5 +1,12 @@
 /target
 egateway.conf
+# ...and the log that appears beside it.  Running the binary from the repo
+# root is an ordinary thing to do -- the live-gate runner points at
+# `$REPO/transfer/CPM` -- and it left an untracked ethernetgateway.log every
+# time.  The config was ignored and its log was not, which is the same file
+# by a different name.
+ethernetgateway.log
+ethernetgateway.log.*
 *.swp
 *.swo
 *~
