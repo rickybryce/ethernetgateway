@@ -7,154 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] - Unreleased
-
-### Fixed
-
-- **Opening a file at an extent opened the wrong one, so every file was a 16 KB
-  file.** CP/M 2.2's way of reaching past the first 16 KB is to put the extent
-  number in the FCB and call Open; the BDOS positions to it and reports that
-  extent's record count. Ours forced the extent, module and record-count fields
-  to zero, so a caller asking for extent 1 was handed extent 0 — and because
-  sequential reads then returned the right *number* of bytes from the wrong
-  place, nothing ever errored. The data was simply wrong.
-
-  Found by running WordStar 3.0 under the emulator: its print overlay is 34 KB,
-  it opens `WSOVLY1.OVR` at extent 1 and then 2, and it reported
-  `E39 BAD OVERLAY FILE, OR WRONG VERSION OVERLAY FILE` — an error message about
-  the *disk*, for a fault in the BDOS underneath it. The same WordStar on the
-  same image printed perfectly when the disk was **booted** and its own CP/M did
-  the reading, and that is what identified the fault as ours rather than the
-  disk's. WordStar prints correctly under the emulator now.
-
-  Anything reading a file over 16 KB by extent was affected, not only WordStar.
-
-- **The images-folder readme is refreshed on upgrade instead of being frozen
-  at whatever version you first ran.** It was written once and never touched
-  again, on the reasoning that an operator might have annotated it — but the
-  file is *instructions*, and this project's own copy was three months stale:
-  it still said an image without a format prefix mounts READ-ONLY and must be
-  renamed to be writable. That stopped being true when identification learned
-  to verify a filesystem — an unprefixed image whose CP/M directory checks out
-  mounts read-write just the same — and the stale advice is exactly why this
-  repository's own images folder had accumulated hand-renamed disks. It was
-  also missing the entire "MOUNTING IS NOT BOOTING" section, which is most of
-  what a reader needs. A readme that still starts with our own header is now
-  brought up to date and the refresh is logged; a file that does not is the
-  operator's and is never touched.
-
-- **The detection survey identified disks by filename, and filenames are not
-  unique.** `test_detect_every_real_image` keyed its expectations on the bare
-  name, and three basenames collide across the sample sets — `cpm13.dsk`,
-  `cpm14.dsk` and `cpm22.dsk` each exist in two z80pack libraries as *different
-  disks*. Pointed at a folder it was not written for, it failed on a disk that
-  works perfectly: z80pack altairsim's `cpm13.dsk` is "TARBELL 62K CPM V1.3",
-  boots correctly, and was reported as a detection bug because cpmsim's
-  unrelated `cpm13.dsk` sits in the table. Expectations are keyed on the CRC-32
-  of the contents now, and the survey prints how many of the images it scanned
-  it actually had an expectation for — a folder none of them is in used to look
-  like a pass.
-
-- **The backspace key inside a booted disk is now yours to set.** Type
-  `TESTING` into a booted Altair disk, backspace over it, and the screen used to
-  read `TESTINGGNIT`. Your terminal's Backspace key sends DEL (0x7F) and most of
-  these operating systems read that as a Teletype *rubout* — they delete the
-  character and then print the character they deleted, which is right for a
-  printing terminal and wrong for a screen. New `cpm_boot_backspace`
-  (`backspace` — the default — or `rubout`) says which byte a booted guest is
-  handed, and the telnet boot picker asks again per disk, seeded from it.
-
-  There is no answer that suits every disk, and that was **measured across two
-  whole disk folders** rather than reasoned: of the 38 images that reach a
-  prompt, 29 erase on BS and 7 on DEL, but CP/M 1.3, 1.4 and the 1975 build are
-  the *opposite* — the rubout is their editing key and BS prints a literal `^H`,
-  so translating breaks something that already worked. Digital Research's own
-  CP/M 2.2, MP/M and UCSD p-System accept either. A Commodore's DEL key (PETSCII
-  0x14) is folded to whichever byte the setting names, because no guest in
-  either survey recognises 0x14 at all — leaving it alone gave a C64 no editing
-  key rather than the disk's own one.
-
-  The other half is the way out: a guest's `BS SPACE BS` now reaches a Commodore
-  as cursor-left, space, cursor-left rather than as the destructive PETSCII DEL
-  that would pull the line about. That makes three PETSCII output translators in
-  the gateway, and the test that holds the first two to the same rule now covers
-  the third.
-
-  The CP/M **emulator** is unaffected: it reads its own console line and has
-  always accepted both bytes.
-
-- **The CPU passes the *undocumented*-flag exerciser too.** `EXZ80ALL` — the
-  same ZEXALL family with bits 3 and 5 of `F` pinned as well — reports all 79
-  groups OK, under the banner `Undefined status bits taken into account`. This
-  had been recorded as a known gap on the grounds that iz80 "does not claim to
-  reproduce" those bits; that was wrong. It implements them throughout, from
-  Sean Young's *The Undocumented Z80 Documented*, including the two cases where
-  they are not a plain copy of the result — the block instructions and 16-bit
-  add. Nothing needed changing; the gap was in the notes, not the core.
-  `EXZ80ALL` ships on no disk, so the test's documentation now records how to
-  assemble it from `ex.mac` and how to validate the toolchain first.
-- **The CPU now passes its conformance suite completely.** `EXZ80DOC` — the
-  ZEXALL exerciser, documented flags — reports **all 79 instruction groups OK**
-  and ends `All tests successful.`, and Supersoft's Diagnostics II reports
-  `CPU IS Z80` / `CPU TESTS OK`. The one group that had been failing,
-  `<ini,outi,ind,outd><,r>`, turned out not to be an instruction fault at all:
-  those instructions copy a byte *from an I/O port* into memory and set the `N`
-  flag from its top bit, so whatever an unclaimed port returns lands in the
-  group's CRC.
-- **A port nothing answers at now reads `0xFF`, not zero.** That is the real
-  fix behind the CRC, and it matters well beyond a test. Zero is a *plausible*
-  reading — an idle status register, a device present and ready — so guest
-  software probing for hardware found boards that were not there. `0xFF` is
-  what an unloaded bus gives, because it floats high. Our own booted-disk
-  machine already answered `0xFF`; only the CP/M emulator disagreed, on the
-  grounds that its guest is "software we chose", which is not true of a feature
-  whose purpose is running arbitrary `.COM` files. Every one of z80pack's
-  machines defines `IO_DATA_UNUSED 0xff`, and its `cpmsim` records why —
-  "unused I/O ports need to return FF, see survey.mac".
-- **Two data disks were run as programs instead of being refused.** `DISK0B`
-  ("Time Sharing Basic V2 programs") and `DISK0F` ("Altair Mini-Disk DOS
-  programs") are the data companions of two disks that boot, and they carry no
-  boot program at all — DISK0B's first sector is its volume label,
-  `VOL±TS2FILES`, followed by 112 zero bytes, and DISK0F's is two stray bytes
-  and 126. Both slipped past the "does this look like a boot sector" check, so
-  the machine ran them: DISK0B executed its own label as instructions and
-  DISK0F ran through a field of NOPs into cleared memory, and both then sat
-  silent — which reads like a disk the gateway cannot boot rather than a disk
-  with nothing on it to boot. They are now refused with the same message their
-  sibling `DISK0D` already got: "this image has no boot sector — it is data,
-  not a system disk".
-  - The rule is that a payload which is **more than four-fifths a single
-    repeated byte** is padding rather than a program, and the fraction is
-    measured rather than argued: across every image in the Altair and z80pack
-    collections, taking the payload each controller really extracts, the disks
-    that boot run from 5% to 63% and the ones with no boot program are 89% and
-    above. Two thresholds reasoned out before measuring were both wrong — a
-    half-way rule would have refused the three Altair hard disks, and a
-    trailing-zero-run rule would have refused z80pack's `mpm-2`, whose loader
-    is short and zero-padded.
-- **A mis-named image could be trusted, and the gateway recommended the
-  rename.** Naming a format with a filename prefix is an override — it skips
-  the directory inspection and mounts read-write — and its size check had only
-  a lower bound. A 625,920-byte Cromemco double-density image called
-  `ibm3740_x.dsk` cleared the 256,256 that format needs twice over and mounted
-  writable, read as single density with its directory landing in the middle of
-  a data track. Worse, the refusal an unmountable size produced said "rename it
-  with a format prefix, e.g. `ibm3740_mydisk.dsk`" — advice that cannot work,
-  since a prefix names the layout rather than the size, and that produced
-  exactly that mount if followed. Both ends are now bounded, and the message
-  points at the remedy that does exist: a disk we cannot mount is often still
-  bootable.
-- **Three real disks were refused for being 96 bytes too long.** `DISK13`,
-  `DISK14` and `DISK16` in the widely circulated Altair set are an `altair8`
-  disk plus a 96-byte trailer, and all three boot. Mounting demanded an exact
-  size and turned them away on the file length before reading their directory.
-  Both mount paths now allow anything short of one whole record, past which a
-  file is a different geometry rather than a padded one — the identical
-  96-byte trailer had already been found and fixed on the boot path and left
-  here. The three now mount read-write and list coherent directories: two
-  CP/M 3 system disks and a CP/M 2.2 tools disk. Nothing was loosened to do it,
-  because size was never what made a disk writable — whatever the size lets
-  through still has its whole directory checked.
+## [0.9.0] - 2026-08-08
 
 ### Added
 
@@ -671,6 +524,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and images before a first session, not after. Nothing is ever overwritten.
 
 ### Fixed
+
+- **Opening a file at an extent opened the wrong one, so every file was a 16 KB
+  file.** CP/M 2.2's way of reaching past the first 16 KB is to put the extent
+  number in the FCB and call Open; the BDOS positions to it and reports that
+  extent's record count. Ours forced the extent, module and record-count fields
+  to zero, so a caller asking for extent 1 was handed extent 0 — and because
+  sequential reads then returned the right *number* of bytes from the wrong
+  place, nothing ever errored. The data was simply wrong.
+
+  Found by running WordStar 3.0 under the emulator: its print overlay is 34 KB,
+  it opens `WSOVLY1.OVR` at extent 1 and then 2, and it reported
+  `E39 BAD OVERLAY FILE, OR WRONG VERSION OVERLAY FILE` — an error message about
+  the *disk*, for a fault in the BDOS underneath it. The same WordStar on the
+  same image printed perfectly when the disk was **booted** and its own CP/M did
+  the reading, and that is what identified the fault as ours rather than the
+  disk's. WordStar prints correctly under the emulator now.
+
+  Anything reading a file over 16 KB by extent was affected, not only WordStar.
+
+- **The images-folder readme is refreshed on upgrade instead of being frozen
+  at whatever version you first ran.** It was written once and never touched
+  again, on the reasoning that an operator might have annotated it — but the
+  file is *instructions*, and this project's own copy was three months stale:
+  it still said an image without a format prefix mounts READ-ONLY and must be
+  renamed to be writable. That stopped being true when identification learned
+  to verify a filesystem — an unprefixed image whose CP/M directory checks out
+  mounts read-write just the same — and the stale advice is exactly why this
+  repository's own images folder had accumulated hand-renamed disks. It was
+  also missing the entire "MOUNTING IS NOT BOOTING" section, which is most of
+  what a reader needs. A readme that still starts with our own header is now
+  brought up to date and the refresh is logged; a file that does not is the
+  operator's and is never touched.
+
+- **The detection survey identified disks by filename, and filenames are not
+  unique.** `test_detect_every_real_image` keyed its expectations on the bare
+  name, and three basenames collide across the sample sets — `cpm13.dsk`,
+  `cpm14.dsk` and `cpm22.dsk` each exist in two z80pack libraries as *different
+  disks*. Pointed at a folder it was not written for, it failed on a disk that
+  works perfectly: z80pack altairsim's `cpm13.dsk` is "TARBELL 62K CPM V1.3",
+  boots correctly, and was reported as a detection bug because cpmsim's
+  unrelated `cpm13.dsk` sits in the table. Expectations are keyed on the CRC-32
+  of the contents now, and the survey prints how many of the images it scanned
+  it actually had an expectation for — a folder none of them is in used to look
+  like a pass.
+
+- **The backspace key inside a booted disk is now yours to set.** Type
+  `TESTING` into a booted Altair disk, backspace over it, and the screen used to
+  read `TESTINGGNIT`. Your terminal's Backspace key sends DEL (0x7F) and most of
+  these operating systems read that as a Teletype *rubout* — they delete the
+  character and then print the character they deleted, which is right for a
+  printing terminal and wrong for a screen. New `cpm_boot_backspace`
+  (`backspace` — the default — or `rubout`) says which byte a booted guest is
+  handed, and the telnet boot picker asks again per disk, seeded from it.
+
+  There is no answer that suits every disk, and that was **measured across two
+  whole disk folders** rather than reasoned: of the 38 images that reach a
+  prompt, 29 erase on BS and 7 on DEL, but CP/M 1.3, 1.4 and the 1975 build are
+  the *opposite* — the rubout is their editing key and BS prints a literal `^H`,
+  so translating breaks something that already worked. Digital Research's own
+  CP/M 2.2, MP/M and UCSD p-System accept either. A Commodore's DEL key (PETSCII
+  0x14) is folded to whichever byte the setting names, because no guest in
+  either survey recognises 0x14 at all — leaving it alone gave a C64 no editing
+  key rather than the disk's own one.
+
+  The other half is the way out: a guest's `BS SPACE BS` now reaches a Commodore
+  as cursor-left, space, cursor-left rather than as the destructive PETSCII DEL
+  that would pull the line about. That makes three PETSCII output translators in
+  the gateway, and the test that holds the first two to the same rule now covers
+  the third.
+
+  The CP/M **emulator** is unaffected: it reads its own console line and has
+  always accepted both bytes.
+
+- **The CPU passes the *undocumented*-flag exerciser too.** `EXZ80ALL` — the
+  same ZEXALL family with bits 3 and 5 of `F` pinned as well — reports all 79
+  groups OK, under the banner `Undefined status bits taken into account`. This
+  had been recorded as a known gap on the grounds that iz80 "does not claim to
+  reproduce" those bits; that was wrong. It implements them throughout, from
+  Sean Young's *The Undocumented Z80 Documented*, including the two cases where
+  they are not a plain copy of the result — the block instructions and 16-bit
+  add. Nothing needed changing; the gap was in the notes, not the core.
+  `EXZ80ALL` ships on no disk, so the test's documentation now records how to
+  assemble it from `ex.mac` and how to validate the toolchain first.
+- **The CPU now passes its conformance suite completely.** `EXZ80DOC` — the
+  ZEXALL exerciser, documented flags — reports **all 79 instruction groups OK**
+  and ends `All tests successful.`, and Supersoft's Diagnostics II reports
+  `CPU IS Z80` / `CPU TESTS OK`. The one group that had been failing,
+  `<ini,outi,ind,outd><,r>`, turned out not to be an instruction fault at all:
+  those instructions copy a byte *from an I/O port* into memory and set the `N`
+  flag from its top bit, so whatever an unclaimed port returns lands in the
+  group's CRC.
+- **A port nothing answers at now reads `0xFF`, not zero.** That is the real
+  fix behind the CRC, and it matters well beyond a test. Zero is a *plausible*
+  reading — an idle status register, a device present and ready — so guest
+  software probing for hardware found boards that were not there. `0xFF` is
+  what an unloaded bus gives, because it floats high. Our own booted-disk
+  machine already answered `0xFF`; only the CP/M emulator disagreed, on the
+  grounds that its guest is "software we chose", which is not true of a feature
+  whose purpose is running arbitrary `.COM` files. Every one of z80pack's
+  machines defines `IO_DATA_UNUSED 0xff`, and its `cpmsim` records why —
+  "unused I/O ports need to return FF, see survey.mac".
+- **Two data disks were run as programs instead of being refused.** `DISK0B`
+  ("Time Sharing Basic V2 programs") and `DISK0F` ("Altair Mini-Disk DOS
+  programs") are the data companions of two disks that boot, and they carry no
+  boot program at all — DISK0B's first sector is its volume label,
+  `VOL±TS2FILES`, followed by 112 zero bytes, and DISK0F's is two stray bytes
+  and 126. Both slipped past the "does this look like a boot sector" check, so
+  the machine ran them: DISK0B executed its own label as instructions and
+  DISK0F ran through a field of NOPs into cleared memory, and both then sat
+  silent — which reads like a disk the gateway cannot boot rather than a disk
+  with nothing on it to boot. They are now refused with the same message their
+  sibling `DISK0D` already got: "this image has no boot sector — it is data,
+  not a system disk".
+  - The rule is that a payload which is **more than four-fifths a single
+    repeated byte** is padding rather than a program, and the fraction is
+    measured rather than argued: across every image in the Altair and z80pack
+    collections, taking the payload each controller really extracts, the disks
+    that boot run from 5% to 63% and the ones with no boot program are 89% and
+    above. Two thresholds reasoned out before measuring were both wrong — a
+    half-way rule would have refused the three Altair hard disks, and a
+    trailing-zero-run rule would have refused z80pack's `mpm-2`, whose loader
+    is short and zero-padded.
+- **A mis-named image could be trusted, and the gateway recommended the
+  rename.** Naming a format with a filename prefix is an override — it skips
+  the directory inspection and mounts read-write — and its size check had only
+  a lower bound. A 625,920-byte Cromemco double-density image called
+  `ibm3740_x.dsk` cleared the 256,256 that format needs twice over and mounted
+  writable, read as single density with its directory landing in the middle of
+  a data track. Worse, the refusal an unmountable size produced said "rename it
+  with a format prefix, e.g. `ibm3740_mydisk.dsk`" — advice that cannot work,
+  since a prefix names the layout rather than the size, and that produced
+  exactly that mount if followed. Both ends are now bounded, and the message
+  points at the remedy that does exist: a disk we cannot mount is often still
+  bootable.
+- **Three real disks were refused for being 96 bytes too long.** `DISK13`,
+  `DISK14` and `DISK16` in the widely circulated Altair set are an `altair8`
+  disk plus a 96-byte trailer, and all three boot. Mounting demanded an exact
+  size and turned them away on the file length before reading their directory.
+  Both mount paths now allow anything short of one whole record, past which a
+  file is a different geometry rather than a padded one — the identical
+  96-byte trailer had already been found and fixed on the boot path and left
+  here. The three now mount read-write and list coherent directories: two
+  CP/M 3 system disks and a CP/M 2.2 tools disk. Nothing was loosened to do it,
+  because size was never what made a disk writable — whatever the size lets
+  through still has its whole directory checked.
 
 - **A hard-disk image with a few bytes of trailer is no longer refused.** The
   88-HDSK demanded an exact 4,988,928 bytes while the floppy allowed a short
@@ -4567,8 +4565,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.1...HEAD
-[0.9.0]: https://github.com/rickybryce/ethernetgateway/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.0
 [0.8.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.1
 [0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.7.0
