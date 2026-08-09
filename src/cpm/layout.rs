@@ -509,18 +509,31 @@ mod generate {
     /// Paths rather than a scan, because a *name* for each collection is the
     /// point — "z80pack cpmsim" tells a reader where to go and a directory
     /// name would not.
-    const REPOS: &[(&str, &str)] = &[
-        ("Altair-Duino / Altair8800 simulator (David Hansel)", "AltairRepos/Altair8800/disks"),
-        ("z80pack — altairsim library", "z80pack/altairsim/disks/library"),
-        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library"),
-        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library"),
-        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library"),
+    /// Where each collection comes from, printed with it.
+    ///
+    /// The addresses matter more than the listings do: the disks are not ours
+    /// to ship, so a catalogue of software the reader cannot go and get is a
+    /// tease.  Read from the checkouts themselves rather than from memory —
+    /// `git remote` for the Altair one, the project's own README for z80pack.
+    const REPOS: &[(&str, &str, &str)] = &[
+        (
+            "Altair-Duino / Altair8800 simulator (David Hansel)",
+            "AltairRepos/Altair8800/disks",
+            "https://github.com/dhansel/Altair8800  (the disks/ folder)",
+        ),
+        ("z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK),
+        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK),
+        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK),
+        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK),
         // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
         // a machine this gateway emulates, and it shows: four of its seven
         // disks are CP/M that our format table cannot read. Listing a
         // collection we cannot open would make this file a catalogue of
         // disappointments rather than of what works.
     ];
+
+    /// One address for all four of its libraries.
+    const Z80PACK: &str = "https://github.com/udo-munk/z80pack  (<sim>/disks/library)";
 
     /// Every file on one image, as the disk's own directory has it.
     ///
@@ -595,7 +608,7 @@ mod generate {
         );
 
         let mut found = 0usize;
-        for (name, rel) in REPOS {
+        for (name, rel, from) in REPOS {
             let dir = std::path::Path::new(&home).join(rel);
             if !dir.is_dir() {
                 eprintln!("skipping {name}: no {}", dir.display());
@@ -616,6 +629,7 @@ mod generate {
             // at a glance in a plain-text file with no other formatting.
             s.push_str("\n\n\n\n");
             s.push_str(&format!(">>>>> {name}\n"));
+                s.push_str(&format!("      {from}\n"));
             for image in images {
                 let disk = image.file_name().unwrap().to_string_lossy().to_string();
                 s.push_str(&format!("\n>> {disk}\n"));
@@ -776,6 +790,11 @@ mod tests {
     fn test_the_catalogue_distinguishes_no_files_from_no_filesystem() {
         let s = repo_disks();
         assert!(s.contains("no CP/M filesystem"), "the note must exist");
+        // And every collection says where it came from.  A catalogue of
+        // software the reader cannot go and get is a tease, and the images
+        // readme promises this file carries the addresses.
+        assert!(s.contains("https://github.com/dhansel/Altair8800"));
+        assert!(s.contains("https://github.com/udo-munk/z80pack"));
         // And it is used, not merely defined.
         assert!(s.matches("no CP/M filesystem -- this disk boots its own system").count() > 10);
         // A disk that *does* have a filesystem lists real 8.3 names.

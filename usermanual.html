@@ -1426,7 +1426,40 @@ it.
 When you boot a disk whose own system tracks drive the card, the boot banner
 in your terminal session says so and prints the address to open — including
 the case where the web server is switched off, which is worth knowing before
-you spend an evening wondering why a working disk looks dead.
+you spend an evening wondering why a working disk looks dead.  There is no
+such warning for a Dazzler and there cannot be: its two registers are ordinary
+low port numbers that turn up by chance all over a disk's data, so a scan
+before boot would cry wolf on two images in three.  A Dazzler announces itself
+when the guest switches one on, and the session list marks it then.
+</p>
+
+<p>
+<strong>Which disks these are.</strong>  In the widely-circulated Altair-Duino
+collection, <code>TDISK04.DSK</code> is a CP/M 1.4 built for the VDM-1 (it
+signs on <code>TARBELL 48K CPM V1.4 OF 2-15-78 / VDM VERSION.</code>), and
+<code>DISK10.DSK</code> is Cromemco's whole Dazzler library — Kaleidoscope,
+Dazzle-mation, Life, XLIFE, the graphics demo, the plotting programs and about
+two dozen in all.  In z80pack's <code>altairsim</code> library,
+<code>cpm14-vdm.dsk</code> is the same VDM-1 CP/M.  Twelve more images across
+the collections carry Dazzler programs.  <code>DISK11.DSK</code> looks like a
+third VDM-1 disk and stays dark: its driver lives in a CUTER monitor ROM rather
+than on the disk, and that ROM is not one the gateway has.
+</p>
+
+<p>
+<strong>Where to get them.</strong>  The disks are other people's work and are
+not shipped with the gateway.  The Altair-Duino set is the <code>disks/</code>
+folder of David Hansel's Altair 8800 simulator,
+<a href="https://github.com/dhansel/Altair8800">github.com/dhansel/Altair8800</a>;
+the others are the <code>&lt;sim&gt;/disks/library</code> folders of Udo
+Munk's z80pack,
+<a href="https://github.com/udo-munk/z80pack">github.com/udo-munk/z80pack</a>.
+Put the <code>.dsk</code> files in <code>CPM/images</code> under your transfer
+directory.  <strong><code>repodisks.txt</code></strong>, which the gateway
+writes into that folder beside its readme, lists every disk in those
+collections and every file on it — read through the same mount path the
+gateway itself uses, so it is each disk's own directory rather than somebody's
+notes — with the address each collection came from at the head of its section.
 </p>
 
 <p>

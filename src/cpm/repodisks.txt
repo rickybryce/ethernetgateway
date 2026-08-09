@@ -15,6 +15,7 @@ files is that system's business.
 
 
 >>>>> Altair-Duino / Altair8800 simulator (David Hansel)
+      https://github.com/dhansel/Altair8800  (the disks/ folder)
 
 >> CDISK01.DSK
 BASIC.COM
@@ -790,6 +791,7 @@ TARGET.PRN
 
 
 >>>>> z80pack — altairsim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
 
 >> cpm13.dsk
 ASM.COM
@@ -1123,6 +1125,7 @@ TARGET.PRN
 
 
 >>>>> z80pack — cpmsim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
 
 >> cpm13.dsk
 ASM.COM
@@ -1796,6 +1799,7 @@ PRELIM.MAC
 
 
 >>>>> z80pack — cromemcosim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
 
 >> cdos236_8.dsk
 BASIC.COM
@@ -2050,6 +2054,7 @@ XSUB.COM
 
 
 >>>>> z80pack — imsaisim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
 
 >> apu.dsk
 AM9511.MAC
