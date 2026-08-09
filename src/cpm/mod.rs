@@ -48,6 +48,7 @@ pub mod modem_port;
 pub mod printer;
 pub mod tarbell;
 pub mod uart;
+pub mod vdm;
 pub mod wd1771;
 pub mod cromemco;
 pub mod z80pack;

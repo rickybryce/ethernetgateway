@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.1] - Unreleased
 
+### Added
+
+- **The Processor Technology VDM-1 — a booted disk's screen, in the web UI.**
+  Some CP/M disks print to no port at all. The VDM-1 was a 1976 S-100 *video
+  card*: no serial line, no keyboard, and no data port — a character appears by
+  being stored into memory at `CC00`, and the card scans that 1 KB window. A
+  disk written for one boots here, takes keystrokes perfectly, and leaves the
+  session it was started from blank for ever, because the guest never produces
+  a character stream to show. The new `/vdm` page on the configuration web
+  server draws the 64×16 grid instead, with the scroll register on port `C8h`
+  choosing which line is displayed first.
+
+  **The browser is what makes this work at all.** Repainting a grid into a
+  session needs cursor addressing: fine on ANSI, absent on ASCII, and hopeless
+  on a 40-column PETSCII C64 that cannot show 64 columns. The deferral notes
+  weighed those three terminals against deriving a character *stream* from the
+  guest's writes — which needs three heuristics and can be wrong about what the
+  guest meant. A page dissolves the question: the repaint is literal, no
+  terminal is involved, and whoever is watching need not be whoever is typing.
+
+  **Sampling cannot disturb the guest**, so every booted session offers a
+  screen rather than only the disks known to use the card — it is a read of the
+  guest's own memory, through its own MMU, with no write, no trap and no change
+  in timing. The list marks the guests that have really driven the card, since
+  writing `C8h` is a VDM-1 driver's own declaration and inferring nothing is
+  better than guessing. Nothing is copied while no browser is watching: one
+  relaxed flag per loop, one snapshot per request, no timer anywhere.
+
+  It reaches `TDISK04` (CP/M 1.4, *VDM VERSION*) and `altairsim`'s
+  `cpm14-vdm`, which was the last image in the four collections that was real
+  work rather than a correct refusal. `DISK11` stays dark: its VDM driver lives
+  in a CUTER monitor ROM rather than on the disk, and no scan of an image can
+  find code that is not in it.
+
+- **A boot that will paint a VDM-1 says so.** A disk whose own system tracks
+  write port `C8h` is announced on the boot banner with the address to open —
+  and told plainly when the web server is off, which it is by default. Measured
+  across all 75 images in the four collections: `OUT C8h` in the system tracks
+  fires on exactly the two VDM-1 disks and nothing else. The conjunction first
+  proposed (the port *and* an address in the screen window) turned out to be
+  unnecessary — 60 of the 75 address that page for reasons that have nothing to
+  do with a video card, so the port alone is the declaration.
+
 ## [0.9.0] - 2026-08-08
 
 ### Added

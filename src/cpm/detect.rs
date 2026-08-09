@@ -37,8 +37,12 @@
 //! Tell you a disk is broken. A data disk has no loader and a disk for hardware
 //! we do not emulate names ports nothing here claims; both come back
 //! [`Detected::Unclear`], which is honest. And it says nothing about whether the
-//! disk *works* — TDISK04 is detected correctly and is still mute, because its
-//! console is a VDM-1 we have not built.
+//! disk *works* — TDISK04 is detected correctly and still writes nothing to any
+//! console port, because its screen is a Processor Technology VDM-1: a card
+//! with no data port, whose picture lives in the guest's own memory and is
+//! shown in the browser rather than in the session. [`image_drives_vdm`] says
+//! that in advance; it is a separate question from which machine, and does not
+//! change the answer to this one.
 
 use super::console::{Board, MachineChoice, MACHINE_CHOICES};
 
@@ -154,6 +158,33 @@ pub fn machine_for(configured: &str, image: &[u8]) -> (String, Option<String>) {
             }
         }
     }
+}
+
+/// Does this disk's own system software drive a VDM-1?
+///
+/// The same class of evidence as everything else here, and unusually strong for
+/// it: the Processor Technology VDM-1 has exactly one register — the scroll
+/// port at `C8h` — and a driver has to write it. Nothing else this gateway
+/// emulates answers there.
+///
+/// **Measured across all 75 images in the four collections.** `OUT C8h` in the
+/// system tracks fires on exactly two, TDISK04 and `cpm14-vdm`, and both really
+/// are VDM-1 disks: **zero false positives**. The conjunction first proposed —
+/// the port *and* an address in the `CC00`–`CFFF` window — turned out to be
+/// unnecessary, because the address half is worthless on its own: 60 of the 75
+/// address that page for reasons that have nothing to do with a video card. The
+/// port alone is the declaration.
+///
+/// What it misses is the reason the screen itself does not depend on it:
+/// **DISK11**'s VDM driver lives in the CUTER monitor ROM at `C000h` and is
+/// therefore not on the disk at all. No scan of an image can find code that is
+/// not in it. So this is used for the *advance warning* — telling the operator
+/// before the guest goes quiet where its screen has gone — while the screen is
+/// offered to every booted session regardless, and reports whether the guest
+/// has really driven the card once it is running.
+pub fn image_drives_vdm(image: &[u8]) -> bool {
+    let (_, outs) = ports_touched(image, SYSTEM_SCAN_BYTES);
+    outs.contains(&super::vdm::SCROLL_PORT)
 }
 
 /// Which machine this image is for, if it says so plainly.
@@ -319,10 +350,50 @@ mod tests {
         assert!(matches!(detect_machine(&[]), Detected::Unclear(_)));
     }
 
+    /// The VDM-1 declares itself with the one register it has, and the scan for
+    /// it is deliberately the *narrow* one — the system tracks, where a BIOS's
+    /// display driver is. Over a whole image a stray `D3 C8` in a data file is
+    /// indistinguishable from an `OUT`, which is the same reasoning that bounds
+    /// every other window in this module.
+    #[test]
+    fn test_a_disk_that_drives_the_vdm_scroll_register_says_so() {
+        assert!(image_drives_vdm(&image_touching(&[], &[super::super::vdm::SCROLL_PORT], false)));
+        // Reading the port is not driving it: the card answers nothing on an
+        // `IN`, so an `IN C8h` is somebody else's port, not a VDM-1 driver.
+        assert!(!image_drives_vdm(&image_touching(&[super::super::vdm::SCROLL_PORT], &[], false)));
+        assert!(!image_drives_vdm(&image_touching(&[0x04], &[0x08], false)));
+        assert!(!image_drives_vdm(&[]));
+    }
+
+    /// Addressing the screen window is *not* evidence — 60 of the 75 images in
+    /// the four collections address `CC00`–`CFFF` for reasons that have nothing
+    /// to do with a video card, which is why the conjunction first proposed was
+    /// dropped in favour of the port alone.
+    #[test]
+    fn test_addressing_the_screen_window_is_not_evidence() {
+        // `LD HL,CC00h` — a perfectly ordinary thing for a program with 48K of
+        // memory to do.
+        let mut img = vec![0x21, 0x00, 0xCC];
+        img.resize(4096, 0);
+        assert!(!image_drives_vdm(&img));
+    }
+
+    /// The advance warning is bounded by the system tracks, and beyond them it
+    /// says nothing rather than guessing.
+    #[test]
+    fn test_the_vdm_scan_stops_where_the_system_tracks_do() {
+        let mut img = vec![0u8; SYSTEM_SCAN_BYTES + 64];
+        img[SYSTEM_SCAN_BYTES + 8] = 0xD3;
+        img[SYSTEM_SCAN_BYTES + 9] = super::super::vdm::SCROLL_PORT;
+        assert!(!image_drives_vdm(&img), "a byte pair in a data file is not a driver");
+    }
+
     /// A disk for a controller we have, with a console we do not, is refused
-    /// rather than given the nearest console. TDISK04's VDM-1 is exactly this
-    /// once the VDM console exists; today it detects as `console_04` because its
-    /// keyboard is there, which is correct — the keyboard is what it reads.
+    /// rather than given the nearest console. TDISK04 is *not* an instance of
+    /// this and never was: it detects as `console_04`, which is right, because
+    /// the console is the keyboard and the keyboard is at `04h`/`05h`. Its
+    /// VDM-1 is a display with no port to detect and nothing for a console
+    /// choice to say — see [`image_drives_vdm`].
     #[test]
     fn test_a_console_we_do_not_have_is_unclear() {
         // Tarbell registers, and a console at ports nothing here uses.

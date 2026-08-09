@@ -38,6 +38,69 @@ use crate::telnet::cpm_emu::{cpm_peer_register, idle_nap, poll_once};
 use crate::telnet::cpm_modem::CpmModem;
 use iz80::Cpu;
 
+/// How a booted session names itself in the web UI's VDM-1 screen list.
+///
+/// Pure, so the naming can be tested without a session, a disk or a listener.
+/// The image comes first because it is what the operator picked and — since one
+/// image can only be booted once — it is the name that is actually unique;
+/// where the typist is sitting follows, because the person choosing a screen in
+/// the browser is not necessarily the person at the keyboard.
+fn screen_label(
+    image: &str,
+    peer: Option<std::net::IpAddr>,
+    is_serial: bool,
+    is_ssh: bool,
+    port: Option<crate::config::SerialPortId>,
+) -> String {
+    let from = if is_serial {
+        match port {
+            Some(crate::config::SerialPortId::A) => "serial port A".to_string(),
+            Some(crate::config::SerialPortId::B) => "serial port B".to_string(),
+            // A relay session is serial in behaviour and arrives over IP, so it
+            // has a peer and no local port.  Naming the slave's address is the
+            // most useful thing available.
+            None => match peer {
+                Some(ip) => format!("relay {ip}"),
+                None => "serial".to_string(),
+            },
+        }
+    } else {
+        match (peer, is_ssh) {
+            (Some(ip), true) => format!("SSH {ip}"),
+            (Some(ip), false) => format!("telnet {ip}"),
+            (None, true) => "SSH".to_string(),
+            (None, false) => "telnet".to_string(),
+        }
+    };
+    format!("{image} — {from}")
+}
+
+/// What to tell a session whose disk drives a VDM-1, before it goes quiet.
+///
+/// The advance warning half of the design: a guest painting a memory-mapped
+/// screen writes to no console port at all, so without this line a VDM-1 disk
+/// boots, takes keystrokes perfectly and looks broken. Only printed for a disk
+/// that *declared* the card (`detect::image_drives_vdm`) — every booted session
+/// offers its screen, but saying so on a disk that has nothing to show would
+/// make the line noise and teach the operator to skip it.
+///
+/// Pure and returning lines rather than printing, so the widths can be checked:
+/// the PETSCII terminals this gateway serves are 40 columns, and these are the
+/// only lines here carrying a URL.
+fn vdm_notice(web_enabled: bool, ip: &str, port: u16) -> Vec<String> {
+    let mut lines = vec!["Screen: this disk paints a VDM-1".to_string()];
+    if web_enabled {
+        lines.push("(no port to print to). Watch it at".to_string());
+        // On its own line because an address plus a sentence does not fit 40
+        // columns, and a wrapped URL is one a person cannot type back in.
+        lines.push(format!("http://{ip}:{port}/vdm"));
+    } else {
+        lines.push("(no port to print to). The web UI".to_string());
+        lines.push("would show it, but it is off.".to_string());
+    }
+    lines
+}
+
 /// Claims an image for one session and releases it however the session ends.
 ///
 /// RAII rather than a matched pair of calls: a boot can leave through an error,
@@ -659,6 +722,10 @@ impl TelnetSession {
         let configured = config::get_config().cpm_boot_machine.clone();
         let (machine_key, detected_note) =
             crate::cpm::detect::machine_for(&configured, &bytes);
+        // Asked here because `bytes` is about to be handed to the machine, and
+        // answered on the banner below — a disk that never boots needs no
+        // advice about where to watch it.
+        let drives_vdm = crate::cpm::detect::image_drives_vdm(&bytes);
         machine.set_machine(&machine_key);
         // Unit 0 is the disk being booted, and it has to be: the bootstrap can
         // load a system from any unit — that was measured — but the operating
@@ -766,6 +833,31 @@ impl TelnetSession {
         }
 
         let name = image.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+
+        // Offer this guest's screen to the web UI, for as long as it runs.
+        //
+        // Registered unconditionally, and *after* the boot succeeded so a disk
+        // that never started never appears in the list.  Unconditionally
+        // because a VDM-1 has no data port and no way to announce itself: the
+        // guest paints by storing bytes into its memory, so the only thing we
+        // could gate on before the fact is a guess about the disk.  Sampling
+        // costs the guest nothing — it is a read of its own RAM through its own
+        // MMU — so the honest arrangement is to offer every booted session and
+        // tell the viewer which ones have actually driven the card.
+        let screen = crate::cpm::vdm::register(screen_label(
+            &name,
+            self.peer_addr,
+            self.is_serial,
+            self.is_ssh,
+            self.serial_port_id,
+        ));
+        // Logged rather than printed at the session: which screen is which is
+        // an operator's question, asked from the browser, and the logs page is
+        // where the rest of that kind of answer already lives.  Printing it
+        // into the guest's session would put a line about our web UI on the
+        // console of a machine that is about to start painting its own.
+        glog!("CP/M boot: VDM-1 screen {} is {}", screen.id(), name);
+
         self.send_line("").await?;
         self.send_line(&format!("  {} {}", self.green("Booted"), self.amber(&name)))
             .await?;
@@ -774,6 +866,19 @@ impl TelnetSession {
             self.dim(if writable { "Changes are saved." } else { "Read-only." })
         ))
         .await?;
+        // Where this guest's screen went, for the disks that have one.  Said
+        // before the guest starts painting, because after that the session is
+        // the guest's and anything we print lands in the middle of its display.
+        if drives_vdm {
+            let webcfg = config::get_config();
+            for line in vdm_notice(
+                webcfg.web_enabled,
+                &crate::serial::primary_local_ip(),
+                webcfg.web_port,
+            ) {
+                self.send_line(&format!("  {}", self.dim(&line))).await?;
+            }
+        }
         // Which console the guest has been given.  Said rather than left
         // implicit, because a disk that goes quiet at this point is almost
         // always looking at a console that is not there, and the operator's
@@ -852,7 +957,7 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
-        let result = self.cpm_boot_run(&mut cpu, &mut machine, &mut modem, erase).await;
+        let result = self.cpm_boot_run(&mut cpu, &mut machine, &mut modem, erase, &screen).await;
 
         // Save whatever the guest changed, whatever ended the session — a user
         // who pressed ESC still wants their work.
@@ -914,6 +1019,7 @@ impl TelnetSession {
         machine: &mut BootMachine,
         modem: &mut CpmModem,
         erase: bool,
+        screen: &crate::cpm::vdm::Screen,
     ) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
         let transfer_dir = cfg.transfer_dir.clone();
@@ -942,6 +1048,7 @@ impl TelnetSession {
                 print_format,
                 print_auto_lf,
                 &transfer_dir,
+                screen,
             )
             .await;
         // Whatever the guest left on the platen is still a print.  The file is
@@ -1005,6 +1112,7 @@ impl TelnetSession {
         print_format: Option<crate::cpm::printer::Format>,
         print_auto_lf: bool,
         transfer_dir: &str,
+        screen: &crate::cpm::vdm::Screen,
     ) -> Result<(), std::io::Error> {
         let mut executed: u64 = 0;
         let mut esc_run = 0u8;
@@ -1060,6 +1168,17 @@ impl TelnetSession {
                     self.flush().await?;
                     printed = true;
                 }
+
+                // The VDM-1's screen, at the same seam and to whoever has it
+                // open in the browser.  A no-op — one atomic load — unless a
+                // viewer polled since the last one, so a guest nobody is
+                // watching runs exactly as it did before this existed.
+                //
+                // It has to be here rather than anywhere the guest "prints",
+                // because a memory-mapped card has no such moment: the picture
+                // is a property of the guest's RAM at an instant, and the seam
+                // is the only instant we own.
+                machine.publish_vdm(screen);
 
                 // The printer, at the same seam and by the same reasoning — but
                 // to a spool rather than to the wire, and with no PETSCII
@@ -1207,6 +1326,58 @@ impl TelnetSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A VDM-1 disk is told where its screen went, and told the truth when
+    /// there is nowhere for it to go — the same say-why rule the rest of this
+    /// boot path follows, and the case that actually matters, because the web
+    /// UI is **off by default**.
+    #[test]
+    fn test_a_vdm_disk_is_told_where_its_screen_is() {
+        let on = vdm_notice(true, "192.168.1.178", 8080);
+        assert!(on.iter().any(|l| l.contains("http://192.168.1.178:8080/vdm")));
+
+        let off = vdm_notice(false, "192.168.1.178", 8080);
+        assert!(!off.iter().any(|l| l.contains("http://")), "no address that shows nothing");
+        assert!(off.iter().any(|l| l.contains("off")), "say why: {off:?}");
+
+        // 40 columns with the two-space indent these are printed under, which
+        // the URL line is the only real candidate to overrun.
+        for line in on.iter().chain(off.iter()) {
+            assert!(line.chars().count() <= 38, "{line:?} does not fit a PETSCII screen");
+        }
+    }
+
+    /// The screen list names the image and where the typist is, because the
+    /// person picking a screen in the browser is not necessarily the person at
+    /// the keyboard.
+    #[test]
+    fn test_a_screen_is_named_for_its_image_and_its_caller() {
+        use crate::config::SerialPortId;
+        let ip: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+
+        assert_eq!(
+            screen_label("TDISK04.DSK", Some(ip), false, false, None),
+            "TDISK04.DSK — telnet 10.0.0.9"
+        );
+        assert_eq!(
+            screen_label("TDISK04.DSK", Some(ip), false, true, None),
+            "TDISK04.DSK — SSH 10.0.0.9"
+        );
+        assert_eq!(
+            screen_label("TDISK04.DSK", None, true, false, Some(SerialPortId::B)),
+            "TDISK04.DSK — serial port B"
+        );
+        // A relay session behaves like a serial caller and arrives over IP, so
+        // it has a peer and no local port.  Naming the slave's address is the
+        // most useful thing there is.
+        assert_eq!(
+            screen_label("TDISK04.DSK", Some(ip), true, false, None),
+            "TDISK04.DSK — relay 10.0.0.9"
+        );
+        // Nothing known about the caller still produces a usable name rather
+        // than a dangling separator.
+        assert_eq!(screen_label("A.DSK", None, false, false, None), "A.DSK — telnet");
+    }
 
     /// One session per image, and the claim comes back however the session
     /// ends — a claim leaked by an error path could never be booted again

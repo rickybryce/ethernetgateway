@@ -1382,6 +1382,62 @@ The web server respects the same <code>security_enabled</code> /
         a hostile peer.</li>
 </ul>
 
+<h3>6.4.3 The VDM-1 Screen</h3>
+
+<p>
+The web server has a second page, <code>/vdm</code>, reached with the
+<strong>VDM-1 Screen</strong> button in the configuration page's <em>AI Chat,
+Browser, Weather &amp; CP/M</em> frame.  It shows the screen of a <em>booted</em> CP/M disk
+(§8.11) whose display is a <strong>Processor Technology VDM-1</strong> —
+a 1976 video card with no serial line and no data port at all.  Software
+written for one puts a character on the screen by storing a byte into memory
+at <code>CC00</code>, so such a disk boots here, takes your keystrokes
+perfectly and leaves the telnet or SSH session it was started from completely
+blank.  There is no character stream to show, because the guest never
+produces one.
+</p>
+
+<p>
+Boot the disk as usual and keep typing in your terminal session — the
+keyboard is an ordinary port, and only the display was ever memory-mapped.
+Open <code>http://&lt;server-ip&gt;:8080/vdm</code> in a browser, pick the
+session from the list, and the 64&times;16 screen is drawn there, cursor and
+all.  Two people can therefore share one session: whoever is typing and
+whoever is watching need not be the same person, which is the one thing a
+memory-mapped display makes easier rather than harder.
+</p>
+
+<p>
+Every booted session offers a screen, not only the disks known to use the
+card, because sampling one costs the guest nothing: it is a read of the
+guest's own memory with no write, no interruption and no change in timing.
+The list marks the sessions that have really driven the card — a guest that
+has written the scroll register on port <code>C8h</code> is running a VDM-1
+driver — and a screen showing only whatever happens to live at
+<code>CC00</code> says so beneath the picture rather than leaving you to
+puzzle at the noise.  Nothing is copied at all while no browser is watching:
+the page asks for a frame about seven times a second and each request
+produces exactly one, so closing the tab ends the cost rather than reducing
+it.
+</p>
+
+<p>
+When you boot a disk whose own system tracks drive the card, the boot banner
+in your terminal session says so and prints the address to open — including
+the case where the web server is switched off, which is worth knowing before
+you spend an evening wondering why a working disk looks dead.
+</p>
+
+<aside class="note">
+<span class="label">Who can watch</span>
+This page belongs to the configuration server, so it authenticates the
+<em>administrator</em> — while the person typing at the guest is on telnet
+or SSH.  Anyone who can open the configuration page can watch any booted
+session's screen.  On a gateway whose web UI already shows the password and
+the API key that is not a new privilege, but it is a different sentence from
+&ldquo;the operator can see their own screen&rdquo;.
+</aside>
+
 <aside class="note">
 <span class="label">Encryption</span>
 The configuration web server speaks plain HTTP, not HTTPS.  Don't
@@ -2534,17 +2590,18 @@ is why the loader is read instead.
 </p>
 
 <p>
-Twenty-nine of the thirty-four images in the widely-circulated Altair sample
+Thirty of the thirty-four images in the widely-circulated Altair sample
 set boot and sign on, with nothing configured: Altair CP/M 2.2,
 <strong>CP/M 3.0</strong>, CP/M 2.2AT, <strong>Altair DOS</strong>,
 <strong>Altair Disk Extended BASIC</strong>, <strong>Time Sharing BASIC</strong>
 V1.1 and V2, 63K CP/M 2.2b and <strong>Altair Hard Disk BASIC</strong> on the
-4.9&nbsp;MB hard disks, three Tarbell CP/M systems, <strong>Comal 80</strong>,
+4.9&nbsp;MB hard disks, four Tarbell CP/M systems, <strong>Comal 80</strong>,
 and all three Cromemco disks &mdash; <strong>CDOS</strong> and two more CP/M 2.2
-systems. Of the five
-that do not, four are correctly refused &mdash; three are <em>programs</em>
+systems. Of the four
+that do not, all four are correctly refused &mdash; three are <em>programs</em>
 disks (data rather than system disks, the companions of disks that do boot) and
-one is blank &mdash; and the fifth waits on a video board we do not emulate yet.
+one is blank. A fifth used to wait on a video board we did not emulate; it now
+boots and paints its screen in the web UI (&sect;6.4.3).
 Separately, every one of the eleven 4.9&nbsp;MB <code>HDSK*</code> hard-disk
 images boots, as do nine disks in z80pack&rsquo;s own library &mdash; including
 <strong>MP/M</strong> and <strong>UCSD p-System IV</strong>.

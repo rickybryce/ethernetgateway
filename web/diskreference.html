@@ -3002,7 +3002,7 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                         <tr><td><code>TDISK01</code></td><td>CP/M 1.3</td><td><code>10h</code>/<code>11h</code></td><td>same</td><td><strong>Boots</strong> &mdash; <code>TARBELL 62K CPM V1.3 OF 8-13-77</code></td></tr>
                         <tr><td><code>TDISK02</code></td><td>CP/M 2.2</td><td><code>10h</code>/<code>11h</code></td><td>same</td><td><strong>Boots</strong> &mdash; <code>Micro Resources 62K CP/M Ver. 2.2 of 1/15/82</code>, reads, writes, two drives</td></tr>
                         <tr><td><code>TDISK05</code></td><td>CP/M 2.2 for VDM-1</td><td><code>04h</code>/<code>05h</code>, ready-low</td><td><code>CALL 0C019h</code> &mdash; CUTER ROM</td><td><strong>Boots</strong> &mdash; <code>Tarbell 48K CPM 2.2</code>, <code>DIR</code>, <code>STAT</code></td></tr>
-                        <tr><td><code>TDISK04</code></td><td>CP/M 1.4 for VDM-1</td><td><code>04h</code>/<code>05h</code>, ready-low</td><td>memory-mapped VDM-1 at <code>CC00</code></td><td>Takes keys; screen not painted &mdash; <strong>deferred</strong></td></tr>
+                        <tr><td><code>TDISK04</code></td><td>CP/M 1.4 for VDM-1</td><td><code>04h</code>/<code>05h</code>, ready-low</td><td>memory-mapped VDM-1 at <code>CC00</code></td><td><strong>Boots</strong> &mdash; <code>TARBELL 48K CPM V1.4 OF 2-15-78</code>, <code>DIR</code>; its screen is in the web UI</td></tr>
                         <tr><td><code>TDISK03</code></td><td>Comal 80</td><td><code>00h</code>/<code>01h</code></td><td><code>OUT 01h</code></td><td>Not a Tarbell disk at all &mdash; see below</td></tr>
                         <tr><td><code>TDISK06</code></td><td>VDM-1 programs</td><td>&mdash;</td><td>&mdash;</td><td>Correctly refused: 256,256 bytes of <code>E5h</code>, a blank</td></tr>
                     </tbody>
@@ -3140,7 +3140,21 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     machine runs was never checked against them.
                 </p>
 
-                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK04 &mdash; the VDM-1, and why it is deferred</h3>
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK04 &mdash; the VDM-1, and where its screen went</h3>
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>Built.</strong> This section was written while the
+                        VDM-1 was deferred, and the reasoning below is kept because
+                        it is what settled the design. What changed is the last
+                        paragraph's conclusion: the screen is <strong>not</strong>
+                        repainted into an ANSI session. It is served by the web UI
+                        at <code>/vdm</code>, which needs no cursor addressing at
+                        all and works for a PETSCII C64 and an ASCII terminal alike
+                        &mdash; the person watching the screen need not even be the
+                        person typing at it. See
+                        <a href="cpmreference.html#vdm">the CP/M reference</a>.
+                    </p>
+                </div>
                 <p>
                     TDISK04 carries the complete driver on the disk, header and all:
                     <code>; VDM DRIVER FOR CBIOS. 9-24-77 VERSION</code>,
@@ -3158,24 +3172,30 @@ CWRSEC  equ 20h     ;same bit fields as CRDSECT</code></pre>
                     <em>any</em> port &mdash; verified by scanning both disks' system
                     tracks for <code>OUT 05h</code>, <code>OUT 01h</code> and
                     <code>OUT 11h</code>: none appear. So with the right console
-                    fitted, TDISK04 takes keystrokes perfectly and still shows
-                    nothing. Give it that console, run it, and its sign-on is sitting
-                    in screen memory:
+                    fitted, TDISK04 takes keystrokes perfectly and the session it was
+                    started from stays blank for ever &mdash; there is no stream to
+                    show. Give it that console, run it, and its sign-on is sitting in
+                    screen memory, which is where the viewer reads it from:
                 </p>
                 <pre><code>--- VDM-1 screen at 0xcc00 ---
 TARBELL 48K CPM V1.4 OF 2-15-78
 VDM VERSION.
 HOW MANY DISKS?
 
+scroll=0x03, driven=true
 pc=0xbed3   (its CONIN loop, waiting for a key)</code></pre>
                 <p>
                     That is a passing test
                     (<code>test_a_vdm_guest_writes_its_signon_into_screen_memory</code>),
-                    so the remaining work is a measured gap rather than a mystery:
-                    sample the window and paint it.
+                    and it now runs through the <em>shipped</em> path rather than
+                    reading the window itself: the machine publishes a snapshot, the
+                    screen registry hands it over and the renderer draws it &mdash;
+                    the same three steps the browser's poll takes. A test that
+                    sampled memory and then described what a display <em>would</em>
+                    do with it is how a plausible-but-wrong renderer survives.
                 </p>
                 <p>
-                    <strong>What makes it a real piece of work, not a fifth table
+                    <strong>What made it a real piece of work, not a fifth table
                     entry:</strong> every console the gateway has is a byte
                     <em>stream</em>. The VDM-1 is a grid you sample, so showing it
                     needs cursor addressing. ANSI clients have that; a 40-column
@@ -3188,9 +3208,22 @@ pc=0xbed3   (its CONIN loop, waiting for a key)</code></pre>
                     the scroll moves no memory; the cursor cell is written as
                     inverse video and is not output at all). Repaint is literal and
                     cannot be wrong about the guest; derivation is an interpretation
-                    of what the guest meant. Given this page's own rule, repaint on
-                    ANSI is the answer, and the VDM-1 becomes a board that requires
-                    an ANSI terminal.
+                    of what the guest meant.
+                </p>
+                <p>
+                    So repaint it is &mdash; but into a <strong>browser</strong>
+                    rather than into the session, which dissolves the terminal
+                    problem instead of accepting it. The web UI already has a
+                    listener, credentials, a lockout map and a page style; a screen
+                    there costs two JSON routes and needs no cursor addressing from
+                    anybody. The cursor comes along free, because on this card the
+                    cursor <em>is</em> an inverse-video cell rather than an output
+                    character. The honest caveat is that this page authenticates the
+                    <em>administrator</em> while the person typing at the guest is on
+                    telnet or SSH; on a gateway whose web UI already shows the
+                    password and the API key that is not a new privilege, but it is
+                    a different sentence from &ldquo;the operator sees their own
+                    screen&rdquo;.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">TDISK03 &mdash; not a Tarbell disk, and now its own machine</h3>
@@ -3350,18 +3383,23 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                         </tr>
                         <tr>
                             <td>The Processor Technology VDM-1</td>
-                            <td><strong>Deferred deliberately, and the gap is measured rather than
-                                guessed</strong> &mdash; a passing test shows TDISK04's sign-on
-                                sitting in screen memory at <code>CC00</code> with the guest parked
-                                in its <code>CONIN</code> loop. All that remains is to sample the
-                                1&nbsp;KB window plus the <code>C8h</code> scroll register and paint
-                                the 64&times;16 grid. What makes it real work is that it is the first
-                                console here that is a <em>screen</em> rather than a byte stream, so
-                                it needs cursor addressing: fine on ANSI, impossible on ASCII, and a
-                                40-column PETSCII client cannot show 64 columns at all. It costs
-                                exactly one disk, TDISK04 &mdash; TDISK05 reaches its prompt through
-                                the CUTER stub without any VDM-1 at all, and no Cromemco disk uses one
-                                (checked: zero <code>OUT C8h</code> across all three whole images).</td>
+                            <td><strong>Done</strong>, after two deliberate deferrals &mdash; the
+                                1&nbsp;KB window at <code>CC00</code> plus the <code>C8h</code>
+                                scroll register, rendered as a 64&times;16 grid in the web UI at
+                                <code>/vdm</code>. It is the first console here that is a
+                                <em>screen</em> rather than a byte stream, which is what made it real
+                                work: showing it needs cursor addressing, which is fine on ANSI,
+                                impossible on ASCII, and hopeless on a 40-column PETSCII client. The
+                                browser dissolves that question rather than answering it. Sampling
+                                cannot disturb the guest &mdash; it is a read of the guest's own RAM
+                                through its own MMU &mdash; so every booted session offers a screen,
+                                and only a session nobody is watching does no work at all. It buys
+                                <strong>TDISK04</strong> and <code>altairsim</code>'s
+                                <code>cpm14-vdm</code>; TDISK05 reaches its prompt through the CUTER
+                                stub without any VDM-1 at all, no Cromemco disk uses one (checked:
+                                zero <code>OUT C8h</code> across all three whole images), and
+                                <code>DISK11</code> still stays dark because its VDM driver is in a
+                                CUTER ROM we do not have rather than on the disk.</td>
                         </tr>
                         <tr>
                             <td>A z80pack <code>cpmsim</code> controller</td>
@@ -3397,19 +3435,23 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                         </tr>
                         <tr>
                             <td>Boot coverage as it stands</td>
-                            <td><strong>29 of the 34</strong> images in the working set boot and sign
+                            <td><strong>30 of the 34</strong> images in the working set boot and sign
                                 on <em>with nothing configured</em> &mdash; the machine setting
                                 defaults to <code>auto</code> and the disk names its own board. By
                                 family: 19 of 22 <code>DISK*</code>; all 3 <code>HDSK*</code> here,
                                 and separately <strong>all eleven</strong> once the removable backup
                                 volume is included (the working set stops at HDSK03; HDSK05&ndash;0B
                                 had never been tried before and all reach
-                                <code>63K CP/M 2.2b</code>); <strong>4 of 6</strong>
-                                <code>TDISK*</code>; and <strong>all 3</strong> <code>CDISK*</code>.
+                                <code>63K CP/M 2.2b</code>); <strong>5 of 6</strong>
+                                <code>TDISK*</code> &mdash; the fifth being TDISK04, which signs on
+                                to a screen rather than to a port; and <strong>all 3</strong>
+                                <code>CDISK*</code>.
                                 Separately, 9 of the disks in z80pack's own library boot.
-                                The five that do not are each accounted for, and
-                                <strong>only one is still work</strong>: <code>TDISK04</code> waits
-                                on the VDM-1. The other four are correctly refused &mdash;
+                                The four that do not are each accounted for, and
+                                <strong>none of them is still work</strong> &mdash; all four are
+                                correctly refused. <code>TDISK04</code>, which used to be the fifth
+                                and the only one that <em>was</em> work, waited on the VDM-1 and now
+                                has it, painting into the web UI rather than into the session.
                                 <code>TDISK06</code> is a blank, and <code>DISK0D</code>,
                                 <code>DISK0B</code> and <code>DISK0F</code> are the <em>data</em>
                                 companions of disks that do boot, carrying no boot program at all.

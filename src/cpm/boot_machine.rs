@@ -215,6 +215,25 @@ pub struct BootMachine {
     /// its own hands; a disk load does not, and pacing a guest that is busy
     /// reading a track would make every `DIR` crawl.
     disk_accesses: u64,
+    /// The VDM-1's scroll register, as the guest last set it.
+    ///
+    /// Held here rather than in the display because it is machine state: the
+    /// card's 1 KB window is guest memory we can sample at any moment, but
+    /// which line is at the top exists only as the last byte written to port
+    /// `C8h`, and nothing else would have seen it.  Latched unconditionally —
+    /// on a machine with no VDM-1 this is a byte that stays zero, and the port
+    /// was previously offered to the modem and discarded, so the guest cannot
+    /// tell the difference.
+    vdm_scroll_latch: u8,
+    /// Has the guest ever written the scroll register?
+    ///
+    /// The one honest, evidence-based answer to "is this a VDM-1 guest?" that
+    /// costs nothing and infers nothing: a program that drives `C8h` is running
+    /// a VDM-1 driver.  It is not used to *gate* anything — the screen can be
+    /// sampled either way, because sampling is free and a program may paint the
+    /// window without ever scrolling it — only to tell a viewer whether they
+    /// are looking at a screen or at whatever happens to live at `CC00`.
+    vdm_seen: bool,
     /// Bank switching, for the machines that have it.
     ///
     /// Idle until a guest allocates a bank, so every disk that does not bank
@@ -254,6 +273,8 @@ impl BootMachine {
             modem: ModemPort::new(),
             print: Vec::new(),
             printer_port: None,
+            vdm_scroll_latch: 0,
+            vdm_seen: false,
             mmu: super::mmu::Mmu::default(),
             has_mmu: false,
             disk_accesses: 0,
@@ -731,6 +752,35 @@ impl BootMachine {
         self.idle_status_reads
     }
 
+    /// The VDM-1 scroll register, for the display that samples this machine.
+    pub fn vdm_scroll(&self) -> u8 {
+        self.vdm_scroll_latch
+    }
+
+    /// Has this guest driven the VDM-1's scroll register?
+    pub fn vdm_active(&self) -> bool {
+        self.vdm_seen
+    }
+
+    /// Hand this machine's screen to a watching viewer, if there is one.
+    ///
+    /// Costs one relaxed atomic load when nobody is watching, which is what
+    /// lets the driver call it at every key-poll seam — thousands of times a
+    /// second — without the price showing up anywhere.
+    ///
+    /// The read goes through `peek`, so a banked guest is sampled through its
+    /// MMU rather than out of the array behind it.  That distinction has
+    /// already been a real defect on this machine once, in the DMA path, and
+    /// the fix is the same one: everything that reads guest memory reads it the
+    /// way the guest's own CPU would.
+    pub fn publish_vdm(&mut self, screen: &super::vdm::Screen) {
+        if !screen.wanted() {
+            return;
+        }
+        let (scroll, active) = (self.vdm_scroll(), self.vdm_active());
+        screen.publish(|addr| self.peek(addr), scroll, active);
+    }
+
     /// Accesses to the disk controller's ports since the machine was made.
     pub fn disk_accesses(&self) -> u64 {
         self.disk_accesses
@@ -1200,6 +1250,22 @@ impl Machine for BootMachine {
                 self.print.push(value);
                 self.idle_status_reads = 0;
             }
+            // The VDM-1's scroll register.  Write-only, like the card: an `IN`
+            // here still falls through below, because a real VDM-1 answers
+            // nothing and a guest that reads a port we have started claiming
+            // must see exactly what it saw before.
+            //
+            // After the printer for the same reason the printer is after the
+            // console: a port the operator has assigned to a device the guest
+            // is really using must not be taken away by a display the guest
+            // cannot even detect.  Deliberately *not* counted as console
+            // activity — painting a memory-mapped screen produces no console
+            // bytes at all, which is exactly why a VDM-1 guest looks idle, and
+            // the pacing is right about that.
+            super::vdm::SCROLL_PORT => {
+                self.vdm_scroll_latch = value;
+                self.vdm_seen = true;
+            }
             // The control register and anything else: offered to the modem,
             // then accepted and discarded.
             other => {
@@ -1431,6 +1497,69 @@ mod tests {
         // through to the modem/idle-bus path, so nothing is echoed to the user.
         m.port_out(0x11, b'X');
         assert!(m.take_output().is_empty(), "0x11 is not this machine's console");
+    }
+
+    /// The VDM-1's one register, and the one thing about it that is easy to get
+    /// wrong: it is an output-only latch.  Claiming a port for a display the
+    /// guest cannot detect must not change what the guest reads there, or a
+    /// machine gains a device that answers `0x00` where it used to find an
+    /// empty bus.
+    #[test]
+    fn test_the_vdm_scroll_register_is_a_write_only_latch() {
+        use crate::cpm::vdm;
+        let mut m = BootMachine::new();
+        assert_eq!(m.vdm_scroll(), 0);
+        assert!(!m.vdm_active(), "nothing has driven the card yet");
+
+        let before = m.port_in(vdm::SCROLL_PORT as u16);
+        m.port_out(vdm::SCROLL_PORT as u16, 0x0C);
+        assert_eq!(m.vdm_scroll(), 0x0C);
+        assert!(m.vdm_active(), "a guest that writes C8h is running a VDM-1 driver");
+        assert_eq!(
+            m.port_in(vdm::SCROLL_PORT as u16),
+            before,
+            "a real VDM-1 drives nothing onto the bus for an IN, so neither do we"
+        );
+        // And it is not console activity: a card that is painted by memory
+        // writes produces no console bytes, which is exactly why a VDM-1 guest
+        // looks idle to the driver — and the driver is right about that.
+        assert!(m.take_output().is_empty());
+    }
+
+    /// The whole path from the guest's memory to a viewer's frame, in one test:
+    /// the guest paints, sets its scroll register, and the screen that comes out
+    /// the other end is rotated the way the card would show it.
+    ///
+    /// Also pins the "nobody is watching costs nothing" contract, which is the
+    /// only reason this can run on every booted session unconditionally.
+    #[test]
+    fn test_a_machine_publishes_the_screen_its_guest_painted() {
+        use crate::cpm::vdm;
+        let mut m = BootMachine::new();
+        for (i, b) in b"HELLO".iter().enumerate() {
+            m.poke(vdm::BASE + i as u16, *b);
+        }
+        // Line 1 at the top, so what the guest wrote on line 0 comes round to
+        // the bottom of the display.
+        m.port_out(vdm::SCROLL_PORT as u16, 1);
+
+        let screen = vdm::register("boot_machine unit test");
+        m.publish_vdm(&screen);
+        assert!(
+            matches!(vdm::look(screen.id()), vdm::Look::Waiting { .. }),
+            "nobody had asked, so nothing was sampled"
+        );
+
+        // That `look` was a viewer asking, so the next seam publishes.
+        m.publish_vdm(&screen);
+        let vdm::Look::Frame(snap) = vdm::look(screen.id()) else {
+            panic!("a frame was published");
+        };
+        assert!(snap.active);
+        assert_eq!(snap.scroll, 1);
+        let text = vdm::frame_text(&snap.frame());
+        assert_eq!(text[vdm::ROWS - 1].trim_end(), "HELLO");
+        assert!(text[0].trim().is_empty(), "line 1 is at the top and it is blank");
     }
 
     /// An unrecognised setting must leave a working console rather than none.
@@ -3786,11 +3915,17 @@ mod tests {
         );
     }
 
-    /// A VDM-1 guest is not mute because it failed — it is painting a screen we
-    /// do not show yet.
+    /// A VDM-1 guest is not mute because it failed — it is painting a screen
+    /// through a card that has no port to print to.
     ///
-    /// This exists so the deferred VDM-1 work is a *measured* gap rather than a
-    /// mystery for whoever picks it up. TDISK04's CP/M assembles with
+    /// The gate for the whole feature, and it runs through the **shipped path**
+    /// rather than reading the window itself: the machine publishes, the
+    /// registry hands the frame over, and `vdm::frame` renders it — exactly the
+    /// three steps a browser's poll takes. A test that sampled memory and then
+    /// described what the display *would* do with it is how a plausible-but-
+    /// wrong renderer survives; the printer work learned that the expensive way.
+    ///
+    /// TDISK04's CP/M assembles with
     /// `VDM EQU TRUE` and prints by storing bytes into the Processor Technology
     /// VDM-1's window at `CC00`, 64 columns by 16 lines, scrolling with the
     /// register on port `C8`. It never writes a console character to any port —
@@ -3799,20 +3934,17 @@ mod tests {
     /// keystrokes perfectly and still shows nothing.
     ///
     /// Give it that console, run it, and its sign-on is sitting in screen
-    /// memory. That is the whole of what remains: sample the window and paint it.
+    /// memory — where the web UI's viewer now finds it.
     ///
     /// Ignored: set `CPM_VDM_IMAGE` to TDISK04.DSK (or another VDM-1 disk).
     #[test]
     #[ignore]
     fn test_a_vdm_guest_writes_its_signon_into_screen_memory() {
+        use crate::cpm::vdm;
         let Ok(path) = std::env::var("CPM_VDM_IMAGE") else {
             eprintln!("set CPM_VDM_IMAGE to run this");
             return;
         };
-        /// The VDM-1's screen window, and its shape.
-        const VDM_BASE: u16 = 0xCC00;
-        const VDM_COLS: usize = 64;
-        const VDM_ROWS: usize = 16;
 
         let bytes = std::fs::read(&path).unwrap();
         let mut m = BootMachine::new();
@@ -3829,20 +3961,26 @@ mod tests {
 
         assert!(m.take_output().is_empty(), "a VDM-1 guest prints to no port at all");
 
-        let mut screen = String::new();
-        for row in 0..VDM_ROWS {
-            let line: String = (0..VDM_COLS)
-                .map(|col| {
-                    // Bit 7 is the VDM-1's own business (inverse video); the
-                    // character is the low seven bits.
-                    let b = m.peek(VDM_BASE + (row * VDM_COLS + col) as u16) & 0x7F;
-                    if (0x20..0x7F).contains(&b) { b as char } else { '.' }
-                })
-                .collect();
-            screen.push_str(line.trim_end());
-            screen.push('\n');
-        }
-        println!("--- VDM-1 screen at {VDM_BASE:#06x} ---\n{screen}");
+        // Through the shipped path, not around it: register a screen the way a
+        // booted session does, ask for a frame the way the browser's poll does,
+        // publish at a seam the way the driver does, and render with the same
+        // function the JSON route calls.
+        let live = vdm::register("live gate");
+        let vdm::Look::Waiting { .. } = vdm::look(live.id()) else {
+            panic!("nothing has been published yet")
+        };
+        m.publish_vdm(&live);
+        let vdm::Look::Frame(snap) = vdm::look(live.id()) else {
+            panic!("the seam published the frame the viewer asked for")
+        };
+
+        let screen: String =
+            vdm::frame_text(&snap.frame()).iter().map(|l| format!("{}\n", l.trim_end())).collect();
+        println!("--- VDM-1 screen at {:#06x} ---\n{screen}", vdm::BASE);
+        println!(
+            "scroll={:#04x}, driven={} (a guest that has written C8h is running a VDM-1 driver)",
+            snap.scroll, snap.active
+        );
         println!("pc={:#06x} (its CONIN loop, waiting for a key)", cpu.registers().pc());
 
         // `CPM`, not `CP/M`: the one disk this gate exists for signs on as

@@ -395,6 +395,50 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("GET", "/vdm") => {
+            let cfg = config::get_config();
+            let body = render_vdm_page(&cfg);
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
+        ("GET", "/vdm/list") => {
+            let body = vdm_list_json(&crate::cpm::vdm::list());
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
+        ("GET", "/vdm/frame") => {
+            // An id that does not parse is not an error condition — a page left
+            // open across a gateway restart will ask for a session that no
+            // longer exists, and the honest answer to both is the same one.
+            let id = parse_form(&request.query)
+                .get("id")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let body = vdm_frame_json(id, &crate::cpm::vdm::look(id));
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("GET", "/serial-ports") => {
             // Live serial-port re-scan for the refresh button.  The
             // JS picks up the result and rewrites the option list of
@@ -1209,6 +1253,243 @@ fn serial_ports_json(ports: &[crate::serial::DetectedPort]) -> String {
     out
 }
 
+// ─── The VDM-1 screen ───────────────────────────────────────────────
+//
+// The Processor Technology VDM-1 was a video *card*: no serial line, no
+// keyboard, no data port.  A booted guest paints by storing bytes into memory
+// at CC00, and the card scans that window.  So does this page — the session
+// task publishes a snapshot, and the browser paints it.  See `cpm::vdm` for the
+// device and why sampling it cannot disturb the guest.
+//
+// It lives on this listener rather than one of its own quite deliberately: a
+// second port would need its own auth, lockout, IP-safety and bindwatch, plus a
+// port key on three config screens, to show a picture that this one can already
+// serve behind the credentials it already checks.
+//
+// One caveat is worth stating rather than discovering: this page authenticates
+// the *administrator*, while the person typing at the guest is on telnet or
+// SSH.  Anyone who can open the config page can watch a booted session's
+// screen.  On a gateway whose web UI already renders the password and the API
+// key that is not a new privilege, but it is a different sentence from "the
+// operator can see their own screen".
+
+/// The live screen list, for the picker.
+fn vdm_list_json(screens: &[crate::cpm::vdm::Listing]) -> String {
+    let mut out = String::from("{\"screens\":[");
+    for (i, s) in screens.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"id\":{},\"label\":\"{}\",\"active\":{},\"frame\":{}}}",
+            s.id,
+            json_escape(&s.label),
+            s.active,
+            s.has_frame,
+        ));
+    }
+    out.push_str("]}");
+    out
+}
+
+/// One screen's answer: gone, waiting for its first frame, or a picture.
+///
+/// The three states are carried through to the browser rather than collapsed,
+/// because a session that has ended and one that has not painted yet both look
+/// like a blank 64x16 grid — the one pair of states a viewer cannot tell apart
+/// by looking, so the page has to be told.
+fn vdm_frame_json(id: u64, look: &crate::cpm::vdm::Look) -> String {
+    use crate::cpm::vdm::Look;
+    match look {
+        Look::Gone => format!("{{\"id\":{id},\"state\":\"gone\"}}"),
+        Look::Waiting { label } => format!(
+            "{{\"id\":{id},\"state\":\"waiting\",\"label\":\"{}\"}}",
+            json_escape(label)
+        ),
+        Look::Frame(snap) => {
+            let frame = snap.frame();
+            let rows = crate::cpm::vdm::frame_text(&frame);
+            let inv = crate::cpm::vdm::frame_inverse(&frame);
+            let join = |v: &[String]| {
+                v.iter()
+                    .map(|s| format!("\"{}\"", json_escape(s)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            format!(
+                "{{\"id\":{id},\"state\":\"live\",\"label\":\"{label}\",\"gen\":{generation},\
+                 \"scroll\":{scroll},\"active\":{active},\"rows\":[{rows}],\"inv\":[{inv}]}}",
+                label = json_escape(&snap.label),
+                generation = snap.generation,
+                scroll = snap.scroll,
+                active = snap.active,
+                rows = join(&rows),
+                inv = join(&inv),
+            )
+        }
+    }
+}
+
+/// The VDM-1 viewer page.
+///
+/// Static: everything on it arrives from `/vdm/list` and `/vdm/frame`, so a
+/// screen opened before a guest booted starts working when it does, and one
+/// left open when a session ends says so instead of freezing on its last frame.
+fn render_vdm_page(cfg: &Config) -> String {
+    let mut out = String::with_capacity(8 * 1024);
+    out.push_str("<!doctype html><html lang=\"en\"><head>");
+    out.push_str("<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    out.push_str("<title>Ethernet Gateway — VDM-1</title>");
+    out.push_str(STYLE);
+    out.push_str(VDM_STYLE);
+    out.push_str("</head><body>");
+    out.push_str(&render_header(cfg));
+    out.push_str(
+        "<div class=\"hint\">Processor Technology VDM-1 &middot; 64&times;16 &middot; \
+         the screen of a booted disk, sampled from its memory at <code>CC00</code></div>",
+    );
+    out.push_str("<section class=\"frame\"><div class=\"frame-head\">\
+         <span class=\"title\">Screen</span>\
+         <span class=\"head-right\"><a class=\"backlink\" href=\"/\">&larr; Configuration</a></span>\
+         </div>");
+    out.push_str(
+        "<div class=\"vdm-pick\"><label for=\"vdm-id\">Session:</label>\
+         <select id=\"vdm-id\"></select>\
+         <span id=\"vdm-note\" class=\"vdm-note\"></span></div>",
+    );
+    // 64 columns of monospace, and the aspect ratio is left alone: this is the
+    // card's memory laid out, not a photograph of a CRT.
+    out.push_str("<div id=\"vdm-screen\" class=\"vdm-screen\"></div>");
+    out.push_str("<div id=\"vdm-status\" class=\"vdm-status\"></div>");
+    out.push_str("</section>");
+    // The two intervals are Rust constants, so the page cannot drift from the
+    // rate this file documents.
+    out.push_str(&format!(
+        "<script>var VDM_POLL_MS={VDM_POLL_MS};var VDM_LIST_MS={VDM_LIST_MS};</script>"
+    ));
+    out.push_str(VDM_SCRIPT);
+    out.push_str("</body></html>");
+    out
+}
+
+const VDM_STYLE: &str = "<style>
+.vdm-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.vdm-pick select { min-width: 260px; }
+.vdm-note { color: var(--amber-dim); font-style: italic; }
+.vdm-screen {
+  background: #000;
+  color: var(--console-text);
+  font-family: 'DejaVu Sans Mono', 'Consolas', monospace;
+  font-size: 16px;
+  line-height: 1.15;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  /* 64 columns must not wrap: a wrapped VDM-1 screen is unreadable and looks
+     like a fault in the guest rather than in the window it is being shown in. */
+  white-space: pre;
+  overflow-x: auto;
+}
+/* Bit 7. The card inverts the cell; so do we, and the cursor comes along for
+   free because on this hardware the cursor IS an inverse-video cell. */
+.vdm-screen i { background: var(--console-text); color: #000; font-style: normal; }
+.vdm-status { color: var(--amber-dim); font-size: 13px; margin-top: 8px; }
+</style>";
+
+/// Poll interval for a frame, in milliseconds.
+///
+/// The session publishes one snapshot per request and nothing on its own, so
+/// this number *is* the sampling rate — and the cost when the page is shut is
+/// zero rather than small.  Fast enough that a scrolling guest reads as
+/// scrolling; slow enough that seven connections a second is the whole expense.
+const VDM_POLL_MS: u32 = 150;
+/// How often the session list is rebuilt.  Sessions come and go at human speed.
+const VDM_LIST_MS: u32 = 2000;
+
+const VDM_SCRIPT: &str = "<script>
+var vdmCurrent = null;
+function vdmEsc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+/* Paint one line, grouping runs of equal inverse-video attribute so a full
+   line of normal text is one text node rather than sixty-four spans. */
+function vdmLine(text, inv) {
+  var out = '', i = 0;
+  while (i < text.length) {
+    var on = inv.charAt(i) === '1', j = i;
+    while (j < text.length && (inv.charAt(j) === '1') === on) { j++; }
+    var chunk = vdmEsc(text.substring(i, j));
+    out += on ? '<i>' + chunk + '</i>' : chunk;
+    i = j;
+  }
+  return out;
+}
+function vdmPaint(d) {
+  var screen = document.getElementById('vdm-screen');
+  var status = document.getElementById('vdm-status');
+  if (d.state === 'gone') {
+    status.textContent = 'That session has ended.';
+    return;
+  }
+  if (d.state === 'waiting') {
+    status.textContent = d.label + ' — waiting for the first frame\\u2026';
+    return;
+  }
+  var html = [];
+  for (var r = 0; r < d.rows.length; r++) {
+    html.push(vdmLine(d.rows[r], d.inv[r]));
+  }
+  screen.innerHTML = html.join('\\n');
+  status.textContent = d.label + ' — frame ' + d.gen + ', scroll ' + d.scroll
+    + (d.active
+       ? ' — this guest is driving the VDM-1.'
+       : ' — this guest has not written the VDM-1 scroll register; what you see'
+         + ' is whatever is in its memory at CC00.');
+}
+function vdmPoll() {
+  if (vdmCurrent === null) { return; }
+  fetch('/vdm/frame?id=' + vdmCurrent)
+    .then(function(r) { return r.json(); })
+    .then(vdmPaint)
+    .catch(function() {});
+}
+function vdmRefreshList() {
+  fetch('/vdm/list').then(function(r) { return r.json(); }).then(function(data) {
+    var sel = document.getElementById('vdm-id');
+    var note = document.getElementById('vdm-note');
+    var want = sel.value;
+    var built = '';
+    for (var i = 0; i < data.screens.length; i++) {
+      var s = data.screens[i];
+      built += '<option value=\"' + s.id + '\">' + vdmEsc(s.label)
+             + (s.active ? ' (VDM-1)' : '') + '</option>';
+    }
+    /* Rebuilt only when it changed, so the list refresh cannot steal a
+       selection the operator just made. */
+    if (sel.innerHTML !== built) {
+      sel.innerHTML = built;
+      if (want) { sel.value = want; }
+      if (!sel.value && data.screens.length > 0) { sel.selectedIndex = 0; }
+      vdmCurrent = sel.value ? parseInt(sel.value, 10) : null;
+    }
+    if (data.screens.length === 0) {
+      vdmCurrent = null;
+      note.textContent = 'No disk is booted right now.';
+      document.getElementById('vdm-status').textContent = '';
+    } else {
+      note.textContent = '';
+    }
+  }).catch(function() {});
+}
+document.getElementById('vdm-id').addEventListener('change', function() {
+  vdmCurrent = this.value ? parseInt(this.value, 10) : null;
+  vdmPoll();
+});
+vdmRefreshList();
+setInterval(vdmRefreshList, VDM_LIST_MS);
+setInterval(vdmPoll, VDM_POLL_MS);
+</script>";
+
 // ─── HTML rendering ─────────────────────────────────────────────────
 
 /// Build the full configuration page.  `notice` is an optional banner
@@ -1497,12 +1778,21 @@ fn frame_ai_browser(cfg: &Config) -> String {
     // Three rows: title+Save, API Key, and Home with a right-aligned "More…"
     // button.  The weather location + units live in the `more-ai` modal
     // (render_more_popups) so this frame stays compact, mirroring the GUI.
+    //
+    // The VDM-1 screen sits at the right edge of the middle row, between this
+    // frame's Save and its More…, so the three right-hand controls line up.
+    // It is in *this* frame because it belongs to the CP/M half of it — a
+    // booted disk's display — and it was tried in the header's ports line
+    // first, where it read as one more small italic note rather than
+    // something to click.  An anchor rather than a button: it navigates away,
+    // and a bare `<button>` inside this form would submit it.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">AI Chat, Browser, Weather &amp; CP/M</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\"><span class=\"label\">API Key:</span>\
-         <input type=\"password\" name=\"groq_api_key\" value=\"{key}\"></div>\
+         <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
+         <a class=\"row-right linkbtn\" href=\"/vdm\">VDM-1 Screen</a></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
          <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
          <button type=\"button\" class=\"more\" data-target=\"more-ai\">More\u{2026}</button></div>\
@@ -2631,6 +2921,26 @@ header { display: flex; align-items: baseline; justify-content: space-between; }
 h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; }
 .server-ip { color: var(--amber); font-family: monospace; font-size: 14px; }
 .hint { color: var(--amber-dim); font-style: italic; margin-top: 4px; }
+/* Links between the two pages this server serves (config and the VDM-1
+   screen).  Amber like everything else here; underlined only on hover, so a
+   line of them does not read as a row of buttons. */
+.backlink { color: var(--amber); text-decoration: none; }
+.backlink:hover { text-decoration: underline; }
+/* A link wearing the small button's clothes — the VDM-1 Screen control, which
+   lines up under this frame's Save and above its More… and so has to match
+   them.  Deliberately an anchor: it navigates away, and a `<button>` in this
+   form would want a `type` to avoid submitting it. */
+a.linkbtn {
+  background: var(--bg-mid);
+  color: var(--amber);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 13px;
+  font-weight: bold;
+  text-decoration: none;
+}
+a.linkbtn:hover { background: #22365a; }
 /* Right-justify an item on its own `.row` (the General frame's More button).
    `.row` is flex with wrap, so auto-margin pushes the button to the frame's
    right edge and it stays inside on every width — unlike the Server frame's
@@ -4332,6 +4642,137 @@ mod tests {
         assert!(out.contains(r#""a\"b""#));
         assert!(out.contains(r#""c\\d""#));
         assert!(out.contains(r#""e\nf""#));
+    }
+
+    // ─── The VDM-1 screen ───────────────────────────────────────────
+
+    #[test]
+    fn test_vdm_list_json_empty_is_a_list_not_an_error() {
+        // The page asks for this every two seconds whether or not anything is
+        // booted, so "nothing" has to be an ordinary answer.
+        assert_eq!(vdm_list_json(&[]), r#"{"screens":[]}"#);
+    }
+
+    #[test]
+    fn test_vdm_list_json_carries_what_the_picker_shows() {
+        use crate::cpm::vdm::Listing;
+        let screens = vec![
+            Listing { id: 1, label: "TDISK04.DSK — telnet 10.0.0.9".into(), active: true, has_frame: true },
+            Listing { id: 7, label: "CPM14.DSK — SSH 10.0.0.4".into(), active: false, has_frame: false },
+        ];
+        assert_eq!(
+            vdm_list_json(&screens),
+            r#"{"screens":[{"id":1,"label":"TDISK04.DSK — telnet 10.0.0.9","active":true,"frame":true},"#
+                .to_string()
+                + r#"{"id":7,"label":"CPM14.DSK — SSH 10.0.0.4","active":false,"frame":false}]}"#
+        );
+    }
+
+    /// Ended and not-yet-painted are different answers, because both look like
+    /// a blank 64x16 grid — the one pair of states the viewer cannot tell apart
+    /// by looking at the screen.
+    #[test]
+    fn test_vdm_frame_json_reports_the_three_states_apart() {
+        use crate::cpm::vdm::Look;
+        assert_eq!(vdm_frame_json(4, &Look::Gone), r#"{"id":4,"state":"gone"}"#);
+        assert_eq!(
+            vdm_frame_json(4, &Look::Waiting { label: "TDISK04.DSK".into() }),
+            r#"{"id":4,"state":"waiting","label":"TDISK04.DSK"}"#
+        );
+    }
+
+    #[test]
+    fn test_vdm_frame_json_renders_the_screen_and_its_inverse_mask() {
+        use crate::cpm::vdm;
+        let screen = vdm::register("webserver unit test — frame json");
+        // 'H', then 'I' with bit 7 set: the same letter, lit differently.
+        screen.publish(
+            |addr| match addr - vdm::BASE {
+                0 => b'H',
+                1 => b'I' | 0x80,
+                _ => b' ',
+            },
+            0,
+            true,
+        );
+        let vdm::Look::Frame(_) = vdm::look(screen.id()) else { panic!("published") };
+        let json = vdm_frame_json(9, &vdm::look(screen.id()));
+
+        assert!(json.contains(r#""state":"live""#), "got {json}");
+        assert!(json.contains(r#""id":9"#), "the id is the caller's, not the registry's");
+        assert!(json.contains(r#""active":true"#));
+        // Sixteen rows and sixteen masks, every one the full width — a short
+        // row would silently shift the rest of the line in the browser.
+        let rows = json.matches(r#"","#).count();
+        assert!(rows >= 30, "16 rows + 16 masks: got {json}");
+        assert!(json.contains(&format!(r#""HI{}""#, " ".repeat(vdm::COLS - 2))));
+        assert!(json.contains(&format!(r#""01{}""#, "0".repeat(vdm::COLS - 2))));
+    }
+
+    /// A guest can paint anything it likes on its own screen, including the two
+    /// characters that would end the JSON string early.  This is not a
+    /// hypothetical: a CP/M command line full of quotes is ordinary.
+    #[test]
+    fn test_vdm_frame_json_escapes_what_a_guest_can_paint() {
+        use crate::cpm::vdm;
+        let screen = vdm::register("webserver unit test — escaping");
+        screen.publish(
+            |addr| match addr - vdm::BASE {
+                0 => b'"',
+                1 => b'\\',
+                _ => b' ',
+            },
+            0,
+            false,
+        );
+        let json = vdm_frame_json(1, &vdm::look(screen.id()));
+        assert!(json.contains(r#"\"\\"#), "got {json}");
+    }
+
+    /// The page is inert HTML plus two fetches; if the endpoints it names ever
+    /// drift from the routes, it silently shows nothing at all.
+    #[test]
+    fn test_the_vdm_page_polls_the_routes_that_exist() {
+        let page = render_vdm_page(&Config::default());
+        assert!(page.contains("/vdm/list"));
+        assert!(page.contains("/vdm/frame?id="));
+        assert!(page.contains(&format!("var VDM_POLL_MS={VDM_POLL_MS}")));
+        assert!(page.contains(&format!("var VDM_LIST_MS={VDM_LIST_MS}")));
+        // And a way back to the configuration page, since this one has no form.
+        assert!(page.contains("href=\"/\""));
+    }
+
+    /// The screen has to be *findable*, not merely reachable. It sat in the
+    /// header's ports line first, where it read as one more small italic note;
+    /// it now sits at the right edge of the CP/M frame's middle row, lined up
+    /// between that frame's Save and its More…. Pinned there, because "there is
+    /// a link to it somewhere on the page" is exactly the assertion that let
+    /// the first placement pass.
+    #[test]
+    fn test_the_config_page_links_to_the_screen_from_the_cpm_frame() {
+        let page = render_main_page(&Config::default(), None);
+        assert!(page.contains("href=\"/vdm\""), "the screen must be reachable without a URL");
+
+        let frame = frame_ai_browser(&Config::default());
+        assert!(frame.contains("href=\"/vdm\""), "it belongs to the frame that says CP/M");
+        // Right-justified, by the same auto-margin the other frames use.
+        assert!(frame.contains("class=\"row-right linkbtn\""), "got {frame}");
+        // And on the *middle* row: after the API key input, before the Home row.
+        let link = frame.find("href=\"/vdm\"").expect("present");
+        assert!(link > frame.find("groq_api_key").expect("present"));
+        assert!(link < frame.find("browser_homepage").expect("present"));
+        // The header keeps its ports line and nothing else — a second copy
+        // would be two things to keep in step for no gain.
+        assert!(!render_header(&Config::default()).contains("/vdm"));
+    }
+
+    /// A class with no CSS rule is how this page has silently lost styling
+    /// before — see `.row-right`, which is guarded the same way.
+    #[test]
+    fn test_the_screen_link_has_a_real_style() {
+        let page = render_main_page(&Config::default(), None);
+        assert!(page.contains("a.linkbtn {"), "linkbtn must have a real rule, not just a class");
+        assert!(page.contains("a.linkbtn:hover"), "and a hover state, like the buttons it sits with");
     }
 
     #[test]

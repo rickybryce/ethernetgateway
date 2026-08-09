@@ -568,6 +568,7 @@
             <a href="#ccp">CCP Commands</a>
             <a href="#disks">Disk Images</a>
             <a href="#booting">Booting</a>
+            <a href="#vdm">VDM-1 Screen</a>
             <a href="#printing">Printing</a>
             <a href="#uart">UART Profiles</a>
             <a href="#egt80">EGT80</a>
@@ -1174,6 +1175,89 @@ altairhd_cobol.dsk</code></pre>
                     <code>0xFF</code> &mdash; a valid reading meaning "88-SIO" &mdash; Altair DOS
                     booted perfectly and wrote its sign-on to a board that was not there, which
                     looked exactly like a disk that would not boot.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="vdm">
+                <div class="section-title">The VDM-1 screen</div>
+                <p class="intro">Some disks do not print to a console at all. The Processor Technology VDM-1 was a 1976 S-100 <em>video card</em>: a character appeared on the screen by being stored into memory at <code>CC00</code>, and there was no data port to intercept. A disk written for one boots here, takes your keystrokes and leaves the session you started it from completely blank &mdash; so its screen is served in the web UI instead, at <code>/vdm</code>.</p>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Using it</h3>
+                <ol class="bullet-list">
+                    <li>Turn the web server on (<code>web_enabled</code>, default port
+                    <code>8080</code>) &mdash; it is <strong>off by default</strong>.</li>
+                    <li>Boot a disk as usual. If the disk's own system tracks drive the card, the
+                    boot banner says so and prints the address to open.</li>
+                    <li>Open <code>http://&lt;gateway&gt;:8080/vdm</code>, or press
+                    <strong>VDM-1 Screen</strong> in the configuration page's
+                    <em>AI Chat, Browser, Weather &amp; CP/M</em> frame, and pick the session from
+                    the list.</li>
+                    <li>Keep typing in your telnet or SSH session. The keyboard is a perfectly
+                    ordinary port &mdash; <code>04h</code>/<code>05h</code> on these disks &mdash;
+                    and only the display was ever memory-mapped.</li>
+                </ol>
+                <p>
+                    <strong>Every booted session offers a screen</strong>, not only the ones known
+                    to be VDM-1 disks, because sampling one costs the guest nothing: it is a read of
+                    the guest's own memory, through its own MMU, with no write, no trap and no
+                    change in timing. The list marks the sessions that have actually driven the
+                    card, and a session showing whatever happens to live at <code>CC00</code> says
+                    so under the screen rather than leaving you to wonder about the noise.
+                </p>
+
+                <table class="data-table">
+                    <thead><tr><th>What you see</th><th>What it means</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>(VDM-1)</code> beside a session</td><td>That guest has written the scroll register on port <code>C8h</code>, so it is running a VDM-1 driver.</td></tr>
+                        <tr><td>&ldquo;waiting for the first frame&rdquo;</td><td>The session is registered but has not yet reached the point in its loop where it hands a screen over. The next one publishes.</td></tr>
+                        <tr><td>&ldquo;That session has ended&rdquo;</td><td>The disk was stopped with <code>ESC</code> <code>ESC</code>, or the caller hung up. A blank screen and a finished session look identical, so they are said differently.</td></tr>
+                        <tr><td>The frame number rising</td><td>The guest is alive. An unchanging picture with a rising frame number is a guest sitting at its prompt; a frozen number is a session that has stopped.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">How much it costs the guest</h3>
+                <p>
+                    Nothing, unless somebody is watching. The page asks for a frame roughly every
+                    150&nbsp;ms and each request produces exactly one snapshot; a session with no
+                    viewer checks a single flag as it goes round its loop and copies nothing. There
+                    is no timer anywhere, and closing the browser tab ends the cost rather than
+                    reducing it.
+                </p>
+
+                <div class="callout callout-warn">
+                    <p>
+                        <strong>Who can watch.</strong> This page is part of the configuration
+                        server, so it authenticates the <em>administrator</em> &mdash; while the
+                        person typing at the guest is on telnet or SSH. Anyone who can open the
+                        configuration page can watch any booted session's screen. On a gateway
+                        whose web UI already shows the password and the API key that is not a new
+                        privilege, but it is worth knowing before you enable the web server on a
+                        network you share.
+                    </p>
+                </div>
+
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>The cursor needs no special case.</strong> On this card the cursor
+                        <em>is</em> a cell with bit 7 set &mdash; inverse video &mdash; rather than
+                        an output character, so a literal repaint of the 64&times;16 window carries
+                        it along with everything else. That is the whole argument for repainting
+                        rather than reconstructing a character stream from the guest's writes: a
+                        picture sampled out of memory cannot be wrong about what the guest meant.
+                        The one piece of state that is not in memory is the scroll register, which
+                        says which of the sixteen lines is displayed first; without it a guest that
+                        has scrolled is shown rotated, with every character present and in the
+                        wrong order.
+                    </p>
+                </div>
+                <p>
+                    Which disks this reaches: <code>TDISK04</code> (CP/M 1.4, <em>VDM VERSION</em>)
+                    and <code>altairsim</code>'s <code>cpm14-vdm</code>. <code>DISK11</code>'s VDM
+                    driver lives in a CUTER monitor ROM rather than on the disk, and that ROM is not
+                    one the gateway has, so it stays dark. See the
+                    <a href="diskreference.html">disk reference</a> for the write-up.
                 </p>
             </div>
 
