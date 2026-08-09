@@ -4376,6 +4376,24 @@ mod tests {
                 break;
             }
         }
+        // Answer whatever the guest asked, for the systems that will not reach
+        // a prompt without being told something first — Cromix asks for its
+        // root device before it opens anything. `\r` separates the answers, so
+        // `CPM_BOOT_KEYS=1\r0` gets past two questions.
+        if let Ok(keys) = std::env::var("CPM_BOOT_KEYS") {
+            for answer in keys.split("\\r") {
+                for b in answer.bytes() {
+                    m.send_key(b);
+                }
+                m.send_key(b'\r');
+                out.clear();
+                for _ in 0..40_000_000u64 {
+                    m.step(&mut cpu);
+                    out.extend(m.take_output());
+                }
+                println!("--- after typing {answer:?} ---\n{}", printable(&out));
+            }
+        }
         let text: String = out
             .iter()
             .map(|&b| if (0x20..0x7F).contains(&b) || b == b'\n' { b as char } else { '.' })
