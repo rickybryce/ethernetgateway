@@ -1155,9 +1155,17 @@ impl App {
                         // list of sixteen reads as sloppiness rather than as a
                         // font.  The web page's mount screen has the same
                         // column for the same reason.
-                        ui.add_sized(
-                            [20.0, ui.spacing().interact_size.y],
-                            egui::Label::new(format!("{letter}:")),
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(28.0, ui.spacing().interact_size.y),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                // A space before the colon: hard against the
+                                // letter it read as cramped rather than as a
+                                // label.  The column is right-aligned and wide
+                                // enough for the widest letter, so the colons
+                                // still form one line down the list.
+                                ui.label(format!("{letter} :"));
+                            },
                         );
                         // A drive in use cannot be changed — the control is
                         // disabled and says why, rather than accepting a choice

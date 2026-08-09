@@ -2356,7 +2356,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             });
         }
         rows.push_str(&format!(
-            "<div class=\"row\"><span class=\"label drive\">{letter}:</span>\
+            "<div class=\"row\"><span class=\"label drive\">{letter} :</span>\
              <select name=\"cpm_mount_{}\"{}>{}</select>{}</div>",
             letter.to_ascii_lowercase(),
             disabled,
@@ -3197,7 +3197,7 @@ a.linkbtn:hover { background: #22365a; }
    of sixteen, which reads as sloppiness rather than as a font.  Fixed width and
    right-aligned, so the colons line up and every control below starts at the
    same x. */
-.label.drive { display: inline-block; min-width: 22px; text-align: right; }
+.label.drive { display: inline-block; min-width: 30px; text-align: right; }
 /* Inline (non-modal) warning that a setting is inert as configured.  Reuses the
    warning-modal red so the two read as the same class of message.  Wraps rather
    than overflowing its frame — the text is a full sentence. */
@@ -4986,14 +4986,14 @@ mod tests {
     fn test_the_mount_screen_drive_letters_share_one_column() {
         let html = render_main_page(&Config::default(), None);
         assert!(
-            html.contains(".label.drive { display: inline-block; min-width: 22px; text-align: right; }"),
+            html.contains(".label.drive { display: inline-block; min-width: 30px; text-align: right; }"),
             "the drive-letter column needs a real CSS rule, not just a class"
         );
         // Every one of the sixteen uses it — a row that opted out would be the
         // one that jitters, and one crooked row is what the eye finds.
         for letter in 'A'..='P' {
             assert!(
-                html.contains(&format!("<span class=\"label drive\">{letter}:</span>")),
+                html.contains(&format!("<span class=\"label drive\">{letter} :</span>")),
                 "drive {letter} is not in the shared column"
             );
         }
