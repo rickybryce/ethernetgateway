@@ -1999,9 +1999,16 @@ fn frame_file_transfer(cfg: &Config) -> String {
 }
 
 fn frame_ai_browser(cfg: &Config) -> String {
-    // Three rows: title+Save, API Key, and Home with a right-aligned "More…"
-    // button.  The weather location + units live in the `more-ai` modal
-    // (render_more_popups) so this frame stays compact, mirroring the GUI.
+    // Three rows: title+Save, the weather location, and Home with a
+    // right-aligned "More…" button.  The Groq key and the weather units live in
+    // the `more-ai` modal (render_more_popups), mirroring the GUI.
+    //
+    // **The API key used to be this row and was moved out deliberately.** It is
+    // optional — AI chat is the only thing that wants one, and everything else
+    // here works without it — but a key field at the top of a frame reads as
+    // something you must fill in before the product works. The weather location
+    // is the opposite: a field with no consequences that shows what the frame is
+    // for.
     //
     // The booted disk's screen sits at the right edge of the middle row,
     // between this frame's Save and its More…, so the three right-hand
@@ -2019,15 +2026,16 @@ fn frame_ai_browser(cfg: &Config) -> String {
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">AI Chat, Browser, Weather &amp; CP/M</span>\
          <span class=\"head-right\">{save}</span></div>\
-         <div class=\"row\"><span class=\"label\">Groq API Key (optional):</span>\
-         <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
+         <div class=\"row\"><span class=\"label\">Weather location:</span>\
+         <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
+         placeholder=\"city or postal code\">\
          <a class=\"row-right linkbtn\" href=\"/vdm\">Disk Screen</a></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
          <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
          <button type=\"button\" class=\"more\" data-target=\"more-ai\">More\u{2026}</button></div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
-        key = html_escape(&cfg.groq_api_key),
+        loc = html_escape(&cfg.weather_location),
         home = html_escape(&cfg.browser_homepage),
     )
 }
@@ -2687,10 +2695,11 @@ fn render_more_popups(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">AI, Browser, Weather &amp; CP/M \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-ai\">\u{00d7}</button></div>\
-         <div class=\"row\"><span class=\"label\">Location:</span>\
-         <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
-         placeholder=\"city or postal code\"></div>\
-         <div class=\"row\"><span class=\"label\">Units:</span>\
+         <div class=\"row\"><span class=\"label\">Groq API Key (optional):</span>\
+         <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
+         <span class=\"hint\">AI Chat only. Everything else on this gateway \
+         works without one; free at console.groq.com.</span></div>\
+         <div class=\"row\"><span class=\"label\">Weather units:</span>\
          <select name=\"weather_units\">\
          <option value=\"auto\" {u_auto}>Auto</option>\
          <option value=\"us\" {u_us}>US (F/mph)</option>\
@@ -2717,7 +2726,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{cpmdisks}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
-        loc = html_escape(&cfg.weather_location),
+        key = html_escape(&cfg.groq_api_key),
         u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
         u_us = if cfg.weather_units == "us" { "selected" } else { "" },
         u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },
@@ -5084,10 +5093,14 @@ mod tests {
         assert!(frame.contains("href=\"/vdm\""), "it belongs to the frame that says CP/M");
         // Right-justified, by the same auto-margin the other frames use.
         assert!(frame.contains("class=\"row-right linkbtn\""), "got {frame}");
-        // And on the *middle* row: after the API key input, before the Home row.
+        // And on the *middle* row: after that row's input, before the Home row.
+        // The middle row is the weather location — the Groq key used to be here
+        // and moved to the popup, because an optional key field at the top of a
+        // frame reads as a prerequisite.
         let link = frame.find("href=\"/vdm\"").expect("present");
-        assert!(link > frame.find("groq_api_key").expect("present"));
+        assert!(link > frame.find("weather_location").expect("present"));
         assert!(link < frame.find("browser_homepage").expect("present"));
+        assert!(!frame.contains("groq_api_key"), "the key belongs in the popup now");
         // The header keeps its ports line and nothing else — a second copy
         // would be two things to keep in step for no gain.
         assert!(!render_header(&Config::default()).contains("/vdm"));

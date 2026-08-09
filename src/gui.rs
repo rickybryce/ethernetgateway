@@ -1337,10 +1337,17 @@ impl App {
     }
 
     fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
+        // The Groq key lives here rather than on the main frame: it is optional,
+        // and a key field in the first row of a frame reads as a prerequisite.
         ui.horizontal(|ui| {
             ui.label("Groq API Key (optional):");
             singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
         });
+        ui.label(
+            egui::RichText::new("AI Chat only — everything else works without one.")
+                .small()
+                .color(AMBER_DIM),
+        );
         ui.horizontal(|ui| {
             ui.label("Home:");
             singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
@@ -3362,14 +3369,22 @@ impl eframe::App for App {
                                         self.save_config_now();
                                     }
                                 });
+                                // **The API key was here and was moved to the
+                                // popup deliberately.**  It is optional — AI
+                                // chat is the only thing that wants one — but a
+                                // key field at the top of a frame reads as
+                                // something the product needs before it will
+                                // work.  The weather location says what the
+                                // frame is for and costs the reader nothing.
                                 ui.horizontal(|ui| {
-                                    ui.label("Groq API Key (optional):");
-                                    singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
+                                    ui.label("Weather location:");
+                                    singleline_with_menu(ui, &mut self.cfg.weather_location, false, None);
                                 });
-                                // Home row carries the "More..." button (weather
-                                // location + units live in that popup), keeping
-                                // this frame at three rows.  The homepage field
-                                // is width-bounded so the button has room.
+                                // Home row carries the "More..." button (the
+                                // Groq key + weather units live in that popup),
+                                // keeping this frame at three rows.  The
+                                // homepage field is width-bounded so the button
+                                // has room.
                                 ui.horizontal(|ui| {
                                     labeled_field(ui, "Home:", &mut self.cfg.browser_homepage, 190.0);
                                     if right_aligned_small_button(ui, "More...") {

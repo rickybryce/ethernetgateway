@@ -379,7 +379,7 @@ impl TelnetSession {
             match input.as_str() {
                 "a" => {
                     self.other_set_field(
-                        "AI API key",
+                        "Groq API key",
                         "groq_api_key",
                         if cfg.groq_api_key.is_empty() { "(not set)" } else { "(hidden)" },
                         true,
@@ -483,10 +483,19 @@ impl TelnetSession {
         current_display: &str,
         is_secret: bool,
     ) -> Result<bool, std::io::Error> {
+        // Its own screen, with a heading.  This used to print underneath
+        // whichever menu called it — and every one of those menus is at or near
+        // the 22-row PETSCII budget, so seven more rows scrolled the heading,
+        // the prompt, or both off a Commodore.  A screen that asks a question
+        // has to be a screen.
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow(&label.to_uppercase()))).await?;
+        self.send_line(&sep).await?;
         self.send_line("").await?;
         self.send_line(&format!(
-            "  Current {}: {}",
-            label.to_lowercase(),
+            "  Current: {}",
             if is_secret {
                 self.dim(current_display)
             } else {
@@ -494,7 +503,11 @@ impl TelnetSession {
             }
         ))
         .await?;
-        self.send(&format!("  New {}: ", label.to_lowercase())).await?;
+        self.send_line("").await?;
+        // "New value" rather than "New <label>": the heading has already said
+        // which field this is, and the label reads badly folded to lower case
+        // when it contains an acronym ("new groq api key").
+        self.send(&format!("  {}", self.cyan("New value: "))).await?;
         self.flush().await?;
 
         let input = if is_secret {
