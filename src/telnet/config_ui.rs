@@ -1122,9 +1122,8 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.dim("The machine applies to a booted"))).await?;
                 self.send_line(&format!("  {}", self.dim("disk, not to the emulator."))).await?;
             } else {
-                self.send_line(&format!("  {}", self.dim("A disk that loads and then goes"))).await?;
-                self.send_line(&format!("  {}", self.dim("quiet is usually looking for a"))).await?;
-                self.send_line(&format!("  {}", self.dim("console that is not there."))).await?;
+                self.send_line(&format!("  {}", self.dim("A disk that loads then goes quiet"))).await?;
+                self.send_line(&format!("  {}", self.dim("wants a console that is not there."))).await?;
             }
             // Always said, both branches: the CPU is the exception on this
             // screen, and an operator who reads "applies to a booted disk"
@@ -1138,6 +1137,14 @@ impl TelnetSession {
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
             self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
             self.send_line(&format!("  {}  Cycle the CPU (Z80 / 8080)", self.cyan("C"))).await?;
+            // State and action on one row: this screen is at exactly 22 and a
+            // separate status line for a boolean would cost a second.
+            self.send_line(&format!(
+                "  {}  Browser typing: {}",
+                self.cyan("S"),
+                if cfg.cpm_screen_input { self.green("ON") } else { self.dim("off") }
+            ))
+            .await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
@@ -1224,9 +1231,21 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "s" => {
+                    // The web UI's screen page is always readable; this is
+                    // whether it is also a keyboard.  Live, like the emulator
+                    // toggle — the route reads the flag per keystroke, so this
+                    // takes effect without a restart.
+                    let v = (!cfg.cpm_screen_input).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_screen_input", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, or Q."))).await?;
+                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, S, or Q."))).await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }

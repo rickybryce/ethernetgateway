@@ -439,6 +439,42 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("POST", "/vdm/key") => {
+            // Typing at a booted guest.  Gated on `cpm_screen_input`, read
+            // live rather than captured at start-up so turning it off takes
+            // effect on the next keystroke rather than on the next restart.
+            //
+            // The bytes arrive percent-encoded in the body, because a keystroke
+            // is any byte at all — a control character in a query string is not
+            // a thing we should be asking a browser to arrange.
+            // Not valid UTF-8 is not an error to report: a keystroke that
+            // arrived mangled is a keystroke to drop, and a browser cannot
+            // usefully act on the difference.
+            let text = String::from_utf8_lossy(&request.body).to_string();
+            let form = parse_form(&text);
+            let id = form.get("id").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let bytes: Vec<u8> = form.get("k").map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+            let body = if !config::get_config().cpm_screen_input {
+                // A refusal the page can act on rather than a silent drop: it
+                // stops offering a keyboard when it sees this.
+                "{\"typed\":false,\"why\":\"off\"}".to_string()
+            } else if bytes.is_empty() {
+                "{\"typed\":false,\"why\":\"nothing\"}".to_string()
+            } else if crate::cpm::screen::push_keys(id, &bytes) {
+                "{\"typed\":true}".to_string()
+            } else {
+                "{\"typed\":false,\"why\":\"gone\"}".to_string()
+            };
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("GET", "/serial-ports") => {
             // Live serial-port re-scan for the refresh button.  The
             // JS picks up the result and rewrites the option list of
@@ -1096,6 +1132,7 @@ fn collect_form_updates(
         "enable_console", "verbose", "log_to_file",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "cpm_emu_enabled",
+        "cpm_screen_input",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
@@ -1391,6 +1428,10 @@ fn render_vdm_page(cfg: &Config) -> String {
     );
     // 64 columns of monospace, and the aspect ratio is left alone: this is the
     // card's memory laid out, not a photograph of a CRT.
+    // One focusable stage around both displays.  Real focus rather than a
+    // "typing mode" flag of our own: the browser already has the concept, and
+    // an operator who clicks away expects the keys to stop going to the guest.
+    out.push_str("<div id=\"vdm-stage\" tabindex=\"0\">");
     out.push_str("<div id=\"vdm-screen\" class=\"vdm-screen\"></div>");
     out.push_str("<div id=\"vdm-status\" class=\"vdm-status\"></div>");
     // The colour card, hidden until a guest switches one on — a machine with
@@ -1402,11 +1443,15 @@ fn render_vdm_page(cfg: &Config) -> String {
          <canvas id=\"dz\" class=\"dz\" width=\"64\" height=\"64\"></canvas>\
          <div id=\"dz-status\" class=\"vdm-status\"></div></div>",
     );
+    out.push_str("</div>");
+    out.push_str("<div id=\"vdm-kb\" class=\"vdm-status\"></div>");
     out.push_str("</section>");
     // The two intervals are Rust constants, so the page cannot drift from the
     // rate this file documents.
     out.push_str(&format!(
-        "<script>var VDM_POLL_MS={VDM_POLL_MS};var VDM_LIST_MS={VDM_LIST_MS};</script>"
+        "<script>var VDM_POLL_MS={VDM_POLL_MS};var VDM_LIST_MS={VDM_LIST_MS};\
+         var VDM_INPUT={input};</script>",
+        input = cfg.cpm_screen_input,
     ));
     out.push_str(VDM_SCRIPT);
     out.push_str("</body></html>");
@@ -1436,6 +1481,12 @@ const VDM_STYLE: &str = "<style>
 .vdm-screen i { background: var(--console-text); color: #000; font-style: normal; }
 .vdm-status { color: var(--amber-dim); font-size: 13px; margin-top: 8px; }
 .dz-wrap { margin-top: 14px; }
+/* The stage takes focus, so the browser's own idea of where the keys go
+   decides it, rather than a mode of ours.  The outline is the whole feedback:
+   an operator has to be able to tell at a glance whether what they type is
+   reaching a guest or their own browser. */
+#vdm-stage { outline: none; border-radius: 4px; }
+#vdm-stage:focus { box-shadow: 0 0 0 2px var(--amber); }
 /* The picture is 32x32 to 128x128 elements and every one of them is a square
    the size of a TV's, so it is scaled up on display and *not* smoothed: this
    is a memory map made visible, not a photograph of a CRT. */
@@ -1580,6 +1631,80 @@ function vdmRefreshList() {
     }
   }).catch(function() {});
 }
+/* What one key press is, in bytes.
+   A browser sends ASCII whoever is watching, so this is the ASCII a terminal
+   would put on the wire and nothing more clever: the gateway then applies the
+   SAME translation it applies to the session's own bytes, which is how the
+   operator's backspace choice reaches the guest identically from either
+   keyboard.  DEL for Backspace for exactly that reason - it is what a terminal
+   sends, and `cpm_boot_backspace` is what decides where it lands. */
+function vdmKeyBytes(e) {
+  if (e.altKey || e.metaKey) { return null; }
+  if (e.ctrlKey) {
+    if (e.key.length !== 1) { return null; }
+    var c = e.key.toUpperCase().charCodeAt(0);
+    /* Ctrl-A..Ctrl-_ , which is how a guest is sent Ctrl-C to break out and
+       Ctrl-S to pause - GDEMO asks for that one by name. */
+    if (c >= 64 && c <= 95) { return [c - 64]; }
+    return null;
+  }
+  switch (e.key) {
+    case 'Enter': return [13];
+    case 'Backspace': return [127];
+    case 'Tab': return [9];
+    case 'Escape': return [27];
+  }
+  if (e.key.length === 1) {
+    var b = e.key.charCodeAt(0);
+    if (b >= 32 && b < 127) { return [b]; }
+  }
+  return null;
+}
+function vdmSendKeys(bytes) {
+  var enc = '';
+  for (var i = 0; i < bytes.length; i++) {
+    enc += '%' + ('0' + bytes[i].toString(16)).slice(-2);
+  }
+  fetch('/vdm/key', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'id=' + vdmCurrent + '&k=' + enc
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.typed && d.why === 'off') {
+      /* The operator turned typing off while this page was open.  Say so once
+         rather than swallowing every keystroke silently. */
+      VDM_INPUT = false;
+      vdmKbNote();
+    }
+  }).catch(function() {});
+}
+function vdmKbNote() {
+  var el = document.getElementById('vdm-kb');
+  if (!VDM_INPUT) {
+    el.textContent = 'This gateway does not accept typing from the browser'
+      + ' (cpm_screen_input is off).';
+    return;
+  }
+  var here = document.activeElement === document.getElementById('vdm-stage');
+  el.textContent = here
+    ? 'Typing goes to the guest. The terminal that started the session can type too.'
+    : 'Click the screen to type at this guest.';
+}
+(function() {
+  var stage = document.getElementById('vdm-stage');
+  stage.addEventListener('focus', vdmKbNote);
+  stage.addEventListener('blur', vdmKbNote);
+  stage.addEventListener('keydown', function(e) {
+    if (!VDM_INPUT || vdmCurrent === null) { return; }
+    var bytes = vdmKeyBytes(e);
+    if (!bytes) { return; }
+    /* Taken, so Backspace does not navigate and Tab does not move focus out of
+       a screen somebody is typing at. */
+    e.preventDefault();
+    vdmSendKeys(bytes);
+  });
+  vdmKbNote();
+})();
 document.getElementById('vdm-id').addEventListener('change', function() {
   vdmCurrent = this.value ? parseInt(this.value, 10) : null;
   vdmPoll();
@@ -2572,6 +2697,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"metric\" {u_metric}>Metric (C/km/h)</option>\
          </select></div>\
          <div class=\"row\">{cpm}</div>\
+         <div class=\"row\">{cpmscreen}</div>\
          <div class=\"row\">{cpmmax}\
              <span class=\"hint\">Runaway ceiling for one CP/M emulator program, \
              in millions of instructions (2000 = 2 billion). A compute-bound \
@@ -2599,6 +2725,11 @@ fn render_more_popups(cfg: &Config) -> String {
             "cpm_emu_enabled",
             "CP/M Emulator (main menu; be sure you trust the CP/M files you run)",
             cfg.cpm_emu_enabled,
+        ),
+        cpmscreen = checkbox(
+            "cpm_screen_input",
+            "Disk Screen may type at a booted disk (the screen is readable either way)",
+            cfg.cpm_screen_input,
         ),
         cpmmax = numfield(
             "cpm_emu_max_minstr",
@@ -4856,6 +4987,40 @@ mod tests {
         let s = screen::register("webserver unit test — no dazzler");
         s.publish(vdm_part(&[], false), None);
         assert!(vdm_frame_json(1, &screen::look(s.id())).contains(r#""dazzler":null"#));
+    }
+
+    /// The page only offers a keyboard when the operator has left one on, and
+    /// it learns which from a constant rather than by guessing.
+    #[test]
+    fn test_the_screen_page_says_whether_typing_is_allowed() {
+        let mut cfg = Config::default();
+        assert!(cfg.cpm_screen_input, "on by default");
+        assert!(render_vdm_page(&cfg).contains("var VDM_INPUT=true"));
+
+        cfg.cpm_screen_input = false;
+        let off = render_vdm_page(&cfg);
+        assert!(off.contains("var VDM_INPUT=false"));
+        // And the page still *renders*: turning typing off must not cost the
+        // operator the screen, which is the whole feature.
+        assert!(off.contains("/vdm/frame?id="));
+    }
+
+    /// The keyboard has to reach the route that exists, and take the keys back
+    /// off the browser — a Backspace that navigates away mid-session is worse
+    /// than one that does nothing.
+    #[test]
+    fn test_the_screen_page_posts_keys_and_keeps_them() {
+        let page = render_vdm_page(&Config::default());
+        assert!(page.contains("'/vdm/key'"), "the route the server answers");
+        assert!(page.contains("e.preventDefault()"), "keys must not reach the browser");
+        // DEL for Backspace, so `cpm_boot_backspace` decides where it lands —
+        // the same byte a terminal sends, translated by the same code.
+        assert!(page.contains("case 'Backspace': return [127];"));
+        // Ctrl-letter, because GDEMO asks for Ctrl-S by name and Ctrl-C is how
+        // a guest is interrupted.
+        assert!(page.contains("e.ctrlKey"));
+        // A real focus, not a mode of ours.
+        assert!(page.contains("tabindex=\"0\""));
     }
 
     /// The page is inert HTML plus two fetches; if the endpoints it names ever

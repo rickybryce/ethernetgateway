@@ -87,7 +87,24 @@ struct Live {
     vdm_active: AtomicBool,
     dazzler_on: AtomicBool,
     frame: Mutex<Option<Snapshot>>,
+    /// Keystrokes a viewer has typed, waiting for the session to collect them.
+    ///
+    /// The way *in*, mirroring the frame's way out, and it is only a queue
+    /// because the two ends run on different tasks — the session drains it at
+    /// the same seam it publishes, and hands each byte to the machine through
+    /// the same call its own terminal's bytes go through.
+    ///
+    /// Bounded, and dropped rather than blocked when full: a viewer holding a
+    /// key down while the guest is busy reading a track must not be able to
+    /// grow this without limit, and a real keyboard's buffer overflows too.
+    keys: Mutex<std::collections::VecDeque<u8>>,
 }
+
+/// How many typed bytes may wait for a busy guest.
+///
+/// The same order as the machine's own key queue: enough for a pasted command
+/// line, not enough to matter if somebody leans on the keyboard.
+const KEY_QUEUE_CAP: usize = 64;
 
 /// Every live screen, in registration order.
 ///
@@ -133,6 +150,7 @@ pub fn register(label: impl Into<String>) -> Screen {
         vdm_active: AtomicBool::new(false),
         dazzler_on: AtomicBool::new(false),
         frame: Mutex::new(None),
+        keys: Mutex::new(std::collections::VecDeque::new()),
     });
     if let Ok(mut list) = screens().lock() {
         list.push((id, live.clone()));
@@ -153,6 +171,17 @@ impl Screen {
         self.live.wanted.swap(false, Ordering::Relaxed)
     }
 
+    /// Collect what a viewer has typed since the last look.
+    ///
+    /// Returns the bytes and leaves the queue empty, so a keystroke is
+    /// delivered exactly once however many sessions or seams go by.
+    pub fn take_keys(&self) -> Vec<u8> {
+        match self.live.keys.lock() {
+            Ok(mut q) => q.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Publish what the guest can see.
     ///
     /// The caller does the sampling because only it has the machine — and it
@@ -171,6 +200,34 @@ impl Screen {
             });
         }
     }
+}
+
+/// Type at one screen's guest.
+///
+/// Separate from [`look`] because it is a different act with a different
+/// consequence, and the caller gating it is the web listener — this module has
+/// no opinion about who may type, only about how the bytes get there.
+///
+/// Returns false when the screen has gone, so a page left open across the end
+/// of a session is told rather than typing into nothing.  Bytes beyond the
+/// queue's cap are dropped, exactly as a real keyboard buffer overflows.
+pub fn push_keys(id: u64, bytes: &[u8]) -> bool {
+    let live = {
+        let Ok(list) = screens().lock() else { return false };
+        match list.iter().find(|(sid, _)| *sid == id) {
+            Some((_, l)) => l.clone(),
+            None => return false,
+        }
+    };
+    if let Ok(mut q) = live.keys.lock() {
+        for b in bytes {
+            if q.len() >= KEY_QUEUE_CAP {
+                break;
+            }
+            q.push_back(*b);
+        }
+    }
+    true
 }
 
 /// Every live screen, oldest first.
@@ -327,6 +384,51 @@ mod tests {
         assert!(!mine.dazzler_on);
         let Look::Frame(snap) = look(screen.id()) else { panic!("published") };
         assert!(snap.dazzler.is_none());
+    }
+
+    /// The way in, mirroring the way out: a viewer types, the session collects
+    /// it once, and the queue is empty afterwards.
+    #[test]
+    fn test_a_viewer_can_type_and_the_session_collects_it_once() {
+        let screen = register("TEST.DSK");
+        assert!(screen.take_keys().is_empty(), "nobody has typed");
+
+        assert!(push_keys(screen.id(), b"DIR\r"));
+        assert_eq!(screen.take_keys(), b"DIR\r".to_vec());
+        assert!(screen.take_keys().is_empty(), "and delivered exactly once");
+    }
+
+    /// Both keyboards feed one queue, in the order the bytes arrived — which is
+    /// what two keyboards on one port do. Two people typing at once interleave,
+    /// and that is a shared terminal rather than a defect.
+    #[test]
+    fn test_two_keyboards_share_one_queue() {
+        let screen = register("TEST.DSK");
+        push_keys(screen.id(), b"AB");
+        push_keys(screen.id(), b"CD");
+        assert_eq!(screen.take_keys(), b"ABCD".to_vec());
+    }
+
+    /// A viewer leaning on a key while the guest is busy reading a track must
+    /// not be able to grow this without bound. A real keyboard buffer overflows
+    /// too; what matters is that it stops rather than that nothing is lost.
+    #[test]
+    fn test_the_key_queue_is_bounded() {
+        let screen = register("TEST.DSK");
+        let flood = vec![b'x'; KEY_QUEUE_CAP * 4];
+        assert!(push_keys(screen.id(), &flood));
+        assert_eq!(screen.take_keys().len(), KEY_QUEUE_CAP);
+    }
+
+    /// Typing at a session that has ended is refused rather than silently
+    /// dropped, so a page left open across the end of a session can say so.
+    #[test]
+    fn test_typing_at_a_finished_session_is_refused() {
+        let screen = register("TEST.DSK");
+        let id = screen.id();
+        assert!(push_keys(id, b"X"));
+        drop(screen);
+        assert!(!push_keys(id, b"X"), "the screen has gone");
     }
 
     #[test]

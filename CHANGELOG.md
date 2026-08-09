@@ -79,6 +79,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   X/Y voltage. `DISK10.DSK` is Cromemco's whole library and twelve more images
   carry Dazzler software.
 
+- **The screen is a keyboard too** (`cpm_screen_input`, on by default). Click
+  the screen page and type: the bytes reach the guest through the *same*
+  translation the terminal's own bytes use, so the backspace key chosen with
+  `cpm_boot_backspace` behaves identically from either keyboard. **Both work at
+  once** — there is one key queue, exactly as two keyboards wired to one port
+  would share one — so the person at the terminal and the person in the browser
+  can both type at the same guest; simultaneous typing interleaves, which is
+  what a shared terminal is rather than a fault. Proved live by typing `ST` at
+  the telnet session and `AT⏎` in the browser and watching `STAT` run.
+
+  `Ctrl-C` and `Ctrl-S` reach the guest — `GDEMO` asks for the latter by name.
+  `ESC ESC` deliberately does not: ending a session somebody else is sitting at
+  is not a keystroke, so a double escape from the browser arrives as two
+  escapes. The setting is read per keystroke rather than at start-up, so
+  turning it off needs no restart and a page left open stops offering a
+  keyboard the first time it is refused. The screen stays readable either way —
+  watching and typing are different acts and get different answers.
+
+  This is what makes the Dazzler disks usable rather than only watchable:
+  `LIFE` asks `ENTER DATA` and `GDEMO` wants `Ctrl-S`, and neither needs a
+  joystick.
+
 - **A boot that will paint a VDM-1 says so.** A disk whose own system tracks
   write port `C8h` is announced on the boot banner with the address to open —
   and told plainly when the web server is off, which it is by default. Measured

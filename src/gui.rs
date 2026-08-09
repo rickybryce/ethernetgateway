@@ -1370,6 +1370,14 @@ impl App {
             &mut self.cfg.cpm_emu_enabled,
             "CP/M Emulator (main menu; be sure you trust the CP/M files you run)",
         );
+        // Whether the web UI's Disk Screen page is a keyboard as well as a
+        // window.  Here rather than with the web server's own settings because
+        // it is a CP/M question — what may type at a booted guest — and the
+        // operator looking for it will be looking at the CP/M controls.
+        ui.checkbox(
+            &mut self.cfg.cpm_screen_input,
+            "Disk Screen may type at a booted disk (the screen is readable either way)",
+        );
         ui.horizontal(|ui| {
             labeled_field(
                 ui,

@@ -1169,7 +1169,25 @@ impl TelnetSession {
                     printed = true;
                 }
 
-                // The VDM-1's screen, at the same seam and to whoever has it
+                // Keystrokes from a browser watching this guest's screen.
+                //
+                // Through `boot_key_for_guest` exactly like the session's own
+                // bytes, so the backspace the operator chose reaches the guest
+                // whichever keyboard it came from — two keyboards on one port
+                // must not disagree about what DEL means.  PETSCII folding is
+                // deliberately *not* applied: a browser sends ASCII whoever the
+                // terminal belongs to, and treating it as a Commodore's
+                // keyboard because a C64 happens to be watching would mangle it.
+                //
+                // No `ESC ESC` here, and that is the one thing this path does
+                // differently: ending a session somebody else is sitting at is
+                // not a keystroke.  A double escape from the browser reaches the
+                // guest as two escapes, which is what a guest expects anyway.
+                for b in screen.take_keys() {
+                    machine.send_key(boot_key_for_guest(b, false, erase));
+                }
+
+                // The screens, at the same seam and to whoever has them
                 // open in the browser.  A no-op — one atomic load — unless a
                 // viewer polled since the last one, so a guest nobody is
                 // watching runs exactly as it did before this existed.

@@ -2420,9 +2420,9 @@ fn test_cpm_settings_opens_the_printer_screen() {
 fn test_cpm_boot_settings_row_count() {
     let header = 3;
     let status = 1 + 4; // blank + Runs/Machine/Backspace/CPU
-    let note = 1 + 3; // blank + the longest of the two explanations
+    let note = 1 + 2; // blank + the longest of the two explanations
     let cpu_note = 2; // "The CPU applies to both. Run EGT8080 on the 8080."
-    let actions = 1 + 4; // blank + R, M, B, C
+    let actions = 1 + 5; // blank + R, M, B, C, S
     let footer = 1 + 1 + 1; // blank + Back + prompt
     let rows = header + status + note + cpu_note + actions + footer;
     assert_eq!(rows, 22, "the CP/M boot settings screen is {rows} rows");
@@ -2439,9 +2439,9 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
     let body = &src[start..end];
 
-    let hint = "Press R, M, B, C, or Q.";
+    let hint = "Press R, M, B, C, S, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["R", "M", "B", "C"] {
+    for key in ["R", "M", "B", "C", "S"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -2472,8 +2472,9 @@ fn test_cpm_boot_screen_row_count() {
     let end = src[start..].find("let prompt = format!").expect("the prompt line") + start;
     let drawn = src[start..end].matches("self.send_line(").count();
     // Every row is a `send_line`, less the two lines of whichever dim branch
-    // does not run (3 when a disk is configured, 2 when it is not), plus the
-    // prompt itself — drawn with `send` so the cursor stays on it.
+    // does not run — both branches are two lines now, the configured one having
+    // been compressed from three to make room for the browser-typing row —
+    // plus the prompt itself, drawn with `send` so the cursor stays on it.
     let rows = drawn - 2 + 1;
     assert!(rows <= 22, "CP/M boot screen is {rows} rows, over the 22-row PETSCII budget");
     assert_eq!(

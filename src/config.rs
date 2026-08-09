@@ -369,6 +369,22 @@ const DEFAULT_WEB_PORT: u16 = 8080;
 /// dial out from guest code.  `cpm_emu_uart = off` closes that door while
 /// leaving the emulator itself usable.
 const DEFAULT_CPM_EMU_ENABLED: bool = true;
+/// Can the web UI's disk-screen page type at a booted guest?
+///
+/// **On**, and the reasoning is Ricky's (2026-08-09): the web UI already edits
+/// every setting and shows the password and the API key, so anyone who can
+/// reach it can do far more than type at a CP/M prompt, and an operator who
+/// exposes it to a public network has already been told what that means.  The
+/// key exists because typing is a *different* thing from watching and deserves
+/// its own switch — a gateway that is deliberately read-only for onlookers is a
+/// reasonable thing to want, and without a key the only way to get it would be
+/// to turn the web server off.
+///
+/// What it does not open: this is the booted-disk path only, it goes through
+/// the same key translation the terminal's own bytes do, and the `ESC ESC`
+/// exit gesture is deliberately not honoured from a browser — ending a session
+/// somebody else is sitting at is not a keystroke.
+const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 /// Refuse connections whose source address ends in `.1` — typically the router
 /// on the local subnet — while the IP allowlist is in force.
 ///
@@ -831,6 +847,11 @@ pub struct Config {
     /// 2.2 environment, sandboxed to a `CPM/` directory under `transfer_dir`.
     /// When false the main-menu item is hidden and the `K` key is rejected.
     pub cpm_emu_enabled: bool,
+    /// Let the web UI's disk-screen page send keystrokes to a booted guest.
+    ///
+    /// The screen is always readable; this decides whether it is also a
+    /// keyboard.  See [`DEFAULT_CPM_SCREEN_INPUT`].
+    pub cpm_screen_input: bool,
     /// Refuse connections from `*.*.*.1` (the local router, typically) while
     /// the IP allowlist applies.  Off by default; see
     /// [`DEFAULT_DISABLE_GATEWAY_CONNECTIONS`].  Loopback is never affected.
@@ -1064,6 +1085,7 @@ impl Default for Config {
             web_enabled: DEFAULT_WEB_ENABLED,
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
+            cpm_screen_input: DEFAULT_CPM_SCREEN_INPUT,
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
@@ -1656,6 +1678,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_emu_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_EMU_ENABLED),
+        cpm_screen_input: map
+            .get("cpm_screen_input")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_CPM_SCREEN_INPUT),
         disable_gateway_connections: map
             .get("disable_gateway_connections")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -2425,8 +2451,17 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   device); or hbios_1 / hbios_2 (RomWBW HBIOS serial unit 1 / 2, reached by
 #   RST 8 — for software built for RomWBW rather than for a bare UART, such as
 #   the QTERM 'h' builds).
+# cpm_screen_input: may the web UI's disk-screen page TYPE at a booted disk?
+#   The screen itself is always readable when the web server is on; this
+#   decides whether it is also a keyboard.  On by default.  The two keyboards
+#   share one queue, exactly as two keyboards on one port would, so the person
+#   at the terminal and the person in the browser can both type -- and their
+#   characters interleave if they do it at once, which is what a shared
+#   terminal is.  The ESC ESC exit gesture is NOT honoured from a browser:
+#   ending a session somebody else is sitting at is not a keystroke.
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
+    write_kv(&mut content, "cpm_screen_input", cfg.cpm_screen_input);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
     content.push_str("\
@@ -3126,6 +3161,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             cfg.punter_hangup_on_failure = value.eq_ignore_ascii_case("true");
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
+        "cpm_screen_input" => cfg.cpm_screen_input = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_mounts" => cfg.cpm_mounts = value.to_string(),
         "cpm_boot_image" => {
@@ -4072,6 +4108,7 @@ mod tests {
             web_enabled: true,
             web_port: 9090,
             cpm_emu_enabled: true,
+            cpm_screen_input: false,
             disable_gateway_connections: true,
             cpm_emu_max_minstr: 500,
             cpm_emu_uart: "rc2014_1b".to_string(),
