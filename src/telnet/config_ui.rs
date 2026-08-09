@@ -243,10 +243,10 @@ impl TelnetSession {
             } else {
                 self.green("(set)")
             };
-            self.send_line(&format!("  AI API key:  {}", key_display))
+            self.send_line(&format!("  Groq API key: {}", key_display))
                 .await?;
             self.send_line(&format!(
-                "  Homepage:    {}",
+                "  Homepage:     {}",
                 self.amber(&cfg.browser_homepage)
             ))
             .await?;
@@ -254,17 +254,21 @@ impl TelnetSession {
             // can be up to 60 chars, which on a 40-col PETSCII screen would
             // wrap and push this exactly-22-row menu past the budget (the
             // prompt would scroll off a C64).  Width leaves room for the
-            // "  Weather:     " prefix and the " [units]" suffix.
+            // "  Weather:      " prefix and the " [units]" suffix.
             let loc_display = if cfg.weather_location.is_empty() {
                 self.dim("(not set)")
             } else {
-                let max_loc = if self.terminal_type == TerminalType::Petscii { 16 } else { 48 };
+                // 15 on a Commodore, not 16: the label column widened by one
+                // when "AI API key" became "Groq API key", and this row was
+                // already at exactly 40 with the longest units word.  Pinned by
+                // `test_weather_row_fits_petscii`.
+                let max_loc = if self.terminal_type == TerminalType::Petscii { 15 } else { 48 };
                 self.amber(&truncate_to_width(&cfg.weather_location, max_loc))
             };
             // Show the units alongside the location so this menu mirrors the
             // web/GUI (which place the units control next to the location).
             self.send_line(&format!(
-                "  Weather:     {} [{}]",
+                "  Weather:      {} [{}]",
                 loc_display,
                 self.dim(&cfg.weather_units)
             ))
@@ -307,7 +311,7 @@ impl TelnetSession {
             self.send_line("").await?;
 
             self.send_line(&format!(
-                "  {}  Set AI API key (Groq)",
+                "  {}  Set Groq API key (optional)",
                 self.cyan("A")
             ))
             .await?;

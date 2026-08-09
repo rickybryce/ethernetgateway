@@ -2019,7 +2019,7 @@ fn frame_ai_browser(cfg: &Config) -> String {
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">AI Chat, Browser, Weather &amp; CP/M</span>\
          <span class=\"head-right\">{save}</span></div>\
-         <div class=\"row\"><span class=\"label\">API Key:</span>\
+         <div class=\"row\"><span class=\"label\">Groq API Key (optional):</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
          <a class=\"row-right linkbtn\" href=\"/vdm\">Disk Screen</a></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
@@ -2348,7 +2348,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             });
         }
         rows.push_str(&format!(
-            "<div class=\"row\"><span class=\"label\">{letter}:</span>\
+            "<div class=\"row\"><span class=\"label drive\">{letter}:</span>\
              <select name=\"cpm_mount_{}\"{}>{}</select>{}</div>",
             letter.to_ascii_lowercase(),
             disabled,
@@ -3182,6 +3182,13 @@ a.linkbtn:hover { background: #22365a; }
    CSS Grid, where a `1fr` button column collapsed to zero and put the button
    outside the frame.  Guarded by test_more_buttons_cannot_leave_their_frame. */
 .row-right { margin-left: auto; }
+/* A drive letter is a *column*, not a word.  The page font is proportional, so
+   `I:` and `M:` are different widths and sixteen rows of them left every select
+   starting at a slightly different place — a jitter of a few pixels down a list
+   of sixteen, which reads as sloppiness rather than as a font.  Fixed width and
+   right-aligned, so the colons line up and every control below starts at the
+   same x. */
+.label.drive { display: inline-block; min-width: 22px; text-align: right; }
 /* Inline (non-modal) warning that a setting is inert as configured.  Reuses the
    warning-modal red so the two read as the same class of message.  Wraps rather
    than overflowing its frame — the text is a full sentence. */
@@ -4955,6 +4962,32 @@ mod tests {
         screen.publish(vdm_part(&[(0, b'"'), (1, b'\\')], false), None);
         let json = vdm_frame_json(1, &screen::look(screen.id()));
         assert!(json.contains(r#"\"\\"#), "got {json}");
+    }
+
+    /// **Sixteen drive letters are a column, not sixteen words.**
+    ///
+    /// The page font is proportional, so `I:` and `M:` are different widths and
+    /// every select on the mount screen started at a slightly different x — a
+    /// few pixels of jitter down a list of sixteen, which reads as sloppiness
+    /// rather than as a font. Ricky spotted it on the real page.
+    ///
+    /// Guarded the way `.row-right` is: a class with no rule behind it is how
+    /// this page has silently lost a layout before.
+    #[test]
+    fn test_the_mount_screen_drive_letters_share_one_column() {
+        let html = render_main_page(&Config::default(), None);
+        assert!(
+            html.contains(".label.drive { display: inline-block; min-width: 22px; text-align: right; }"),
+            "the drive-letter column needs a real CSS rule, not just a class"
+        );
+        // Every one of the sixteen uses it — a row that opted out would be the
+        // one that jitters, and one crooked row is what the eye finds.
+        for letter in 'A'..='P' {
+            assert!(
+                html.contains(&format!("<span class=\"label drive\">{letter}:</span>")),
+                "drive {letter} is not in the shared column"
+            );
+        }
     }
 
     /// The Dazzler travels as one hex digit per element — a nibble *is* a hex

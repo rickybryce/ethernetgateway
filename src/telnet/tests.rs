@@ -2695,6 +2695,32 @@ fn test_other_settings_menu_row_count() {
     assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
 }
 
+/// **The widest that screen's value rows can get, measured rather than eyeballed.**
+///
+/// The label column on OTHER SETTINGS widened by one when "AI API key" became
+/// "Groq API key", and the weather row was already at *exactly* 40 columns with
+/// the longest units word — so that one character would have wrapped a C64 and
+/// pushed a 22-row menu's prompt off the screen.  The location truncation gave
+/// the character back.
+///
+/// Written as the arithmetic rather than as a literal, so the next person to
+/// widen the column sees which term they are spending.
+#[test]
+fn test_weather_row_fits_petscii() {
+    let prefix = "  Weather:      ".len(); // the aligned label column
+    let location = 15; // `max_loc` on a Commodore
+    let units = " [metric]".len(); // the longest of auto / us / metric
+    assert!(
+        prefix + location + units <= PETSCII_WIDTH,
+        "the weather row is {} columns, over {PETSCII_WIDTH}",
+        prefix + location + units
+    );
+    // And every other value row on that screen shares the column.
+    for label in ["  Groq API key: ", "  Homepage:     ", "  Weather:      "] {
+        assert_eq!(label.len(), 16, "{label:?} is out of step with the column");
+    }
+}
+
 /// The Master/Slave screen's accept-relays row carries an inline "(SSH off!)"
 /// qualifier when the relay cannot possibly work, and it must still fit 40 cols.
 ///

@@ -1148,7 +1148,17 @@ impl App {
                         .or_else(|| crate::cpm::image::drive_held_note(drive0));
                     let mounted = mounts.get(idx).and_then(|m| m.as_ref());
                     {
-                        ui.label(format!("{letter}:"));
+                        // A fixed column, not a word: the UI font is
+                        // proportional, so `I:` and `M:` are different widths
+                        // and sixteen rows of them start every combo box at a
+                        // slightly different x.  A few pixels of jitter down a
+                        // list of sixteen reads as sloppiness rather than as a
+                        // font.  The web page's mount screen has the same
+                        // column for the same reason.
+                        ui.add_sized(
+                            [20.0, ui.spacing().interact_size.y],
+                            egui::Label::new(format!("{letter}:")),
+                        );
                         // A drive in use cannot be changed — the control is
                         // disabled and says why, rather than accepting a choice
                         // that would then be refused on Save.
@@ -1328,7 +1338,7 @@ impl App {
 
     fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("API Key:");
+            ui.label("Groq API Key (optional):");
             singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
         });
         ui.horizontal(|ui| {
@@ -3353,7 +3363,7 @@ impl eframe::App for App {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label("API Key:");
+                                    ui.label("Groq API Key (optional):");
                                     singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
                                 });
                                 // Home row carries the "More..." button (weather
