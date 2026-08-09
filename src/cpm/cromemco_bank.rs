@@ -24,6 +24,38 @@
 //! that `40h` is the bank select at all, which is a fact about a port number
 //! and not a design.
 //!
+//! # Common memory: a block, not a mode
+//!
+//! A bank switch is useless unless the code *doing* the switching survives it.
+//! Cromix's trampoline sits at `FF90` —
+//! `DI / OUT (40h),A / LD (HL),E / OUT (40h),A / RET` — and fetches its next
+//! instruction from the bank it has just selected. That only works if the top
+//! of memory is the same memory in every bank.
+//!
+//! The card is built for exactly that. From the *64KZ-II Instruction Manual*
+//! (023-2020), §3:
+//!
+//! > SW1 and SW2 set up memory blocks A and B, respectively, so that they may
+//! > be enabled through bank selection. The eight switches that are part of SW1
+//! > or SW2 correspond to banks 0 through 7. Each of these eight switches may
+//! > be set ON to effectively place the memory block in a memory bank.
+//! > Therefore, **each memory block may be placed in up to eight memory
+//! > banks**.
+//!
+//! and each block is half the address space — the manual's switch table gives
+//! `Block A Addresses: 0000h-7FFFh | 8000h-FFFFh` and the same for Block B. So
+//! **32 KB is the only granularity the hardware has**, and a Cromix machine
+//! gets its common region by switching the operating system board's upper block
+//! into every bank: the kernel lives above `8000h` where every process reaches
+//! it, and each user gets the bottom half of their own bank. The Cromix manual
+//! describes the same arrangement from the software side — "One 64KZ RAM board
+//! resides in bank 0 and is reserved for the Operating System. This board also
+//! resides in all unused banks."
+//!
+//! This is why the top *1 KB* — which a secondary source suggested, and which
+//! the guest could not distinguish from 32 KB — is ruled out rather than
+//! preferred: the card cannot express it.
+//!
 //! # What a bitmap means for an emulator
 //!
 //! Hardware lets several banks be enabled at once, because a *card* is assigned
@@ -42,6 +74,15 @@ pub const PORT: u8 = 0x40;
 
 /// Banks the hardware allows — eight levels of 64 KB.
 pub const BANKS: usize = 8;
+
+/// Where the common block starts.
+///
+/// The 64KZ-II is two 32 KB blocks, each switchable into any combination of
+/// banks, so 32 KB is the only boundary the hardware has. A Cromix machine puts
+/// the operating system board's upper block in every bank, which makes
+/// `8000h`-`FFFFh` common and leaves the lower half private — the whole point
+/// of having banks.
+pub const COMMON_BASE: u16 = 0x8000;
 
 /// The bank-select state of one machine.
 #[derive(Default)]
@@ -100,7 +141,9 @@ impl BankSelect {
     /// because it is bank 0 and every unbanked path must keep using it
     /// directly.
     pub fn read(&self, bank0: &[u8], addr: u16) -> u8 {
-        if self.current == 0 {
+        // The common block is one board answering in every bank, so it serves
+        // reads exactly as it serves writes.
+        if addr >= COMMON_BASE || self.current == 0 {
             return bank0[addr as usize];
         }
         match self.upper.get(self.current - 1).and_then(|b| b.as_ref()) {
@@ -112,9 +155,9 @@ impl BankSelect {
         }
     }
 
-    /// Write a byte to the selected bank, allocating it on first use.
+    /// Write a byte, allocating a bank on first use.
     pub fn write(&mut self, bank0: &mut [u8], addr: u16, value: u8) {
-        if self.current == 0 {
+        if addr >= COMMON_BASE || self.current == 0 {
             bank0[addr as usize] = value;
             return;
         }
@@ -154,12 +197,34 @@ mod tests {
         }
     }
 
-    /// Banks are separate 64 KB spaces: the same address in two banks holds two
-    /// different bytes, which is the entire point of the feature.
+    /// **The upper block is the same memory in every bank.**
+    ///
+    /// Without this a guest cannot survive its own bank switch: Cromix's
+    /// trampoline at `FF90` fetches its next instruction from the bank it just
+    /// selected, and with private upper memory that instruction is blank RAM —
+    /// measured, 64 KB of `NOP` for ever.
+    #[test]
+    fn test_the_upper_block_is_common_to_every_bank() {
+        let mut zero = vec![0u8; 0x1_0000];
+        let mut b = BankSelect::default();
+        b.write(&mut zero, 0xFF90, 0xF3); // the trampoline's first byte, in bank 0
+
+        b.port_out(0x02); // bank 1
+        assert_eq!(b.read(&zero, 0xFF90), 0xF3, "the kernel is still up there");
+        b.write(&mut zero, 0xFF91, 0x78);
+        b.port_out(0x01); // back to bank 0
+        assert_eq!(b.read(&zero, 0xFF91), 0x78, "and a write from bank 1 was seen by bank 0");
+        assert_eq!(zero[0xFF91], 0x78, "it really is the one array");
+    }
+
+    /// Below the block boundary each bank is private, which is what a bank is
+    /// *for*. 32 KB because that is the only granularity the card has — its two
+    /// blocks are `0000h-7FFFh` and `8000h-FFFFh`.
     #[test]
     fn test_a_bank_is_its_own_memory() {
         let mut zero = vec![0u8; 0x1_0000];
         let mut b = BankSelect::default();
+        const { assert!(0x1234 < COMMON_BASE) } // the address below must be private
         b.write(&mut zero, 0x1234, 0xAA);
 
         b.port_out(0x02); // bank 1
