@@ -38,7 +38,7 @@ use crate::telnet::cpm_emu::{cpm_peer_register, idle_nap, poll_once};
 use crate::telnet::cpm_modem::CpmModem;
 use iz80::Cpu;
 
-/// How a booted session names itself in the web UI's VDM-1 screen list.
+/// How a booted session names itself in the web UI's screen list.
 ///
 /// Pure, so the naming can be tested without a session, a disk or a listener.
 /// The image comes first because it is what the operator picked and — since one
