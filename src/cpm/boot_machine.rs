@@ -4524,6 +4524,108 @@ mod tests {
             .iter()
             .map(|&b| if (0x20..0x7F).contains(&b) || b == b'\n' { b as char } else { '.' })
             .collect();
+        // Where a quiet guest actually is.  A frozen PC and no port traffic
+        // reads as "waiting for an interrupt" and that is a guess; this asks.
+        // Set `CPM_BOOT_LOOP` to sample the PC after everything above has run,
+        // report the hot addresses, and disassemble the code around them.
+        if std::env::var("CPM_BOOT_LOOP").is_ok() {
+            // The last answer is typed *inside* the trace, not before it: the
+            // interesting instant is the transition, and by the time an
+            // ordinary run has finished the guest is already sliding — which
+            // makes the trace uniform and useless.  Measured that mistake.
+            if let Ok(key) = std::env::var("CPM_BOOT_LOOP_KEY") {
+                for b in key.bytes() {
+                    m.send_key(b);
+                }
+                m.send_key(b'\r');
+            }
+            let mut seen: std::collections::BTreeMap<u16, u64> =
+                std::collections::BTreeMap::new();
+            // The last few addresses before the guest fell into a straight run
+            // of increments — which is what executing blank memory looks like.
+            // Catching the *edge* is the whole point: the hot list afterwards
+            // is uniform noise and says nothing about how it got there.
+            let mut recent: std::collections::VecDeque<u16> =
+                std::collections::VecDeque::new();
+            let mut straight = 0u32;
+            let mut fell: Option<Vec<u16>> = None;
+            let mut candidate: Option<Vec<u16>> = None;
+            for _ in 0..60_000_000u64 {
+                let pc = cpu.registers().pc();
+                *seen.entry(pc).or_insert(0) += 1;
+                if recent.back().map(|p| p.wrapping_add(1) == pc).unwrap_or(false) {
+                    straight += 1;
+                } else {
+                    straight = 0;
+                }
+                recent.push_back(pc);
+                if recent.len() > 40 {
+                    recent.pop_front();
+                }
+                // Snapshot the window as the run *starts*, and keep it only if
+                // the run turns out to be long.  Snapshotting at 200 shows the
+                // slide itself, which says nothing about how it got there —
+                // measured that mistake first.
+                if straight == 1 {
+                    candidate = Some(recent.iter().copied().collect());
+                }
+                if straight == 200 && fell.is_none() {
+                    fell = candidate.take();
+                }
+                m.step(&mut cpu);
+            }
+            if let Some(trail) = &fell {
+                println!("--- it fell into a straight run here ---");
+                println!("  last 40 PCs: {:04x?}", trail);
+            } else {
+                println!("--- no straight run of 200: it is not sliding through blank memory ---");
+            }
+            let mut hot: Vec<(u16, u64)> = seen.into_iter().collect();
+            hot.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            println!("--- where it spends its time ({} distinct addresses) ---", hot.len());
+            for (pc, n) in hot.iter().take(12) {
+                println!("  {pc:#06x}  {n:>9}");
+            }
+            let r = cpu.registers();
+            println!(
+                "  regs: af={:04x} bc={:04x} de={:04x} hl={:04x} sp={:04x}",
+                r.get16(iz80::Reg16::AF),
+                r.get16(iz80::Reg16::BC),
+                r.get16(iz80::Reg16::DE),
+                r.get16(iz80::Reg16::HL),
+                r.get16(iz80::Reg16::SP),
+            );
+            // Disassemble the tightest region: the hottest address and what
+            // surrounds it.  PC is saved and put back, because disassembling
+            // walks it.
+            println!("  bank selected at the end: {}", m.bank40.current());
+            // Disassemble from bank 0, because the guest died in whatever bank
+            // it switched *to* and the code we want to read is the code that
+            // did the switching.
+            if let Ok(at) = std::env::var("CPM_BOOT_DISASM_AT") {
+                let at = u16::from_str_radix(at.trim_start_matches("0x"), 16).unwrap();
+                m.bank40.port_out(0x01); // bank 0
+                let saved = cpu.registers().pc();
+                cpu.registers().set_pc(at);
+                println!("--- bank 0 code at {at:#06x} ---");
+                for _ in 0..20 {
+                    let a = cpu.registers().pc();
+                    println!("  {a:04x}  {}", cpu.disasm_instruction(&mut m));
+                }
+                cpu.registers().set_pc(saved);
+            }
+            let centre = hot.first().map(|(pc, _)| *pc).unwrap_or(0);
+            let from = centre.saturating_sub(16);
+            let saved = cpu.registers().pc();
+            cpu.registers().set_pc(from);
+            println!("--- code around {centre:#06x} ---");
+            for _ in 0..24 {
+                let at = cpu.registers().pc();
+                let mark = if at == centre { " <== hottest" } else { "" };
+                println!("  {at:04x}  {}{mark}", cpu.disasm_instruction(&mut m));
+            }
+            cpu.registers().set_pc(saved);
+        }
         println!("--- {} ---\n{}", path, text);
         println!("port hits (0x80 bit = OUT): {:?}", m.port_hits);
         println!("mem[0..12] = {:02x?}", (0..12).map(|a| m.peek(a)).collect::<Vec<_>>());
