@@ -266,6 +266,15 @@ pub struct BootMachine {
     /// claimed on a machine that has no such device would take it away from
     /// whatever else lives there.
     has_mmu: bool,
+    /// Cromemco's bank select on port `40h`, and whether this machine has it.
+    ///
+    /// Its own field rather than a mode of the MMU: they are different boards
+    /// on different machines with different registers, and the one thing they
+    /// share — that memory access has to go through whichever is active — is
+    /// handled by [`BootMachine::mem_read`] and [`BootMachine::mem_write`]
+    /// instead.
+    bank40: super::cromemco_bank::BankSelect,
+    has_bank40: bool,
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
@@ -311,6 +320,8 @@ impl BootMachine {
             instructions: 0,
             mmu: super::mmu::Mmu::default(),
             has_mmu: false,
+            bank40: super::cromemco_bank::BankSelect::default(),
+            has_bank40: false,
             disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
@@ -439,6 +450,11 @@ impl BootMachine {
         // whether this machine can bank.  Claiming ports 14h-17h anywhere else
         // would take them from a real board that might want them.
         self.has_mmu = machine.boards.contains(&super::console::Board::Z80pack);
+        // Cromemco's memory boards carry the bank select, so a machine with a
+        // Cromemco disk controller is a machine that has one.  Gated, because a
+        // guest on any other machine writing `40h` must go on seeing nothing
+        // happen — a port this machine does not have is not this machine's.
+        self.has_bank40 = machine.boards.contains(&super::console::Board::Cromemco);
     }
 
     /// The console this machine carries.
@@ -1054,11 +1070,7 @@ impl BootMachine {
                         // as empty and retries the same sector for ever --
                         // measured, 1,677 status polls and not one console read.
                         let at = addr.wrapping_add(i as u16);
-                        if self.mmu.is_idle() {
-                            self.mem[at as usize] = *b;
-                        } else {
-                            self.mmu.write(&mut self.mem, at, *b);
-                        }
+                        self.mem_write(at, *b);
                     }
                 } else {
                     // Reads come out of the same mapping for the same reason:
@@ -1066,12 +1078,7 @@ impl BootMachine {
                     // see to be the bytes that reach the disk.
                     let bytes: Vec<u8> = (0..len)
                         .map(|i| {
-                            let at = addr.wrapping_add(i as u16);
-                            if self.mmu.is_idle() {
-                                self.mem[at as usize]
-                            } else {
-                                self.mmu.read(&self.mem, at)
-                            }
+                            self.mem_read(addr.wrapping_add(i as u16))
                         })
                         .collect();
                     if let Some(m) = self.disks.get_mut(drive as usize).and_then(|x| x.as_mut()) {
@@ -1172,22 +1179,50 @@ impl BootMachine {
 }
 
 
+impl BootMachine {
+    /// Read guest memory the way this machine's own CPU would.
+    ///
+    /// **Every path that touches guest memory goes through here**, and that is
+    /// the point of it existing. Two machines bank memory by different boards —
+    /// z80pack's MMU on `14h`-`17h` and Cromemco's select on `40h` — and the
+    /// last time a second path indexed the array directly, a banked CP/M 3 read
+    /// its own directory as empty because the disk's DMA wrote where the guest
+    /// was not looking. One function, so a third banking scheme cannot miss a
+    /// caller.
+    ///
+    /// The common case is one comparison and the array index it always was.
+    fn mem_read(&mut self, address: u16) -> u8 {
+        if !self.mmu.is_idle() {
+            return self.mmu.read(&self.mem, address);
+        }
+        if !self.bank40.is_idle() {
+            return self.bank40.read(&self.mem, address);
+        }
+        self.mem[address as usize]
+    }
+
+    /// Write guest memory the way this machine's own CPU would. See
+    /// [`BootMachine::mem_read`].
+    fn mem_write(&mut self, address: u16, value: u8) {
+        if !self.mmu.is_idle() {
+            self.mmu.write(&mut self.mem, address, value);
+            return;
+        }
+        if !self.bank40.is_idle() {
+            self.bank40.write(&mut self.mem, address, value);
+            return;
+        }
+        self.mem[address as usize] = value;
+    }
+}
+
 impl Machine for BootMachine {
     fn peek(&mut self, address: u16) -> u8 {
-        // The common case is one comparison: no guest has banked, so bank 0 is
-        // the whole machine and this is the array index it always was.
-        if self.mmu.is_idle() {
-            return self.mem[address as usize];
-        }
-        self.mmu.read(&self.mem, address)
+        self.mem_read(address)
     }
 
     fn poke(&mut self, address: u16, value: u8) {
-        if self.mmu.is_idle() {
-            self.mem[address as usize] = value;
-            return;
-        }
-        self.mmu.write(&mut self.mem, address, value);
+        self.mem_write(address, value);
     }
 
     fn port_in(&mut self, address: u16) -> u8 {
@@ -1369,6 +1404,15 @@ impl Machine for BootMachine {
             // Not console activity, for the VDM-1's reason: a card painted by
             // memory writes produces no console bytes, and the pacing is right
             // that such a guest looks idle.
+            // Cromemco's bank select.  After the disk controller, like every
+            // display here, so a board the operator's machine really has keeps
+            // its port; nothing else claims 40h today, but the ordering is the
+            // rule rather than the coincidence.  Gated on the machine having
+            // Cromemco boards: an Altair guest writing 40h must go on seeing
+            // nothing happen.
+            super::cromemco_bank::PORT if self.has_bank40 => {
+                self.bank40.port_out(value);
+            }
             super::dazzler::ADDRESS_PORT => {
                 self.dazzler_address = Some(value);
             }
@@ -1792,6 +1836,88 @@ mod tests {
             }
         }
         assert!(seen_low, "the card still answers even with its picture switched off");
+    }
+
+    /// **Cromemco's bank select, on the machine that has one.**
+    ///
+    /// A bitmap, not a bank number — bit 1 is bank 1 — and each bank is its own
+    /// 64 KB. Measured on the guest that needs it: Cromix writes `40h` before
+    /// it does anything else and could not open its console until this existed.
+    #[test]
+    fn test_a_cromemco_machine_banks_its_memory() {
+        use crate::cpm::cromemco_bank::PORT;
+        let mut m = BootMachine::new();
+        m.set_machine("cromemco");
+        m.poke(0x2000, 0xAA);
+
+        m.port_out(PORT as u16, 0x02); // bit 1 = bank 1
+        assert_eq!(m.peek(0x2000), 0, "a fresh bank does not see bank 0");
+        m.poke(0x2000, 0xBB);
+
+        m.port_out(PORT as u16, 0x01); // bit 0 = bank 0, the power-up bank
+        assert_eq!(m.peek(0x2000), 0xAA, "bank 0 kept its own byte");
+        m.port_out(PORT as u16, 0x02);
+        assert_eq!(m.peek(0x2000), 0xBB, "and bank 1 kept its own");
+    }
+
+    /// **A machine without Cromemco boards does not have the port.**
+    ///
+    /// The gate that matters: an Altair guest writing `40h` — for whatever
+    /// reason of its own — must go on seeing exactly nothing happen. A device
+    /// added to every machine is a device that can break the ones that were
+    /// working.
+    #[test]
+    fn test_only_a_cromemco_machine_has_the_bank_select() {
+        use crate::cpm::cromemco_bank::PORT;
+        let mut m = BootMachine::new(); // the default is an Altair
+        m.poke(0x2000, 0xAA);
+        m.port_out(PORT as u16, 0x02);
+        assert_eq!(m.peek(0x2000), 0xAA, "no banking here: the write went nowhere");
+        m.poke(0x2000, 0xBB);
+        m.port_out(PORT as u16, 0x01);
+        assert_eq!(m.peek(0x2000), 0xBB, "still the one flat memory it always was");
+    }
+
+    /// **The port is write-only, like the card.**
+    ///
+    /// The manual describes eight bits *output* and says nothing about reading,
+    /// so an `IN` must answer exactly what it answered before this device
+    /// existed.
+    #[test]
+    fn test_the_bank_select_is_write_only() {
+        use crate::cpm::cromemco_bank::PORT;
+        let mut m = BootMachine::new();
+        m.set_machine("cromemco");
+        let before = m.port_in(PORT as u16);
+        m.port_out(PORT as u16, 0x04);
+        assert_eq!(m.port_in(PORT as u16), before, "a real card drives nothing onto the bus");
+    }
+
+    /// **Everything that reaches guest memory goes through the same door.**
+    ///
+    /// `mem_read`/`mem_write` exist so a second banking scheme cannot miss a
+    /// caller, and the caller that was missed last time was the disk's DMA:
+    /// with the z80pack MMU implemented but DMA writing bank 0 directly, a
+    /// banked CP/M 3 read its own directory as empty. This asserts the source
+    /// has one path rather than two, which is the only way to check it without
+    /// a controller that does DMA on a Cromemco machine — a combination no real
+    /// disk here produces.
+    #[test]
+    fn test_guest_memory_has_exactly_one_access_path() {
+        let src = include_str!("boot_machine.rs");
+        // Bounded at the test module, or this matches its own pattern strings
+        // and fails on itself — the `pkill -f` mistake, in a test.
+        let start = src.find("impl Machine for BootMachine").expect("the impl");
+        let end = src.find("\n#[cfg(test)]\nmod tests").expect("the test module");
+        let body = &src[start..end];
+        // Inside the trait impl and everything after it — the DMA service loop
+        // included — nothing indexes the memory array directly.
+        for pattern in ["self.mem[at as usize]", "self.mem[address as usize]"] {
+            assert!(
+                !body.contains(pattern),
+                "{pattern} bypasses mem_read/mem_write — the CP/M 3 DMA defect, again"
+            );
+        }
     }
 
     /// An unrecognised setting must leave a working console rather than none.

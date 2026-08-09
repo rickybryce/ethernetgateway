@@ -53,6 +53,7 @@ pub mod uart;
 pub mod vdm;
 pub mod wd1771;
 pub mod cromemco;
+pub mod cromemco_bank;
 pub mod z80pack;
 
 pub use fcb::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE};
