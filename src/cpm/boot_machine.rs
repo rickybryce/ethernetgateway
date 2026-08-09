@@ -4532,10 +4532,15 @@ mod tests {
                  if st & 0x40 == 0 { "AT TRACK 0" } else { "not track 0" },
                  if st & 0x02 == 0 { "may move" } else { "busy" });
         println!(
-            "pc={:#06x} stuck_polls={} idle_console={}",
+            "pc={:#06x} stuck_polls={} idle_console={} halted={}",
             cpu.registers().pc(),
             m.stuck_polls(),
-            m.idle_status_reads()
+            m.idle_status_reads(),
+            // A guest sitting on `HALT` is not stuck: it is *waiting for an
+            // interrupt*, and this machine has never delivered one to anybody.
+            // Worth printing rather than inferring from a frozen PC, because
+            // "spinning" and "halted" want completely different investigations.
+            cpu.is_halted(),
         );
         // The oracle the plan asked for: the guest's own operating system must
         // say who it is.  This cannot be satisfied by a plausible wrong answer
