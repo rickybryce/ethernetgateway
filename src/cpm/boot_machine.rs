@@ -246,6 +246,14 @@ pub struct BootMachine {
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
+    /// Diagnostic: the first writes to each port, with their values.
+    ///
+    /// A count says a program drove a board; the *value* says how it was
+    /// configured, and for a memory-mapped card that value is the only thing
+    /// naming where in memory to look. Bounded, because a console port is
+    /// written thousands of times and only the setup matters.
+    #[cfg(test)]
+    port_writes: Vec<(u8, u8)>,
 }
 
 impl BootMachine {
@@ -280,6 +288,8 @@ impl BootMachine {
             disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
+            #[cfg(test)]
+            port_writes: Vec::new(),
         }
     }
 
@@ -1218,6 +1228,9 @@ impl Machine for BootMachine {
         #[cfg(test)]
         {
             *self.port_hits.entry(port | 0x80).or_insert(0) += 1;
+            if self.port_writes.len() < 512 {
+                self.port_writes.push((port, value));
+            }
         }
         match port {
             p if self.has_mmu && super::mmu::Mmu::owns_port(p) => {
@@ -3994,6 +4007,86 @@ mod tests {
             screen.contains(&want),
             "the guest never painted {want:?} into screen memory; it holds:\n{screen}"
         );
+    }
+
+    /// **What a Cromemco Dazzler program actually drives.**
+    ///
+    /// The Dazzler is the VDM-1's problem one card along: a 1976 colour
+    /// graphics board that reads its picture out of main memory by DMA, so a
+    /// program using one writes *no* console bytes and the session stays blank.
+    /// `DISK10.DSK` carries the whole Cromemco library — SPACEWAR, LIFE,
+    /// KSCOPE, DMATION and twenty more — and TDISK04's KSCOPE prints only
+    /// `CROMEMCO DAZZLER KSCOPE PROGRAM` before going quiet.
+    ///
+    /// This measures which ports such a program really touches, because the
+    /// alternative was my recollection of a manual, and a port address
+    /// remembered wrongly is the kind of mistake that looks like a broken
+    /// emulation for a day. The boot's own ports are subtracted, so what is
+    /// left is the *program's* — the disk controller and console drop out.
+    ///
+    /// Silence on the console is consistent with a Dazzler and is not proof of
+    /// one; this is the proof.
+    ///
+    /// Ignored: set `CPM_DAZZLER_IMAGE` to a disk carrying Dazzler software,
+    /// and `CPM_DAZZLER_CMD` to the program to run (default `KSCOPE`).
+    #[test]
+    #[ignore]
+    fn test_measure_what_a_dazzler_program_drives() {
+        let Ok(path) = std::env::var("CPM_DAZZLER_IMAGE") else {
+            eprintln!("set CPM_DAZZLER_IMAGE to run this");
+            return;
+        };
+        let cmd = std::env::var("CPM_DAZZLER_CMD").unwrap_or_else(|_| "KSCOPE".into());
+
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&path).unwrap(), false).expect("a bootable image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let signon = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        println!("--- sign-on ---\n{signon}");
+
+        // Everything the machine did to get to its prompt: the controller, the
+        // console, the loader.  Subtracted below so the program stands alone.
+        let before = m.port_hits.clone();
+        m.port_writes.clear();
+
+        for &b in format!("{cmd}\r").as_bytes() {
+            m.send_key(b);
+        }
+        let mut out = Vec::new();
+        for _ in 0..200_000_000u64 {
+            m.step(&mut cpu);
+            out.extend(m.take_output());
+        }
+        println!("--- {cmd} said ---\n{}", printable(&out));
+
+        let mut fresh: Vec<(u8, u64)> = Vec::new();
+        for (&p, &n) in m.port_hits.iter() {
+            let was = before.get(&p).copied().unwrap_or(0);
+            if n > was {
+                fresh.push((p, n - was));
+            }
+        }
+        fresh.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        println!("--- ports {cmd} drove (the boot's own subtracted) ---");
+        for (p, n) in &fresh {
+            // `port_hits` records a write as `port | 0x80`, which is **lossy
+            // above 0x7F**: an OUT to `FFh` and an OUT to `7Fh` land in the
+            // same bucket.  Said here rather than left to be misread, because
+            // it already has been once.  The value list below is exact.
+            let (dir, port) = if p & 0x80 != 0 { ("OUT", p & 0x7F) } else { ("IN ", *p) };
+            let note = if p & 0x80 != 0 { "  (or +0x80)" } else { "" };
+            println!("  {dir} {port:#04x}   {n:>10}{note}");
+        }
+        // The values, for the ports that are not the console or the disk — a
+        // count proves the board was driven, but only the value says how, and
+        // for a card that reads main memory the value is what names the buffer.
+        println!("--- what it wrote, port by port (console and disk left out) ---");
+        let noisy = [0x08u8, 0x09, 0x0A, 0x10, 0x11];
+        for (p, v) in m.port_writes.iter().filter(|(p, _)| !noisy.contains(p)) {
+            println!("  OUT {p:#04x}, {v:#04x}   ({v:08b})");
+        }
+        assert!(!fresh.is_empty(), "{cmd} touched no port at all — it never ran");
     }
 
     /// The end-to-end check the plan asked for: boot a real disk, run it, and
