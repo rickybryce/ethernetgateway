@@ -1212,6 +1212,17 @@ impl App {
             "A mounted drive uses the files inside the image instead of the files in its folder. The folder's files are not touched and return when you unmount.".to_string()
         };
         ui.add(egui::Label::new(intro).wrap());
+        // The offer goes here — above the drives, beside the message that says
+        // there is nothing to mount — and not in the footer under sixteen rows
+        // where it was first put.  "Where do I get a disk?" is asked at the top
+        // of this window, not the bottom, and the web page answers it in the
+        // same place.
+        ui.horizontal(|ui| {
+            self.draw_cpm_fetch_button(ui);
+        });
+        if !self.cpm_fetch_note.is_empty() {
+            ui.label(egui::RichText::new(&self.cpm_fetch_note).small().color(AMBER_DIM));
+        }
         ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
@@ -3804,12 +3815,7 @@ impl eframe::App for App {
                 {
                     self.cpm_mount_reload_draft();
                 }
-                self.draw_cpm_fetch_button(ui);
             });
-            if !self.cpm_fetch_note.is_empty() {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(&self.cpm_fetch_note).small().color(AMBER_DIM));
-            }
         });
         self.cpm_mount_popup_open = cpm_mount_open;
 
