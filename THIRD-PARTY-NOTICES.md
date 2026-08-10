@@ -1871,7 +1871,7 @@ The GNU General Public License does not permit incorporating your program into p
 ## GNU General Public License v3.0 or later (GPL-3.0-or-later)
 
 Used by:
-- [ethernetgateway 0.9.1](https://github.com/rickybryce/ethernetgateway)
+- [ethernetgateway 0.9.2](https://github.com/rickybryce/ethernetgateway)
 
 ```
                     GNU GENERAL PUBLIC LICENSE
