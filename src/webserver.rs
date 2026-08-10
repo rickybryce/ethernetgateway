@@ -897,6 +897,34 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         };
     }
 
+    // Fetching the sample disks.  Its own action rather than a field, because
+    // it is not a setting: nothing is saved, files arrive in the images folder,
+    // and the operator finds out what happened in the banner.
+    //
+    // Synchronous, and that is a real cost — this holds the request for as long
+    // as the download takes, which is about a minute on a cold folder.  It is
+    // the honest arrangement for a page with no job queue: the alternative is
+    // returning immediately and leaving the operator refreshing to guess
+    // whether it worked.  The connection cap means a stuck download occupies
+    // one of sixteen, not the server.
+    if fields.get("action").map(String::as_str) == Some("getdisks") {
+        let base = crate::cpm::layout::cpm_dir(&old_cfg.transfer_dir);
+        let images = base.join(crate::cpm::image::IMAGES_DIR);
+        let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
+            Ok(r) => {
+                let mut m = format!("Sample disks: {}.", r.summary());
+                // Named, not just counted: "3 failed" with no names leaves the
+                // operator unable to retry or report anything.
+                for (name, why) in r.failed.iter().take(3) {
+                    m.push_str(&format!(" {name}: {why}."));
+                }
+                m
+            }
+            Err(e) => format!("Sample disks: {e}"),
+        };
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+    }
+
     // CP/M mounts are applied live, then the resulting table is what gets
     // written — rather than writing the request and hoping it took.  A drive
     // that refused (because somebody is on it) therefore keeps its old image in
@@ -2406,10 +2434,40 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-cpm-disks\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">Mount CP/M Drives</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-cpm-disks\">\u{00d7}</button></div>\
-         {intro}{rows}{create}\
+         {intro}{get}{rows}{create}\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
+        get = get_disks_row(&images),
+    )
+}
+
+/// The offer to fetch the sample disks.
+///
+/// Above the drive rows, because a fresh install has nothing to mount and
+/// "where do I get a disk" is the question this screen otherwise leaves the
+/// operator holding.  Says the count, the size and **where they come from**
+/// before they agree: the disks are not ours, and an operator who would rather
+/// fetch them by hand should be able to see that and decline.
+fn get_disks_row(images: &[String]) -> String {
+    let all = crate::cpm::fetch::catalogue();
+    let here: std::collections::HashSet<&str> = images.iter().map(|s| s.as_str()).collect();
+    let wanted: Vec<_> = all.iter().filter(|d| !here.contains(d.name.as_str())).collect();
+    if wanted.is_empty() {
+        return String::from(
+            "<div class=\"row\"><span class=\"sub\">Every sample disk this gateway is \
+             known to run is already in the images folder.</span></div>",
+        );
+    }
+    let mb = wanted.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+    format!(
+        "<div class=\"row\">{button}\
+         <span class=\"sub\">{n} disks, {mb:.0} MB, from {src} \u{2014} only the ones known to \
+         run here. They are not ours; this fetches them for you, and anything already in the \
+         folder is left alone.</span></div>",
+        button = save_button("getdisks", "Download sample disks", "secondary"),
+        n = wanted.len(),
+        src = html_escape(crate::cpm::fetch::ALTAIR_DUINO_SOURCE),
     )
 }
 
@@ -5063,6 +5121,34 @@ mod tests {
         assert!(page.contains("e.ctrlKey"));
         // A real focus, not a mode of ours.
         assert!(page.contains("tabindex=\"0\""));
+    }
+
+    /// **The download offer names what it will do before doing it** — how many
+    /// disks, how big, and whose they are. An operator who would rather fetch
+    /// them by hand has to be able to see that and decline.
+    #[test]
+    fn test_the_disk_download_offer_says_what_it_is() {
+        let dir = std::env::temp_dir().join(format!("egweb{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let row = get_disks_row(&[]);
+        assert!(row.contains("Download sample disks"));
+        assert!(row.contains("github.com/dhansel/Altair8800"), "whose disks: {row}");
+        assert!(row.contains("known to"), "that they are the ones that work: {row}");
+        assert!(row.contains("left alone"), "that nothing is overwritten: {row}");
+        // The count is the catalogue's, not a number typed here.
+        assert!(row.contains(&crate::cpm::fetch::catalogue().len().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With every disk already there the offer becomes a statement, not a
+    /// button that would do nothing.
+    #[test]
+    fn test_the_offer_disappears_once_the_disks_are_here() {
+        let names: Vec<String> =
+            crate::cpm::fetch::catalogue().into_iter().map(|d| d.name).collect();
+        let row = get_disks_row(&names);
+        assert!(!row.contains("<button"), "nothing left to fetch: {row}");
+        assert!(row.contains("already in the images folder"));
     }
 
     /// The page is inert HTML plus two fetches; if the endpoints it names ever

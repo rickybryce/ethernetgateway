@@ -1447,7 +1447,23 @@ than on the disk, and that ROM is not one the gateway has.
 </p>
 
 <p>
-<strong>Where to get them.</strong>  The disks are other people's work and are
+<strong>Getting them automatically.</strong>  Every disk screen &mdash; the telnet
+mount wizard, the web <em>Mount CP/M Drives</em> page and the desktop
+<em>Mount CP/M Drives</em> window &mdash; offers to <strong>download the sample
+disks</strong> before you mount anything.  It fetches about 23&nbsp;MB into
+<code>CPM/images</code>, where the gateway finds them without any further
+setup, and it offers <strong>only the disks this gateway is known to run</strong>
+&mdash; thirty of the Altair-Duino collection's thirty-four.  The other four are
+left out on purpose: three are data companions with no boot program and one is
+a blank, and downloading those only to find they do nothing is not a favour.
+Anything already in the folder is <strong>never overwritten</strong>, so a disk
+you have edited or put there yourself is safe.  The download is pinned to a
+particular commit and every file is checked against a recorded SHA-256, so what
+arrives is what was tested.
+</p>
+
+<p>
+<strong>Where to get them by hand.</strong>  The disks are other people's work and are
 not shipped with the gateway.  The Altair-Duino set is the <code>disks/</code>
 folder of David Hansel's Altair 8800 simulator,
 <a href="https://github.com/dhansel/Altair8800">github.com/dhansel/Altair8800</a>;

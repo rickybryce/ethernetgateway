@@ -46,6 +46,100 @@ impl TelnetSession {
     }
 
     /// Entry point: mount or unmount?
+    /// Offer to fetch the sample disks, then do it.
+    ///
+    /// Its own screen, for the reason every value prompt here has one: this
+    /// menu grows with the number of mounted images and has no rows to spare
+    /// for a conversation.
+    ///
+    /// The operator is told the count, the size and **where it comes from**
+    /// before agreeing.  The disks are not ours — they are David Hansel's
+    /// collection, and the software on them belongs to MITS, Microsoft and
+    /// Digital Research — so an operator who would rather fetch them
+    /// themselves should be able to see that and decline.
+    pub(in crate::telnet) async fn cpmmount_download(&mut self) -> Result<(), std::io::Error> {
+        use crate::cpm::fetch;
+        let base = self.cpmmount_base();
+        let images = base.join(crate::cpm::image::IMAGES_DIR);
+        let all = fetch::catalogue();
+        let wanted = fetch::missing(&images, &all);
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("DOWNLOAD SAMPLE DISKS"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+
+        if wanted.is_empty() {
+            self.send_line(&format!("  {}", self.green("All of them are already here."))).await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+
+        let megabytes = wanted.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+        self.send_line(&format!(
+            "  {} disks, {:.0} MB, from",
+            self.amber(&wanted.len().to_string()),
+            megabytes
+        ))
+        .await?;
+        self.send_line(&format!("  {}", self.amber(fetch::ALTAIR_DUINO_SOURCE))).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.dim("Only the disks that are known to"))).await?;
+        self.send_line(&format!("  {}", self.dim("run here. They are not ours; this"))).await?;
+        self.send_line(&format!("  {}", self.dim("fetches them for you. Anything"))).await?;
+        self.send_line(&format!("  {}", self.dim("already there is left alone."))).await?;
+        self.send_line("").await?;
+        self.send(&format!("  Download them? {}: ", self.cyan("y/N"))).await?;
+        self.flush().await?;
+        let answer = self.get_line_input().await?.unwrap_or_default();
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.dim("Fetching. This takes a minute."))).await?;
+        self.flush().await?;
+
+        // Off the async runtime: this is a minute of blocking network and file
+        // I/O, and doing it on the session's own task would stall every other
+        // session's timers with it.
+        let dir = images.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            fetch::download_missing(&dir, |_name, _i, _n| {})
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+
+        self.send_line("").await?;
+        match report {
+            Ok(r) => {
+                let colour = if r.failed.is_empty() { self.green(&r.summary()) } else { self.amber(&r.summary()) };
+                self.send_line(&format!("  {colour}")).await?;
+                // Name what failed rather than only counting it: "3 failed" with
+                // no names leaves the operator unable to retry anything.
+                for (name, why) in r.failed.iter().take(4) {
+                    let w = if self.terminal_type == TerminalType::Petscii { 34 } else { 70 };
+                    self.send_line(&format!(
+                        "  {}",
+                        self.red(&truncate_to_width(&format!("{name}: {why}"), w))
+                    ))
+                    .await?;
+                }
+            }
+            Err(e) => self.send_line(&format!("  {}", self.red(&e))).await?,
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
+    }
+
     pub(in crate::telnet) async fn cpm_mount_wizard(&mut self) -> Result<(), std::io::Error> {
         loop {
             let mounts = image::registry::all();
@@ -181,6 +275,13 @@ impl TelnetSession {
                 .await?;
             self.send_line(&format!("  {}  New blank disk", self.cyan("N")))
                 .await?;
+            // The download offer, before the mount options rather than after:
+            // a fresh install has nothing to mount, and "where do I get a disk"
+            // is the question this screen otherwise leaves the operator holding.
+            // One row, on a screen that grows with the number of mounts — which
+            // is why it says what it does and nothing more.
+            self.send_line(&format!("  {}  Download sample disks", self.cyan("D")))
+                .await?;
             if any {
                 self.send_line(&format!("  {}  Unmount a drive", self.cyan("U")))
                     .await?;
@@ -197,6 +298,7 @@ impl TelnetSession {
                 Some(s) if s == "m" => self.cpmmount_pick_image().await?,
                 Some(s) if s == "b" => self.cpmmount_pick_boot().await?,
                 Some(s) if s == "n" => self.cpmmount_new_blank().await?,
+                Some(s) if s == "d" => self.cpmmount_download().await?,
                 Some(s) if s == "u" && any => self.cpmmount_pick_unmount().await?,
                 Some(s) if !s.is_empty() => {}
                 _ => return Ok(()),

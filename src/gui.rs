@@ -544,6 +544,13 @@ struct App {
     /// CP/M group rather than more rows in it: sixteen drives do not fit
     /// beside the other settings, and mounting is an occasional operation.
     cpm_mount_popup_open: bool,
+    /// A sample-disk download running on its own thread, and what it last said.
+    ///
+    /// A thread rather than a blocking call: this is a minute of network I/O
+    /// and the window has to keep painting, or the operator cannot tell a
+    /// download from a hang.
+    cpm_fetch: Option<std::sync::mpsc::Receiver<String>>,
+    cpm_fetch_note: String,
     /// Draft selection, one entry per drive: the image filename, or empty for
     /// "use the drive folder".  Edited in the window and applied on Save, so a
     /// half-made choice never reaches a live drive.
@@ -731,6 +738,8 @@ impl App {
             general_popup_open: false,
             ai_browser_popup_open: false,
             cpm_mount_popup_open: false,
+            cpm_fetch: None,
+            cpm_fetch_note: String::new(),
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_slot_labels: Vec::new(),
             cpm_slot_labels_from: (Vec::new(), false),
@@ -1069,6 +1078,82 @@ impl App {
     }
 
     /// Contents of the "Mount CP/M Drives" window: a row per drive.
+    /// The offer to fetch the sample disks, and the download itself.
+    ///
+    /// On a thread, with the result arriving down a channel: a minute of
+    /// blocking network I/O on the UI thread would freeze the window, and an
+    /// operator cannot tell a frozen window from a crashed one.
+    ///
+    /// Says the count, the size and where they come from before anything
+    /// happens — the disks are not ours, and someone who would rather fetch
+    /// them by hand should be able to see that and not press it.
+    fn draw_cpm_fetch_button(&mut self, ui: &mut egui::Ui) {
+        // Collect a finished download first, so the button comes back.
+        if let Some(rx) = &self.cpm_fetch {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.cpm_fetch_note = msg;
+                    self.cpm_fetch = None;
+                    self.cpm_mount_reload_draft();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.cpm_fetch_note = "The download ended without saying how.".to_string();
+                    self.cpm_fetch = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.cpm_fetch.is_some() {
+            ui.label(egui::RichText::new("Downloading…").color(AMBER));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        }
+
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let images = base.join(crate::cpm::image::IMAGES_DIR);
+        let all = crate::cpm::fetch::catalogue();
+        let wanted = crate::cpm::fetch::missing(&images, &all);
+        if wanted.is_empty() {
+            return;
+        }
+        let mb = wanted.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Download sample disks").color(AMBER_BRIGHT),
+            ))
+            .on_hover_text(format!(
+                "Fetch {} disks ({:.0} MB) from {} — only the ones this gateway is known to run. \
+                 They are not ours; this fetches them for you, and anything already in the images \
+                 folder is left alone.",
+                wanted.len(),
+                mb,
+                crate::cpm::fetch::ALTAIR_DUINO_SOURCE,
+            ))
+            .clicked()
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.cpm_fetch = Some(rx);
+            self.cpm_fetch_note = String::new();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
+                    Ok(r) => {
+                        let mut m = r.summary();
+                        for (name, why) in r.failed.iter().take(3) {
+                            m.push_str(&format!("  {name}: {why}"));
+                        }
+                        m
+                    }
+                    Err(e) => e,
+                };
+                let _ = tx.send(msg);
+                // Wake the UI: without this the result sits in the channel
+                // until something else happens to cause a repaint.
+                ctx.request_repaint();
+            });
+        }
+    }
+
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         let cpm_base = base.clone();
@@ -3719,7 +3804,12 @@ impl eframe::App for App {
                 {
                     self.cpm_mount_reload_draft();
                 }
+                self.draw_cpm_fetch_button(ui);
             });
+            if !self.cpm_fetch_note.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&self.cpm_fetch_note).small().color(AMBER_DIM));
+            }
         });
         self.cpm_mount_popup_open = cpm_mount_open;
 

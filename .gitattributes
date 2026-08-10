@@ -22,3 +22,9 @@ EGT80/EGT80.COM            binary
 # than after.  Pinned to LF, and `test_the_catalogue_ships_with_unix_line_endings`
 # fails loudly if it ever arrives otherwise.
 src/cpm/repodisks.txt      text eol=lf
+
+# The disk manifest is compiled in with include_str! and is TAB-separated —
+# a Windows checkout that rewrote its line endings would not break the parse,
+# but the file is generated and diffed like repodisks.txt, so pin it the same
+# way and keep the two consistent.
+src/cpm/altairduino.txt    text eol=lf
