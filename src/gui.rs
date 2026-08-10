@@ -1522,6 +1522,20 @@ impl App {
              only: a booted disk is the session, is meant to sit at its prompt, \
              and has no ceiling.",
         );
+        // The download offer, *before* the mount button and only while there is
+        // something to fetch.
+        //
+        // Here as well as on the mount screen because an operator can pick a
+        // boot disk from this very popup without ever opening that window — so
+        // the one place they are certain to pass through is this one, and an
+        // offer they never see is not an offer.  It disappears once the disks
+        // are there, so the ordinary case is unchanged.
+        ui.horizontal(|ui| {
+            self.draw_cpm_fetch_button(ui);
+        });
+        if !self.cpm_fetch_note.is_empty() {
+            ui.label(egui::RichText::new(&self.cpm_fetch_note).small().color(AMBER_DIM));
+        }
         // Disk images get their own window: sixteen drives will not fit here,
         // and mounting is an occasional operation rather than a setting.
         ui.horizontal(|ui| {

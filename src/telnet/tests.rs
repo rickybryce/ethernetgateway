@@ -2236,9 +2236,15 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
     let body = &src[start..end];
 
-    let hint = "Press E, C, D, U, I, B, P, or Q.";
+    let hint = "Press E, C, D, U, I, B, P, G, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["E", "C", "U", "D", "I", "B", "P"] {
+    // `G` is shown only while the images folder is empty — a conditional row,
+    // because this screen is at its 22-row budget and the offer replaces the
+    // "Images: none mounted" line rather than adding to it. It is handled and
+    // hinted unconditionally, which is the safe direction: a key that works
+    // when it is not shown costs nothing, and one that is shown and does not
+    // work is the drift this test exists for.
+    for key in ["E", "C", "U", "D", "I", "B", "P", "G"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"

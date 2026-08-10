@@ -664,19 +664,34 @@ impl TelnetSession {
                 .filter(|m| m.is_some())
                 .count()
                 + crate::cpm::image::registry::boot_loans().len();
-            self.send_line(&format!(
-                "  Images:    {}",
-                if mounted == 0 {
-                    self.dim("none mounted")
-                } else {
-                    self.amber(&format!(
-                        "{} drive{} mounted",
-                        mounted,
-                        if mounted == 1 { "" } else { "s" }
-                    ))
-                }
-            ))
-            .await?;
+            // With no images at all, this row's "none mounted" says nothing the
+            // operator can act on — so it becomes the offer to fetch some.  A
+            // swap rather than an extra line, because the screen is at exactly
+            // 22 rows and has none to give; and it belongs *here* rather than
+            // only on the mount screen, since an operator can pick a boot disk
+            // from `B` without ever visiting that one.
+            let no_images =
+                crate::cpm::image::available_images(&self.cpmmount_base()).is_empty();
+            // With no images the row is dropped entirely and the offer joins the
+            // *action* list below, where the other keys are — an action sitting
+            // in the middle of the status block read as a mistake.  Same row
+            // count either way, which is what this screen's budget requires.
+            if no_images {
+            } else {
+                self.send_line(&format!(
+                    "  Images:    {}",
+                    if mounted == 0 {
+                        self.dim("none mounted")
+                    } else {
+                        self.amber(&format!(
+                            "{} drive{} mounted",
+                            mounted,
+                            if mounted == 1 { "" } else { "s" }
+                        ))
+                    }
+                ))
+                .await?;
+            }
             // What the CP/M menu item actually runs.  Shown next to the other
             // CP/M settings because that is the question an operator is really
             // asking here — our emulator, or somebody's disk.
@@ -712,6 +727,13 @@ impl TelnetSession {
                 self.cyan("I")
             ))
             .await?;
+            if no_images {
+                self.send_line(&format!(
+                    "  {}  Download sample disks (none yet)",
+                    self.cyan("G")
+                ))
+                .await?;
+            }
             self.send_line(&format!(
                 "  {}  Boot settings (runs, machine, CPU)",
                 self.cyan("B")
@@ -791,11 +813,16 @@ impl TelnetSession {
                     // here answered "Press E, C, D, U, or Q."
                     self.cpm_mount_wizard().await?;
                 }
+                // Only offered while the images folder is empty, but always
+                // handled: a key that works when it is not shown costs nothing,
+                // and one that is shown and does not work is the drift this
+                // screen has suffered before.
+                "g" => self.cpmmount_download().await?,
                 "q" => return Ok(()),
                 _ => {
                     // Every displayed key belongs in this hint; I and B were
                     // each missing from it once.
-                    self.show_error("Press E, C, D, U, I, B, P, or Q.").await?;
+                    self.show_error("Press E, C, D, U, I, B, P, G, or Q.").await?;
                 }
             }
         }

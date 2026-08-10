@@ -2889,7 +2889,32 @@ fn render_more_popups(cfg: &Config) -> String {
              on either setting, so it is the one to reach for; EGT80.COM is the \
              Z80 build and will crash an 8080.</span>",
         ),
-        cpmdisks = "<button type=\"button\" class=\"more\"                     data-target=\"more-cpm-disks\">Mount CP/M drives\u{2026}</button>",
+        cpmdisks = {
+            // Before the mount button, and only while there is something to
+            // fetch: an operator can choose a *boot* disk from this popup
+            // without ever opening the mount screen, so this is the one place
+            // they are certain to pass through.
+            let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
+            let images = crate::cpm::image::available_images(&base);
+            let here: std::collections::HashSet<&str> =
+                images.iter().map(|s| s.as_str()).collect();
+            let missing = crate::cpm::fetch::catalogue()
+                .into_iter()
+                .filter(|d| !here.contains(d.name.as_str()))
+                .count();
+            let get = if missing == 0 {
+                String::new()
+            } else {
+                format!(
+                    "{} <span class=\"sub\">{missing} sample disks not here yet</span> ",
+                    save_button("getdisks", "Download sample disks", "secondary"),
+                )
+            };
+            format!(
+                "{get}<button type=\"button\" class=\"more\" \
+                 data-target=\"more-cpm-disks\">Mount CP/M drives&hellip;</button>"
+            )
+        },
 
         save = save_button("save", "Save", "secondary"),
     ));
