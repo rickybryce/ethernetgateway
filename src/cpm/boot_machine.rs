@@ -1906,9 +1906,21 @@ mod tests {
     /// disk here produces.
     #[test]
     fn test_guest_memory_has_exactly_one_access_path() {
-        let src = include_str!("boot_machine.rs");
+        // **Line endings normalised first.** A Windows checkout has CRLF, so a
+        // pattern containing a bare `\n` finds nothing and the bound below
+        // panics — which is precisely how this failed on the Windows CI job and
+        // nowhere else. Any source-scanning test that spans a line break has to
+        // do this.
+        let src = include_str!("boot_machine.rs").replace("\r\n", "\n");
         // Bounded at the test module, or this matches its own pattern strings
         // and fails on itself — the `pkill -f` mistake, in a test.
+        // Proof the normalisation does its job, run here because the platform
+        // that needs it is one this test cannot execute on. Without the
+        // replace, this find returns None and the bound below panics.
+        let crlf = "impl Machine for BootMachine\r\nx\r\n#[cfg(test)]\r\nmod tests";
+        assert!(crlf.find("\n#[cfg(test)]\nmod tests").is_none(), "CRLF really does defeat it");
+        assert!(crlf.replace("\r\n", "\n").find("\n#[cfg(test)]\nmod tests").is_some());
+
         let start = src.find("impl Machine for BootMachine").expect("the impl");
         let end = src.find("\n#[cfg(test)]\nmod tests").expect("the test module");
         let body = &src[start..end];
