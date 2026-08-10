@@ -3402,6 +3402,27 @@ db 0e           IN   (0Eh)     ; status, 0 = OK</code></pre>
                                 CUTER ROM we do not have rather than on the disk.</td>
                         </tr>
                         <tr>
+                            <td>The Cromemco bank select, and Cromix</td>
+                            <td><strong>Built, and it is not enough on its own.</strong> Cromix &mdash;
+                                Cromemco's Unix-like operating system &mdash; boots on the 4FDC, asks
+                                for its root device and takes the answer, then needs memory banking:
+                                port <code>40h</code>, a <em>bitmap</em> of eight 64&nbsp;KB banks,
+                                one bit each. Clean-room from the 64KZ-II Instruction Manual
+                                (023-2020), which also settles the part no port map could: the card
+                                is two 32&nbsp;KB blocks, each placeable in <em>any combination</em>
+                                of banks, so a Cromix machine makes <code>8000h</code>&ndash;<code>FFFFh</code>
+                                common to every bank by putting the system board's upper block in all
+                                of them. Without that, Cromix's bank-switch trampoline at
+                                <code>FF90</code> fetches its next instruction from a blank bank and
+                                slides through 64&nbsp;KB of <code>NOP</code> for ever &mdash;
+                                measured. <strong>32&nbsp;KB is the only granularity the hardware
+                                has</strong>, which is what ruled out a smaller common area the
+                                guest could not distinguish. It still stops at
+                                <code>Unable to open console</code>: its TU-ART is armed for
+                                interrupts and waits for one, and this emulator has never delivered
+                                an interrupt to any guest.</td>
+                        </tr>
+                        <tr>
                             <td>A z80pack <code>cpmsim</code> controller</td>
                             <td><strong>Done</strong> &mdash; see the section above. It reaches
                                 <code>TDISK03</code> (Comal 80) plus nine disks in z80pack's own
