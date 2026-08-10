@@ -130,7 +130,7 @@ impl std::fmt::Display for Unknown {
         match self {
             Unknown::NoSuchFormat(t) => write!(
                 f,
-                "no format called '{t}' — see readme.txt in the images folder"
+                "no format called '{t}' - see readme.txt in the images folder"
             ),
             Unknown::WrongSize { token, expected, actual } => write!(
                 f,
@@ -146,22 +146,74 @@ impl std::fmt::Display for Unknown {
             // double-density image is exactly that.
             Unknown::NoMatchingFormat { size } => write!(
                 f,
-                "no known format is {size} bytes — nothing here mounts a disk \
+                "no known format is {size} bytes - nothing here mounts a disk \
                  that size, and renaming cannot change that. It may still be \
                  bootable: try the boot picker (see readme.txt)"
             ),
+            // Says what to do about it, like its sibling above.  A disk with a
+            // size we know but no CP/M directory is very often a disk that is
+            // not CP/M *at all* and boots its own operating system — the Altair
+            // hard disks carrying Disk BASIC and the Accounting System are
+            // exactly that, and they boot perfectly.  Reporting only "no
+            // directory" sent the operator looking for a fault in a disk that
+            // works.
             Unknown::NoDirectory { candidates } => write!(
                 f,
-                "no CP/M directory found — this may not be a CP/M disk (tried {})",
+                "no CP/M directory found - this is probably not a CP/M disk. It \
+                 may still boot its own operating system: try the boot picker. \
+                 (tried {})",
                 candidates.join(", ")
             ),
             Unknown::Ambiguous { candidates } => write!(
                 f,
-                "several formats fit this file ({}) — rename it with the right \
+                "several formats fit this file ({}) - rename it with the right \
                  prefix to say which",
                 candidates.join(", ")
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// **Every refusal an operator can read must be plain ASCII.**
+    ///
+    /// These go out over telnet, where a 40-column PETSCII terminal renders a
+    /// UTF-8 em dash as three garbage glyphs rather than one character — which
+    /// is exactly how Ricky saw `no CP/M directory found â this may not be...`
+    /// on a real session. The width tests cannot catch it: a multi-byte char
+    /// counts as one `char` and three bytes on the wire.
+    #[test]
+    fn test_every_refusal_is_ascii() {
+        let reasons = [
+            Unknown::NoSuchFormat("bogus".to_string()),
+            Unknown::WrongSize { token: "ibm3740", expected: 256_256, actual: 1 },
+            Unknown::NoMatchingFormat { size: 12_345 },
+            Unknown::NoDirectory { candidates: vec!["altairhd"] },
+            Unknown::Ambiguous { candidates: vec!["a", "b"] },
+        ];
+        for r in reasons {
+            let text = r.to_string();
+            assert!(
+                text.is_ascii(),
+                "a refusal an operator reads on telnet is not ASCII: {text:?}"
+            );
+        }
+    }
+
+    /// **A disk we cannot mount is often one that boots**, and the refusal has
+    /// to say so — the Altair hard disks carrying Disk BASIC and the Accounting
+    /// System have no CP/M directory and boot perfectly. Saying only "no
+    /// directory" sent an operator looking for a fault in a working disk.
+    #[test]
+    fn test_a_disk_that_is_not_cpm_is_pointed_at_the_boot_picker() {
+        let text = Unknown::NoDirectory { candidates: vec!["altairhd"] }.to_string();
+        assert!(text.contains("boot"), "{text}");
+        // And its sibling, which had this right first and is the reason the
+        // gap was visible at all.
+        assert!(Unknown::NoMatchingFormat { size: 999 }.to_string().contains("boot"));
     }
 }
 
@@ -1002,7 +1054,9 @@ mod tests {
             Unknown::NoDirectory { candidates } => assert!(candidates.contains(&"ibm3740")),
             other => panic!("expected NoDirectory, got {other:?}"),
         }
-        assert!(err.to_string().contains("may not be a CP/M disk"));
+        assert!(err.to_string().contains("probably not a CP/M disk"));
+        // And it says what to do instead: these disks very often boot.
+        assert!(err.to_string().contains("boot picker"));
     }
 
     #[test]
