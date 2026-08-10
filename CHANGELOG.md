@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.1] - Unreleased
+## [0.9.1] - 2026-08-10
 
 ### Added
 
@@ -101,6 +101,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LIFE` asks `ENTER DATA` and `GDEMO` wants `Ctrl-S`, and neither needs a
   joystick.
 
+- **The gateway can fetch the sample disks for you.** Every disk screen —
+  the telnet mount wizard, the web *Mount CP/M Drives* page and the desktop
+  window, plus the CP/M settings screen on all three — offers to download them
+  into `CPM/images` before you mount anything. About 23 MB, and it is offered
+  on the settings screen too because an operator can pick a *boot* disk without
+  ever opening the mount screen: an offer nobody sees is not an offer.
+
+  **Only the disks that are known to run** — thirty of the Altair-Duino
+  collection's thirty-four, chosen by this project's own boot survey rather
+  than by hand. The other four are left out deliberately: three are data
+  companions with no boot program and one is a blank, and downloading a disk
+  that does nothing is not a favour.
+
+  Pinned to a commit and SHA-256 verified, so what arrives is what was tested,
+  and a changed file is refused rather than accepted. **Nothing already in the
+  folder is ever overwritten**, and downloads land on a `.part` name and are
+  renamed so an interrupted fetch cannot leave half a disk behind. Nothing is
+  mirrored: the disks are David Hansel's collection and the software on them
+  belongs to MITS, Microsoft and Digital Research, so this fetches them from
+  the original repository on the operator's behalf and names the source before
+  asking. `test_every_offered_disk_boots_when_downloaded` downloads all thirty
+  and boots every one, so "known to run" is a tested claim.
+
+- **`repodisks.txt`, a catalogue of what is on every disk we support.** Written
+  into the images folder beside the readme, listing each disk in the four
+  collections and the files on it — read through the same mount path the
+  gateway uses, so it is each disk's own directory rather than somebody's
+  notes, with the address each collection came from at the head of its section.
+  A disk with no CP/M filesystem says so instead of showing an empty listing,
+  because "no files" and "a layout that is not CP/M's" look identical and mean
+  completely different things.
+
+- **Cromemco's bank select on port `40h`**, clean-room from the 64KZ-II
+  Instruction Manual: a bitmap of eight 64 KB banks, one bit each, with the
+  upper 32 KB common to every bank because the card is two 32 KB blocks each
+  placeable in any combination of banks. Cromix — Cromemco's Unix-like
+  operating system — needs it, and now boots, banks and configures its console
+  instead of sliding through 64 KB of `NOP`. It still stops at `Unable to open
+  console`: its TU-ART is armed for interrupts, and this emulator has never
+  delivered one to any guest. `iz80` implements interrupt mode 1 only, and the
+  TU-ART is a mode-0 device, so that is where it rests for now.
+
 - **A boot that will paint a VDM-1 says so.** A disk whose own system tracks
   write port `C8h` is announced on the boot banner with the address to open —
   and told plainly when the web server is off, which it is by default. Measured
@@ -109,6 +151,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposed (the port *and* an address in the screen window) turned out to be
   unnecessary — 60 of the 75 address that page for reasons that have nothing to
   do with a video card, so the port alone is the declaration.
+
+### Fixed
+
+- **A disk that will not mount now says it might boot.** `HDSK01` and `HDSK02`
+  are Altair Hard Disk BASIC and the Accounting System — not CP/M filesystems,
+  so refusing to mount them is right, but "no CP/M directory found" sent
+  operators looking for a fault in disks that work perfectly. The sibling
+  refusal had pointed at the boot picker for months; this one now does too.
+
+- **Refusals are plain ASCII again.** They carried a UTF-8 em dash, which a
+  40-column PETSCII terminal renders as three garbage glyphs. The width tests
+  could not catch it: a multi-byte character counts as one `char` and three
+  bytes on the wire.
+
+- **A value prompt gets its own screen.** The shared "type a new value" prompt
+  behind eight telnet menu entries printed underneath a menu already at the
+  22-row budget, so it scrolled on a Commodore.
+
+- **The Groq API key says whose it is, and that it is optional** — and it moved
+  off the first row of its frame on the web page and the desktop GUI. An
+  optional key at the top of a frame reads as something the gateway needs
+  before it will work; the weather location took its place.
+
+- **The mount screens' drive letters share one column.** The page and window
+  fonts are proportional, so `I:` and `M:` are different widths and every
+  control started at a slightly different place down a list of sixteen.
 
 ## [0.9.0] - 2026-08-08
 
