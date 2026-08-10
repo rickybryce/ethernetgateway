@@ -4736,8 +4736,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.0...HEAD
-[0.9.1]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.1
 [0.9.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.0
 [0.8.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.1
 [0.8.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.8.0
