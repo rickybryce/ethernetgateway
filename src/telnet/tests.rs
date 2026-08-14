@@ -42,6 +42,60 @@ fn test_is_backspace_key() {
     assert!(!is_backspace_key(0x00, 0x7F));
 }
 
+/// **Space must never become the session's erase character — and nothing else
+/// may be refused.**
+///
+/// Terminal detection makes whatever byte answers its prompt the erase
+/// character. That is the right design: it measures the key rather than
+/// guessing, which is the only way to serve a machine whose editing key is
+/// unusual. Space is the single answer it must not take, and it is easy to hit
+/// — `ATDT ethernetgateway` from inside the CP/M emulator opens a second
+/// detection prompt. Measured live 2026-08-14: `New York` in the weather
+/// location echoed `New<BS> <BS>York`, and all three gateway paths rewrite
+/// `erase_char` to 0x7F on the way out, so every space typed at a remote host
+/// arrived as a destructive DEL.
+///
+/// **The breadth is the other half of the test.** The first fix refused every
+/// printable byte, which is wrong about real hardware and would have broken
+/// users who were doing nothing wrong — so the printable keys that are somebody's
+/// genuine backspace are asserted to still work, by name.
+#[test]
+fn test_only_space_is_refused_as_the_erase_key() {
+    assert!(!can_be_erase_char(b' '), "space is the one answer that cannot be a key");
+
+    // Printable keys that really are a backspace on real machines.  A rule that
+    // refuses these tells the user their own key is invalid and then declines
+    // to erase with it.
+    assert!(
+        can_be_erase_char(0x5F),
+        "0x5F is the Apple I back arrow (ASCII-1963 left arrow), a real backspace key"
+    );
+    assert!(can_be_erase_char(b'#'), "# erased on the early Unix ttys");
+
+    // Control codes were always the main case and must be untouched.
+    for b in [0x00u8, 0x08, 0x14, 0x1B, 0x1F, 0x7F, 0x80, 0xFF] {
+        assert!(can_be_erase_char(b), "0x{b:02x} must still be usable");
+    }
+    // Nothing else in the printable range is refused either.
+    for b in 0x21..=0x7Eu8 {
+        assert!(can_be_erase_char(b), "0x{b:02x} ({:?}) must not be refused", b as char);
+    }
+
+    // The substitute costs nothing: the three usual backspace keys are accepted
+    // whatever the erase character is.
+    for key in [0x08u8, 0x7F, 0x14] {
+        assert!(
+            is_backspace_key(key, DEFAULT_ERASE_CHAR),
+            "0x{key:02x} must still erase after a refused detection"
+        );
+    }
+    // The defect, and its absence.
+    assert!(is_backspace_key(b' ', b' '), "this is what was happening");
+    assert!(!is_backspace_key(b' ', DEFAULT_ERASE_CHAR), "a space must type, not erase");
+    // And an Apple I user's key still erases, which the first fix broke.
+    assert!(is_backspace_key(0x5F, 0x5F), "the back arrow must still erase");
+}
+
 #[test]
 fn test_is_esc_key() {
     assert!(is_esc_key(0x1B, false));
@@ -4614,6 +4668,63 @@ fn test_modem_apply_settings_row_count() {
 }
 
 // ─── Telnet option negotiation ───────────────────────
+
+/// **A terminal the client announced is believed**, whichever transport
+/// carried the announcement.
+///
+/// SSH sends `TERM` in the pty request and it was being discarded. That cost
+/// SSH clients not a prompt but an *answer*: `run()` skips terminal detection
+/// entirely for SSH, so every SSH session kept the `TerminalType::Ansi`
+/// default whatever the client said — a `dumb` terminal was sent colour, and a
+/// Commodore-side client was sent ANSI instead of PETSCII. Verified live:
+/// `TERM=c64` over SSH now reaches the menu in PETSCII.
+///
+/// On the telnet side the same function decides whether the BACKSPACE prompt
+/// can be skipped, so the two transports cannot come to disagree about what an
+/// announced name means.
+#[test]
+fn test_an_announced_terminal_is_believed() {
+    // A name we know: type is taken and the prompt is skipped.
+    let mut s = make_test_session(TerminalType::Ascii);
+    s.note_announced_terminal("xterm-256color");
+    assert!(s.ttype_matched, "a known TERM must skip the prompt");
+    assert_eq!(s.terminal_type, TerminalType::Ansi);
+    assert_eq!(s.ttype_raw.as_deref(), Some("xterm-256color"));
+
+    // A Commodore announcing itself is still a Commodore.
+    let mut s = make_test_session(TerminalType::Ansi);
+    s.note_announced_terminal("C64");
+    assert!(s.ttype_matched);
+    assert_eq!(s.terminal_type, TerminalType::Petscii);
+
+    // An unrecognised name is *recorded* for the gateway-debug diagnostic but
+    // does not count as identification, so on telnet that client is still asked
+    // to press BACKSPACE: the question is skipped only when we know the answer.
+    let mut s = make_test_session(TerminalType::Ascii);
+    s.note_announced_terminal("MY-WEIRD-TERM");
+    assert!(!s.ttype_matched, "an unknown TERM must still be asked");
+    assert_eq!(s.ttype_raw.as_deref(), Some("MY-WEIRD-TERM"));
+
+    // No pty, or an empty/garbage TERM: nothing recorded, still asked.
+    let mut s = make_test_session(TerminalType::Ascii);
+    s.note_announced_terminal("");
+    assert!(!s.ttype_matched);
+    assert_eq!(s.ttype_raw, None, "an empty TERM is not an announcement");
+
+    // Control bytes are stripped rather than taken as part of the name, the
+    // same as the telnet subnegotiation always did.
+    let mut s = make_test_session(TerminalType::Ascii);
+    s.note_announced_terminal("vt100\u{0}\r");
+    assert!(s.ttype_matched);
+    assert_eq!(s.ttype_raw.as_deref(), Some("vt100"));
+
+    // First announcement wins: a later one cannot retype an identified session.
+    let mut s = make_test_session(TerminalType::Ascii);
+    s.note_announced_terminal("C64");
+    s.note_announced_terminal("xterm");
+    assert_eq!(s.terminal_type, TerminalType::Petscii, "the first answer stands");
+    assert_eq!(s.ttype_raw.as_deref(), Some("C64"));
+}
 
 #[test]
 fn test_match_terminal_name_c64_variants() {

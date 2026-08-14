@@ -414,6 +414,7 @@ impl russh::server::Server for SshServer {
             username: cfg.username.clone(),
             password: cfg.password.clone(),
             peer_addr: peer_addr.map(|a| a.ip()),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
@@ -437,6 +438,12 @@ struct SshHandler {
     /// Snapshot of `cfg.password` taken at connect time.
     password: String,
     peer_addr: Option<std::net::IpAddr>,
+    /// `TERM` from the client's pty request, when it sent one.
+    ///
+    /// Handed to the `TelnetSession` so an SSH client that announced its
+    /// terminal is not asked to press BACKSPACE — the same shortcut telnet
+    /// already takes from TTYPE.  `None` for a shell opened without a pty.
+    pty_term: Option<String>,
     /// Write half of the duplex bridge to the TelnetSession.
     /// Set once a shell is opened; prevents duplicate shell requests.
     duplex_writer:
@@ -742,7 +749,7 @@ impl russh::server::Handler for SshHandler {
     async fn pty_request(
         &mut self,
         channel: russh::ChannelId,
-        _term: &str,
+        term: &str,
         _col_width: u32,
         _row_height: u32,
         _pix_width: u32,
@@ -750,6 +757,23 @@ impl russh::server::Handler for SshHandler {
         _modes: &[(russh::Pty, u32)],
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
+        // The client's `TERM` is the same fact telnet's TTYPE carries, and it
+        // was being discarded.
+        //
+        // What that cost is *not* an extra prompt: `run()` skips
+        // `detect_terminal_type` entirely for SSH (`if !self.is_ssh`), so an SSH
+        // session never asked anything.  It simply kept `new_ssh`'s default of
+        // `TerminalType::Ansi` — every SSH client was assumed to be ANSI
+        // whatever it said it was, so `TERM=dumb` got colour it cannot render
+        // and a Commodore-side client got ANSI instead of PETSCII.  Measured:
+        // with this plumbed in, `TERM=c64` over SSH now reaches the menu in
+        // PETSCII.
+        //
+        // The pty request always precedes the shell request, so this is set
+        // before `shell_request` builds the session.  A client with no pty at
+        // all (`ssh host command`, or `-T`) never gets here and keeps the ANSI
+        // default, exactly as every SSH session did before.
+        self.pty_term = Some(term.to_string());
         session.channel_success(channel)?;
         Ok(())
     }
@@ -794,6 +818,7 @@ impl russh::server::Handler for SshHandler {
         // Spawn the TelnetSession on the gateway side of the duplex.
         let writer_for_task = writer_arc.clone();
         let lockouts_for_task = self.lockouts.clone();
+        let pty_term = self.pty_term.clone();
         tokio::spawn(async move {
             let mut sess = telnet::TelnetSession::new_ssh(
                 Box::new(gateway_read),
@@ -803,6 +828,10 @@ impl russh::server::Handler for SshHandler {
                 peer_addr,
                 lockouts_for_task,
             );
+            // Before `run()`, so detection sees it.
+            if let Some(term) = pty_term {
+                sess.note_announced_terminal(&term);
+            }
             if let Err(e) = sess.run().await {
                 glog!("SSH: session error: {}", e);
             }
@@ -1270,6 +1299,7 @@ mod tests {
             username: "admin".into(),
             password: "secret".into(),
             peer_addr: Some("10.0.0.1".parse().unwrap()),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
@@ -1350,6 +1380,7 @@ mod tests {
             username: user.into(),
             password: pass.into(),
             peer_addr: Some("10.0.0.2".parse().unwrap()),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
@@ -1574,6 +1605,7 @@ mod tests {
             username: "admin".into(),
             password: "secret".into(),
             peer_addr: Some(ip),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
@@ -1606,6 +1638,7 @@ mod tests {
             username: "admin".into(),
             password: "secret".into(),
             peer_addr: Some(ip),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
@@ -1653,6 +1686,7 @@ mod tests {
             username: "admin".into(),
             password: "secret".into(),
             peer_addr: Some(ip),
+            pty_term: None,
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),

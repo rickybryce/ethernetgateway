@@ -46,7 +46,12 @@ pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
 mod io;
 pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
 mod session;
-pub(crate) use session::{match_terminal_name, is_backspace_key};
+pub(crate) use session::is_backspace_key;
+// Test-only re-exports: `match_terminal_name` is now reached through
+// `TelnetSession::note_announced_terminal` (shared by telnet TTYPE and the SSH
+// pty request), so production code no longer names it directly.
+#[cfg(test)]
+pub(crate) use session::{can_be_erase_char, match_terminal_name, DEFAULT_ERASE_CHAR};
 mod transfer;
 mod config_ui;
 // Width-aware confirmation formatter; used by config_ui itself and by the

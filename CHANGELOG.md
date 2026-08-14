@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.2] - Unreleased
 
+### Fixed
+
+- **A space at the terminal-detection prompt turned every space into a delete
+  key.** `Press BACKSPACE to detect terminal:` took whatever byte answered it
+  as the session's erase character, with no check. Answer it with a space and
+  `0x20` became the erase key: from then on every space in a weather location,
+  a filename or a password erased a character instead of typing one — and the
+  SSH/telnet/serial gateways translate the erase character to `0x7F` on the way
+  out, so every space typed at a *remote host* arrived as a destructive DEL.
+
+  Easy to hit because `ATDT ethernetgateway` from inside the CP/M emulator
+  opens a **second** detection prompt: the outer session is normally identified
+  automatically from the client's announced terminal type and never asks, so
+  the one inside EGT80/EGT8080 is the first time many operators see the
+  question. Neither terminal was at fault — the same answer broke a plain
+  telnet session too.
+
+  Space is now refused as an erase character and the prompt asks again, up to
+  twice, naming space specifically. **Only space is refused.** The first fix
+  banned every printable byte and was wrong about real hardware: an Apple I
+  clone's editing key is the back arrow `0x5F` (`←` in ASCII-1963, before that
+  code point became underscore) and the early Unix ttys erased with `#` — both
+  printable, both genuine. The retries are bounded and fall through to the old
+  behaviour so a relay or a test harness cannot be trapped in a prompt it
+  cannot satisfy.
+
+- **A directory entry one block past the end of a disk passed the image
+  identification check.** `directory_is_consistent` compared against
+  `Format::data_blocks()`, which is a *count*, where the last legal block is
+  one less — so the check that decides whether an unlabelled disk may be
+  written to disagreed with the mount by exactly one block, and the operator
+  got the generic "the CP/M directory in this image is damaged" instead of the
+  specific reason. It now derives every number from `Params::derive`, the same
+  source the mount uses, which also settles a dormant disagreement about
+  allocation-map width at exactly 256 blocks, and it rejects an entry claiming
+  a block inside the directory's own area as the mount already did.
+
+- **The declared minimum Rust version could not build the crate.**
+  `rust-version` said 1.87 while the code uses let chains, stabilised in 1.88 —
+  so anyone following the README got a parse error rather than cargo's "this
+  crate requires rustc 1.88". A gating CI job now builds at the declared
+  minimum, which is the check that would have caught it.
+
+- **Mount changes made with the CP/M emulator switched off reported success and
+  were silently discarded.** The live table is deliberately not authoritative
+  while the emulator is off, so the configuration was written back with its old
+  value — but nothing stopped the screens acting, so all three confirmed a
+  change that vanished at the next restart. They now refuse with the reason,
+  from the one function every mount path already passes through.
+
+- **A controller reporting a longer write than its own buffer would panic the
+  session.** The only unguarded index on the disk write path; both ends are now
+  bounded and a short buffer refuses the write rather than committing a partial
+  sector.
+
+### Changed
+
+- **SSH sessions now honour the client's `TERM`.** It arrives in the pty
+  request and was being discarded, so every SSH session was assumed to be ANSI
+  whatever the client said — a `dumb` terminal was sent colour it cannot
+  render, and a Commodore-side client was sent ANSI instead of PETSCII. Telnet
+  has always taken this from TTYPE; both transports now go through one
+  function, so they cannot come to disagree about what a terminal name means.
+
 ## [0.9.1] - 2026-08-10
 
 ### Added

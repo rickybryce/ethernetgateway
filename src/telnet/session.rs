@@ -53,9 +53,83 @@ pub(crate) fn is_backspace_key(byte: u8, erase_char: u8) -> bool {
     byte == erase_char || byte == 0x08 || byte == 0x7F || byte == 0x14
 }
 
+/// The erase character to use when the detection prompt was answered with
+/// something that cannot be a backspace key.
+///
+/// 0x7F costs nothing: [`is_backspace_key`] accepts 0x08, 0x7F and 0x14
+/// unconditionally, so the three real backspace keys keep working whatever this
+/// is.  It is also the `TelnetSession` default, so an undetected session and a
+/// mis-detected one behave the same.
+pub(crate) const DEFAULT_ERASE_CHAR: u8 = 0x7F;
+
+/// Can `byte` be somebody's backspace key?
+///
+/// **Space alone cannot.**  Terminal detection takes whatever byte answers its
+/// prompt and makes it the session's erase character, which is the right design
+/// — it *measures* the key instead of guessing it, and that is the only way to
+/// serve a machine whose editing key is unusual.  The one answer it must not
+/// take at face value is `0x20`.
+///
+/// Space is what bites.  `ATDT ethernetgateway` from inside the CP/M emulator
+/// opens a *second* terminal-detection prompt, which is easy to tap space at,
+/// and from then on every space in a weather location, a filename or a password
+/// erased a character instead of adding one — and worse, the three gateway
+/// paths translate `erase_char` to `0x7F` on the way out (`gateway.rs`), so
+/// every space typed at a remote host arrived as a destructive DEL.  Measured
+/// live 2026-08-14: `New York` echoed back `New<BS> <BS>York`.
+///
+/// **The rule is this narrow on purpose, and the first version was not.**  It
+/// refused every printable byte, which is wrong about real hardware: an Apple I
+/// clone's editing key is the back arrow, `0x5F` — `←` in ASCII-1963, before
+/// that code point became underscore — and the early Unix ttys erased with
+/// `#`, `0x23`.  Both are printable, both are somebody's genuine backspace, and
+/// banning the range would have told those users their own key was invalid
+/// while quietly refusing to erase with it.  Space earns its exception on its
+/// own terms rather than by being printable: no keyboard sends `0x20` as an
+/// editing key (a space is what *paints over* an erased column, not what
+/// commands the erase), it is the reflex answer to any unexplained prompt, and
+/// it is the one character whose loss breaks ordinary typing everywhere.
+///
+/// The terminal *type* is decided by the byte either way and is not touched
+/// here: a space still means ASCII, which is where it already fell.
+pub(crate) fn can_be_erase_char(byte: u8) -> bool {
+    byte != b' '
+}
+
 impl TelnetSession {
 
     // ─── Terminal detection ─────────────────────────────────
+
+    /// Record a terminal name the client announced, exactly as the telnet
+    /// TTYPE subnegotiation does.
+    ///
+    /// SSH clients send their `TERM` in the pty request, which is the same fact
+    /// telnet's TTYPE carries and was being thrown away.  It did **not** cost
+    /// them a prompt — `run()` skips [`Self::detect_terminal_type`] for SSH
+    /// altogether — it cost them the answer: every SSH session kept `new_ssh`'s
+    /// `TerminalType::Ansi` default no matter what the client was, so a `dumb`
+    /// terminal was sent colour and a Commodore-side client was sent ANSI.
+    ///
+    /// One function rather than a second copy of the rule in `ssh.rs`, because
+    /// the two transports carry one fact and should not come to disagree about
+    /// what it means.  An unrecognised name is still recorded for the
+    /// gateway-debug diagnostic while `ttype_matched` stays false, so on the
+    /// telnet side a client calling itself something unheard-of is still asked
+    /// to press BACKSPACE — we skip the question only when we know the answer.
+    pub(crate) fn note_announced_terminal(&mut self, name: &str) {
+        if self.ttype_matched {
+            return;
+        }
+        let clean: String = name.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.ttype_raw = Some(clean.clone());
+        if let Some(tt) = match_terminal_name(&clean) {
+            self.terminal_type = tt;
+            self.ttype_matched = true;
+        }
+    }
 
     pub(in crate::telnet) async fn detect_terminal_type(&mut self) -> Result<(), std::io::Error> {
         // Serial callers don't speak the telnet protocol — dialing
@@ -107,33 +181,70 @@ impl TelnetSession {
                 .await?;
             self.flush().await?;
 
-            let byte = match tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                self.read_byte_filtered(),
-            )
-            .await
-            {
-                Ok(result) => match result? {
-                    Some(b) => b,
-                    None => return Ok(()),
-                },
-                Err(_) => {
-                    self.send_raw(b"\r\n\r\n  Disconnected: idle timeout.\r\n\r\n")
-                        .await?;
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "idle timeout during terminal detection",
-                    ));
+            // Ask again when the answer was a space, because a space is the one
+            // answer that cannot be anybody's key (see `can_be_erase_char`) and
+            // is the reflex response to a prompt somebody did not expect — which
+            // is exactly how it arrives here, `ATDT ethernetgateway` opening a
+            // second detection prompt inside the CP/M emulator.
+            //
+            // **Bounded, and it falls through rather than insisting.** A session
+            // is not always a person: a relay, a test harness or a modem that
+            // sends something odd must not be trapped in a prompt it cannot
+            // satisfy, so after `SPACE_RETRIES` the space is accepted as an
+            // ASCII terminal exactly as before and only the erase character is
+            // refused.  Looping until satisfied would turn a cosmetic mistake
+            // into an unreachable gateway.
+            //
+            // The message names **space** specifically and does not say "that is
+            // not a backspace key", which would be a lie to the machines this
+            // prompt exists for: an Apple I clone's back arrow is 0x5F and the
+            // early Unix erase was `#`, both printable and both genuine.
+            const SPACE_RETRIES: u32 = 2;
+            let mut byte;
+            let mut attempt = 0;
+            loop {
+                byte = match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    self.read_byte_filtered(),
+                )
+                .await
+                {
+                    Ok(result) => match result? {
+                        Some(b) => b,
+                        None => return Ok(()),
+                    },
+                    Err(_) => {
+                        self.send_raw(b"\r\n\r\n  Disconnected: idle timeout.\r\n\r\n")
+                            .await?;
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "idle timeout during terminal detection",
+                        ));
+                    }
+                };
+                if can_be_erase_char(byte) || attempt >= SPACE_RETRIES {
+                    break;
                 }
-            };
+                attempt += 1;
+                self.send_raw(b"\r\nSpace cannot be the erase key. Press BACKSPACE: ")
+                    .await?;
+                self.flush().await?;
+            }
 
-            self.erase_char = byte;
+            // The byte still decides the terminal type — a space still means
+            // ASCII, which is where it already fell.  It does *not* get to become
+            // the erase character: see `can_be_erase_char`.
+            self.erase_char = if can_be_erase_char(byte) { byte } else { DEFAULT_ERASE_CHAR };
             self.terminal_type = match byte {
                 0x14 => TerminalType::Petscii,
                 0x08 | 0x7F => TerminalType::Ansi,
                 _ => TerminalType::Ascii,
             };
-            detect_method = format!("BACKSPACE key 0x{:02x}", byte);
+            detect_method = format!(
+                "BACKSPACE key 0x{:02x}{}",
+                byte,
+                if can_be_erase_char(byte) { "" } else { " (space: not used as erase)" }
+            );
         }
 
         let type_name = match self.terminal_type {

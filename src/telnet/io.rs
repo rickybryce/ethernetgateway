@@ -454,21 +454,16 @@ impl TelnetSession {
     ) -> Result<(), std::io::Error> {
         match opt {
             OPT_TTYPE => {
-                if body.first().copied() == Some(TTYPE_IS) && !self.ttype_matched {
-                    let name_bytes = &body[1..];
-                    let name: String = name_bytes
-                        .iter()
-                        .map(|&b| b as char)
-                        .filter(|c| !c.is_control())
-                        .collect();
-                    // Record what the client announced even when we don't
-                    // recognize it, so the gateway-debug terminal diagnostic
-                    // can show the exact name that failed to match.
-                    self.ttype_raw = Some(name.clone());
-                    if let Some(tt) = match_terminal_name(&name) {
-                        self.terminal_type = tt;
-                        self.ttype_matched = true;
-                    }
+                if body.first().copied() == Some(TTYPE_IS) {
+                    let name: String = body[1..].iter().map(|&b| b as char).collect();
+                    // Shared with the SSH pty request, which carries the same
+                    // fact as `TERM`.  One function, because two places
+                    // deciding what an announced terminal name means is how
+                    // the two transports come to disagree — and it already
+                    // records an unrecognised name for the gateway-debug
+                    // diagnostic and leaves `ttype_matched` false so the
+                    // client is still asked.
+                    self.note_announced_terminal(&name);
                 }
             }
             OPT_STATUS => {
