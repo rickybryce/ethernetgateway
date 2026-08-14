@@ -47,10 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a block inside the directory's own area as the mount already did.
 
 - **The declared minimum Rust version could not build the crate.**
-  `rust-version` said 1.87 while the code uses let chains, stabilised in 1.88 —
+  `rust-version` said 1.87 while the code uses let chains, stabilised in 1.88,
   so anyone following the README got a parse error rather than cargo's "this
-  crate requires rustc 1.88". A gating CI job now builds at the declared
-  minimum, which is the check that would have caught it.
+  crate requires rustc …". The real floor is **1.92**: egui/eframe 0.34 require
+  it, so it is the dependency graph and not our own source that decides. A
+  gating CI job now builds at the declared minimum — it caught the second wrong
+  answer (1.88) on its first run, and `versionchange.txt` now carries the
+  command that measures the floor rather than an instruction to reason about it.
+
+### Security
+
+- **`webbrowser` bumped to 1.2.2** for RUSTSEC-2026-0257 (argument injection
+  through the Unix `BROWSER` template). It reaches us only through
+  `egui-winit`, for opening a link from the desktop GUI — the gateway's own
+  text-mode browser is unrelated code — so exposure was limited, but the fix is
+  a lockfile bump.
 
 - **Mount changes made with the CP/M emulator switched off reported success and
   were silently discarded.** The live table is deliberately not authoritative

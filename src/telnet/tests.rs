@@ -4726,6 +4726,45 @@ fn test_an_announced_terminal_is_believed() {
     assert_eq!(s.ttype_raw.as_deref(), Some("C64"));
 }
 
+/// **Both detection prompts must fit a 40-column screen.**
+///
+/// This is the one thing written before the terminal type is known, so it has
+/// to fit the narrowest terminal it could be talking to — a PETSCII C64 —
+/// rather than the 80 columns everything after detection may assume.
+///
+/// Added because the space re-prompt was written at 48 columns and would have
+/// wrapped on exactly the machine the prompt exists to identify. The strings
+/// are read from the constants rather than restated here, for the same reason
+/// the help-fit tests iterate `*_help_lines()`: a test holding its own copy
+/// cannot catch the real one changing.
+#[test]
+fn test_the_detection_prompts_fit_a_c64_screen() {
+    const PETSCII_COLS: usize = 40;
+    for (what, prompt) in [("first ask", DETECT_PROMPT), ("space re-ask", DETECT_REPROMPT)] {
+        assert!(
+            prompt.chars().count() <= PETSCII_COLS,
+            "the {what} prompt is {} columns on a {PETSCII_COLS}-column screen: {prompt:?}",
+            prompt.chars().count()
+        );
+        // It is sent with `send_raw`, before the terminal type is known, so it
+        // cannot rely on any translation on the way out.
+        assert!(prompt.is_ascii(), "the {what} prompt must be ASCII: {prompt:?}");
+    }
+    // The re-ask has to name the key it is refusing, or it reads as the same
+    // question repeating for no reason.
+    assert!(
+        DETECT_REPROMPT.to_ascii_lowercase().contains("space"),
+        "the re-ask must say what was wrong: {DETECT_REPROMPT:?}"
+    );
+    // And it must not claim the answer was "not a backspace key", which would
+    // be false for the machines this prompt exists for — an Apple I clone's
+    // back arrow (0x5F) and the early Unix `#` are both real erase keys.
+    assert!(
+        !DETECT_REPROMPT.to_ascii_lowercase().contains("not a backspace"),
+        "the re-ask must refuse space specifically, not backspace keys in general"
+    );
+}
+
 #[test]
 fn test_match_terminal_name_c64_variants() {
     assert_eq!(match_terminal_name("C64"), Some(TerminalType::Petscii));

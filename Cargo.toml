@@ -10,12 +10,16 @@ homepage = "https://github.com/rickybryce/ethernetgateway"
 readme = "README.md"
 keywords = ["telnet", "ssh", "zmodem", "xmodem", "retrocomputing"]
 categories = ["command-line-utilities", "network-programming", "emulators"]
-# 1.88 stabilised let-chains (`if let Some(x) = e && cond`) in edition 2024, and
-# the crate uses them in ~96 places.  Declaring less is worse than useless: 1.87
-# passes the `rust-version` check and then fails in the *parser*, so the operator
-# gets a syntax error instead of cargo's "requires rustc 1.88".  CI builds on
-# @stable and can never see this, so the `msrv` job pins this exact value.
-rust-version = "1.88"
+# The floor is set by the DEPENDENCIES, not by our own source.
+#
+# Our code needs 1.88: let-chains (`if let Some(x) = e && cond`) were stabilised
+# there for edition 2024 and are used in ~96 places.  But egui/eframe 0.34
+# require 1.92, so 1.92 is what actually builds this repo and 1.88 would fail at
+# dependency resolution — a promise the build cannot keep, which is the same
+# defect as the 1.87 it replaced, only later in the process.  Both were found by
+# the `msrv` CI job rather than by reading, because every other job installs
+# @stable and can never see this; keep that job's pin equal to this value.
+rust-version = "1.92"
 # Exclude build artifacts and dev-only files from the published crate.
 exclude = [
     "/target",

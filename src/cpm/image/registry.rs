@@ -588,6 +588,12 @@ mod tests {
     async fn test_mounts_are_refused_while_the_emulator_is_off() {
         // Process-wide config, so the crate-wide lock, held across the whole
         // test and released before anything else reads the singleton.
+        //
+        // **Config lock first, then the registry lock.**  This is the only test
+        // that holds both, so no other order exists to deadlock against today —
+        // a second one must take them in this order.  Nothing is awaited while
+        // the registry's `std` guard is held, which is the other half of the
+        // rule (`tests_lock` is not a tokio mutex and cannot cross an await).
         let _cfg_lock = crate::config::CONFIG_TEST_LOCK.lock().await;
         let _g = registry_lock();
         reset();

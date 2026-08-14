@@ -51,7 +51,9 @@ pub(crate) use session::is_backspace_key;
 // `TelnetSession::note_announced_terminal` (shared by telnet TTYPE and the SSH
 // pty request), so production code no longer names it directly.
 #[cfg(test)]
-pub(crate) use session::{can_be_erase_char, match_terminal_name, DEFAULT_ERASE_CHAR};
+pub(crate) use session::{
+    can_be_erase_char, match_terminal_name, DEFAULT_ERASE_CHAR, DETECT_PROMPT, DETECT_REPROMPT,
+};
 mod transfer;
 mod config_ui;
 // Width-aware confirmation formatter; used by config_ui itself and by the
@@ -843,7 +845,7 @@ impl TelnetSession {
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ascii,
             color_enabled: true,
-            erase_char: 0x7F,
+            erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr: None,
             transfer_subdir: String::new(),
@@ -901,7 +903,7 @@ impl TelnetSession {
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ansi,
             color_enabled: true,
-            erase_char: 0x7F,
+            erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
             transfer_subdir: String::new(),
@@ -975,7 +977,7 @@ impl TelnetSession {
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ascii,
             color_enabled: true,
-            erase_char: 0x7F,
+            erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
             transfer_subdir: String::new(),
@@ -1587,7 +1589,7 @@ pub fn start_server(
                                     current_menu: Menu::Main,
                                     terminal_type: TerminalType::Ansi,
                                     color_enabled: true,
-                                    erase_char: 0x7F,
+                                    erase_char: session::DEFAULT_ERASE_CHAR,
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
                                     transfer_subdir: String::new(),

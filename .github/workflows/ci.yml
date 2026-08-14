@@ -83,6 +83,12 @@ jobs:
   # version the code could not be compiled by, and the only person who found out
   # was somebody following the README.
   #
+  # It earned itself on its first run.  1.88 — the corrected value, taken from
+  # our own source — was *also* wrong, because egui/eframe 0.34 require 1.92, so
+  # the declared floor still failed at dependency resolution.  Two wrong answers
+  # in a row from careful reading, both caught here in five minutes: the floor is
+  # a property of the whole dependency graph and cannot be read off our code.
+  #
   # GATING, not advisory.  A wrong MSRV is not a flaky third-party peer — it is a
   # promise in Cargo.toml, the README and the user manual that the build breaks.
   #
@@ -91,21 +97,21 @@ jobs:
   # release on an old toolchain's behaviour, which is not promised to anyone.
   #
   # RUSTFLAGS is cleared deliberately.  The repo-wide `-D warnings` is a
-  # *stable* gate; an older rustc lints differently, and a lint that 1.88 emits
+  # *stable* gate; an older rustc lints differently, and a lint that 1.92 emits
   # and stable does not would fail this job for a reason unrelated to the floor.
   #
   # Keep the pin in step with Cargo.toml's `rust-version` — the point is that
   # they are the same number, so raising one without the other turns this job red.
   msrv:
-    name: msrv (1.88)
+    name: msrv (1.92)
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.88 (the declared minimum)
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install Rust 1.92 (the declared minimum)
+        uses: dtolnay/rust-toolchain@1.92.0
 
       - name: Install Linux build dependencies
         run: |

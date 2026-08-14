@@ -96,6 +96,22 @@ pub(crate) fn can_be_erase_char(byte: u8) -> bool {
     byte != b' '
 }
 
+/// The terminal-detection prompt.
+///
+/// **Must fit 40 columns.**  This is the one screen written before the terminal
+/// is known, so the narrowest one it could be — a 40-column PETSCII C64 — is
+/// what it has to fit.  Held by `test_the_detection_prompts_fit_a_c64_screen`
+/// rather than by counting it here, and extracted as a constant for the same
+/// reason the help lines are: a test that restates the string cannot catch the
+/// string changing.
+pub(crate) const DETECT_PROMPT: &str = "Press BACKSPACE to detect terminal: ";
+
+/// The re-ask when the answer was a space.  Same 40-column budget, which is why
+/// it is this terse — the first draft said "Space cannot be the erase key.
+/// Press BACKSPACE: " and was 48 columns, wrapping on exactly the terminal this
+/// prompt exists to identify.
+pub(crate) const DETECT_REPROMPT: &str = "Space cannot erase. Press BACKSPACE: ";
+
 impl TelnetSession {
 
     // ─── Terminal detection ─────────────────────────────────
@@ -170,15 +186,15 @@ impl TelnetSession {
         if self.ttype_matched {
             self.erase_char = match self.terminal_type {
                 TerminalType::Petscii => 0x14,
-                _ => 0x7F,
+                _ => DEFAULT_ERASE_CHAR,
             };
             detect_method = format!(
                 "telnet TTYPE \"{}\"",
                 self.ttype_raw.as_deref().unwrap_or("?")
             );
         } else {
-            self.send_raw(b"\r\nPress BACKSPACE to detect terminal: ")
-                .await?;
+            self.send_raw(b"\r\n").await?;
+            self.send_raw(DETECT_PROMPT.as_bytes()).await?;
             self.flush().await?;
 
             // Ask again when the answer was a space, because a space is the one
@@ -226,8 +242,8 @@ impl TelnetSession {
                     break;
                 }
                 attempt += 1;
-                self.send_raw(b"\r\nSpace cannot be the erase key. Press BACKSPACE: ")
-                    .await?;
+                self.send_raw(b"\r\n").await?;
+                self.send_raw(DETECT_REPROMPT.as_bytes()).await?;
                 self.flush().await?;
             }
 

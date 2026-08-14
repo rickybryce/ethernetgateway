@@ -23,6 +23,20 @@ README.md               # (no version string since the v0.7.0 trim — verify wi
 #                         again at 0.9.1 — 1.87 could not build the crate at all once
 #                         let-chains went in.  The `msrv` CI job exists so the next drift
 #                         is a red X rather than a user's bug report; it is gating.
+#
+#                         DO NOT read the MSRV off our own source.  It is the highest
+#                         rust-version in the whole dependency graph, and ours is not the
+#                         one that wins: our code needs 1.88 (let chains) while egui/eframe
+#                         0.34 need 1.92, so 1.88 was wrong in the same way 1.87 was, only
+#                         failing later.  Both wrong answers came from careful reading and
+#                         both were caught by CI.  Measure it instead:
+#
+#                           cargo metadata --format-version 1 | python3 -c "import json,sys; \
+#                             print(max((p['rust_version'] for p in json.load(sys.stdin)['packages'] \
+#                             if p.get('rust_version')), key=lambda v: tuple(map(int, v.split('.')))))"
+#
+#                         Re-run that after any dependency bump — a `cargo update` can
+#                         raise the floor without a single line of our code changing.
 SECURITY.md             # supported-versions table.  Deliberately worded "latest released 0.x"
 #                         rather than a pinned number so it cannot go stale again — if you
 #                         ever put a number back, it belongs on this checklist.
