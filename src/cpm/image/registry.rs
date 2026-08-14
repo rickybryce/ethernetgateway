@@ -212,22 +212,56 @@ pub fn usage_of(drive0: u8) -> Usage {
     usage().get(drive0 as usize).copied().unwrap_or_default()
 }
 
+/// Reason the mount screens cannot be operated at all, if there is one.
+///
+/// Separate from the per-drive checks below because it is not about a drive:
+/// with the emulator off there is no live mount table to change.
+///
+/// One string, in one place, because three screens phrasing this three ways is
+/// how they drift — and because a fourth surface must inherit the rule rather
+/// than restate it.
+pub fn mounts_unavailable() -> Option<String> {
+    if crate::config::get_config().cpm_emu_enabled {
+        return None;
+    }
+    Some("the CP/M emulator is off - turn it on to change drives".to_string())
+}
+
 /// Refuse a mount change while somebody is on the drive.
 ///
 /// Not a correctness guard — see the module comment — but the difference
 /// between an operator changing a disk and a user watching their disk change
 /// under them.
+///
+/// **Also refuses while the emulator is off**, and that one *is* a correctness
+/// guard, in the only place all three screens pass through. Turning the
+/// emulator off calls [`clear_all`], so the live table is empty and
+/// `image::current_mounts_value` deliberately reports `cpm_mounts` instead of
+/// it — otherwise one Save would rewrite the operator's drives as none. But the
+/// mount screens were not gated the same way: a mount made with the emulator
+/// off really happened in the live registry, the screen re-seeded from it and
+/// said "B: foo.dsk (Altair 88-DCDD ...)", and then the config was written back
+/// with its *old* value. The change survived until the next restart and then
+/// vanished, with nothing having reported a problem. Refusing here makes the
+/// screen say why instead of confirming what it did not save.
+///
+/// Deliberately not in `mount_image_unchecked`, so [`super::restore_mount`] can
+/// still hand a booted session's drive back: that is not an operator's change,
+/// and refusing it would leave a drive neither mounted nor lent.
 pub fn check_can_change(drive0: u8) -> Result<(), String> {
+    if let Some(why) = mounts_unavailable() {
+        return Err(why);
+    }
     if lock!(borrowed()).contains_key(&drive0) {
         return Err(format!(
-            "drive {}: is held by a booted disk — it comes back when that session ends",
+            "drive {}: is held by a booted disk - it comes back when that session ends",
             (b'A' + drive0) as char
         ));
     }
     let u = usage_of(drive0);
     match u.describe() {
         Some(what) => Err(format!(
-            "drive {}: is {} — try again once that session leaves CP/M",
+            "drive {}: is {} - try again once that session leaves CP/M",
             (b'A' + drive0) as char,
             what
         )),
@@ -533,6 +567,55 @@ mod tests {
         reset();
         assert!(usage().iter().all(|u| u.describe().is_none()));
         assert!(check_can_change(0).is_ok());
+    }
+
+    /// **With the emulator off, a mount screen must refuse rather than confirm.**
+    ///
+    /// The three screens all persist through `image::current_mounts_value`,
+    /// which reports `cpm_mounts` rather than the live table while the emulator
+    /// is off — correctly, because turning it off calls `clear_all` and saving
+    /// the empty table would wipe the operator's drives. But nothing stopped
+    /// the screens *acting*: the mount landed in the live registry, the screen
+    /// re-seeded from it and reported success, and the config was then written
+    /// back with its old value. The change survived until the next restart and
+    /// then disappeared, with nothing having reported a problem.
+    ///
+    /// Asserted on `check_can_change` because that is the one function all
+    /// three screens reach through — `mount_image` and `unmount_drive` both
+    /// call it — so a fourth surface inherits the refusal instead of
+    /// reimplementing it.
+    #[tokio::test]
+    async fn test_mounts_are_refused_while_the_emulator_is_off() {
+        // Process-wide config, so the crate-wide lock, held across the whole
+        // test and released before anything else reads the singleton.
+        let _cfg_lock = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let _g = registry_lock();
+        reset();
+
+        assert!(check_can_change(0).is_ok(), "the default config has the emulator on");
+        assert!(mounts_unavailable().is_none());
+
+        let off = crate::config::Config {
+            cpm_emu_enabled: false,
+            ..crate::config::Config::default()
+        };
+        let previous = crate::config::swap_config_for_test(Some(off));
+
+        let why = mounts_unavailable().expect("the emulator being off is a reason");
+        let err = check_can_change(0).unwrap_err();
+        assert_eq!(err, why, "the screens must be told the one reason, not two");
+        assert!(err.contains("emulator is off"), "{err}");
+        // The same rule the sibling refusals follow: it is read on a 40-column
+        // PETSCII screen.
+        assert!(err.is_ascii(), "a refusal an operator reads is not ASCII: {err:?}");
+        // Every drive, not just the one: this is not about a drive at all.
+        for d in 0..NUM_DRIVES {
+            assert!(check_can_change(d).is_err(), "drive {d} must refuse too");
+        }
+
+        crate::config::swap_config_for_test(previous);
+        assert!(check_can_change(0).is_ok(), "and the refusal lifts when it comes back");
+        reset();
     }
 
     #[test]

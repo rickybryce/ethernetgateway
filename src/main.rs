@@ -9,6 +9,21 @@
 //!
 //! Author: Ricky Bryce
 
+// `collapsible_if` suggests folding `if a { if let Some(x) = b { .. } }` into a
+// let chain.  It is pure style — the code is correct either way — and it is off
+// until the declared `rust-version` allows let chains, so it appeared in 55
+// places across 23 files the moment the MSRV was corrected from 1.87 to 1.88.
+// (1.87 could not build this crate at all: the let chains already in it need
+// 1.88.  See Cargo.toml.)
+//
+// Silenced rather than applied, for the same reason `cargo fmt` is not part of
+// this workflow: taking it would re-indent the body of 55 hand-formatted blocks
+// in one mechanical sweep, which is exactly the kind of mass rewrite this repo
+// avoids on purpose.  Nothing is being hidden — the let-chain form is used
+// freely where it was written that way, and this only declines to convert the
+// blocks that were not.
+#![allow(clippy::collapsible_if)]
+
 mod aichat;
 mod bindwatch;
 mod config;

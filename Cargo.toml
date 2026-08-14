@@ -10,7 +10,12 @@ homepage = "https://github.com/rickybryce/ethernetgateway"
 readme = "README.md"
 keywords = ["telnet", "ssh", "zmodem", "xmodem", "retrocomputing"]
 categories = ["command-line-utilities", "network-programming", "emulators"]
-rust-version = "1.87"
+# 1.88 stabilised let-chains (`if let Some(x) = e && cond`) in edition 2024, and
+# the crate uses them in ~96 places.  Declaring less is worse than useless: 1.87
+# passes the `rust-version` check and then fails in the *parser*, so the operator
+# gets a syntax error instead of cargo's "requires rustc 1.88".  CI builds on
+# @stable and can never see this, so the `msrv` job pins this exact value.
+rust-version = "1.88"
 # Exclude build artifacts and dev-only files from the published crate.
 exclude = [
     "/target",

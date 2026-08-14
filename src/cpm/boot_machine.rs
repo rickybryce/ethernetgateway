@@ -557,6 +557,16 @@ impl BootMachine {
         // size takes it.  That is how an image is matched to hardware — the
         // boards took different media, and before anything is running the file
         // length is all there is to go on.
+        //
+        // **First match wins, and its refusal is final**: a later board that
+        // would also have taken the image is never offered it. Unambiguous on
+        // every machine that exists here — the Altair machines carry
+        // DCDD/HDSK/Tarbell, whose media sizes are all distinct, and the two
+        // boards that *do* share 256,256 bytes (Tarbell and z80pack) are never
+        // on the same machine. A machine that put two boards claiming one size
+        // together would need this to try the rest before giving up; noted
+        // rather than built, because guessing which board an operator meant is
+        // the sort of thing that wants a real case to be right about.
         let len = bytes.len() as u64;
         let which = self.controllers.iter().position(|c| c.accepts(len).is_some());
         let taken = which.map(|i| self.controllers[i].insert(drive, len, read_only));
@@ -1034,10 +1044,27 @@ impl BootMachine {
                         return;
                     }
                     let off = offset as usize;
-                    if let Some(dst) = m.bytes.get_mut(off..off + len) {
-                        dst.copy_from_slice(&buf[..len]);
-                        m.dirty = true;
-                    }
+                    // Both ends bounded, and the buffer end is the one that was
+                    // missing. `buf[..len]` was the only unguarded index in this
+                    // function: a controller reporting a length longer than its
+                    // own buffer would panic the session, and the two sides
+                    // agree today only by a coincidence of constants — the
+                    // WD1771 clamps its sector length to what the chip can
+                    // buffer (512) and Cromemco's largest sector happens to be
+                    // 512 too, so the clamp sits on one side of the pair only.
+                    //
+                    // A short buffer refuses the write rather than writing what
+                    // there is. The read paths answer an impossible request with
+                    // an erased sector because a real drive returns *something*
+                    // from unformatted media; there is no equivalent courtesy
+                    // for a write, where a partial sector is worse than none —
+                    // it is a sector the guest believes it wrote.
+                    let (Some(dst), Some(src)) = (m.bytes.get_mut(off..off + len), buf.get(..len))
+                    else {
+                        return;
+                    };
+                    dst.copy_from_slice(src);
+                    m.dirty = true;
                 }
             }
             // A transfer straight between the image and guest memory. The
@@ -1529,6 +1556,10 @@ mod tests {
         last_write: std::sync::Arc<std::sync::Mutex<Option<(u8, u8)>>>,
         buf: Vec<u8>,
         inserted: Option<u8>,
+        /// Handed back by the next `port_out`, so a test can make the board ask
+        /// the machine for something specific — including something impossible,
+        /// which is the only way to reach the machine's own bounds checks.
+        next_request: Option<HostRequest>,
     }
 
     /// Sized so nothing the floppy controller takes can be confused with it.
@@ -1551,7 +1582,7 @@ mod tests {
         }
         fn port_out(&mut self, port: u8, value: u8) -> HostRequest {
             *self.last_write.lock().unwrap() = Some((port, value));
-            HostRequest::None
+            self.next_request.take().unwrap_or(HostRequest::None)
         }
         fn media(&self) -> Vec<super::super::controller::Medium> {
             vec![super::super::controller::Medium {
@@ -2044,6 +2075,7 @@ mod tests {
             last_write: seen.clone(),
             buf: Vec::new(),
             inserted: None,
+            next_request: None,
         }));
 
         // An image the floppy controller refuses is offered on to the next one.
@@ -2064,6 +2096,60 @@ mod tests {
         let fake = m.controllers.last().unwrap().buffer(1).expect("buffered").to_vec();
         assert_eq!(fake.len(), 128);
         assert!(fake.iter().all(|&b| b == 0xC3), "wrong bytes or wrong offset");
+    }
+
+    /// **A controller asking to write more than it is holding must not panic
+    /// the session**, and must not write a partial sector either.
+    ///
+    /// The machine sliced the controller's buffer to the length the controller
+    /// reported — `buf[..len]` — which was the only unguarded index in
+    /// `service`. Every other bound there is checked and the out-of-range case
+    /// has a stated policy. The two sides agree today by a coincidence of
+    /// constants: `Wd1771::sector_out` clamps its sector length to
+    /// `MAX_SECTOR_LEN` (512) while `Cromemco::serve` computes the length from
+    /// its own geometry table, and Cromemco's largest sector is also 512. The
+    /// clamp is on one side of the pair only, and its own comment shows the risk
+    /// was seen in the chip and not followed out to the machine.
+    ///
+    /// Reached through a stand-in board because no real one can currently ask
+    /// this — which is the point: the coupling is implicit, so the guard is what
+    /// makes it explicit.
+    #[test]
+    fn test_a_write_longer_than_the_controllers_buffer_is_refused() {
+        let mut m = BootMachine::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        m.controllers.push(Box::new(FakeBoard {
+            last_write: seen.clone(),
+            // Four bytes held, half a sector claimed.
+            buf: vec![0xAA; 4],
+            inserted: None,
+            next_request: Some(HostRequest::Write { drive: 1, offset: 0, len: 512 }),
+        }));
+
+        let img = vec![0x11u8; FAKE_IMAGE_LEN as usize];
+        m.insert(1, img, false).expect("the second controller takes it");
+
+        // The request is served here, and must come back rather than unwind.
+        m.port_out(0xB3, 0x01);
+
+        let disk = m.disks[1].as_ref().expect("still inserted");
+        assert!(
+            disk.bytes.iter().all(|&b| b == 0x11),
+            "a short buffer must write nothing, not a partial sector"
+        );
+        assert!(!disk.dirty, "and the image must not be marked as changed");
+
+        // The guard is the *pair* of bounds, so prove the ordinary write still
+        // works — a refusal that refuses everything would pass the assert above.
+        let ctrl = m.controllers.len() - 1;
+        m.controllers[ctrl].buffer_loaded(1, &[0x77; 512]);
+        m.service(HostRequest::Write { drive: 1, offset: 0, len: 512 }, ctrl);
+        let disk = m.disks[1].as_ref().expect("still inserted");
+        assert!(
+            disk.bytes[..512].iter().all(|&b| b == 0x77),
+            "a write the controller can actually satisfy must still land"
+        );
+        assert!(disk.dirty, "and must mark the image changed");
     }
 
     #[test]

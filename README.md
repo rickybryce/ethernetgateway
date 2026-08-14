@@ -108,7 +108,7 @@ options, and the full AT command set.
 
 ## Building from Source
 
-Requires the **Rust toolchain** (rustc 1.87+), a **C toolchain**, `cmake`,
+Requires the **Rust toolchain** (rustc 1.88+), a **C toolchain**, `cmake`,
 `pkg-config`, and (on Linux) `libudev`. Install Rust from
 [rustup.rs](https://rustup.rs), then:
 

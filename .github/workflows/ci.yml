@@ -75,6 +75,57 @@ jobs:
           PROPTEST_CASES: "4096"
         run: cargo test proptest --verbose
 
+  # ─── The declared MSRV actually compiles ──────────────────────────────
+  #
+  # Every other job installs @stable, so nothing in the pipeline ever built at
+  # the minimum this project *promises*.  That is how `rust-version` sat at 1.87
+  # while the crate used let-chains, stabilised in 1.88: the declared floor was a
+  # version the code could not be compiled by, and the only person who found out
+  # was somebody following the README.
+  #
+  # GATING, not advisory.  A wrong MSRV is not a flaky third-party peer — it is a
+  # promise in Cargo.toml, the README and the user manual that the build breaks.
+  #
+  # `cargo check` only: this asks "does the declared floor still parse and type-
+  # check", which is the whole claim.  Running the tests here would gate the
+  # release on an old toolchain's behaviour, which is not promised to anyone.
+  #
+  # RUSTFLAGS is cleared deliberately.  The repo-wide `-D warnings` is a
+  # *stable* gate; an older rustc lints differently, and a lint that 1.88 emits
+  # and stable does not would fail this job for a reason unrelated to the floor.
+  #
+  # Keep the pin in step with Cargo.toml's `rust-version` — the point is that
+  # they are the same number, so raising one without the other turns this job red.
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust 1.88 (the declared minimum)
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (all targets)
+        run: cargo check --all-targets --verbose
+
   # ─── Interop against real protocol peers (advisory) ───────────────────
   #
   # Runs the 25 `#[ignore]`d tests, which are excluded from `cargo test`

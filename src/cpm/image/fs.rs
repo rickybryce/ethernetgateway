@@ -1078,7 +1078,11 @@ impl ImageFs {
     /// has.  Used by the consistency tests.
     #[allow(dead_code)]
     pub fn used_blocks(&self) -> u32 {
-        let mut seen = vec![false; self.params.max_block as usize + 2];
+        // `max_block + 1` slots, because block numbers run `0..=max_block` —
+        // the same sizing `rebuild_bitmap` uses. This had an extra slot that
+        // nothing could ever set; harmless, but two spellings of one length
+        // invite a reader to conclude one of them knows something.
+        let mut seen = vec![false; self.params.max_block as usize + 1];
         for e in &self.dir {
             for &b in &e.blocks {
                 if b != 0 {

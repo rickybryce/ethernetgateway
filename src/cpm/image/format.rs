@@ -500,6 +500,24 @@ impl Format {
         let sub = within % rps;
         // Absolute track — the boot area included — because a skew that changes
         // partway down the disk changes at an absolute track.
+        //
+        // **This division assumes the reserved area is whole tracks of `sectrk`
+        // records**, and that is not true of every format here: `cromemcodd`
+        // reserves 90 records that are track 0 (26 records, recorded single
+        // density) plus track 1 (64), so `90 / 64` says the data area starts on
+        // absolute track 1 where it really starts on track 2.  Only `Skew::Split`
+        // reads this value — `Table` and `None` ignore the track — and the one
+        // Split format is `altair8`, where the boot area really is two whole
+        // tracks (`64 / 32`), so no disk this gateway reads is affected.
+        //
+        // The assumption is held by `test_a_split_skew_needs_a_whole_number_of
+        // _reserved_tracks` rather than left to be rediscovered, because of
+        // *which* bug it becomes: on a mixed-density disk that also wanted a
+        // split skew — precisely the Cromemco shape — the boundary would land
+        // one track early, the directory (at the start of the data area) would
+        // still read correctly under either table, and file content past the
+        // boundary would come back scrambled.  That is the failure the module
+        // header describes as having cost months on the Altair layout.
         let abs_track = self.reserved_records / self.sectrk as u32 + track;
         let physical_sector = self.skew.physical(abs_track, logical_sector);
         let abs = self.reserved_records as u64
@@ -1381,6 +1399,61 @@ mod tests {
         let hd = by_token("altairhd").unwrap();
         assert!(hd.data_record_offset(hd.data_records() - 1).is_some());
         assert_eq!(hd.data_record_offset(hd.data_records()), None);
+    }
+
+    /// **A split skew is only meaningful if the reserved area is whole tracks.**
+    ///
+    /// `data_physical_record` finds the absolute track as
+    /// `reserved_records / sectrk + track`, which is right only when the boot
+    /// area is made of tracks the same size as a data track. It is not always:
+    /// `cromemcodd` reserves 90 records that are a 26-record single-density
+    /// track 0 plus a 64-record track 1, so the division yields 1 where the data
+    /// area begins on absolute track 2.
+    ///
+    /// That value is read by `Skew::Split` alone, and the only Split format
+    /// today divides exactly — so this is a guard on a bug that cannot be made
+    /// yet, not a description of one. It is worth holding because of the shape
+    /// the bug would have: the boundary one track early leaves the directory
+    /// readable under either table and scrambles file content past it, which is
+    /// the failure mode the module header records as having cost months on the
+    /// Altair layout. A test is cheaper than rediscovering it.
+    ///
+    /// If a format ever needs both a split skew and a mixed-density boot area,
+    /// this test is the place that says so: give `Format` the reserved area in
+    /// *tracks* — measured, like every other geometry here — rather than
+    /// dividing records by a track length that does not apply to them.
+    #[test]
+    fn test_a_split_skew_needs_a_whole_number_of_reserved_tracks() {
+        let mut split_formats = 0;
+        for f in FORMATS {
+            if !matches!(f.skew, Skew::Split { .. }) {
+                continue;
+            }
+            split_formats += 1;
+            assert_eq!(
+                f.reserved_records % f.sectrk as u32,
+                0,
+                "{}: a split skew reads an absolute track derived as \
+                 reserved_records ({}) / sectrk ({}), which is only the real \
+                 track when the boot area is whole data-sized tracks",
+                f.token,
+                f.reserved_records,
+                f.sectrk
+            );
+            // And the derived boundary must be where the data actually starts,
+            // which is the thing the division is standing in for.
+            assert_eq!(
+                f.reserved_records / f.sectrk as u32,
+                f.reserved_records.div_ceil(f.sectrk as u32),
+                "{}: the reserved area does not end on a track boundary",
+                f.token
+            );
+        }
+        assert!(
+            split_formats > 0,
+            "no Split format left — this guard is now vacuous and should be \
+             re-aimed or removed rather than left passing"
+        );
     }
 
     #[test]

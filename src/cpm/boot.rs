@@ -397,15 +397,15 @@ impl std::fmt::Display for BootError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BootError::NoDisk(d) => {
-                write!(f, "drive {d} is empty — put a disk image in it first")
+                write!(f, "drive {d} is empty - put a disk image in it first")
             }
             BootError::Unreadable(e) => write!(f, "could not read the boot sector: {e}"),
             BootError::NeverPositioned => {
-                write!(f, "the disk never presented sector 0 — the controller is not turning")
+                write!(f, "the disk never presented sector 0 - the controller is not turning")
             }
             BootError::NotBootable => write!(
                 f,
-                "this image has no boot sector — it is data, not a system disk"
+                "this image has no boot sector - it is data, not a system disk"
             ),
             BootError::NoBootstrap => write!(
                 f,

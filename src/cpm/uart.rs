@@ -171,40 +171,40 @@ const fn ports(status_port: u8, data_port: u8, family: UartFamily) -> ModemAcces
 /// Every selectable virtual-modem port, in UI display order.  Single source of
 /// truth for config validation and all three UIs.
 pub const UART_CHOICES: &[UartChoice] = &[
-    UartChoice { key: "off", description: "Off — no virtual modem", access: ModemAccess::Off },
+    UartChoice { key: "off", description: "Off - no virtual modem", access: ModemAccess::Off },
     UartChoice {
         key: "rc2014_1a",
-        description: "RC2014 SIO/2 board 1, ch A — status 0x80 / data 0x81",
+        description: "RC2014 SIO/2 board 1, ch A - status 0x80 / data 0x81",
         access: ports(0x80, 0x81, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_1b",
-        description: "RC2014 SIO/2 board 1, ch B (usual AUX:) — 0x82 / 0x83",
+        description: "RC2014 SIO/2 board 1, ch B (usual AUX:) - 0x82 / 0x83",
         access: ports(0x82, 0x83, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_2a",
-        description: "RC2014 SIO/2 board 2, ch A — status 0x84 / data 0x85",
+        description: "RC2014 SIO/2 board 2, ch A - status 0x84 / data 0x85",
         access: ports(0x84, 0x85, UartFamily::Sio),
     },
     UartChoice {
         key: "rc2014_2b",
-        description: "RC2014 SIO/2 board 2, ch B — status 0x86 / data 0x87",
+        description: "RC2014 SIO/2 board 2, ch B - status 0x86 / data 0x87",
         access: ports(0x86, 0x87, UartFamily::Sio),
     },
     UartChoice {
         key: "altair_2sio1",
-        description: "Altair 88-2SIO port 1 — status 0x10 / data 0x11",
+        description: "Altair 88-2SIO port 1 - status 0x10 / data 0x11",
         access: ports(0x10, 0x11, UartFamily::Acia),
     },
     UartChoice {
         key: "altair_2sio2",
-        description: "Altair 88-2SIO port 2 — status 0x12 / data 0x13",
+        description: "Altair 88-2SIO port 2 - status 0x12 / data 0x13",
         access: ports(0x12, 0x13, UartFamily::Acia),
     },
     UartChoice {
         key: "altair_sio",
-        description: "Altair 88-SIO — status 0x00 / data 0x01",
+        description: "Altair 88-SIO - status 0x00 / data 0x01",
         access: ports(0x00, 0x01, UartFamily::Sio88),
     },
     UartChoice {
@@ -214,12 +214,12 @@ pub const UART_CHOICES: &[UartChoice] = &[
     },
     UartChoice {
         key: "hbios_1",
-        description: "RomWBW HBIOS serial unit 1 (RST 8) — e.g. qtermh1",
+        description: "RomWBW HBIOS serial unit 1 (RST 8) - e.g. qtermh1",
         access: ModemAccess::Hbios { unit: 1 },
     },
     UartChoice {
         key: "hbios_2",
-        description: "RomWBW HBIOS serial unit 2 (RST 8) — e.g. qtermh2",
+        description: "RomWBW HBIOS serial unit 2 (RST 8) - e.g. qtermh2",
         access: ModemAccess::Hbios { unit: 2 },
     },
 ];

@@ -18,7 +18,11 @@ versionchange.txt       # the "Current version:" line in this file's header
 README.md               # (no version string since the v0.7.0 trim — verify with the grep below)
 #                         BUT it does carry the MSRV: keep "rustc X.YZ+" in the build
 #                         section in step with Cargo.toml's rust-version (and usermanual.html,
-#                         which states it twice).  These drifted apart at 0.8.1.
+#                         which states it twice, and .github/workflows/ci.yml's `msrv` job,
+#                         which pins the same number).  These drifted apart at 0.8.1, and
+#                         again at 0.9.1 — 1.87 could not build the crate at all once
+#                         let-chains went in.  The `msrv` CI job exists so the next drift
+#                         is a red X rather than a user's bug report; it is gating.
 SECURITY.md             # supported-versions table.  Deliberately worded "latest released 0.x"
 #                         rather than a pinned number so it cannot go stale again — if you
 #                         ever put a number back, it belongs on this checklist.

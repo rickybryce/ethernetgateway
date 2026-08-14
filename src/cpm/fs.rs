@@ -329,7 +329,10 @@ impl CpmFs {
         self.drive
     }
 
-    /// Current drive as an uppercase letter (`A`..`H`).
+    /// Current drive as an uppercase letter (`A`..`P`).
+    ///
+    /// Sixteen, not eight: `NUM_DRIVES` is 16 and this is used across the whole
+    /// range. The doc said `A`..`H` from a time when it was not.
     pub fn current_drive_letter(&self) -> char {
         (b'A' + self.drive) as char
     }

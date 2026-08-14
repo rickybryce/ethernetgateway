@@ -1303,6 +1303,22 @@ pub fn load_or_create_config() -> Config {
     cfg
 }
 
+/// Put `cfg` in the global singleton and hand back what was there.
+///
+/// Test-only, and **in memory only** — it does not touch `egateway.conf`, which
+/// is the whole point: a test that needs `get_config()` to answer differently
+/// should not rewrite the operator's file to ask the question.
+/// `update_config_value` would.
+///
+/// The caller must hold [`CONFIG_TEST_LOCK`] and put the old value back, for
+/// the reason that lock exists: this state is process-wide and any test that
+/// reads the config races one that changes it.
+#[cfg(test)]
+pub(crate) fn swap_config_for_test(cfg: Option<Config>) -> Option<Config> {
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::replace(&mut *guard, cfg)
+}
+
 /// Decide what `load_or_create_config` does when an existing config file can't
 /// be read: keep the already-loaded config if we have one (a reload — don't
 /// take the service down over a transient/corrupt-file blip), or signal a

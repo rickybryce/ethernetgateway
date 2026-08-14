@@ -136,7 +136,7 @@ pub fn create_blank_image(
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(&filename);
     if path.exists() {
-        return Err(format!("{filename} already exists — delete it first"));
+        return Err(format!("{filename} already exists - delete it first"));
     }
     // Two sessions racing must not both believe they made it, and a write that
     // stops partway must not leave anything behind that looks like a disk.
@@ -199,22 +199,28 @@ pub fn create_blank_image(
     }
 
     Ok(format!(
-        "created {filename} — {}, empty and ready to mount",
+        "created {filename} - {}, empty and ready to mount",
         fmt.label
     ))
 }
 
 /// What a drive is doing that stops it being changed, for the mount screens.
 ///
-/// A lent drive reads as *empty* in the mount table, so without this the three
+/// A lent drive reads as *empty* in the mount table, so without this the
 /// screens show a booted session's drives as free and enabled, and the operator
-/// gets an unexplained refusal when they press Save.  One function, because
-/// three screens phrasing the same state three ways is how they drift.
+/// gets an unexplained refusal when they press Save.  One function, because two
+/// screens phrasing the same state two ways is how they drift.
+///
+/// **Two callers, not three** — the desktop and web screens, which annotate one
+/// drive's row. The telnet screen spells its own `(booted)` marker in
+/// `cpm_mount_ui.rs` because it is listing all sixteen drives rather than
+/// annotating one, and the two jobs want different text. That divergence is
+/// deliberate; this comment used to claim a rule the code did not hold.
 pub fn drive_held_note(drive0: u8) -> Option<String> {
     registry::boot_loans()
         .into_iter()
         .find(|(d, _)| *d == drive0)
-        .map(|(_, name)| format!("{name} — held by a booted disk"))
+        .map(|(_, name)| format!("{name} - held by a booted disk"))
 }
 
 /// Open an image and publish it on a drive.
@@ -254,13 +260,13 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
     // nonsense.  Only a second, different drive is the two-views hazard.
     if let Some(other) = registry::drive_holding(filename).filter(|d| *d != drive0) {
         return Err(format!(
-            "{filename} is already mounted on drive {}: — unmount it there first",
+            "{filename} is already mounted on drive {}: - unmount it there first",
             (b'A' + other) as char
         ));
     }
     if registry::is_image_booted(&images_dir(cpm_base).join(filename)) {
         return Err(format!(
-            "{filename} is being run by a booted session — it cannot be mounted at the same time"
+            "{filename} is being run by a booted session - it cannot be mounted at the same time"
         ));
     }
     mount_image_unchecked(cpm_base, drive0, filename)
@@ -334,11 +340,11 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
         match ident.why {
             Some(why) => format!(
                 "this image was identified by inspection and its CP/M directory \
-                 has {why} — so writing to it is not safe. If you know the format, \
+                 has {why} - so writing to it is not safe. If you know the format, \
                  rename it with the prefix to override."
             ),
             None => "the filename does not say which format this is, so it was \
-                     identified by inspection — rename it with a format prefix to \
+                     identified by inspection - rename it with a format prefix to \
                      allow writing"
                 .to_string(),
         }
@@ -368,15 +374,16 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
         if read_only { " (read-only)" } else { "" }
     );
     Ok(if read_only {
-        format!("{drive}: {filename} — read-only: {reason}")
+        format!("{drive}: {filename} - read-only: {reason}")
     } else {
         format!("{drive}: {filename} ({})", ident.format.label)
     })
 }
 
 /// Take the image off a drive, so its host folder is visible again.
-// Called by the mount UIs, which land in the next step; the mount side is
-// already reached from `apply_config_mounts`.
+///
+/// Called by all three mount screens; the mount side is also reached from
+/// [`apply_config_mounts`] at startup.
 pub fn unmount_drive(drive0: u8) -> Result<String, String> {
     registry::check_can_change(drive0)?;
     let drive = (b'A' + drive0) as char;
@@ -384,7 +391,7 @@ pub fn unmount_drive(drive0: u8) -> Result<String, String> {
         Some(m) => {
             crate::glog!("CP/M: unmounted {} from drive {}:", m.filename, drive);
             Ok(format!(
-                "{drive}: {} unmounted — the drive folder's files are visible again",
+                "{drive}: {} unmounted - the drive folder's files are visible again",
                 m.filename
             ))
         }
@@ -429,8 +436,6 @@ pub fn parse_mounts(value: &str) -> Vec<(u8, String)> {
     out
 }
 
-/// Render mounts back into the `cpm_mounts` config form.
-// Written by the mount UIs when they save; see `unmount_drive`.
 /// Render a mount list as the `cpm_mounts` config value.
 ///
 /// **Private on purpose.** Building this value is the one job that has to
@@ -517,6 +522,11 @@ pub fn apply_mount_selection(
                     Err(e) => errors.push(e),
                 }
             }
+            // Unreachable at run time — the leading `a == b` guard already took
+            // both-absent — but **not** removable: a match arm with a guard does
+            // not count towards exhaustivity, so the compiler still requires
+            // this case to be spelled. Deleting it is an E0004, which is how
+            // this comment came to be written instead.
             (None, None) => {}
         }
     }
@@ -571,7 +581,6 @@ pub fn looks_like_an_image_name(name: &str) -> bool {
 }
 
 /// Every `.dsk` sitting in the images folder, sorted, for the mount pickers.
-// Read by the mount UIs; see `unmount_drive`.
 pub fn available_images(cpm_base: &Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(images_dir(cpm_base)) {

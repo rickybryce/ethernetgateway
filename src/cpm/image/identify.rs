@@ -42,6 +42,7 @@
 //! it says why it is read-only.
 
 use super::format::{by_token, token_of, Format, FORMATS};
+use super::fs::Params;
 
 /// How a format was arrived at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +204,209 @@ mod refusal_tests {
         }
     }
 
+    /// **The same rule, applied to the modules the test above cannot reach.**
+    ///
+    /// `test_every_refusal_is_ascii` enumerates `Unknown`, which is possible
+    /// because its variants are *values*. Every sibling message an operator
+    /// reads on the same screen is built by `format!` at the point of use and
+    /// cannot be enumerated at all — so for three years the rule held in the one
+    /// module that could state it, and eleven messages in the modules next door
+    /// carried U+2014 to the same telnet session. Two of them
+    /// (`registry.rs`'s "held by a booted disk", "try again once that session
+    /// leaves CP/M") are the refusals an operator meets most often, and every
+    /// `cpm_emu_uart` description was one too.
+    ///
+    /// A source scan is the honest test here, the same technique as
+    /// `telnet/tests.rs`'s `test_no_petscii_translator_maps_backspace_to_
+    /// destructive_del`: what is being asserted is a property of the *text in
+    /// the file*, and there is no value to hold.
+    ///
+    /// What actually goes wrong is worth stating, because it is not only ugly.
+    /// PETSCII is the milder case: `to_latin1_bytes` maps anything above U+00FF
+    /// to `?`, so the column count survives. `TerminalType::Ascii` takes the
+    /// other branch of `send()` and writes the UTF-8 bytes untouched, so an em
+    /// dash is three columns where `truncate_to_width` counted one — and the
+    /// modem line on the CP/M settings screen is truncated to an exact width.
+    ///
+    /// Scoped to the modules whose strings reach `send()`/`send_line()`:
+    /// mount and boot refusals, and the three config UIs' shared choice lists.
+    /// `glog!` output is deliberately *not* in scope — it goes to the console
+    /// and the log file, which are not 40 columns of PETSCII.
+    #[test]
+    fn test_no_operator_facing_string_is_non_ascii() {
+        // (label, source).  Every one of these builds text that a telnet
+        // session prints verbatim.
+        let sources: [(&str, &str); 6] = [
+            ("cpm/image/mod.rs", include_str!("mod.rs")),
+            ("cpm/image/registry.rs", include_str!("registry.rs")),
+            ("cpm/image/identify.rs", include_str!("identify.rs")),
+            ("cpm/boot.rs", include_str!("../boot.rs")),
+            ("cpm/uart.rs", include_str!("../uart.rs")),
+            ("cpm/console.rs", include_str!("../console.rs")),
+        ];
+        for (label, src) in sources {
+            let bad = non_ascii_literals(src);
+            assert!(
+                bad.is_empty(),
+                "{label}: {} string(s) an operator may read on telnet are not ASCII: {bad:#?}\n\
+                 Use '-' rather than an em dash; see this test for why.",
+                bad.len()
+            );
+        }
+    }
+
+    /// Every non-ASCII double-quoted literal in `src` that is **not** inside a
+    /// `#[cfg(test)]` item.
+    ///
+    /// Comments are skipped rather than stripped, because the prose in this
+    /// project uses em dashes freely and correctly — the rule is about text
+    /// that reaches a terminal, not about the source. Test modules are skipped
+    /// for the same reason: a test's assertion message is read in a terminal
+    /// that is not a C64.
+    ///
+    /// Deliberately simple, and the simplifications are safe here rather than
+    /// in general: no file in the list uses raw strings (checked), and a
+    /// `\u{2014}` escape would evade this scan — it is written in ASCII, so it
+    /// is not what anybody types by accident, which is the failure this catches.
+    fn non_ascii_literals(src: &str) -> Vec<String> {
+        let c: Vec<char> = src.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        let mut depth: i32 = 0;
+        // Depth at which the innermost `#[cfg(test)]` item opened, if we are in
+        // one.  Covers `mod tests` and bare `#[cfg(test)] fn` helpers alike.
+        let mut test_at: Option<i32> = None;
+        let mut pending_cfg_test = false;
+        while i < c.len() {
+            // Line comment.
+            if c[i] == '/' && c.get(i + 1) == Some(&'/') {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Block comment.  Not nested-aware; none of these files nest them.
+            if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                i += 2;
+                while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(c.len());
+                continue;
+            }
+            // String literal.
+            if c[i] == '"' {
+                i += 1;
+                let mut lit = String::new();
+                while i < c.len() && c[i] != '"' {
+                    if c[i] == '\\' {
+                        // Keep the escape out of the text; it cannot be the
+                        // non-ASCII we are looking for.
+                        i += 2;
+                        continue;
+                    }
+                    lit.push(c[i]);
+                    i += 1;
+                }
+                i += 1;
+                if test_at.is_none() && !lit.is_ascii() {
+                    out.push(lit);
+                }
+                continue;
+            }
+            // A quote is a char literal only when it closes like one; anything
+            // else is a lifetime, and swallowing `'static` would eat the rest
+            // of the file.
+            if c[i] == '\'' {
+                if c.get(i + 1) == Some(&'\\') {
+                    i += 2;
+                    while i < c.len() && c[i] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if c.get(i + 2) == Some(&'\'') {
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            // `#[cfg(test)]` arms the next block we open.
+            if c[i] == '#' && c[i..].iter().take(12).collect::<String>() == "#[cfg(test)]" {
+                pending_cfg_test = true;
+                i += 12;
+                continue;
+            }
+            if c[i] == '{' {
+                if pending_cfg_test && test_at.is_none() {
+                    test_at = Some(depth);
+                    pending_cfg_test = false;
+                }
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            if c[i] == '}' {
+                depth -= 1;
+                if test_at == Some(depth) {
+                    test_at = None;
+                }
+                i += 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The scanner itself is load-bearing, so it is tested: a guard that cannot
+    /// fire is worse than no guard, and every simplification above is a way for
+    /// it to quietly stop firing.
+    #[test]
+    fn test_the_non_ascii_scan_can_actually_fire() {
+        assert!(non_ascii_literals("let s = \"plain ascii\";").is_empty());
+        assert_eq!(
+            non_ascii_literals("let s = \"an em dash \u{2014} here\";"),
+            vec!["an em dash \u{2014} here".to_string()],
+            "the scan must see a literal em dash"
+        );
+        assert!(
+            non_ascii_literals("// a comment \u{2014} with a dash\n").is_empty(),
+            "prose in comments is not the rule"
+        );
+        assert!(
+            non_ascii_literals("/* block \u{2014} dash */").is_empty(),
+            "nor in block comments"
+        );
+        assert!(
+            non_ascii_literals("#[cfg(test)]\nmod t { fn f() { let s = \"x \u{2014} y\"; } }")
+                .is_empty(),
+            "a test module's own messages are not read on a C64"
+        );
+        assert_eq!(
+            non_ascii_literals(
+                "#[cfg(test)]\nmod t { fn f() { let s = \"x \u{2014} y\"; } }\nfn g() { let s = \"z \u{2014} w\"; }"
+            ),
+            vec!["z \u{2014} w".to_string()],
+            "and production code AFTER a test module is still in scope"
+        );
+        assert!(
+            non_ascii_literals("fn f<'a>(x: &'a str) -> &'static str { \"ok\" }").is_empty(),
+            "a lifetime must not be mistaken for a char literal"
+        );
+        assert_eq!(
+            non_ascii_literals("let q = '\"'; let s = \"a \u{2014} b\";"),
+            vec!["a \u{2014} b".to_string()],
+            "a quote char literal must not desynchronise the scan"
+        );
+        assert!(
+            non_ascii_literals("let s = \"escaped \\\" quote\";").is_empty(),
+            "an escaped quote does not end the literal"
+        );
+    }
+
     /// **A disk we cannot mount is often one that boots**, and the refusal has
     /// to say so — the Altair hard disks carrying Disk BASIC and the Accounting
     /// System have no CP/M directory and boot perfectly. Saying only "no
@@ -300,8 +504,8 @@ pub fn is_erased_directory(dir: &[u8]) -> bool {
 ///
 /// * every entry names printable 8.3, a user number of 0–15, and no more than
 ///   128 records in one extent;
-/// * every allocation block is inside the disk (`1..=blocks`, and never 0,
-///   which means "unused");
+/// * every allocation block is inside the disk (`1..=DSM`, and never 0, which
+///   means "unused") and outside the directory's own blocks;
 /// * an extent must claim **at least** as many blocks as its record count needs;
 /// * **no block is claimed by two entries** — the one that random data fails
 ///   almost immediately, because collisions are overwhelmingly likely once
@@ -322,9 +526,28 @@ pub fn is_erased_directory(dir: &[u8]) -> bool {
 /// of the disk, two files claiming one block" — but applied *before* trusting
 /// the mount rather than after the first write. It cannot sit at "nearly right":
 /// one out-of-range or double-claimed block fails it outright.
+///
+/// **Every number here comes from [`Params::derive`], not from the format
+/// directly**, because "the same check at two moments" is only true if both
+/// moments compute it the same way — and they did not. This function used to
+/// derive its own from [`Format::data_blocks`], which returns a *count*: it
+/// compared `b > blocks` where the last legal block is `blocks - 1`, so an entry
+/// naming one block past the end of the disk passed, and it decided the
+/// allocation-map width on `blocks > 255` where CP/M's rule is `DSM > 255`,
+/// which disagrees with the mount at exactly 256 blocks and would decode eight
+/// 16-bit block numbers out of bytes the mount reads as sixteen 8-bit ones.
+/// The first was live (no format has 256 blocks, so the second was not), and
+/// `ImageFs::mount` caught it afterwards and forced read-only — but with the
+/// generic "the directory is damaged" rather than the specific reason
+/// [`Identified::why`] exists to carry. `data_blocks` was itself created because
+/// this arithmetic lived in four places; this was the fifth.
 pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'static str> {
-    let blocks = format.data_blocks();
-    let per_block = (format.blocksize / 128).max(1);
+    let params = Params::derive(format);
+    let per_block = params.records_per_block.max(1);
+    // Blocks the directory itself occupies. An entry claiming one of them is
+    // corrupt in the same way as one off the end — the mount path has always
+    // rejected it (`ImageFs::inconsistency`) and this side never did.
+    let dir_blocks = params.dir_records.div_ceil(per_block);
     let mut claimed: std::collections::HashSet<u16> = std::collections::HashSet::new();
     let mut live = 0usize;
     let mut other = 0usize;
@@ -367,17 +590,21 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
             return Err("a record count too large for one extent");
         }
         // Sixteen 8-bit block numbers, or eight 16-bit ones. Which it is
-        // follows from the disk's size, exactly as CP/M itself decides.
-        let wide = blocks > 255;
-        let nums: Vec<u16> = if wide {
+        // follows from the disk's size, exactly as CP/M itself decides — and
+        // from the same `wide_blocks` the mount will use, not a second reading
+        // of the rule.
+        let nums: Vec<u16> = if params.wide_blocks {
             e[16..32].chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect()
         } else {
             e[16..32].iter().map(|&b| b as u16).collect()
         };
         let used: Vec<u16> = nums.into_iter().filter(|&b| b != 0).collect();
         for b in &used {
-            if *b as u32 > blocks {
+            if *b > params.max_block {
                 return Err("an allocation block off the end of the disk");
+            }
+            if (*b as u32) < dir_blocks {
+                return Err("an allocation block inside the directory");
             }
             if !claimed.insert(*b) {
                 return Err("two directory entries claiming one block");
@@ -648,13 +875,21 @@ mod tests {
     #[test]
     fn test_an_inconsistent_directory_stays_read_only() {
         let fmt = by_token("ibm3740").unwrap();
-        let blocks = fmt.data_blocks();
+        // The *first illegal* block, not a comfortably illegal one. This read
+        // `(blocks + 8).min(255)` and cleared the boundary by eight, which is
+        // why it went on passing while the check was off by one — see
+        // `test_the_last_block_is_legal_and_the_next_one_is_not`.
+        let first_bad = Params::derive(fmt).max_block + 1;
 
         type Mutate = Box<dyn Fn(&mut Vec<u8>)>;
         let cases: Vec<(&str, Mutate)> = vec![
             (
                 "a block off the end of the disk",
-                Box::new(move |d: &mut Vec<u8>| d[16] = (blocks + 8).min(255) as u8),
+                Box::new(move |d: &mut Vec<u8>| d[16] = first_bad as u8),
+            ),
+            (
+                "a block inside the directory",
+                Box::new(|d: &mut Vec<u8>| d[16] = 1),
             ),
             (
                 "two entries claiming one block",
@@ -688,6 +923,71 @@ mod tests {
             .unwrap_or_else(|e| panic!("{what}: should still identify, got {e:?}"));
             assert_eq!(id.confidence, Confidence::Sniffed, "{what} must not be trusted");
             assert!(id.force_read_only(), "{what} must stay read-only");
+        }
+    }
+
+    /// **The exact boundary, in both directions**, because an off-by-one here is
+    /// invisible to every test that clears it by a margin.
+    ///
+    /// `data_blocks()` is a *count*, so the last legal block is one less than it.
+    /// `directory_is_consistent` compared against the count and let an entry
+    /// naming block DSM+1 — one past the end of the disk — through; the mount
+    /// path caught it afterwards with `params.max_block` and forced read-only,
+    /// so the two checks that are supposed to be one check disagreed by exactly
+    /// one block. A test that asserts only "some too-large block fails" cannot
+    /// see that. This one asserts the pair.
+    #[test]
+    fn test_the_last_block_is_legal_and_the_next_one_is_not() {
+        // A format whose DSM fits in a byte, so the boundary can be written into
+        // an 8-bit allocation map at all.
+        let fmt = by_token("ibm3740").unwrap();
+        let params = Params::derive(fmt);
+        assert!(!params.wide_blocks, "this test needs 8-bit block numbers");
+        assert!(params.max_block < 255, "the boundary must be representable in one byte");
+
+        let with_block = |b: u16| {
+            let mut dir = consistent_dir(fmt);
+            dir[16] = b as u8;
+            directory_is_consistent(&dir, fmt)
+        };
+
+        assert_eq!(with_block(params.max_block), Ok(()), "the last block on the disk is legal");
+        assert_eq!(
+            with_block(params.max_block + 1),
+            Err("an allocation block off the end of the disk"),
+            "one past the last block is off the end"
+        );
+    }
+
+    /// **Identify and the mount must decide the allocation-map width the same
+    /// way**, or they read entirely different block numbers out of the same
+    /// sixteen bytes.
+    ///
+    /// CP/M's rule is `DSM > 255`. This function used to apply it to the block
+    /// *count* instead, which agrees everywhere except at exactly 256 blocks —
+    /// where identify would decode eight 16-bit numbers from bytes the mount
+    /// reads as sixteen 8-bit ones, and then pronounce the result consistent
+    /// enough to write to. No format in the table has 256 blocks, so the
+    /// disagreement was dormant; asserted here against the rule rather than
+    /// against the table, so adding such a format cannot wake it up.
+    #[test]
+    fn test_identify_and_the_mount_agree_on_allocation_width() {
+        for fmt in FORMATS {
+            let params = Params::derive(fmt);
+            assert_eq!(
+                params.wide_blocks,
+                params.max_block > 255,
+                "{}: the width must follow DSM, not the block count",
+                fmt.token
+            );
+            // And the count-based rule that used to be here is the one that
+            // differs — at 256 blocks exactly, which is what the pair pins.
+            assert_eq!(
+                params.max_block as u32,
+                fmt.data_blocks().saturating_sub(1),
+                "{}: DSM is one less than the block count",
+                fmt.token
+            );
         }
     }
 
