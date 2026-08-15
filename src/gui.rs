@@ -148,6 +148,15 @@ pub fn run(
             Box::new(move |cc| {
                 *gui_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cc.egui_ctx.clone());
                 egui_extras::install_image_loaders(&cc.egui_ctx);
+                // Spend the one-shot screen marker here, on the way in, and
+                // before anything can fail: a marker that outlived a launch
+                // which never opened a browser would open one at every launch
+                // afterwards.  Here rather than in `App::new` because this
+                // writes the file and replaces the global config, which a unit
+                // test constructing an `App` must not do.
+                if cfg.open_screen_after_restart {
+                    config::update_config_value("open_screen_after_restart", "false");
+                }
                 Ok(Box::new(App::new(cfg, shutdown, restart)))
             }),
         )
@@ -626,6 +635,12 @@ struct App {
     /// nothing to open.  Offering to start it beats a dead button, but starting
     /// a listener is outward-facing, so it is offered and never done silently.
     vdm_web_offer_open: bool,
+    /// The web server this window's gateway was started with: `(enabled, port)`.
+    ///
+    /// Captured once, from the config `main` used to spawn this cycle's server,
+    /// and never refreshed — see [`App::vdm_url`] for why neither the live
+    /// config nor `last_synced_cfg` answers this question.
+    running_web: (bool, u16),
     /// When to open the screen in a browser, once the web server has had a
     /// moment to bind.
     ///
@@ -662,11 +677,18 @@ impl App {
         // far worse fault than the one it exists to fix.  Written straight to
         // the file rather than left for the next Save, because the operator may
         // never press one.
+        // Read, never written here.  `App::new` must not touch the process-wide
+        // config or the file: it runs in unit tests, `update_config_value`
+        // replaces the global `CONFIG` and rewrites `egateway.conf`, and doing
+        // that from a plain `#[test]` running beside the rest of the suite is
+        // how one test's config lands in another's lap.  `run` spends the
+        // marker on disk before this is reached.
         let open_screen_asked = cfg.open_screen_after_restart;
-        if open_screen_asked {
-            cfg.open_screen_after_restart = false;
-            config::update_config_value("open_screen_after_restart", "false");
-        }
+        cfg.open_screen_after_restart = false;
+        // Captured before `cfg` is moved into the struct: this is what `main`
+        // started this cycle's server from, and the only honest answer to
+        // "where is the web server".
+        let running_web = (cfg.web_enabled, cfg.web_port);
         let cfg = cfg;
         // Seed saved_geom from the config so we don't rewrite the identical
         // geometry we just restored on first launch.
@@ -788,6 +810,7 @@ impl App {
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
+            running_web,
             vdm_web_offer_open: false,
             // If the operator got here by asking for the screen and agreeing
             // to the restart, finish the job.  The marker is in the config
@@ -1555,34 +1578,33 @@ impl App {
     fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
         // The Groq key lives here rather than on the main frame: it is optional,
         // and a key field in the first row of a frame reads as a prerequisite.
-        ui.horizontal(|ui| {
-            ui.label("Groq API Key (optional):");
-            singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
+        // The same label column and control width as the CP/M rows below, so
+        // one popup reads as one form rather than two lists that happen to
+        // share a window.
+        cpm_choice_row(ui, "Groq API Key (optional):", |ui| {
+            singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, Some(CPM_CONTROL_W));
         });
         ui.label(
             egui::RichText::new("AI Chat only — everything else works without one.")
                 .small()
                 .color(AMBER_DIM),
         );
-        ui.horizontal(|ui| {
-            ui.label("Home:");
-            singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, None);
+        cpm_choice_row(ui, "Home:", |ui| {
+            singleline_with_menu(ui, &mut self.cfg.browser_homepage, false, Some(CPM_CONTROL_W));
         });
-        ui.horizontal(|ui| {
-            // The same words the main frame uses for the same field: this popup
-            // re-shows it, and two names for one control is how a reader ends
-            // up wondering whether they are two settings.
-            labeled_field(ui, "Weather location:", &mut self.cfg.weather_location, 160.0);
+        // The same words the main frame uses for the same field: this popup
+        // re-shows it, and two names for one control is how a reader ends up
+        // wondering whether they are two settings.
+        cpm_choice_row(ui, "Weather location:", |ui| {
+            singleline_with_menu(ui, &mut self.cfg.weather_location, false, Some(CPM_CONTROL_W));
         });
-        ui.horizontal(|ui| {
-            ui.label("Units:");
+        cpm_choice_row(ui, "Units:", |ui| {
             let sel = match self.cfg.weather_units.as_str() {
                 "us" => "US (F/mph)",
                 "metric" => "Metric (C/km/h)",
                 _ => "Auto",
             };
-            egui::ComboBox::from_id_salt("weather_units_combo")
-                .width(160.0)
+            cpm_combo(ui, "weather_units_combo")
                 .selected_text(sel)
                 .show_ui(ui, |ui| {
                     for (label, val) in [
@@ -1606,7 +1628,7 @@ impl App {
             &mut self.cfg.cpm_emu_enabled,
             "CP/M Emulator (main menu; be sure you trust the CP/M files you run)",
         );
-        // Whether the web UI's Disk Screen page is a keyboard as well as a
+        // Whether the web UI's VDM / Dazzler page is a keyboard as well as a
         // window.  Here rather than with the web server's own settings because
         // it is a CP/M question — what may type at a booted guest — and the
         // operator looking for it will be looking at the CP/M controls.
@@ -1730,10 +1752,8 @@ impl App {
             });
         }
         let boot_label = self.cpm_boot_label();
-        ui.horizontal(|ui| {
-            ui.label("CP/M runs:");
-            egui::ComboBox::from_id_salt("cpm_boot_image_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "CP/M runs:", |ui| {
+            cpm_combo(ui, "cpm_boot_image_combo")
                 .selected_text(boot_label)
                 .show_ui(ui, |ui| {
                     // The images folder is read here rather than above it: this
@@ -1776,15 +1796,13 @@ impl App {
         })
         .response
         .on_hover_text(
-            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless the boot                  picker is told otherwise, and that answer covers the mounted                  disks too.",
+            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless \"a booted                  disk may WRITE\" is ticked above, and that answer covers the                  mounted disks too.",
         );
         // Which machine a BOOTED disk believes it is running on -- specifically
         // where it finds its console.  The same `MACHINE_CHOICES` list the telnet
         // and web screens render, so the three cannot drift apart.
-        ui.horizontal(|ui| {
-            ui.label("Booted disk's machine:");
-            egui::ComboBox::from_id_salt("cpm_boot_machine_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "Booted disk's machine:", |ui| {
+            cpm_combo(ui, "cpm_boot_machine_combo")
                 .selected_text(crate::cpm::console::machine_label(
                     &self.cfg.cpm_boot_machine,
                 ))
@@ -1811,10 +1829,8 @@ impl App {
         // What a BOOTED disk is handed for the Backspace key.  The same
         // `BACKSPACE_CHOICES` list the telnet and web screens render -- and the
         // telnet boot picker too, which asks again per disk.
-        ui.horizontal(|ui| {
-            ui.label("Booted disk's backspace:");
-            egui::ComboBox::from_id_salt("cpm_boot_backspace_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "Booted disk's backspace:", |ui| {
+            cpm_combo(ui, "cpm_boot_backspace_combo")
                 .selected_text(crate::cpm::boot::backspace_label(&self.cfg.cpm_boot_backspace))
                 .show_ui(ui, |ui| {
                     for (value, label) in crate::cpm::boot::BACKSPACE_CHOICES {
@@ -1841,10 +1857,8 @@ impl App {
         // Which processor BOTH CP/M machines run.  The same `CPU_CHOICES` list
         // the telnet and web screens render -- and the only CP/M setting of the
         // four that is not about a booted disk alone.
-        ui.horizontal(|ui| {
-            ui.label("CP/M CPU:");
-            egui::ComboBox::from_id_salt("cpm_cpu_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "CP/M CPU:", |ui| {
+            cpm_combo(ui, "cpm_cpu_combo")
                 .selected_text(crate::cpm::cpu::cpu_label(&self.cfg.cpm_cpu))
                 .show_ui(ui, |ui| {
                     for (value, label) in crate::cpm::cpu::CPU_CHOICES {
@@ -1867,10 +1881,8 @@ impl App {
         // Where CP/M printer output goes.  Beside the CPU because it is the
         // other setting that reaches both machines, and immediately above the
         // board it depends on.
-        ui.horizontal(|ui| {
-            ui.label("CP/M printer:");
-            egui::ComboBox::from_id_salt("cpm_printer_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "CP/M printer:", |ui| {
+            cpm_combo(ui, "cpm_printer_combo")
                 .selected_text(crate::cpm::printer::printer_label(&self.cfg.cpm_printer))
                 .show_ui(ui, |ui| {
                     for (value, label) in crate::cpm::printer::PRINTER_CHOICES {
@@ -1905,10 +1917,8 @@ impl App {
              the line, sends a bare CR and reprints just the emphasised run at \
              the same columns -- and that becomes real styling.",
         );
-        ui.horizontal(|ui| {
-            ui.label("Bare carriage return:");
-            egui::ComboBox::from_id_salt("cpm_printer_autolf_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "Bare carriage return:", |ui| {
+            cpm_combo(ui, "cpm_printer_autolf_combo")
                 .selected_text(
                     crate::cpm::printer::AUTOLF_CHOICES
                         .iter()
@@ -1943,10 +1953,8 @@ impl App {
              Altair line printer, off for the emulator's LST: service, where \
              CP/M sends CR LF and overstrike is meaningful.",
         );
-        ui.horizontal(|ui| {
-            ui.label("Booted disk's printer:");
-            egui::ComboBox::from_id_salt("cpm_printer_port_combo")
-                .width(320.0)
+        cpm_choice_row(ui, "Booted disk's printer:", |ui| {
+            cpm_combo(ui, "cpm_printer_port_combo")
                 .selected_text(crate::cpm::printer::port_label(&self.cfg.cpm_printer_port))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -1978,38 +1986,50 @@ impl App {
         );
         // Virtual-modem UART port: which machine/port address the emulated
         // CP/M's modem answers at.
-        ui.horizontal(|ui| {
-            ui.label("CP/M virtual modem:");
-            egui::ComboBox::from_id_salt("cpm_emu_uart_combo")
-                .width(320.0)
-                .selected_text(crate::cpm::uart::uart_description(&self.cfg.cpm_emu_uart))
-                .show_ui(ui, |ui| {
-                    for c in crate::cpm::uart::UART_CHOICES {
-                        ui.selectable_value(
-                            &mut self.cfg.cpm_emu_uart,
-                            c.key.to_string(),
-                            c.description,
-                        );
-                    }
-                });
-            // One click back to the port EGT8080 also defaults to: the answer to
-            // "I changed something and now the CP/M terminal cannot connect".
-            if ui
-                .small_button("Default port")
-                .on_hover_text(
-                    "Reset the CP/M virtual modem to the port EGT8080 expects                      (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
-                )
-                .clicked()
-            {
-                self.cfg.cpm_emu_uart = crate::cpm::uart::DEFAULT_UART.to_string();
-                self.last_synced_cfg.cpm_emu_uart = self.cfg.cpm_emu_uart.clone();
-                config::update_config_value("cpm_emu_uart", crate::cpm::uart::DEFAULT_UART);
-                logger::log(format!(
-                    "CP/M virtual modem port reset to the default ({}).",
-                    crate::cpm::uart::DEFAULT_UART
-                ));
-            }
-        });
+        // The one row with a button after its dropdown, so the button is drawn
+        // *outside* the fixed control box -- inside it, it took the width the
+        // dropdown was given and rendered on top of a value cut off mid-port.
+        let mut reset_uart = false;
+        cpm_choice_row_trailing(
+            ui,
+            "CP/M virtual modem:",
+            |ui| {
+                cpm_combo(ui, "cpm_emu_uart_combo")
+                    .selected_text(crate::cpm::uart::uart_description(&self.cfg.cpm_emu_uart))
+                    .show_ui(ui, |ui| {
+                        for c in crate::cpm::uart::UART_CHOICES {
+                            ui.selectable_value(
+                                &mut self.cfg.cpm_emu_uart,
+                                c.key.to_string(),
+                                c.description,
+                            );
+                        }
+                    });
+            },
+            // Only a flag here: the control closure above already holds
+            // `self.cfg` mutably, and two closures cannot.  The work happens
+            // below, where nothing else is borrowing.
+            |ui| {
+                // One click back to the port EGT8080 also defaults to: the
+                // answer to "I changed something and now the CP/M terminal
+                // cannot connect".
+                reset_uart = ui
+                    .small_button("Default port")
+                    .on_hover_text(
+                        "Reset the CP/M virtual modem to the port EGT8080 expects                          (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
+                    )
+                    .clicked();
+            },
+        );
+        if reset_uart {
+            self.cfg.cpm_emu_uart = crate::cpm::uart::DEFAULT_UART.to_string();
+            self.last_synced_cfg.cpm_emu_uart = self.cfg.cpm_emu_uart.clone();
+            config::update_config_value("cpm_emu_uart", crate::cpm::uart::DEFAULT_UART);
+            logger::log(format!(
+                "CP/M virtual modem port reset to the default ({}).",
+                crate::cpm::uart::DEFAULT_UART
+            ));
+        }
         // The CP/M virtual modem's saved AT profile — the counterpart of the
         // per-port AT&W block on the Serial page.  The guest writes it with
         // AT&W from inside the emulator; it is editable here for the same
@@ -2912,20 +2932,26 @@ impl App {
     /// wanted the screen.  Loopback because the desktop UI runs in the same
     /// process as the server it is opening — no address to guess, and nothing
     /// that depends on which interface the listener bound.
-    /// **The port the server is actually on, not the one in the text box.**
-    /// `cfg` carries unsaved edits — a port typed and not yet saved is a port
-    /// nothing is listening on — while `last_synced_cfg` is what was persisted
-    /// and therefore what the running listener was started from. Opening the
-    /// typed one would hand the operator a refused connection and look like the
-    /// screen was broken.
+    /// **The port the running listener was started from**, which is neither the
+    /// text box nor the current config.
+    ///
+    /// `cfg` carries unsaved edits, so a port typed and not saved is a port
+    /// nothing is listening on. `last_synced_cfg` is no better: it is refreshed
+    /// from the global config whenever that changes, including a change made
+    /// from the web or telnet UI that needs a restart to take effect — so it can
+    /// name a port the listener has not moved to yet. What the server is
+    /// actually on is what `main` handed this window when it built it, which is
+    /// captured once in [`App::new`] and left alone.
+    ///
+    /// Getting this wrong is not cosmetic: it opens a browser at a port nobody
+    /// is serving, which looks exactly like the screen being broken.
     fn vdm_url(&self) -> String {
-        format!("http://127.0.0.1:{}/vdm", self.last_synced_cfg.web_port)
+        format!("http://127.0.0.1:{}/vdm", self.running_web.1)
     }
 
-    /// Is the web server actually up? Same reasoning as [`Self::vdm_url`]: a
-    /// ticked-but-unsaved checkbox has not started anything.
+    /// Is the web server actually up? Same snapshot, same reasoning.
     fn vdm_web_running(&self) -> bool {
-        self.last_synced_cfg.web_enabled
+        self.running_web.0
     }
 
     /// Hand the screen's URL to the desktop's browser.
@@ -3208,6 +3234,84 @@ impl App {
             self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
         }
     }
+}
+
+/// The label column of the CP/M popup's choice rows, and the width of the
+/// controls beside it.
+///
+/// **One column, right-aligned, so the colons line up.** These labels run from
+/// `CP/M CPU:` to `Booted disk's backspace:`, and drawn plainly each control
+/// started wherever its own label happened to end — eight ragged left edges down
+/// one popup.
+///
+/// The widths need pinning too, and `ComboBox::width` alone does not do it: it
+/// is a *minimum*, and the button grows to fit whatever is selected
+/// (`combo_box.rs`: `actual_width = galley + icons, at_least(minimum)`), so the
+/// right edges moved as the operator changed a setting. Boxing the control to
+/// an exact width and truncating the text inside it is what makes every row the
+/// same shape.
+const CPM_LABEL_W: f32 = 196.0;
+const CPM_CONTROL_W: f32 = 330.0;
+
+/// Helper: one `label: [control]` row of the CP/M popup, aligned on the colon.
+///
+/// The control closure gets a `Ui` already bounded to [`CPM_CONTROL_W`], so a
+/// `ComboBox` inside it lays its text out against that width rather than
+/// against the rest of the window.
+fn cpm_choice_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    control: impl FnOnce(&mut egui::Ui),
+) -> egui::InnerResponse<()> {
+    cpm_choice_row_trailing(ui, label, control, |_| {})
+}
+
+/// [`cpm_choice_row`] with something after the control — a button that belongs
+/// to the row rather than to the choice.
+///
+/// Outside the fixed box on purpose: boxed with the control it would eat the
+/// width the control was given, and the one row that has such a button rendered
+/// with its dropdown truncated mid-value and the button sitting on top of it.
+fn cpm_choice_row_trailing(
+    ui: &mut egui::Ui,
+    label: &str,
+    control: impl FnOnce(&mut egui::Ui),
+    trailing: impl FnOnce(&mut egui::Ui),
+) -> egui::InnerResponse<()> {
+    ui.horizontal(|ui| {
+        let h = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(
+            egui::vec2(CPM_LABEL_W, h),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(CPM_CONTROL_W, h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_max_width(CPM_CONTROL_W);
+                control(ui);
+            },
+        );
+        trailing(ui);
+    })
+}
+
+/// A dropdown of exactly [`CPM_CONTROL_W`], whatever is selected in it.
+///
+/// Both halves are needed and neither is obvious. `ComboBox::width` is a
+/// *minimum* — it becomes `minimum_width = width - 2 * button_padding` and the
+/// button then takes `max(text + icon, minimum_width)` — so a long value grows
+/// the box and the right edges wander as settings change. Truncating bounds the
+/// text against the boxed width, and asking for `CPM_CONTROL_W + 2 * padding`
+/// makes that minimum come out at exactly `CPM_CONTROL_W`, so the two ends meet
+/// and every row is the same width.
+fn cpm_combo(ui: &egui::Ui, id_salt: &str) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id_salt)
+        .width(CPM_CONTROL_W + 2.0 * ui.spacing().button_padding.x)
+        .truncate()
 }
 
 /// Helper: labeled text field in a horizontal row.
@@ -4419,14 +4523,26 @@ impl eframe::App for App {
             });
         });
         if vdm_commit {
+            // **Only the two keys this dialog asked about.**  The obvious
+            // `save_and_restart_all()` would persist every unsaved edit in the
+            // window -- a half-typed telnet port, a transfer directory being
+            // edited -- and then apply them all in a restart the operator
+            // agreed to for the web server alone.  The Kermit-server popup a
+            // few lines up already does the narrow thing; this now matches it.
             self.cfg.web_enabled = true;
-            // Armed before the restart, because the restart takes this window
-            // with it: `save_and_restart_all` unwinds the server, `gui::run`
-            // returns and `main` builds a fresh `App`.  That one picks the
-            // intent up and opens the page, so the operator does not have to
-            // find the button again after everything has come back.
-            self.cfg.open_screen_after_restart = true;
-            self.save_and_restart_all();
+            self.last_synced_cfg.web_enabled = true;
+            config::update_config_value("web_enabled", "true");
+            // Written before the restart, because the restart takes this window
+            // with it: the server unwinds, `gui::run` returns and `main` builds
+            // a fresh `App`.  That one spends the marker and opens the page, so
+            // the operator does not have to find the button again.
+            config::update_config_value("open_screen_after_restart", "true");
+            logger::log("Web server enabled — restarting to bind the listener...".into());
+            // Restart without persisting the rest: `restart` before `shutdown`,
+            // the order `save_and_restart_all` documents, so the main loop sees
+            // the intent when it checks after the join.
+            self.restart.store(true, Ordering::SeqCst);
+            self.shutdown.store(true, Ordering::SeqCst);
         }
         if vdm_close {
             vdm_offer_open = false;
@@ -4632,9 +4748,11 @@ mod tests {
     /// checkbox cannot make it open a page that is not being served.
     #[test]
     fn test_the_desktop_screen_button_opens_the_screen_not_the_root() {
-        let mut app = test_app();
-        app.last_synced_cfg.web_enabled = true;
-        app.last_synced_cfg.web_port = 9123;
+        let mut app = App::new(
+            Config { web_enabled: true, web_port: 9123, ..Config::default() },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
 
         let url = app.vdm_url();
         assert!(url.ends_with("/vdm"), "it must land on the screen: {url}");
@@ -4642,16 +4760,21 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:"), "{url}");
         assert!(app.vdm_web_running());
 
-        // An unsaved edit changes neither answer: the running server is still
-        // where it was, and that is where the browser has to be sent.
+        // **Neither later view of the config moves it.**  `cfg` holds unsaved
+        // edits, and `last_synced_cfg` is refreshed from the global config
+        // whenever that changes -- including a change made from the web or
+        // telnet UI that needs a restart to take effect.  The listener is still
+        // where `main` started it, and that is where the browser must be sent.
         app.cfg.web_port = 4444;
         app.cfg.web_enabled = false;
-        assert_eq!(app.vdm_url(), "http://127.0.0.1:9123/vdm");
-        assert!(app.vdm_web_running(), "the saved state is what is running");
-
-        // And with the server really off, the button has nothing to open.
+        app.last_synced_cfg.web_port = 5555;
         app.last_synced_cfg.web_enabled = false;
-        assert!(!app.vdm_web_running());
+        assert_eq!(app.vdm_url(), "http://127.0.0.1:9123/vdm");
+        assert!(app.vdm_web_running(), "what is running is what it was started with");
+
+        // And a gateway whose server really was off offers to start it instead.
+        let off = test_app();
+        assert!(!off.vdm_web_running());
     }
 
     #[test]

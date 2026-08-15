@@ -2625,11 +2625,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   an OS service (BDOS function 5 and the BIOS LIST vector), and a booted disk
 #   drives a printer PORT itself (see cpm_printer_port).  Either way one
 #   document is written into the transfer folder for you to print.
-#     off    DEFAULT - printer output appears on your terminal, as it always
-#            has.  Nothing is written to disk.
+#     off    printer output appears on your terminal, as it always has.
+#            Nothing is written to disk -- and nothing can be recovered
+#            afterwards either, which is why this is no longer the default.
 #     odt    an OpenDocument text file (.odt), monospaced, one page per form
-#            feed - opens in LibreOffice, Word or Google Docs
-#     text   plain text (.txt), form feeds kept
+#            feed - opens in LibreOffice, Word or Google Docs.  Overstrike
+#            becomes real bold and underline.
+#     text   DEFAULT - plain text (.txt), form feeds kept.  Nothing is written
+#            until a guest actually prints.
 #   The file is named PRINT-YYYYMMDD-HHMMSS from this machine's clock and lands
 #   in a `printer' folder inside the transfer directory - its own folder so a
 #   printer left on does not scatter documents through your files, and NOT on a

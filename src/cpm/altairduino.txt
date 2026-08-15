@@ -63,5 +63,5 @@ HDSK07.DSK	4988928	8f86caa64ab10278f9a5fa1fe410e01c9f45c3b1d2f953fdaa8bc0a455165
 TDISK01.DSK	256256	da472286220d309b34edbac1ac1d617c8df0d3a0bc743f8591fdd979b782dd62	hansel	Tarbell 1011 floppy - CP/M
 TDISK02.DSK	256256	6307578a30538af4d053c6cf2c729878635787c64242baa36bd9462fcda24c65	hansel	Tarbell 1011 floppy - CP/M
 TDISK03.DSK	256256	c8bbefeb2615f62915b730fe06825bcb84c6d286e8e201d8bf36d6739d015ba8	hansel	Tarbell 1011 floppy - CP/M
-TDISK04.DSK	256256	544e22f8df7d3530bf096cb6c0ff2f32be52db695933fd32ccb858d9cf62f7c5	hansel	CP/M 1.4 for the VDM-1 - paints the Disk Screen page, not the terminal
+TDISK04.DSK	256256	544e22f8df7d3530bf096cb6c0ff2f32be52db695933fd32ccb858d9cf62f7c5	hansel	CP/M 1.4 for the VDM-1 - paints the VDM screen, not the terminal
 TDISK05.DSK	256256	fc9e98f4c47d23af0657bf3261a40f6948091a41bb9f3d7b8aa8fcb8560e4eaa	hansel	Tarbell 1011 floppy - CP/M

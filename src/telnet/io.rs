@@ -179,6 +179,13 @@ impl TelnetSession {
     /// terminal's ESC byte so callers treat them like a Ctrl+C / ESC.
     pub(in crate::telnet) async fn session_read_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
         if let Some(b) = self.pushback.take() {
+            // A pushed-back byte is a real one, so it decides what "straight
+            // after a CR" means for the next call as much as a freshly read
+            // byte does.  Without this the flag could survive across it and
+            // drop a NUL that followed something else entirely -- narrow, but
+            // `drain_trailing_eol` pushes back precisely in the middle of the
+            // CR-NUL sequences this is about.
+            self.last_was_cr = b == b'\r';
             return Ok(Some(b));
         }
         let filter_iac = !self.is_serial && !self.is_ssh;
@@ -196,7 +203,15 @@ impl TelnetSession {
                     return Ok(None);
                 }
                 let byte = buf[0];
-                if !filter_iac || byte != IAC {
+                if !filter_iac {
+                    // Serial and SSH carry no NVT encoding: a bare CR is a bare
+                    // CR there, so a NUL after one is the peer's own byte --
+                    // and this path also carries a file being fed into a booted
+                    // guest's console, where dropping a 0x00 would corrupt it.
+                    self.last_was_cr = false;
+                    return Ok(Some(byte));
+                }
+                if byte != IAC {
                     // Drop the NUL of an RFC 854 `CR NUL` pair.  It is how a
                     // telnet client spells a bare CR, not a byte the user
                     // typed, and passing it on printed `^@` at a booted CP/M
@@ -224,7 +239,15 @@ impl TelnetSession {
             self.mid_iac_cmd = false;
             let cmd = buf[0];
             match cmd {
-                IAC => return Ok(Some(IAC)), // escaped data 0xFF
+                IAC => {
+                    // A byte delivered to the caller, so it decides what comes
+                    // "straight after a CR" — without this the flag survived
+                    // across it and a genuine NUL after an escaped 0xFF was
+                    // dropped as padding.  Same for the branches below that
+                    // return a byte.
+                    self.last_was_cr = false;
+                    return Ok(Some(IAC)); // escaped data 0xFF
+                }
                 SB => {
                     self.telnet_negotiated = true;
                     let Some(payload) = self.read_subneg_payload().await? else {
@@ -254,6 +277,7 @@ impl TelnetSession {
                     } else {
                         0x1B
                     };
+                    self.last_was_cr = false;
                     return Ok(Some(esc));
                 }
                 EC => {
@@ -261,12 +285,14 @@ impl TelnetSession {
                     // architecture has no low-level input buffer, so
                     // translate to DEL (0x7F); the line-input layer
                     // already handles this as backspace.
+                    self.last_was_cr = false;
                     return Ok(Some(0x7F));
                 }
                 EL => {
                     // RFC 854: delete everything on the current line.
                     // Translate to NAK (0x15); the line-input loop
                     // treats this as "erase-line."
+                    self.last_was_cr = false;
                     return Ok(Some(LINE_ERASE_BYTE));
                 }
                 _ => {

@@ -53,13 +53,19 @@ pub const PRINTER_TEXT: &str = "text";
 
 /// What `cpm_printer` is when nothing says otherwise.
 ///
-/// **Off**, unlike most of the CP/M defaults. Every other setting here changes
-/// how the emulator behaves inside itself; this one writes files into the
-/// operator's transfer directory, and a feature that creates files unasked
-/// should be asked for. With it off the `LIST` vector keeps the behaviour it
-/// has always had — printer output appears on the terminal — so turning it off
-/// is not a loss of function, it is a choice of where the paper goes.
-pub const DEFAULT_PRINTER: &str = PRINTER_OFF;
+/// **Plain text**, since 0.9.2. It was `off`, on the reasoning that a feature
+/// which writes files into the operator's transfer directory should be asked
+/// for — a fair rule, and the wrong one here. Nothing is written until a guest
+/// actually prints, so an operator who never uses `LST:` never sees a file;
+/// what `off` really bought was that the first person to print anything got
+/// their output scattered across the terminal, mid-screen, with no way to get
+/// it back. That is not a safer default, it is a lost printout.
+///
+/// Text rather than `odt` because it is the format that cannot disappoint: any
+/// editor opens it, it is what most CP/M printing actually is, and an operator
+/// who wants the formatting that overstrike carries — bold and underline — can
+/// say so. Both write into `transfer/printer/`, never onto a CP/M drive.
+pub const DEFAULT_PRINTER: &str = PRINTER_TEXT;
 
 /// The choices for `cpm_printer`, `(value, label)`.
 ///
@@ -1135,7 +1141,11 @@ mod tests {
             PRINTER_CHOICES.iter().any(|(v, _)| *v == DEFAULT_PRINTER),
             "the default printer setting is not one of the offered choices"
         );
-        assert_eq!(DEFAULT_PRINTER, PRINTER_OFF, "printing must be off unless asked for");
+        // Text since 0.9.2, and pinned rather than left to drift: nothing is
+        // written until a guest actually prints, and the old `off` default did
+        // not protect anyone -- it scattered the first printout across the
+        // terminal with no way to get it back.
+        assert_eq!(DEFAULT_PRINTER, PRINTER_TEXT, "printing defaults to a text file");
         assert!(
             port_for(DEFAULT_PRINTER_PORT).is_some(),
             "the default printer port does not resolve to a board"

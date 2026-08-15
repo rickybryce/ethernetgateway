@@ -16,7 +16,7 @@
 //! of programs for a system disk that does boot, carrying no boot program of its
 //! own. `TDISK04` is kept although it prints nothing: it boots and paints a
 //! VDM-1 screen rather than writing to a console port, which is a disk that
-//! works and needs the Disk Screen page to be seen.
+//! works and needs the VDM / Dazzler page to be seen.
 //!
 //! That the list is *derived* matters more than the four names. It was an
 //! exclusion list transcribed from a survey run elsewhere until 2026-08-15, and
@@ -570,7 +570,7 @@ mod generate {
     /// would be exactly the hand-written drift this generator avoids.
     fn describe(name: &str) -> &'static str {
         match name {
-            "TDISK04.DSK" => "CP/M 1.4 for the VDM-1 - paints the Disk Screen page, not the terminal",
+            "TDISK04.DSK" => "CP/M 1.4 for the VDM-1 - paints the VDM screen, not the terminal",
             // The five from McNeely are named one by one, because unlike the
             // families below we know exactly what each is: its own catalogue
             // says so, and they are the reason that repository was added.
@@ -627,7 +627,7 @@ mod tests {
             assert!(!names.contains(&refused.to_string()), "{refused} does not boot");
         }
         // And the one that boots to a screen rather than a port *is* offered —
-        // it works, it just needs the Disk Screen page to be seen.
+        // it works, it just needs the VDM / Dazzler page to be seen.
         assert!(names.contains(&"TDISK04.DSK".to_string()));
     }
 

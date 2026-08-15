@@ -5158,6 +5158,38 @@ async fn test_only_the_nul_straight_after_a_cr_is_dropped() {
         b"\x00A\x00\r\x00\r\n",
         "only the one NUL straight after a CR is padding: {got:?}"
     );
+
+    // Serial and SSH carry no NVT encoding, so nothing is padding there: the
+    // same bytes must arrive whole.  This path also feeds a booted guest's
+    // console from a file, where a dropped 0x00 is corruption.
+    {
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        session.is_ssh = true;
+        peer.write_all(b"\r\x00").await.unwrap();
+        assert_eq!(session.session_read_byte().await.unwrap(), Some(b'\r'));
+        assert_eq!(
+            session.session_read_byte().await.unwrap(),
+            Some(0),
+            "an SSH client's NUL is its own byte, not NVT padding"
+        );
+    }
+
+    // A pushed-back byte is a real byte, so what follows *it* is not padding.
+    // `drain_trailing_eol` pushes back in the middle of exactly these
+    // sequences, so a flag that survived across a pushback would drop a NUL
+    // that came after something else.
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    peer.write_all(b"\r\x00").await.unwrap();
+    assert_eq!(session.session_read_byte().await.unwrap(), Some(b'\r'));
+    // A byte handed back between the CR and the NUL: with the flag surviving
+    // across it, the NUL below would be eaten as padding it is not.
+    session.pushback = Some(b'X');
+    assert_eq!(session.session_read_byte().await.unwrap(), Some(b'X'));
+    assert_eq!(
+        session.session_read_byte().await.unwrap(),
+        Some(0),
+        "the NUL after a pushed-back byte is not CR padding"
+    );
 }
 
 #[tokio::test]
