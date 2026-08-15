@@ -9483,7 +9483,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [webbrowser 1.2.1](https://github.com/amodm/webbrowser-rs)
+- [webbrowser 1.2.2](https://github.com/amodm/webbrowser-rs)
 
 ```
 The MIT License (MIT)
