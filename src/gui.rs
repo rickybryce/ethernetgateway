@@ -674,6 +674,53 @@ struct App {
     wizard: Option<wizard::Wizard>,
 }
 
+/// What the web listener did with the port it was given.
+///
+/// A boolean cannot carry this: "off" and "failed to bind" both mean the button
+/// has nothing to open, and they want opposite things said to the operator —
+/// one is an offer to start the server, the other is news that starting it did
+/// not work and why.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WebScreenState {
+    /// Listening, on this port.
+    Bound(u16),
+    /// Registered and still binding.
+    Starting(u16),
+    /// Configured, and the bind failed.  `in_use` is the case worth naming.
+    Failed { port: u16, in_use: bool },
+    /// Not configured at all.
+    Off,
+}
+
+impl WebScreenState {
+    /// Read one listener's bind outcome.
+    ///
+    /// A free function of its input so it can be tested without a bound socket
+    /// or the process-wide bindwatch roster — the mapping is the whole of the
+    /// decision, and it is what a caller gets wrong.
+    fn of(status: Option<(u16, crate::bindwatch::Status)>) -> WebScreenState {
+        use crate::bindwatch::Status;
+        match status {
+            Some((port, Status::Bound)) => WebScreenState::Bound(port),
+            // Still coming up.  The port it is binding to, not "off": offering
+            // to enable a server that is starting would be a restart nobody
+            // needed.
+            Some((port, Status::Pending)) => WebScreenState::Starting(port),
+            Some((port, Status::Failed { in_use })) => WebScreenState::Failed { port, in_use },
+            // Not in this cycle's roster at all: not configured.
+            None => WebScreenState::Off,
+        }
+    }
+
+    /// The port a browser could be sent to, if any.
+    fn port(&self) -> Option<u16> {
+        match self {
+            WebScreenState::Bound(p) | WebScreenState::Starting(p) => Some(*p),
+            _ => None,
+        }
+    }
+}
+
 impl App {
     fn new(mut cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
         // Clear the one-shot screen marker the moment it is read, and before
@@ -1724,21 +1771,38 @@ impl App {
                 )
                 .clicked()
             {
-                if self.vdm_web_running() {
-                    self.open_vdm_page(ui.ctx());
-                } else {
-                    self.vdm_web_offer_open = true;
+                match self.vdm_web_state() {
+                    // Listening, or about to be: send them to it.
+                    WebScreenState::Bound(_) | WebScreenState::Starting(_) => {
+                        self.open_vdm_page(ui.ctx())
+                    }
+                    // Configured and did not bind.  Offering to "enable" a
+                    // server that is already enabled would restart the gateway
+                    // and change nothing; say what went wrong instead.
+                    WebScreenState::Failed { port, in_use } => logger::log(if in_use {
+                        format!(
+                            "The VDM / Dazzler screen needs the web server, and port {port} is                              already in use — most often a second copy of the gateway. Stop that                              one, or give this one a different web port."
+                        )
+                    } else {
+                        format!("The web server could not bind port {port}, so there is no                                  screen to open. See the log above for the reason.")
+                    }),
+                    WebScreenState::Off => self.vdm_web_offer_open = true,
                 }
             }
-            ui.label(
-                egui::RichText::new(if self.vdm_web_running() {
-                    self.vdm_url()
-                } else {
-                    "web server is off".to_string()
-                })
-                .small()
-                .color(AMBER_DIM),
-            );
+            let (note, colour) = match self.vdm_web_state() {
+                WebScreenState::Bound(_) => (self.vdm_url(), AMBER_DIM),
+                WebScreenState::Starting(_) => ("web server is starting…".to_string(), AMBER_DIM),
+                WebScreenState::Failed { port, in_use } => (
+                    if in_use {
+                        format!("port {port} is in use — another copy running?")
+                    } else {
+                        format!("web server could not bind port {port}")
+                    },
+                    AMBER,
+                ),
+                WebScreenState::Off => ("web server is off".to_string(), AMBER_DIM),
+            };
+            ui.label(egui::RichText::new(note).small().color(colour));
         });
         // What the CP/M menu item runs: our emulator, or a disk image booted
         // on emulated Altair hardware.  The same `boot_choices` list the telnet
@@ -2938,27 +3002,32 @@ impl App {
     /// wanted the screen.  Loopback because the desktop UI runs in the same
     /// process as the server it is opening — no address to guess, and nothing
     /// that depends on which interface the listener bound.
-    /// **The port the running listener was started from**, which is neither the
-    /// text box nor the current config.
+    /// **What actually happened to the web listener**, which is a different
+    /// question from what the config asks for.
     ///
-    /// `cfg` carries unsaved edits, so a port typed and not saved is a port
-    /// nothing is listening on. `last_synced_cfg` is no better: it is refreshed
-    /// from the global config whenever that changes, including a change made
-    /// from the web or telnet UI that needs a restart to take effect — so it can
-    /// name a port the listener has not moved to yet. What the server is
-    /// actually on is what `main` handed this window when it built it, which is
-    /// captured once in [`App::new`] and left alone.
+    /// Three sources could answer "where is the web server" and two of them are
+    /// wrong. `cfg` carries unsaved edits, so a port typed and not saved is a
+    /// port nothing is listening on. `last_synced_cfg` is refreshed from the
+    /// global config whenever that changes — including a change made from the
+    /// web or telnet UI that needs a restart to take effect — so it can name a
+    /// port the listener has not moved to yet. Even the snapshot `main` started
+    /// this cycle's server from only says what was *attempted*.
     ///
-    /// Getting this wrong is not cosmetic: it opens a browser at a port nobody
-    /// is serving, which looks exactly like the screen being broken.
-    fn vdm_url(&self) -> String {
-        format!("http://127.0.0.1:{}/vdm", self.running_web.1)
+    /// [`crate::bindwatch`] says what happened, and it is the one that matters:
+    /// a second copy of the gateway holding the port is the exact case that
+    /// module exists for, and without asking it this button would open a browser
+    /// at a refused connection — or at the *other* instance's configuration
+    /// page, which is worse.
+    fn vdm_web_state(&self) -> WebScreenState {
+        WebScreenState::of(crate::bindwatch::status_of("web"))
     }
 
-    /// Is the web server actually up? Same snapshot, same reasoning.
-    fn vdm_web_running(&self) -> bool {
-        self.running_web.0
+    /// The screen's own address, at whatever port really answered.
+    fn vdm_url(&self) -> String {
+        format!("http://127.0.0.1:{}/vdm", self.vdm_web_state().port().unwrap_or(self.running_web.1))
     }
+
+
 
     /// Hand the screen's URL to the desktop's browser.
     ///
@@ -4766,6 +4835,48 @@ mod tests {
         assert!(!asked.cfg.open_screen_after_restart, "the marker must be cleared when read");
     }
 
+    /// **A boolean cannot carry what the button needs to know.**
+    ///
+    /// "Off" and "configured but the bind failed" both mean there is no page to
+    /// open, and they want opposite things said: one is an offer to start the
+    /// server, the other is news that starting it did not work. Offering to
+    /// "enable" a server that is already enabled would restart the gateway and
+    /// change nothing.
+    ///
+    /// The case this exists for is the one `bindwatch` was written for: a second
+    /// copy of the gateway holding the port. Without asking it, the button opens
+    /// a browser at a refused connection — or at the other instance's
+    /// configuration page, which is worse than refused.
+    #[test]
+    fn test_the_screen_button_reads_the_bind_outcome_not_the_setting() {
+        use crate::bindwatch::Status;
+
+        assert_eq!(WebScreenState::of(Some((8080, Status::Bound))), WebScreenState::Bound(8080));
+        assert_eq!(
+            WebScreenState::of(Some((8080, Status::Pending))),
+            WebScreenState::Starting(8080),
+            "a listener still binding is not an off one"
+        );
+        assert_eq!(
+            WebScreenState::of(Some((8080, Status::Failed { in_use: true }))),
+            WebScreenState::Failed { port: 8080, in_use: true }
+        );
+        assert_eq!(WebScreenState::of(None), WebScreenState::Off);
+
+        // Only the two that are listening offer a page.
+        assert_eq!(WebScreenState::Bound(8080).port(), Some(8080));
+        assert_eq!(WebScreenState::Starting(8080).port(), Some(8080));
+        assert_eq!(WebScreenState::Failed { port: 8080, in_use: true }.port(), None);
+        assert_eq!(WebScreenState::Off.port(), None);
+
+        // And the two that do not are distinguishable, which is the whole
+        // point: one gets the offer dialog, the other gets told why.
+        assert_ne!(
+            WebScreenState::Failed { port: 8080, in_use: false },
+            WebScreenState::Off
+        );
+    }
+
     /// **The desktop button opens the screen, at the port the server is on.**
     ///
     /// Three things this pins, each of which was a way to get it wrong:
@@ -4787,7 +4898,7 @@ mod tests {
         assert!(url.ends_with("/vdm"), "it must land on the screen: {url}");
         assert!(url.contains(":9123/"), "the configured port is not in {url}");
         assert!(url.starts_with("http://127.0.0.1:"), "{url}");
-        assert!(app.vdm_web_running());
+        assert!(app.vdm_url().contains(":9123/"));
 
         // **Neither later view of the config moves it.**  `cfg` holds unsaved
         // edits, and `last_synced_cfg` is refreshed from the global config
@@ -4799,11 +4910,11 @@ mod tests {
         app.last_synced_cfg.web_port = 5555;
         app.last_synced_cfg.web_enabled = false;
         assert_eq!(app.vdm_url(), "http://127.0.0.1:9123/vdm");
-        assert!(app.vdm_web_running(), "what is running is what it was started with");
+        assert!(app.vdm_url().contains(":9123/"), "what is running is what it was started with");
 
         // And a gateway whose server really was off offers to start it instead.
         let off = test_app();
-        assert!(!off.vdm_web_running());
+        assert_eq!(off.vdm_web_state(), WebScreenState::Off, "no listener, no page to open");
     }
 
     #[test]

@@ -64,6 +64,23 @@ pub(crate) fn expect(name: &'static str, port: u16) {
     });
 }
 
+/// What became of one listener's bind, for a caller that needs the *outcome*
+/// rather than the intention.
+///
+/// **The config says what was asked for; this says what happened.** The desktop
+/// UI's screen button is the caller: it opens a browser at the web server, and
+/// `web_enabled = true` with the port already taken by a second copy of the
+/// gateway would otherwise send somebody to a refused connection — or, worse, to
+/// the *other* instance's configuration page. That second-copy case is the one
+/// this module was written for, so it already knows the answer; nothing was
+/// asking it.
+///
+/// `None` when the listener is not in this cycle's roster at all, which is how
+/// "not configured" reads.
+pub(crate) fn status_of(name: &str) -> Option<(u16, Status)> {
+    with(|s| s.listeners.get(name).copied())
+}
+
 pub(crate) fn bound(name: &'static str) {
     with(|s| {
         if let Some(entry) = s.listeners.get_mut(name) {
