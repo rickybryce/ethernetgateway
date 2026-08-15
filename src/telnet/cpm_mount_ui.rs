@@ -446,13 +446,18 @@ impl TelnetSession {
             })
             .collect();
 
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("BOOT A DISK IMAGE"))).await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
+        // The "nothing to list" screen draws its own header and returns; the
+        // paged list below draws one per page.  Nothing is drawn before this
+        // branch, because a header drawn here *and* again inside the loop puts
+        // two of them on the wire — invisible on a terminal whose clear works,
+        // and plainly wrong on one whose does not.
         if bootable.is_empty() {
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("BOOT A DISK IMAGE"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
             self.send_line(&format!("  {}", self.amber("No bootable images found."))).await?;
             self.send_line("").await?;
             self.send_line("  A bootable image is one of these").await?;
@@ -466,34 +471,106 @@ impl TelnetSession {
             let _ = self.wait_for_key().await;
             return Ok(());
         }
-        self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating"))).await?;
-        self.send_line(&format!("  {}", self.dim("system. Its drive FOLDERS do not"))).await?;
-        self.send_line(&format!("  {}", self.dim("apply; mounted images do, each on"))).await?;
-        self.send_line(&format!("  {}", self.dim("the board slot its letter names."))).await?;
-        self.send_line("").await?;
-        let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
-        for (i, n) in bootable.iter().take(Self::TRANSFER_PAGE_SIZE).enumerate() {
-            self.send_line(&format!(
-                "  {}  {}",
-                self.cyan(&(i + 1).to_string()),
-                self.amber(&truncate_to_width(n, width))
-            ))
-            .await?;
-        }
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
-        self.send(&format!("{}> ", self.cyan("boot"))).await?;
-        self.flush().await?;
+        // Paged, and the page holds **nine** rather than the ten every other
+        // listing shows.  This screen carries four lines explaining that a
+        // booted disk runs its own operating system — the distinction the whole
+        // feature rests on — and with them, the header and the same page/nav
+        // footer the mount picker uses, ten entries would overrun the 22-row
+        // PETSCII screen by one.  Nine fills it exactly, and the arithmetic is
+        // done by `test_cpm_boot_picker_page_fits_petscii` rather than trusted:
+        // this was first written as eight from a hand count that double-counted
+        // a blank line, and the test is what said so.
+        //
+        // It listed the first ten and stopped: no page indicator, no Next, and
+        // nothing saying more existed.  An eleventh bootable image was simply
+        // unreachable from the telnet screen — and silently so, which is worse
+        // than a refusal, because the operator's disk appeared not to be
+        // bootable at all.
+        const BOOT_PAGE: usize = 9;
+        let name = {
+            let mut page: usize = 0;
+            loop {
+                let total_pages = bootable.len().div_ceil(BOOT_PAGE).max(1);
+                if page >= total_pages {
+                    page = total_pages - 1;
+                }
+                let offset = page * BOOT_PAGE;
+                let end = (offset + BOOT_PAGE).min(bootable.len());
+                let shown = &bootable[offset..end];
 
-        let Some(input) = self.get_menu_input(false).await? else {
-            return Ok(());
+                // The whole screen is rebuilt every pass, header included, not
+                // just the list — otherwise page 2 prints under page 1 and the
+                // title scrolls off.  Unconditional rather than "only when
+                // paging": one clear costs nothing next to a screen of text,
+                // and a condition here is a way for the first page to differ
+                // from the rest.
+                self.clear_screen().await?;
+                let sep = self.separator();
+                self.send_line(&sep).await?;
+                self.send_line(&format!("  {}", self.yellow("BOOT A DISK IMAGE"))).await?;
+                self.send_line(&sep).await?;
+                self.send_line("").await?;
+                self.send_line(&format!("  {}", self.dim("The disk runs its OWN operating")))
+                    .await?;
+                self.send_line(&format!("  {}", self.dim("system. Its drive FOLDERS do not")))
+                    .await?;
+                self.send_line(&format!("  {}", self.dim("apply; mounted images do, each on")))
+                    .await?;
+                self.send_line(&format!("  {}", self.dim("the board slot its letter names.")))
+                    .await?;
+                self.send_line("").await?;
+                let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+                for (i, n) in shown.iter().enumerate() {
+                    self.send_line(&format!(
+                        "  {}  {}",
+                        self.cyan(&(i + 1).to_string()),
+                        self.amber(&truncate_to_width(n, width))
+                    ))
+                    .await?;
+                }
+                self.send_line("").await?;
+                self.send_line(&format!("  Page {} of {}", page + 1, total_pages)).await?;
+                self.send_line("").await?;
+                // Same footer as the mount picker, so the two listings are
+                // driven the same way.
+                let mut nav = Vec::new();
+                if page > 0 {
+                    nav.push(self.action_prompt("P", "Prev"));
+                }
+                if page + 1 < total_pages {
+                    nav.push(self.action_prompt("N", "Next"));
+                }
+                nav.push(self.action_prompt("Q", "Back"));
+                self.send_line(&format!("  {}", nav.join("  "))).await?;
+                self.send(&format!("{}> ", self.cyan("boot"))).await?;
+                self.flush().await?;
+
+                let Some(input) = self.get_menu_input(false).await? else {
+                    return Ok(());
+                };
+                match input.as_str() {
+                    "p" => page = page.saturating_sub(1),
+                    "n" => {
+                        if page + 1 < total_pages {
+                            page += 1;
+                        }
+                    }
+                    "q" | "" => return Ok(()),
+                    other => {
+                        // Indexed into the **page**, not the whole list: the
+                        // numbers on screen start at 1 on every page, so
+                        // resolving them against the full list would boot a
+                        // different disk from the one the operator read.
+                        if let Ok(n) = other.trim().parse::<usize>()
+                            && let Some(name) = shown.get(n.wrapping_sub(1))
+                        {
+                            break name.clone();
+                        }
+                    }
+                }
+            }
         };
-        let Ok(n) = input.trim().parse::<usize>() else {
-            return Ok(());
-        };
-        let Some(name) = bootable.get(n.wrapping_sub(1)) else {
-            return Ok(());
-        };
+        let name = &name;
         let path = crate::cpm::image::images_dir(&base).join(name);
         // Bring `cpm_mounts` up before booting.  Mounting is otherwise lazy —
         // it happens when a session first enters the emulator — so booting

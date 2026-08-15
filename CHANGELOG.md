@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The telnet boot picker listed ten disk images and stopped.** No page
+  indicator, no Next, and nothing saying more existed — so an eleventh bootable
+  image could not be reached from the telnet screen, and silently: the disk
+  appeared not to be bootable at all rather than not shown. It now pages like
+  the mount picker beside it, with `Page x of y` and Prev/Next.
+
+  Nine per page rather than the ten every other listing uses, because this
+  screen also spends four lines explaining that a booted disk runs its own
+  operating system, and ten entries would overrun the 22-row PETSCII screen by
+  one. The page numbers are resolved against the *page*, not the whole list, so
+  "1" on page 2 boots the tenth image and not the first — verified live by
+  giving only that image a plausible boot sector and watching which one got past
+  the check.
+
 - **A space at the terminal-detection prompt turned every space into a delete
   key.** `Press BACKSPACE to detect terminal:` took whatever byte answered it
   as the session's erase character, with no check. Answer it with a space and

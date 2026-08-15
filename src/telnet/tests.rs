@@ -2498,6 +2498,46 @@ fn test_cpm_boot_settings_row_count() {
     assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
 }
 
+/// **The boot picker's page has to fit a 40x22 PETSCII screen**, which is why
+/// it shows eight images per page where every other listing shows ten.
+///
+/// This screen spends four lines explaining that a booted disk runs its own
+/// operating system — the distinction the whole feature rests on — before it
+/// lists anything, and it carries the same page/nav footer as the mount picker.
+/// With `TRANSFER_PAGE_SIZE` entries that comes to 24 rows on a 22-row screen.
+///
+/// The list length is read out of the source rather than restated, because the
+/// number being right is the entire point: a hand-copied constant agrees with
+/// the screen only until somebody changes one of them.
+#[test]
+fn test_cpm_boot_picker_page_fits_petscii() {
+    let src = include_str!("cpm_mount_ui.rs");
+    let decl = src.find("const BOOT_PAGE: usize =").expect("the page-size constant");
+    let per_page: usize = src[decl..]
+        .split('=')
+        .nth(1)
+        .and_then(|s| s.trim().split(';').next())
+        .and_then(|s| s.trim().parse().ok())
+        .expect("a parseable page size");
+
+    let header = 3; // sep + title + sep
+    let intro = 1 + 4; // blank + the four "runs its OWN operating system" lines
+    let footer = 1 + 1 + 1 + 1 + 1; // blank + page info + blank + nav + prompt
+    let rows = header + intro + per_page + footer;
+    assert!(
+        rows <= 22,
+        "the boot picker is {rows} rows at {per_page} per page, over the 22-row PETSCII budget"
+    );
+    // And it must not have shrunk pointlessly: an unnecessarily short page
+    // means more paging than the screen requires.
+    assert_eq!(rows, 22, "the boot picker is {rows} rows; it should fill the budget");
+    assert!(
+        per_page < TelnetSession::TRANSFER_PAGE_SIZE,
+        "if this screen can afford the usual {} per page, use that constant instead",
+        TelnetSession::TRANSFER_PAGE_SIZE
+    );
+}
+
 /// Every key the CP/M boot screen displays must also be one it handles and one
 /// its error hint names.  The same three-way drift the CP/M settings screen
 /// suffered twice, guarded the same way.
