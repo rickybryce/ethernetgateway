@@ -578,14 +578,49 @@ impl TelnetSession {
                 }
             }
         };
-        let name = &name;
-        let path = crate::cpm::image::images_dir(&base).join(name);
+        let path = crate::cpm::image::images_dir(&base).join(&name);
         // Bring `cpm_mounts` up before booting.  Mounting is otherwise lazy —
         // it happens when a session first enters the emulator — so booting
         // straight from this picker on a fresh gateway would hand the guest a
         // machine with one disk in it and no sign that the rest were meant to
         // be there.
         self.cpmemu_ensure_drives().await?;
+
+        // A screen of its own, because the two questions below were printed
+        // *underneath* the picker — which is already at its full 22 rows, so on
+        // a PETSCII terminal the heading and the top of the disk list scrolled
+        // away while the operator was being asked to authorise writes to their
+        // disks.  Same rule as `other_set_field`: a screen that asks a question
+        // has to be a screen.
+        //
+        // It is also the right place to say what was chosen and where to read
+        // about it.  The picker shows a filename and nothing else, and the
+        // sample disks are not self-describing — `repodisks.txt` beside them
+        // lists what each one holds, which is exactly the thing an operator
+        // wants a moment before committing a disk to a boot.
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("BOOT THIS DISK?"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+        self.send_line(&format!("  Disk:  {}", self.amber(&truncate_to_width(&name, width))))
+            .await?;
+        // Size and medium, from the same answer the picker used to decide the
+        // image was bootable at all -- so the row cannot disagree with the list
+        // it was chosen from.
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if let Some(medium) = crate::cpm::boot_machine::BootMachine::medium_for(len) {
+            self.send_line(&format!("  Media: {}", self.amber(&truncate_to_width(medium, width))))
+                .await?;
+        }
+        self.send_line(&format!("  Size:  {} bytes", self.amber(&len.to_string()))).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.dim("repodisks.txt in the images"))).await?;
+        self.send_line(&format!("  {}", self.dim("folder lists what each disk"))).await?;
+        self.send_line(&format!("  {}", self.dim("holds."))).await?;
+        self.send_line("").await?;
 
         // Writing is a decision, not a default: a booted guest writes raw
         // sectors and nothing above it would notice a mistake.
@@ -595,7 +630,6 @@ impl TelnetSession {
         // worded as though it were about one image while the mounts were
         // effectively write-protected anyway, and now that they are not, the
         // understatement would be a trap.
-        self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("Covers the mounted disks too."))).await?;
         self.send(&format!("  Allow writes to the disks? {}: ", self.cyan("y/N")))
             .await?;

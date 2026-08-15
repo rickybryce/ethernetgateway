@@ -2563,6 +2563,51 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
+/// **The boot confirmation is a screen, not a footnote under the picker.**
+///
+/// The two questions a boot asks — allow writes, and how this disk wants
+/// Backspace — used to print *underneath* the boot picker, which is itself at
+/// its full 22 rows. On a PETSCII terminal the heading and the top of the disk
+/// list scrolled away while the operator was being asked to authorise writes to
+/// their disks: the worst moment to lose the context of what was chosen.
+///
+/// Same rule, and the same fix, as `other_set_field`: a screen that asks a
+/// question has to clear and draw a heading first. This one also reports what
+/// was picked and points at `repodisks.txt`, because the picker shows a bare
+/// filename and the sample disks do not describe themselves.
+#[test]
+fn test_the_boot_confirmation_is_its_own_screen_and_fits() {
+    let src = include_str!("cpm_mount_ui.rs");
+    let start = src.find("async fn cpmmount_pick_boot").expect("the picker fn");
+    let body = &src[start..];
+    let ask = body.find("Allow writes to the disks?").expect("the write question");
+    let before = &body[..ask];
+
+    // It must clear and draw its own heading before asking.
+    let cleared = before.rfind("self.clear_screen()").expect("no clear before the question");
+    let heading = before.rfind("BOOT THIS DISK?").expect("the confirmation heading");
+    assert!(cleared < heading, "the heading must be drawn after the clear");
+    // And that clear must come after the *list* was drawn, i.e. it is a new
+    // screen rather than the picker's own.
+    let list = before.rfind("Page {} of {}").expect("the picker's page line");
+    assert!(list < cleared, "the question still shares the picker's screen");
+
+    // The review lines the operator needs before committing.
+    for needed in ["Disk:", "Media:", "Size:", "repodisks.txt"] {
+        assert!(before.contains(needed), "the confirmation must show {needed}");
+    }
+
+    // Row budget: header(3) + blank + 3 review + blank + 3 repodisks note
+    // + blank + 1 writes note + 1 writes prompt, then the Backspace question's
+    // 2 notes + 1 prompt land under it once the first is answered (+1 for the
+    // echoed newline).
+    let rows = 3 + 1 + 3 + 1 + 3 + 1 + 1 + 1 + 1 + 2 + 1;
+    assert!(
+        rows <= 22,
+        "the boot confirmation reaches {rows} rows, over the 22-row PETSCII budget"
+    );
+}
+
 /// **Every key the CP/M Disk Images screen displays must be one it handles.**
 ///
 /// `Q` was displayed by this screen from the day it shipped and never handled:
@@ -2847,9 +2892,12 @@ fn test_security_help_screen_row_count() {
 
 /// Other settings menu row count:
 /// header(3) + blank + 5 values + blank + 8 item rows + blank + Q/H + prompt = 21
-/// (Verbose+GUI and Gateway-debug+CP/M each share a value row, folding 7
-/// statuses into 5 lines; the last item row carries BOTH `L` Log file and `R`
-/// Restart server.)
+/// (Verbose and GUI share a value row, folding 6 statuses into 5 lines; the
+/// last item row carries BOTH `L` Log file and `R` Restart server.)
+///
+/// The CP/M status left with its menu entry — it shared the gateway-debug row,
+/// so the row count is unchanged, but a status a screen cannot act on and does
+/// not say where to act on is worse than none.
 ///
 /// **This screen used to be at exactly 22** — its own comment said a new entry
 /// had to pair with an existing one. Moving CP/M up to the CONFIGURATION menu

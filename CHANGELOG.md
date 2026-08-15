@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Booting a disk now confirms on a screen of its own.** The two questions a
+  boot asks — allow writes, and how the disk wants Backspace — printed
+  *underneath* the boot picker, which is itself at its full 22 rows, so on a
+  PETSCII terminal the heading and the top of the disk list scrolled away while
+  the operator was being asked to authorise writes to their disks. The new
+  screen names the disk, its medium and size, and points at `repodisks.txt` in
+  the images folder, which lists what each sample disk holds — the thing you
+  want a moment before committing a disk to a boot, and something the picker's
+  bare filename cannot tell you.
+
 - **CP/M moved up a level on the telnet menus: CONFIGURATION → `C`.** It had
   been under Other Settings since it was a single on/off toggle, and it is now
   an emulator, a disk-image wizard, a boot picker and a printer — a feature

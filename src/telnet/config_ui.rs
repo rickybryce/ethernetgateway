@@ -313,16 +313,13 @@ impl TelnetSession {
             } else {
                 self.dim("off")
             };
-            let cpm_status = if cfg.cpm_emu_enabled {
-                self.green("ON")
-            } else {
-                self.dim("off")
-            };
-            self.send_line(&format!(
-                "  Gw dbg: {}   CP/M: {}",
-                gw_dbg_status, cpm_status
-            ))
-            .await?;
+            // CP/M's status went with its menu entry, up to CONFIGURATION.  A
+            // status this screen cannot act on is worse than no status: it
+            // reads as a control that has stopped working, and it points
+            // nowhere — the operator who sees `CP/M: ON` here and wants it off
+            // has been told where to look by nothing at all.  Its own screen
+            // shows it, one level up.
+            self.send_line(&format!("  Gw dbg: {}", gw_dbg_status)).await?;
             self.send_line("").await?;
 
             self.send_line(&format!(

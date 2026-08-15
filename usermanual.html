@@ -752,7 +752,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
         <tr><td><code>weather_location</code></td><td>string</td><td>empty</td><td>Last-used city or postal code, worldwide (migrates legacy <code>weather_zip</code>). Updated automatically.</td></tr>
         <tr><td><code>weather_units</code></td><td>string</td><td><code>auto</code></td><td>Weather units: <code>auto</code>, <code>us</code>, or <code>metric</code>.</td></tr>
-        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. On by default (jailed, bounded, and shipping its own terminal); set <code>false</code> to hide the item and reject the key. configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Other Settings &rarr; <code>E</code>). See §8.11.</td></tr>
+        <tr><td><code>cpm_emu_enabled</code></td><td>bool</td><td><code>true</code></td><td>The CP/M emulator <code>K</code> main-menu item, which runs arbitrary Z80 <code>.COM</code> software. On by default (jailed, bounded, and shipping its own terminal); set <code>false</code> to hide the item and reject the key. configured in the &ldquo;AI, Browser &amp; Weather &mdash; More&rdquo; panel (telnet: Configuration &rarr; <code>C</code>). See §8.11.</td></tr>
         <tr><td><code>cpm_screen_input</code></td><td>bool</td><td><code>true</code></td><td>May the web UI's <em>Disk Screen</em> page send keystrokes to a booted disk?  The screen is readable whenever the web server is on; this decides whether it is also a keyboard.  Both keyboards share one queue, so the terminal and the browser can type at the same guest.  <code>ESC ESC</code> is never honoured from the browser.  See &sect;6.4.3.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>CP/M emulator runaway ceiling, in millions of instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). Bounds a compute-bound <code>.COM</code> that never reads the console; must be &ge;&nbsp;1, and anything above <strong>1000000</strong> is <em>capped</em> at that rather than refused &mdash; asking for &ldquo;no limit&rdquo; gets you as close as this goes, which at emulated speed is over three months of continuous running. Bounds one transient in the <em>emulator</em> only; a booted disk is the session and has no ceiling. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>How the emulated CP/M reaches the virtual modem. Defaults to <code>rc2014_1b</code> (0x82/0x83), the port the bundled EGT80 terminal expects, so the two work together untouched; every UI offers a one-click &ldquo;Default port&rdquo; to come back to it. <code>off</code> = none; a machine/port profile such as <code>rc2014_1b</code> (RC2014 SIO/2 0x82/0x83) or <code>altair_2sio1</code> (Altair 88‑2SIO 0x10/0x11); <code>aux</code> (BDOS AUX: device, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit, via <code>RST 8</code>). See §8.11.</td></tr>
@@ -1182,14 +1182,16 @@ Changes are written to <code>egateway.conf</code> on confirm and apply
 immediately to running services where possible.
 </p>
 
-<pre><code>  Port A: &lt;Disabled / Modem mode / Console mode / Kermit server&gt;
-  Port B: &lt;Disabled / Modem mode / Console mode / Kermit server&gt;
+<pre><code>  Server addresses:
+    192.168.1.10
+  ATD 192.168.1.10:2323
 
   E  Security
   G  Gateway Configuration
   M  Serial Configuration
   S  Server Configuration
   F  File Transfer
+  C  CP/M Settings
   O  Other Settings
   R  Reset Defaults
 
@@ -1206,8 +1208,10 @@ immediately to running services where possible.
     <dd>Listen ports and enable flags for telnet, SSH, the standalone Kermit server, and the configuration web UI; max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
     <dt><span class="kbd">F</span> File Transfer</dt>
     <dd>Per-protocol timeouts and retries for XMODEM, ZMODEM, Kermit, and Punter, plus the Kermit server toggle / port and <code>allow_atdt_kermit</code>.</dd>
+    <dt><span class="kbd">C</span> CP/M Settings</dt>
+    <dd>The CP/M emulator and everything under it: enable/disable, the runaway instruction ceiling, the virtual-modem port (<code>cpm_emu_uart</code>), mounting and unmounting disk images, booting a disk image so it runs its own operating system, the boot machine and CPU, and the <code>LST:</code> printer. Reached from <em>Other Settings</em> in releases before 0.9.2.</dd>
     <dt><span class="kbd">O</span> Other Settings</dt>
-    <dd>Verbose XMODEM logging and the Show-GUI-on-Startup flag.</dd>
+    <dd>The Groq API key, browser homepage, weather location and units, verbose transfer logging, the Show-GUI-on-Startup flag, the gateway debug trace, log-file settings and Restart Server.</dd>
     <dt><span class="kbd">R</span> Reset Defaults</dt>
     <dd>Restore every recognised key to its built-in default. Confirms with <em>Y/N</em> first; credentials are reset to <code>admin</code> / <code>changeme</code>, so you'll want to set new ones immediately afterward if security is enabled.</dd>
 </dl>
