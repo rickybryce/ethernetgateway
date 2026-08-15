@@ -35,6 +35,10 @@ const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xd4, 0xc5, 0x90);
 const TEXT_INPUT: Color32 = Color32::from_rgb(0xe8, 0xdc, 0xb0);
 #[cfg(test)]
 const GREEN: Color32 = Color32::from_rgb(0x33, 0xff, 0x33);
+/// For the one thing on a configuration screen that is a *finding* rather than
+/// a setting: a bound port that did not answer.  Bright enough to read against
+/// the panel without being the alarm red the must-acknowledge popups use.
+const RED_ALERT: Color32 = Color32::from_rgb(0xff, 0x5a, 0x4a);
 const CONSOLE_TEXT: Color32 = Color32::from_rgb(0x33, 0xcc, 0x33);
 const SCRIPTURE: Color32 = Color32::from_rgb(0xc0, 0xaa, 0x60);  // lighter amber for verse
 const CONSOLE_BG: Color32 = Color32::from_rgb(0x08, 0x12, 0x28); // deeper blue for console
@@ -639,6 +643,19 @@ struct App {
     /// button opens a browser at it — and if the listener is off there is
     /// nothing to open.  Offering to start it beats a dead button, but starting
     /// a listener is outward-facing, so it is offered and never done silently.
+    /// A finished port check, waiting to be turned into a popup.
+    ///
+    /// The check runs on its own thread -- four connect timeouts would freeze
+    /// the window -- so the result comes back through a channel the frame loop
+    /// polls, exactly as the sample-disk download does.
+    port_check_rx: Option<std::sync::mpsc::Receiver<usize>>,
+    /// Whether the port-check result popup is open.
+    ///
+    /// **A popup, because the console window is not where anybody looks.** The
+    /// red labels say *which* port, but only once you are looking at the frame;
+    /// somebody who has just pressed Test ports is owed the answer where they
+    /// are.
+    port_check_popup_open: bool,
     vdm_web_offer_open: bool,
     /// The web server this window's gateway was started with: `(enabled, port)`.
     ///
@@ -864,6 +881,8 @@ impl App {
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
             running_web,
+            port_check_rx: None,
+            port_check_popup_open: false,
             vdm_web_offer_open: false,
             // If the operator got here by asking for the screen and agreeing
             // to the restart, finish the job.  The marker is in the config
@@ -1026,13 +1045,19 @@ impl App {
         ui.horizontal(|ui| {
             let resp = ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
             pad_to(ui, COL1_W, resp.rect.width());
-            labeled_field(ui, "Port:", &mut self.telnet_port_buf, PORT_W);
+            labeled_port_field(ui, "telnet", &mut self.telnet_port_buf, PORT_W);
             ui.add_space(GUTTER);
             let resp = ui.checkbox(&mut self.cfg.web_enabled, "Web Server");
             pad_to(ui, COL2_W, resp.rect.width());
-            labeled_field(ui, "Port:", &mut self.web_port_buf, PORT_W);
-            if with_more_button && right_aligned_small_button(ui, "More...") {
-                self.server_popup_open = true;
+            labeled_port_field(ui, "web", &mut self.web_port_buf, PORT_W);
+            if with_more_button {
+                let blocked = crate::portcheck::results()
+                    .iter()
+                    .filter(|(_, _, r)| r.is_blocked())
+                    .count();
+                if server_more_button(ui, blocked) {
+                    self.server_popup_open = true;
+                }
             }
         });
         // Row 2: SSH + Kermit Server.  Same column widths so the
@@ -1041,7 +1066,7 @@ impl App {
         ui.horizontal(|ui| {
             let resp = ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
             pad_to(ui, COL1_W, resp.rect.width());
-            labeled_field(ui, "Port:", &mut self.ssh_port_buf, PORT_W);
+            labeled_port_field(ui, "SSH", &mut self.ssh_port_buf, PORT_W);
             ui.add_space(GUTTER);
             let mut local = self.cfg.kermit_server_enabled;
             let prev = local;
@@ -1061,7 +1086,7 @@ impl App {
                     logger::log("Kermit server disabled.".into());
                 }
             }
-            labeled_field(ui, "Port:", &mut self.kermit_server_port_buf, PORT_W);
+            labeled_port_field(ui, "Kermit", &mut self.kermit_server_port_buf, PORT_W);
         });
     }
 
@@ -1071,6 +1096,72 @@ impl App {
     /// enable/port fields per the operator-facing layout decision; the
     /// More popup keeps everything available for completeness.
     fn draw_server_more_only(&mut self, ui: &mut egui::Ui) {
+        // The port check.  In here rather than on the frame, which has no line
+        // to spare for a button, a summary and an advisory that would sit there
+        // whether or not anybody had ever run one.  The frame's `More...` turns
+        // red when this found something, so the way here is signposted.
+        //
+        // A button rather than anything automatic: each probe is a real
+        // connection to our own listener -- a session slot and a line in the
+        // log -- so running it on a timer would fill the log with the operator
+        // connecting to themselves.
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Test ports").color(AMBER_BRIGHT)))
+                .on_hover_text(
+                    "Connect to each bound listener at this machine's own network \
+                     address. A port that does not answer has its Port label \
+                     reddened. A port that does answer is NOT reported open: on \
+                     Windows and macOS a connection to your own address skips the \
+                     firewall entirely, and nothing here can see a router that is \
+                     not forwarding a port.",
+                )
+                .clicked()
+            {
+                // Off the frame thread: four connect timeouts is over a second
+                // of blocking, and the window would freeze for it.  The count
+                // comes back through a channel so the popup opens when the
+                // check is actually finished rather than a guess later.
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.port_check_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::portcheck::run_check());
+                });
+            }
+            let blocked =
+                crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
+            if blocked > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{blocked} port{} did not answer",
+                        if blocked == 1 { "" } else { "s" }
+                    ))
+                    .small()
+                    .color(RED_ALERT),
+                );
+            } else if crate::portcheck::has_run() {
+                ui.label(
+                    egui::RichText::new("every bound port answered here")
+                        .small()
+                        .color(AMBER_DIM),
+                );
+            }
+        });
+        // Always, not only when something was found.  A red Port label means
+        // "we tested this and nothing answered"; this means "ports may need
+        // opening on a firewall", which is true whether or not the check caught
+        // anything -- and it cannot catch everything.  It sees nothing past this
+        // machine, and on Windows and macOS a self-connection skips the firewall
+        // entirely, so silence is not an all-clear.
+        ui.label(
+            egui::RichText::new(
+                "Remember to open these ports on your firewall — a check from this \
+                 machine cannot see a router that is not forwarding them.",
+            )
+            .small()
+            .color(AMBER_DIM),
+        );
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 50.0);
             ui.add_space(8.0);
@@ -3395,6 +3486,32 @@ fn labeled_field(ui: &mut egui::Ui, label: &str, buf: &mut String, width: f32) {
     singleline_with_menu(ui, buf, false, Some(width));
 }
 
+/// Helper: a `Port:` field whose *label* turns red when the last port check
+/// found that listener blocked.
+///
+/// **The label carries the signal, not a marker beside it.** A `(firewalled)`
+/// tag and even a one-character `*` both sit in the row and push everything to
+/// their right — these rows are aligned into columns by `pad_to`, and with the
+/// tag shown the Web Server port input was pushed off under the More button.
+/// Colouring a word that is already there moves nothing at all, whether or not
+/// a check has run.
+///
+/// Only a blocked port is coloured. A pass is not evidence — see
+/// [`crate::portcheck`] — so there is no green counterpart.
+fn labeled_port_field(ui: &mut egui::Ui, listener: &str, buf: &mut String, width: f32) {
+    let blocked = crate::portcheck::result_of(listener).filter(|(_, r)| r.is_blocked());
+    let label = match &blocked {
+        Some(_) => ui.label(egui::RichText::new("Port:").strong().color(RED_ALERT)),
+        None => ui.label("Port:"),
+    };
+    if let Some((port, reach)) = blocked
+        && let Some(hover) = reach.hover(port)
+    {
+        label.on_hover_text(hover);
+    }
+    singleline_with_menu(ui, buf, false, Some(width));
+}
+
 /// Helper: pad the horizontal cursor so the just-rendered widget
 /// occupies exactly `target_w` total width.  `used_w` is the widget's
 /// actual width from its Response.rect.  Used by the Server frame's
@@ -3415,6 +3532,35 @@ fn right_aligned_small_button(ui: &mut egui::Ui, label: &str) -> bool {
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| ui.small_button(label).clicked(),
     )
+    .inner
+}
+
+/// Helper: the Server frame's `More...`, red when a port check found something.
+///
+/// **The frame says there is something to look at; the popup says what.** A
+/// third row carrying a button, a summary and an advisory was tried first and
+/// cost the frame a line it does not have to spare -- and the row was there
+/// whether or not anybody had ever run a check. Colouring a button that is
+/// already in the row costs nothing and points at the place the detail lives.
+fn server_more_button(ui: &mut egui::Ui, blocked: usize) -> bool {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let text = if blocked > 0 {
+            egui::RichText::new("More...").strong().color(RED_ALERT)
+        } else {
+            egui::RichText::new("More...")
+        };
+        let resp = ui.add(egui::Button::new(text).small());
+        if blocked > 0 {
+            resp.clone().on_hover_text(format!(
+                "{blocked} bound port{} did not answer when this machine \
+                 connected to {} at its own network address. Open More... to \
+                 test again.",
+                if blocked == 1 { "" } else { "s" },
+                if blocked == 1 { "it" } else { "them" },
+            ));
+        }
+        resp.clicked()
+    })
     .inner
 }
 
@@ -4542,6 +4688,123 @@ impl eframe::App for App {
         // only binds on a server restart, which drops every session anybody
         // else is in the middle of.  The operator has to be told that before
         // they agree, not discover it.
+        // A finished port check becomes a popup.  Polled here rather than in
+        // the frame that owns the button, because that frame is only drawn
+        // while its popup is open -- the answer would arrive to nobody.
+        if let Some(rx) = &self.port_check_rx {
+            match rx.try_recv() {
+                Ok(_) => {
+                    self.port_check_rx = None;
+                    self.port_check_popup_open = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.port_check_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+
+        // The result of a port check, every listener named.
+        //
+        // **Red framed, and it says "answered" rather than "open".** A pass is
+        // not evidence: on Windows and macOS a connection to your own address
+        // skips the firewall entirely, so a port that answered here may still be
+        // unreachable from anywhere else. Reporting it as open would be the one
+        // mistake an operator would act on -- they would go looking at their
+        // router while Defender quietly dropped every connection.
+        let mut pc_open = self.port_check_popup_open;
+        let mut close = false;
+        let blocked_now =
+            crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
+        egui::Window::new(
+            egui::RichText::new(if blocked_now > 0 {
+                "Port test - something is blocking"
+            } else {
+                "Port test"
+            })
+            .strong()
+            .color(if blocked_now > 0 { RED_ALERT } else { AMBER_BRIGHT }),
+        )
+        .open(&mut pc_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(470.0)
+        .frame(warn_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            let results = crate::portcheck::results();
+            if results.is_empty() {
+                ui.label("No listener is bound, so there was nothing to test.");
+            } else {
+                for (name, port, reach) in &results {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{name} {port}"))
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        if reach.is_blocked() {
+                            ui.label(
+                                egui::RichText::new("did not answer").strong().color(RED_ALERT),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("answered on this machine").color(AMBER_DIM),
+                            );
+                        }
+                    });
+                }
+            }
+            // How old the answer is.  Nothing polls, so a red label is a
+            // snapshot: fix the firewall and it stays red until the next check.
+            if let Some(age) = crate::portcheck::age() {
+                let secs = age.as_secs();
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(if secs < 5 {
+                        "Checked just now.".to_string()
+                    } else if secs < 90 {
+                        format!("Checked {secs} seconds ago.")
+                    } else {
+                        format!("Checked {} minutes ago.", secs / 60)
+                    })
+                    .small()
+                    .color(AMBER_DIM),
+                );
+            }
+            ui.add_space(8.0);
+            if blocked_now > 0 {
+                ui.label(
+                    egui::RichText::new(
+                        "A port that did not answer is being blocked by something on \
+                         this machine -- a host firewall, or security software.",
+                    )
+                    .color(AMBER),
+                );
+                ui.add_space(4.0);
+            }
+            ui.label(
+                "\"Answered\" is not the same as reachable. On Windows and macOS a \
+                 connection to your own address skips the firewall, so a port can \
+                 answer here and still be blocked for everyone else -- and nothing \
+                 here can see a router that is not forwarding a port. Open these \
+                 ports on your firewall.",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("Close").strong()))
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            pc_open = false;
+        }
+        self.port_check_popup_open = pc_open;
+
         // Read before the closure borrows `self`.
         let secured = self.cfg.security_enabled;
         let mut vdm_offer_open = self.vdm_web_offer_open;

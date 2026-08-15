@@ -197,6 +197,10 @@ enum SaveAction {
     /// Persist config and ask the serial subsystem to reopen its
     /// ports.  Mirrors `gui::App::save_and_restart_serial`.
     SaveAndRestartSerial,
+    /// Persist config and test the bound ports.  Its own action because the
+    /// page that comes back shows the result in a modal, and only this one
+    /// should.
+    PortCheck,
 }
 
 impl SaveAction {
@@ -204,6 +208,7 @@ impl SaveAction {
         match value {
             Some("save_and_restart") => SaveAction::SaveAndRestart,
             Some("save_and_restart_serial") => SaveAction::SaveAndRestartSerial,
+            Some("portcheck") => SaveAction::PortCheck,
             _ => SaveAction::Save,
         }
     }
@@ -374,6 +379,10 @@ async fn handle_connection(
             // them — tens of megabytes if the operator took the sample disks.
             // Doing it on the connection's own task would stall every other
             // session's timers, which is the trap this file already names.
+            // Only the redirect a port check makes carries this, so the modal
+            // belongs to the page that asked for it rather than to whoever
+            // loads the page next.
+            let show_check = parse_form(&request.query).contains_key("portcheck");
             let render_cfg = cfg.clone();
             // A join failure means the render panicked.  Answer 500, not 200
             // with an error page in it: a monitor polling `/` would read a 200
@@ -381,7 +390,7 @@ async fn handle_connection(
             // can carry anything, including markup, and this page is served
             // behind the operator's own credentials but is still a page.
             let (code, reason, body) =
-                match tokio::task::spawn_blocking(move || render_main_page(&render_cfg, notice))
+                match tokio::task::spawn_blocking(move || render_main_page(&render_cfg, notice, show_check))
                     .await
                 {
                     Ok(html) => (200, "OK", html),
@@ -547,7 +556,16 @@ async fn handle_connection(
             // instead of resubmitting the form.  The notice rides along
             // in the query string (URL-encoded) and the GET handler picks
             // it up to render the banner once.
-            let location = format!("/?notice={}", encode_query(&notice));
+            // A port check also asks the page to show its result, because the
+            // banner scrolls past and the console window is not where anybody
+            // is looking.  A query flag rather than server-side state: the
+            // modal belongs to the page that was just loaded, not to the next
+            // person who happens to open one.
+            let location = if action == SaveAction::PortCheck {
+                format!("/?portcheck=1&notice={}", encode_query(&notice))
+            } else {
+                format!("/?notice={}", encode_query(&notice))
+            };
             write_redirect(&mut stream, &location).await?;
 
             // Response has been flushed and the connection shut down —
@@ -555,7 +573,11 @@ async fn handle_connection(
             // the runtime tearing down mid-write so the operator never
             // sees the confirmation banner on the redirected GET.
             match action {
-                SaveAction::Save => {}
+                // Nothing to do here: the check already ran inside
+                // `apply_form_post`, and the page it redirects to shows the
+                // result.  Listed rather than folded into `Save` so a reader
+                // sees that a port check restarts nothing.
+                SaveAction::Save | SaveAction::PortCheck => {}
                 SaveAction::SaveAndRestartSerial => {
                     crate::serial::restart_all_serial();
                     logger::log("Web: serial ports reconfigured.".into());
@@ -943,6 +965,27 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
                 m
             }
             Err(e) => format!("Sample disks: {e}"),
+        };
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+    }
+
+    // The port check, on the same synchronous footing as the download above and
+    // for the same reason: there is no job queue, and returning immediately
+    // would leave the operator refreshing to guess whether it ran.  Four
+    // connect timeouts is the worst case, which is well inside a page load.
+    if fields.get("action").map(String::as_str) == Some("portcheck") {
+        let blocked = crate::portcheck::run_check();
+        let msg = if blocked == 0 {
+            // Never "all ports are open".  A self-connection skips the firewall
+            // on Windows and macOS, so a pass is not evidence -- and this page
+            // is read on all three.
+            "Port check: every bound listener answered on this machine. That rules              out a local block on Linux; on Windows and macOS a connection to your              own address skips the firewall, and nothing here can see a router that              is not forwarding a port."
+                .to_string()
+        } else {
+            format!(
+                "Port check: {blocked} bound port{} did not answer on this machine —                  marked below.",
+                if blocked == 1 { "" } else { "s" }
+            )
         };
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
@@ -1769,7 +1812,9 @@ setInterval(vdmPoll, VDM_POLL_MS);
 
 /// Build the full configuration page.  `notice` is an optional banner
 /// shown above the form (used to confirm a save).
-fn render_main_page(cfg: &Config, notice: Option<String>) -> String {
+/// `show_port_check` opens the result modal on load -- set only by the redirect
+/// a port check makes, so the modal belongs to the page that asked for it.
+fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool) -> String {
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html lang=\"en\"><head>");
     out.push_str("<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
@@ -1793,6 +1838,9 @@ fn render_main_page(cfg: &Config, notice: Option<String>) -> String {
     out.push_str("<form method=\"post\" action=\"/save\" id=\"cfg-form\">");
     out.push_str(&render_grid(cfg));
     out.push_str(&render_more_popups(cfg));
+    if show_port_check {
+        out.push_str(&render_port_check_modal());
+    }
     out.push_str(&render_warning_popups());
     out.push_str(&render_scripture_and_logo());
     out.push_str("</form>");
@@ -1863,28 +1911,46 @@ fn frame_server(cfg: &Config) -> String {
          <span class=\"sub\">(Changes Require Restart)</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"server-grid\">\
-         {telnet_chk}<span class=\"port-label\">Port:</span>{telnet_port}\
-         {web_chk}<span class=\"port-label\">Port:</span>{web_port}\
-         <button type=\"button\" class=\"more\" data-target=\"more-server\">More\u{2026}</button>\
-         {ssh_chk}<span class=\"port-label\">Port:</span>{ssh_port}\
-         {kermit_chk}<span class=\"port-label\">Port:</span>{kermit_port}\
+         {telnet_chk}{telnet_label}{telnet_port}\
+         {web_chk}{web_label}{web_port}\
+         <button type=\"button\" class=\"more{more_alert}\" data-target=\"more-server\" title=\"{more_hint}\">More\u{2026}</button>\
+         {ssh_chk}{ssh_label}{ssh_port}\
+         {kermit_chk}{kermit_label}{kermit_port}\
          <span class=\"grid-blank\"></span>\
          </div></section>",
         save = save_button("save_and_restart", "Save and Restart", "primary"),
+        more_alert = if crate::portcheck::results().iter().any(|(_, _, r)| r.is_blocked()) {
+            " alert"
+        } else {
+            ""
+        },
+        more_hint = {
+            let n = crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
+            if n > 0 {
+                format!("{n} bound port(s) did not answer when this machine connected to them at its own network address. Open More… to test again.")
+            } else {
+                "More server settings, and the port check.".to_string()
+            }
+        },
+        telnet_label = port_label("telnet"),
+        web_label = port_label("web"),
+        ssh_label = port_label("SSH"),
+        kermit_label = port_label("Kermit"),
         telnet_chk = checkbox("telnet_enabled", "Telnet", cfg.telnet_enabled),
-        telnet_port = port_input("telnet_port", cfg.telnet_port, None),
+        telnet_port = port_input_for("telnet_port", cfg.telnet_port, None, Some("telnet")),
         ssh_chk = checkbox("ssh_enabled", "SSH", cfg.ssh_enabled),
-        ssh_port = port_input("ssh_port", cfg.ssh_port, None),
+        ssh_port = port_input_for("ssh_port", cfg.ssh_port, None, Some("SSH")),
         web_chk = checkbox_with_attr(
             "web_enabled",
             "Web Server",
             cfg.web_enabled,
             "onchange=\"warnIfDisablingWeb(this)\"",
         ),
-        web_port = port_input(
+        web_port = port_input_for(
             "web_port",
             cfg.web_port,
             Some("onchange=\"warnIfChangingWebPort(this)\""),
+            Some("web"),
         ),
         kermit_chk = checkbox_with_attr(
             "kermit_server_enabled",
@@ -1892,24 +1958,57 @@ fn frame_server(cfg: &Config) -> String {
             cfg.kermit_server_enabled,
             "onchange=\"warnOnEnable(this, 'warn-kermit-server')\"",
         ),
-        kermit_port = port_input("kermit_server_port", cfg.kermit_server_port, None),
+        kermit_port = port_input_for("kermit_server_port", cfg.kermit_server_port, None, Some("Kermit")),
     )
 }
 
-/// Render a port-number `<input>` for the Server-frame grid.  Six
-/// characters is enough for any valid TCP port (65535 = 5 digits)
-/// plus a touch of breathing room.  When `extra_attr` is provided
-/// the attribute string is appended verbatim (used for the web-port
-/// onchange warning) and a `data-orig` carries the current value so
-/// the warning JS can detect changes.
-fn port_input(name: &str, value: u16, extra_attr: Option<&str>) -> String {
+/// Six characters is enough for any valid TCP port (65535 = 5 digits) plus a
+/// touch of breathing room.  When `extra_attr` is provided the attribute string
+/// is appended verbatim (used for the web-port onchange warning) and a
+/// `data-orig` carries the current value so the warning JS can detect changes.
+/// The `Port:` label for one listener, red when the last check found it blocked.
+///
+/// **The label carries the signal, not a tag beside it.** The Server frame is a
+/// fixed seven-column grid laid out by position; an extra item per row would
+/// shear every row after it. Colouring a word already in the grid moves nothing.
+///
+/// Only a blocked port is coloured — a pass is not evidence, see
+/// [`crate::portcheck`].
+fn port_label(listener: &str) -> String {
+    match crate::portcheck::result_of(listener) {
+        Some((port, reach)) if reach.is_blocked() => format!(
+            "<span class=\"port-label port-blocked\" title=\"{}\">Port:</span>",
+            html_escape(&reach.hover(port).unwrap_or_default())
+        ),
+        _ => "<span class=\"port-label\">Port:</span>".to_string(),
+    }
+}
+
+/// A port-number `<input>` for the Server-frame grid.
+///
+/// The input and its marker are wrapped in one cell rather than added as a
+/// second grid child: the Server frame is a fixed seven-column grid, and an
+/// eighth item per row would shear every row after it.
+///
+/// **Only a blocked port draws anything.** There is deliberately no green
+/// "open" marker to balance it — a self-connection does not meet the firewall
+/// at all on Windows or macOS, so a pass is not evidence. See
+/// [`crate::portcheck`].
+fn port_input_for(
+    name: &str,
+    value: u16,
+    extra_attr: Option<&str>,
+    listener: Option<&str>,
+) -> String {
     let attr = extra_attr.unwrap_or("");
-    format!(
+    let input = format!(
         "<input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"6\" class=\"port-num\" data-orig=\"{value}\" {attr}>",
         name = name,
         value = value,
         attr = attr,
-    )
+    );
+    let _ = listener;
+    input
 }
 
 fn frame_security(cfg: &Config) -> String {
@@ -2558,6 +2657,64 @@ fn get_disks_row(images: &[String]) -> String {
     )
 }
 
+/// The port-check result modal, open on load.
+///
+/// **A modal, because the banner scrolls past and nobody reads the console.**
+/// The red `Port:` labels say *which* listener, but only to somebody already
+/// looking at the Server frame; whoever just pressed Test ports is owed the
+/// answer where they are.
+///
+/// It says "answered", never "open". A pass is not evidence — on Windows and
+/// macOS a connection to your own address skips the firewall entirely — and
+/// reporting it as open is the one mistake an operator would act on, going to
+/// look at their router while something local drops every connection.
+fn render_port_check_modal() -> String {
+    let results = crate::portcheck::results();
+    let blocked = results.iter().filter(|(_, _, r)| r.is_blocked()).count();
+    let mut rows = String::new();
+    if results.is_empty() {
+        rows.push_str(
+            "<div class=\"row\"><span class=\"sub\">No listener is bound, so there was \
+             nothing to test.</span></div>",
+        );
+    }
+    for (name, port, reach) in &results {
+        rows.push_str(&format!(
+            "<div class=\"row\"><span class=\"label\">{name} {port}</span>{verdict}</div>",
+            name = html_escape(name),
+            port = port,
+            verdict = if reach.is_blocked() {
+                "<span class=\"port-blocked\" style=\"font-weight:700\">did not answer</span>"
+                    .to_string()
+            } else {
+                "<span class=\"sub\">answered on this machine</span>".to_string()
+            },
+        ));
+    }
+    format!(
+        "<div class=\"modal open\" id=\"port-check\"><div class=\"modal-body warn\">\
+         <div class=\"modal-head\"><span class=\"title\">{title}</span>\
+         <button type=\"button\" class=\"close\" data-close=\"port-check\">&times;</button></div>\
+         {rows}\
+         {blocked_note}\
+         <div class=\"row\"><span class=\"hint\">&ldquo;Answered&rdquo; is not the same as \
+         reachable. On Windows and macOS a connection to your own address skips the firewall, \
+         so a port can answer here and still be blocked for everyone else &mdash; and nothing \
+         here can see a router that is not forwarding a port. Open these ports on your \
+         firewall.</span></div>\
+         </div></div>",
+        title = if blocked > 0 { "Port test — something is blocking" } else { "Port test" },
+        rows = rows,
+        blocked_note = if blocked > 0 {
+            "<div class=\"row\"><span class=\"hint\">A port that did not answer is being \
+             blocked by something on this machine &mdash; a host firewall, or security \
+             software.</span></div>"
+        } else {
+            ""
+        },
+    )
+}
+
 fn render_more_popups(cfg: &Config) -> String {
     let mut out = String::new();
     // Desktop-GUI display scale (see cfg.gui_zoom_factor). Match on the parsed
@@ -2571,6 +2728,11 @@ fn render_more_popups(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-server\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">Server \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-server\">\u{00d7}</button></div>\
+         <div class=\"row\">{portcheck} <span class=\"sub\">{portcheck_note}</span></div>\
+         <div class=\"row\"><span class=\"hint\">Remember to open these ports on your \
+         firewall &mdash; a check from this machine cannot see a router that is not \
+         forwarding them, and on Windows and macOS a connection to your own address \
+         skips the firewall entirely.</span></div>\
          <div class=\"row\">{sessions} {idle}</div>\
          <div class=\"row\"><span class=\"label\">GUI display scale:</span>\
          <select name=\"gui_zoom\">\
@@ -2592,6 +2754,20 @@ fn render_more_popups(cfg: &Config) -> String {
          {master_slave}\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
+        portcheck = save_button("portcheck", "Test ports", "secondary"),
+        portcheck_note = {
+            let blocked = crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
+            if blocked > 0 {
+                format!(
+                    "{blocked} bound port{} did not answer &mdash; reddened below",
+                    if blocked == 1 { "" } else { "s" }
+                )
+            } else if crate::portcheck::has_run() {
+                "every bound port answered on this machine".to_string()
+            } else {
+                String::new()
+            }
+        },
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),
         z_auto = if zf.is_none() { "selected" } else { "" },
@@ -3515,6 +3691,21 @@ button.refresh {
    6ch was BOTH too wide for the row to fit and too narrow to show five digits,
    because the padding ate into it. */
 .server-grid .port-num { width: calc(5ch + 14px); }
+/* The port input and its check marker share one grid cell.  A second grid
+   child per row would shear every row after it -- the grid is seven columns
+   and the rows are laid out by position. */
+.port-cell { display: flex; align-items: center; gap: 6px; }
+/* Only a blocked port is ever marked; there is no open-port counterpart,
+   because a self-connection does not meet the firewall on Windows or macOS. */
+/* Specific enough to win.  `.server-grid .port-label` sets the colour at two
+   classes, so a one-class `.port-blocked` lost the colour and kept only the
+   weight -- the label came out bold and unchanged, which reads as emphasis
+   rather than as a warning.  Three classes takes it back. */
+.server-grid .port-label.port-blocked { color: #ff5a4a; font-weight: 700; cursor: help; }
+/* The frame says there is something to look at; the popup says what.  A row of
+   its own carrying a button and an advisory cost the frame a line it does not
+   have to spare, and sat there whether or not a check had ever run. */
+button.more.alert { color: #ff5a4a; border-color: #ff5a4a; }
 .server-grid button.more { justify-self: end; margin-left: 0; }
 /* Tight row: keeps the contents on a single line.  Used by the
    File Transfer XMODEM tunables row so the right-floated More
@@ -3903,7 +4094,7 @@ mod tests {
         submitted.insert("gateway_role".into(), "standalone".into());
         submitted.insert("telnet_gateway_raw".into(), "true".into());
 
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         let script = html
             .split("<script>")
             .nth(1)
@@ -3966,7 +4157,7 @@ mod tests {
                 "{n} not rendered at all"
             );
         }
-        let on = render_main_page(&Config { log_to_file: true, ..cfg.clone() }, None);
+        let on = render_main_page(&Config { log_to_file: true, ..cfg.clone() }, None, false);
         for n in ["log_file", "log_max_size_kb", "log_max_files"] {
             let disabled_when_on = on
                 .split('<')
@@ -4074,7 +4265,7 @@ mod tests {
             gateway_role: "slave".into(),
             ..Config::default()
         };
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
 
         // Collect the `name=` of every checkbox rendered disabled.
         let mut disabled: Vec<String> = Vec::new();
@@ -4127,7 +4318,7 @@ mod tests {
     #[test]
     fn test_render_main_page_contains_key_fields() {
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         // Header + each frame's signature field.
         assert!(html.contains("Ethernet Gateway"));
         assert!(html.contains("telnet_enabled"));
@@ -4165,7 +4356,7 @@ mod tests {
     #[test]
     fn test_render_main_page_offers_the_cpm_boot_choice() {
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(html.contains("name=\"cpm_boot_image\""), "the select must be on the page");
         assert!(html.contains("CP/M runs"), "and be labelled");
         // The emulator is always offered, and is the empty value so that a
@@ -4193,7 +4384,7 @@ mod tests {
     #[test]
     fn test_render_main_page_offers_both_backspace_choices() {
         let mut cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(html.contains("name=\"cpm_boot_backspace\""), "the select must be on the page");
         assert!(html.contains("Booted disk's backspace key"), "and be labelled");
         for (value, label) in crate::cpm::boot::BACKSPACE_CHOICES {
@@ -4209,7 +4400,7 @@ mod tests {
         );
 
         cfg.cpm_boot_backspace = crate::cpm::boot::BACKSPACE_RUBOUT.to_string();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains(&format!("value=\"{}\" selected", crate::cpm::boot::BACKSPACE_RUBOUT)),
             "the configured value must come back selected"
@@ -4217,7 +4408,7 @@ mod tests {
 
         // The case the string comparison would get wrong.
         cfg.cpm_boot_backspace = "something nobody offers".to_string();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains(&format!(
                 "value=\"{}\" selected",
@@ -4242,7 +4433,7 @@ mod tests {
     #[test]
     fn test_cpm_selects_are_rendered_and_saved() {
         let cfg = Config::default();
-        let page = render_main_page(&cfg, None);
+        let page = render_main_page(&cfg, None, false);
         let keys = [
             "cpm_boot_image",
             "cpm_boot_machine",
@@ -4291,7 +4482,7 @@ mod tests {
     #[test]
     fn test_render_main_page_offers_both_cpus() {
         let mut cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(html.contains("name=\"cpm_cpu\""), "the select must be on the page");
         for (value, label) in crate::cpm::cpu::CPU_CHOICES {
             assert!(html.contains(&format!("value=\"{value}\"")), "{value} is missing");
@@ -4303,7 +4494,7 @@ mod tests {
         );
 
         cfg.cpm_cpu = crate::cpm::cpu::CPU_8080.to_string();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains(&format!("value=\"{}\" selected", crate::cpm::cpu::CPU_8080)),
             "the configured processor must come back selected"
@@ -4311,7 +4502,7 @@ mod tests {
 
         // The case the string comparison would get wrong.
         cfg.cpm_cpu = "something nobody offers".to_string();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains(&format!("value=\"{}\" selected", crate::cpm::cpu::CPU_Z80)),
             "an unrecognised value must render as the processor actually in force"
@@ -4324,7 +4515,7 @@ mod tests {
     #[test]
     fn test_render_main_page_offers_every_boot_machine() {
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(html.contains("name=\"cpm_boot_machine\""), "the select must be on the page");
         assert!(html.contains("Booted disk's machine"), "and be labelled");
         // Iterated over the real list, so a machine added to `console.rs` cannot
@@ -4359,7 +4550,7 @@ mod tests {
     #[test]
     fn test_a_missing_boot_image_still_appears_in_the_web_list() {
         let cfg = Config { cpm_boot_image: "vanished.dsk".to_string(), ..Default::default() };
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(html.contains("vanished.dsk"), "the setting must be visible");
         assert!(html.contains("(missing)"), "and marked as not being there");
     }
@@ -4367,7 +4558,7 @@ mod tests {
     #[test]
     fn test_render_main_page_includes_notice() {
         let cfg = Config::default();
-        let html = render_main_page(&cfg, Some("Saved!".into()));
+        let html = render_main_page(&cfg, Some("Saved!".into()), false);
         assert!(html.contains("Saved!"));
     }
 
@@ -4377,7 +4568,7 @@ mod tests {
             browser_homepage: "<script>alert(1)</script>".into(),
             ..Config::default()
         };
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
@@ -4797,7 +4988,7 @@ mod tests {
         // The whole page is one form, so a field must appear exactly once —
         // twice and the save submits both and the last value wins (the defect
         // that let a save clobber allow_relay_kermit).
-        let page = render_main_page(&cfg, None);
+        let page = render_main_page(&cfg, None, false);
         for name in ["log_to_file", "log_file", "log_max_size_kb", "log_max_files"] {
             let n = page.matches(&format!("name=\"{}\"", name)).count();
             assert_eq!(n, 1, "{name} appears {n} times in the form; it must appear once");
@@ -4860,7 +5051,7 @@ mod tests {
         }
 
         // One form, so exactly once — twice and the last value silently wins.
-        let page = render_main_page(&cfg, None);
+        let page = render_main_page(&cfg, None, false);
         for name in ["gateway_term_width", "gateway_term_height"] {
             let n = page.matches(&format!("name=\"{}\"", name)).count();
             assert_eq!(n, 1, "{name} appears {n} times in the form; it must appear once");
@@ -4940,7 +5131,7 @@ mod tests {
         }
 
         // The class must be styled, or the warning renders as ordinary text.
-        let page_css = render_main_page(&Config::default(), None);
+        let page_css = render_main_page(&Config::default(), None, false);
         assert!(
             page_css.contains(".warn-inline {"),
             ".warn-inline has no CSS rule — the warning would not look like one"
@@ -5007,7 +5198,7 @@ mod tests {
         // silently — guard against that drift by asserting each
         // intended action value appears in the rendered HTML.
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains("value=\"save_and_restart\""),
             "Server frame's Save and Restart button missing"
@@ -5161,7 +5352,7 @@ mod tests {
     /// this page has silently lost a layout before.
     #[test]
     fn test_the_mount_screen_drive_letters_share_one_column() {
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(
             html.contains(".label.drive { display: inline-block; min-width: 30px; text-align: right; }"),
             "the drive-letter column needs a real CSS rule, not just a class"
@@ -5291,7 +5482,7 @@ mod tests {
     /// the first placement pass.
     #[test]
     fn test_the_config_page_links_to_the_screen_from_the_cpm_frame() {
-        let page = render_main_page(&Config::default(), None);
+        let page = render_main_page(&Config::default(), None, false);
         assert!(page.contains("href=\"/vdm\""), "the screen must be reachable without a URL");
 
         let frame = frame_ai_browser(&Config::default());
@@ -5315,7 +5506,7 @@ mod tests {
     /// before — see `.row-right`, which is guarded the same way.
     #[test]
     fn test_the_screen_link_has_a_real_style() {
-        let page = render_main_page(&Config::default(), None);
+        let page = render_main_page(&Config::default(), None, false);
         assert!(page.contains("a.linkbtn {"), "linkbtn must have a real rule, not just a class");
         assert!(page.contains("a.linkbtn:hover"), "and a hover state, like the buttons it sits with");
     }
@@ -5416,7 +5607,7 @@ mod tests {
         // the primary frame stays compact.  Lock that down — if the
         // layout regresses, the primary frame grows back to 4 rows
         // and unbalances the row pair with AI/Browser.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         // Dir input must come first in the frame.
         let dir_idx = html
             .find(r#"name="transfer_dir""#)
@@ -5456,7 +5647,7 @@ mod tests {
         // 6-char wide.  Lock the structure down so a future revert
         // to flex `<div class="row">` would visibly mis-align the
         // colons and trip this test.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(html.contains(r#"class="server-grid""#));
         // Four port inputs, all with class="port-num" + size="6".
         let port_num_count = html.matches(r#"class="port-num""#).count();
@@ -5464,7 +5655,10 @@ mod tests {
         let size6_in_server = html.matches(r#" size="6" class="port-num""#).count();
         assert_eq!(size6_in_server, 4, "all 4 port inputs must be size=6");
         // Six port-label cells (one per port column in each row).
-        let port_label_count = html.matches(r#"class="port-label""#).count();
+        // Prefix, not the whole attribute: a port the check found blocked carries
+        // `class="port-label port-blocked"`, and an exact match would count 3
+        // and fail for a reason that has nothing to do with the layout.
+        let port_label_count = html.matches(r#"class="port-label"#).count();
         assert_eq!(port_label_count, 4, "expected 4 port-label cells (one per port input)");
     }
 
@@ -5475,7 +5669,7 @@ mod tests {
         // In CSS-Grid auto-flow that position puts the button as the
         // last cell of row 1.  If a future refactor places More after
         // kermit_server_enabled instead, this test catches the regress.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         let web_idx = html
             .find(r#"name="web_port""#)
             .expect("web_port field");
@@ -5498,7 +5692,7 @@ mod tests {
         // on the same line as Negotiate/Block/Retries by carrying the
         // `tight-row` class (nowrap).  Lock that down — previously the
         // default `.row` flex-wrap pushed More onto its own line.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(
             html.contains(r#"class="row tight-row""#),
             "File-transfer tunables row missing tight-row class"
@@ -5522,7 +5716,7 @@ mod tests {
     /// against; a browser is the only thing that can actually measure it.
     #[test]
     fn test_narrow_viewports_do_not_scroll_sideways() {
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
 
         assert!(
             html.contains("@media (max-width: 640px)"),
@@ -5750,7 +5944,7 @@ mod tests {
 
     #[test]
     fn test_more_buttons_cannot_leave_their_frame() {
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
 
         // 1. Numeric inputs have a real width, not a browser-dependent `size`.
         assert!(
@@ -5803,7 +5997,7 @@ mod tests {
         // layout to 2 content rows.  This test guards against an
         // accidental revert that would re-grow the frame and unbalance
         // the side-by-side Server/Security row.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         // First content row must hold both telnet and web fields.
         let telnet_idx = html
             .find(r#"name="telnet_enabled""#)
@@ -5836,7 +6030,7 @@ mod tests {
         // shape regresses, the per-port rows would need their Enabled
         // checkbox back and the More-button-on-same-line property
         // would break too.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(html.contains("Serial Port A"), "Port A header title missing");
         assert!(html.contains("Serial Port B"), "Port B header title missing");
         assert!(
@@ -5876,7 +6070,7 @@ mod tests {
         // More button doesn't get pushed onto a second line.  Lock
         // that down — earlier the More button wrapped beneath the
         // baud field once we added the dropdown + refresh button.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(
             html.contains(r#"class="row serial-row""#),
             "serial rows missing the serial-row class that suppresses wrap"
@@ -5894,7 +6088,7 @@ mod tests {
         // The Serial Ports frame must render a <select> for each
         // port, not the old free-text <input>.  This test guards
         // against an accidental revert of the GUI-parity change.
-        let html = render_main_page(&Config::default(), None);
+        let html = render_main_page(&Config::default(), None, false);
         assert!(
             html.contains(r#"name="serial_a_port""#),
             "serial_a_port form field missing"
@@ -5926,7 +6120,7 @@ mod tests {
         // ssh_username/ssh_password as form inputs would have to
         // update this test alongside the field names.
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         assert!(
             html.contains("name=\"username\""),
             "Security frame missing unified username input"
@@ -5954,7 +6148,7 @@ mod tests {
         // test locks down the presence of the strip so a future refactor
         // can't silently regress the banner back to "permanent header"
         // behavior.
-        let html = render_main_page(&Config::default(), Some("Configuration saved.".into()));
+        let html = render_main_page(&Config::default(), Some("Configuration saved.".into()), false);
         assert!(
             html.contains("history.replaceState"),
             "page does not strip the ?notice= query string on load"
@@ -6000,7 +6194,7 @@ mod tests {
 
         // And it reaches the real page, not just the helper.
         let cfg = Config { log_max_size_kb: 1_048_576, ..Config::default() };
-        let page = render_main_page(&cfg, None);
+        let page = render_main_page(&cfg, None, false);
         assert!(
             page.contains("name=\"log_max_size_kb\" value=\"1048576\" size=\"7\""),
             "the rendered config page still clips the log size field"
@@ -6019,7 +6213,7 @@ mod tests {
         // added later is covered automatically — this test previously checked
         // only `more-server` and would not have noticed a new one.
         let cfg = Config::default();
-        let html = render_main_page(&cfg, None);
+        let html = render_main_page(&cfg, None, false);
         let form_start = html.find("<form").expect("form open tag");
         let form_end = html.find("</form>").expect("form close tag");
 

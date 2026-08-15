@@ -1741,6 +1741,25 @@ impl TelnetSession {
 
     // ─── SERVER CONFIGURATION ───────────────────────────────
 
+    /// The port-check marker for one listener: `*`, or nothing.
+    ///
+    /// **A star on every terminal, not the word where it happens to fit.** The
+    /// status rows run to about 29 columns before the marker, so
+    /// `(firewalled)` fits an 80-column terminal and overruns a C64 by two —
+    /// and a screen that says `(firewalled)` on one row and `*` on another,
+    /// depending on who is connected, is two screens. One character fits
+    /// everywhere and the legend below explains it once.
+    ///
+    /// Only a blocked port is marked. A pass is not evidence — see
+    /// [`crate::portcheck`] — so there is no counterpart marker for a port that
+    /// answered.
+    fn port_check_mark(&self, listener: &str) -> &'static str {
+        match crate::portcheck::result_of(listener) {
+            Some((_, reach)) if reach.is_blocked() => " *",
+            _ => "",
+        }
+    }
+
     pub(in crate::telnet) async fn server_configuration(&mut self) -> Result<(), std::io::Error> {
         loop {
             let cfg = config::get_config();
@@ -1758,8 +1777,8 @@ impl TelnetSession {
                 self.red("Disabled")
             };
             self.send_line(&format!(
-                "  Telnet: {} (port {})",
-                telnet_status, cfg.telnet_port
+                "  Telnet: {} (port {}){}",
+                telnet_status, cfg.telnet_port, self.port_check_mark("telnet")
             ))
             .await?;
             let ssh_status = if cfg.ssh_enabled {
@@ -1768,8 +1787,8 @@ impl TelnetSession {
                 self.red("Disabled")
             };
             self.send_line(&format!(
-                "  SSH:    {} (port {})",
-                ssh_status, cfg.ssh_port
+                "  SSH:    {} (port {}){}",
+                ssh_status, cfg.ssh_port, self.port_check_mark("SSH")
             ))
             .await?;
             let kermit_status = if cfg.kermit_server_enabled {
@@ -1778,8 +1797,8 @@ impl TelnetSession {
                 self.red("Disabled")
             };
             self.send_line(&format!(
-                "  Kermit: {} (port {})",
-                kermit_status, cfg.kermit_server_port
+                "  Kermit: {} (port {}){}",
+                kermit_status, cfg.kermit_server_port, self.port_check_mark("Kermit")
             ))
             .await?;
             let web_status = if cfg.web_enabled {
@@ -1788,8 +1807,8 @@ impl TelnetSession {
                 self.red("Disabled")
             };
             self.send_line(&format!(
-                "  Web:    {} (port {})",
-                web_status, cfg.web_port
+                "  Web:    {} (port {}){}",
+                web_status, cfg.web_port, self.port_check_mark("web")
             ))
             .await?;
             let ip_safety_status = if cfg.disable_ip_safety {
@@ -1844,8 +1863,23 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Master/Slave",
-                self.cyan("M")
+                "  {}  Master/Slave     {}  Test ports",
+                self.cyan("M"),
+                self.cyan("F")
+            ))
+            .await?;
+            // **Always shown, not only when a star was drawn.**  The star means
+            // "we tested this port and nothing answered"; the line means "ports
+            // may need opening on a firewall", which is true whether or not the
+            // check caught anything -- and the check cannot catch everything.
+            // It sees nothing past this machine, and on Windows and macOS a
+            // connection to our own address skips the firewall altogether, so
+            // silence from the check is not an all-clear.  An operator whose
+            // friend cannot reach them needs this line most in exactly the case
+            // where no star appears.
+            self.send_line(&format!(
+                "  {}",
+                self.dim("* open ports on firewall")
             ))
             .await?;
             self.send_line(&format!(
@@ -1865,6 +1899,53 @@ impl TelnetSession {
             };
 
             match input.as_str() {
+                "f" => {
+                    // Off the async runtime: each probe is a real connection
+                    // with a timeout, and four of them would stall every other
+                    // session's timers.
+                    self.send_line("").await?;
+                    self.send_line(&format!("  {}", self.dim("Testing. This takes a moment."))).await?;
+                    self.flush().await?;
+                    let blocked = tokio::task::spawn_blocking(crate::portcheck::run_check)
+                        .await
+                        .unwrap_or(0);
+                    self.send_line("").await?;
+                    if blocked == 0 {
+                        // Not "all ports are open": a self-connection skips the
+                        // firewall on Windows and macOS, so a pass proves
+                        // nothing there.
+                        self.send_line(&format!(
+                            "  {}",
+                            self.green("Every bound port answered here.")
+                        ))
+                        .await?;
+                        self.send_line(&format!(
+                            "  {}",
+                            self.dim("A router that is not forwarding")
+                        ))
+                        .await?;
+                        self.send_line(&format!(
+                            "  {}",
+                            self.dim("a port still looks fine from here.")
+                        ))
+                        .await?;
+                    } else {
+                        self.send_line(&format!(
+                            "  {}",
+                            self.red(&format!("{blocked} bound port(s) did not answer."))
+                        ))
+                        .await?;
+                        self.send_line(&format!(
+                            "  {}",
+                            self.dim("They are marked on the screen.")
+                        ))
+                        .await?;
+                    }
+                    self.send_line("").await?;
+                    self.send("  Press any key to continue.").await?;
+                    self.flush().await?;
+                    let _ = self.wait_for_key().await;
+                }
                 "t" => {
                     let new_val = if cfg.telnet_enabled { "false" } else { "true" };
                     let v = new_val.to_string();

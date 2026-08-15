@@ -47,6 +47,7 @@ mod cpm;
 mod gui;
 mod kermit;
 mod logger;
+mod portcheck;
 mod punter;
 mod relay;
 mod router;
@@ -212,6 +213,10 @@ fn main() {
                 // below and reports whether it bound, and the watcher then says
                 // out loud if none of them did (see bindwatch).
                 bindwatch::reset();
+                // Cleared with it: the ports can change across a restart, so a
+                // result kept from the last cycle would redden a port that was
+                // never tested.
+                portcheck::reset();
                 telnet::start_server(
                     shutdown_rt.clone(),
                     restart_rt.clone(),
@@ -247,6 +252,12 @@ fn main() {
                 // knows the full roster.  3 s is far longer than a bind takes
                 // and is only an upper bound on how long it waits.
                 bindwatch::spawn_watch(3_000);
+                // And once they have settled, find out whether anything can
+                // actually reach them.  At startup because the red labels are
+                // the only signal, and somebody whose port is blocked is by
+                // definition not getting the connection that would prompt them
+                // to go looking.  Background, so it delays nothing.
+                portcheck::spawn_startup_check(3_000);
 
                 // Wait for shutdown signal
                 loop {

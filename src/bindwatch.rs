@@ -81,6 +81,30 @@ pub(crate) fn status_of(name: &str) -> Option<(u16, Status)> {
     with(|s| s.listeners.get(name).copied())
 }
 
+/// Every listener that really took its port, as `(name, port)`.
+///
+/// For the port check: a listener that failed to bind is not a firewall problem
+/// and must not be probed as one -- the answer would be "nothing answered",
+/// which is true and would be reported as the wrong cause.
+/// Is any listener still waiting to report?
+///
+/// For the startup port check: probing a listener that has not bound yet would
+/// report it blocked, which is wrong in the one direction that module is
+/// careful about.
+pub(crate) fn any_pending() -> bool {
+    with(|s| s.listeners.values().any(|(_, st)| *st == Status::Pending))
+}
+
+pub(crate) fn bound_listeners() -> Vec<(String, u16)> {
+    with(|s| {
+        s.listeners
+            .iter()
+            .filter(|(_, (_, st))| *st == Status::Bound)
+            .map(|(name, (port, _))| ((*name).to_string(), *port))
+            .collect()
+    })
+}
+
 pub(crate) fn bound(name: &'static str) {
     with(|s| {
         if let Some(entry) = s.listeners.get_mut(name) {
