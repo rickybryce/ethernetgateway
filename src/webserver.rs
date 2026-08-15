@@ -2299,17 +2299,33 @@ fn render_warning_popups() -> String {
 /// absence.  Same hazard as the role-gated checkboxes, handled the same way.
 fn render_cpm_disks_modal(cfg: &Config) -> String {
     let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
-    let images = crate::cpm::image::available_images(&base);
     let mounts = crate::cpm::image::registry::all();
     let usage = crate::cpm::image::registry::usage();
 
     // Resolved, not read off the key — a `cpm_boot_image` naming a disk that is
     // no longer there runs the emulator, and this page has to name the slots
     // the machine that starts will have.  Once per request, beside the folder
-    // listing above.
-    let naming =
-        crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
-    let booting = naming == crate::cpm::boot::SlotNaming::Boards;
+    // listing above.  The same `MountContext` the telnet and desktop screens
+    // use, so the three cannot disagree about what a drive is called or which
+    // images may go in one.
+    let ctx = crate::cpm::boot::MountContext::resolve(
+        &cfg.transfer_dir,
+        &cfg.cpm_boot_image,
+        &cfg.cpm_boot_machine,
+    );
+    let naming = ctx.naming.clone();
+    let booting = ctx.booting();
+    // Only images the machine that will run could reach: with a disk booting,
+    // the board is chosen by size, so an image on another board mounts
+    // perfectly and is invisible to the guest.
+    let dir = crate::cpm::image::images_dir(&base);
+    let all_images = crate::cpm::image::available_images(&base);
+    let total_images = all_images.len();
+    let images: Vec<String> = all_images
+        .into_iter()
+        .filter(|n| std::fs::metadata(dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false))
+        .collect();
+    let hidden_images = total_images - images.len();
     let mut rows = String::new();
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let letter = (b'A' + drive0) as char;
@@ -2380,9 +2396,12 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
                 .and_then(crate::cpm::boot::slot_board)
                 .map(|b| format!(" on the {b}"))
                 .unwrap_or_default();
+            // The slot's name comes from the *booted disk's* board, not from
+            // whatever happens to be in this row: every image offered above is
+            // on that one board now, so the column reads in one vocabulary.
             note.push_str(&format!(
                 " <span class=\"sub\">{}{}</span>",
-                html_escape(&crate::cpm::boot::slot_name(&naming, drive0, len)),
+                html_escape(&ctx.slot(drive0)),
                 html_escape(&board),
             ));
         }
@@ -2412,6 +2431,22 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         String::from(
             "<div class=\"row\"><span class=\"sub\">A mounted drive uses the files inside the image instead of the files in its folder. The folder's files are not touched and return when you unmount.</span></div>",
         )
+    };
+    // Never let an image disappear from the list without saying so.  A folder
+    // the operator can see the contents of, offering fewer disks than it holds,
+    // is a mystery; naming the reason makes it something they can act on --
+    // change what boots, or fetch a disk of the right kind.
+    let intro = if hidden_images > 0 {
+        format!(
+            "{intro}<div class=\"row\"><span class=\"sub\">{hidden_images} more image{} in the \
+             folder {} not offered: with a disk set to boot, an image only reaches the guest if it \
+             lands on the same board, and the board is chosen by the image's size. A floppy beside \
+             a booted hard disk mounts perfectly and is invisible to it.</span></div>",
+            if hidden_images == 1 { "" } else { "s" },
+            if hidden_images == 1 { "is" } else { "are" },
+        )
+    } else {
+        intro
     };
 
     // Making a blank disk sits on the same screen because it is the answer to

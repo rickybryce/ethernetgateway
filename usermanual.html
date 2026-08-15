@@ -2759,6 +2759,27 @@ really start, naming drives <code>A:</code>&ndash;<code>P:</code> again rather
 than the slots of a board that is not going to be booted.
 </p>
 
+<p>
+<strong>The mount screens follow what is set to boot.</strong>  Which images they
+offer, and what they call a drive, both depend on it &mdash; because the board an
+image lands on is chosen by its <em>size</em>.  Under the CP/M emulator every
+image is offered and the slots are drives <code>A:</code>&ndash;<code>P:</code>.
+With a disk set to boot, only images on that disk&rsquo;s own board are offered,
+and the slots take that board&rsquo;s names: beside a booted Altair 88-HDSK they
+run <code>unit&nbsp;0.0</code> to <code>unit&nbsp;3.3</code>, because an 88-HDSK
+slot is a <em>platter</em> and not a drive.  Anything withheld is counted and
+explained rather than silently missing.
+</p>
+
+<p>
+This matters because the alternative was a baffling failure: mount a floppy
+while a hard disk is booting and it goes to the 88-DCDD, which that guest never
+reads.  The disk is mounted, the file is fine, and the guest cannot see it
+&mdash; while its own <code>B:</code> is an empty platter and answers
+<code>Bdos Err on B: Bad Sector</code>.  To give a booted hard disk a second
+disk, mount another <em>hard disk</em> image.
+</p>
+
 <aside>
 <strong>Booting is not mounting.</strong> Inside a booted disk there is no jail,
 no <code>A&gt;</code> from us, no <code>EXIT</code>, no EGT8080 and no drives

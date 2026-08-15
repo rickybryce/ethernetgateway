@@ -247,6 +247,101 @@ pub enum SlotNaming {
     Boards,
 }
 
+/// What the mount screens are mounting *into*.
+///
+/// **A drive on the mount screen is not a fixed thing.** Which machine CP/M is
+/// configured to run decides both what a slot is called and which images can
+/// usefully go in one, and until 0.9.2 the mount screens knew neither: they
+/// offered every image in the folder against sixteen drive letters, whatever was
+/// booting.
+///
+/// That was not a cosmetic gap. The board an image lands on is chosen by its
+/// *size* — a 337,568-byte floppy to the 88-DCDD, a 4.9 MB image to the 88-HDSK
+/// — so mounting a floppy while a hard disk is set to boot put it on a board the
+/// guest never reads. Everything worked and nothing was reachable, and the only
+/// hint was a warning printed after the boot had already started. Worse, the two
+/// namings appeared *together*: one screen could show `unit 0.0` beside
+/// `Drive 1`, two vocabularies for one list, because each row was named after
+/// its own image's board.
+///
+/// So the question is asked once, here, and the screens follow it.
+#[derive(Debug, Clone)]
+pub struct MountContext {
+    /// How to name a slot.
+    pub naming: SlotNaming,
+    /// The machine key in force, for `board_for`/`slot_label`.
+    machine: String,
+    /// The board the booted disk is on, if a disk is booting.
+    ///
+    /// `None` means the emulator runs, and then every image is welcome: our own
+    /// BDOS is underneath the drive and reads the image's filesystem directly,
+    /// so no board has to agree to anything.
+    board: Option<&'static str>,
+    /// The booted image's size, which is what [`Self::slot`] asks the board by.
+    boot_len: Option<u64>,
+}
+
+impl MountContext {
+    /// Resolve from the configuration.
+    pub fn resolve(transfer_dir: &str, boot_image: &str, machine: &str) -> MountContext {
+        let target = boot_target(transfer_dir, boot_image);
+        let naming = target.slot_naming();
+        // The booted disk's own size decides its board, exactly as `insert`
+        // will when the boot happens.
+        let boot_len = match &target {
+            BootTarget::Image(path) => std::fs::metadata(path).ok().map(|md| md.len()),
+            _ => None,
+        };
+        let board = boot_len
+            .and_then(|len| super::boot_machine::BootMachine::board_for(Some(machine), len));
+        MountContext { naming, machine: machine.to_string(), board, boot_len }
+    }
+
+    /// Can an image of this size be reached by whatever is going to run?
+    ///
+    /// Under the emulator, yes — always. Under a booted disk, only if it lands
+    /// on the same board the guest is driving; anything else is a disk the
+    /// guest cannot see however correctly we mount it.
+    pub fn accepts(&self, image_len: u64) -> bool {
+        match self.board {
+            None => true,
+            Some(want) => {
+                super::boot_machine::BootMachine::board_for(Some(&self.machine), image_len)
+                    == Some(want)
+            }
+        }
+    }
+
+    /// What to call slot `slot`.
+    ///
+    /// Named after the *booted* disk's board rather than the image being placed,
+    /// which is the whole point: every image this context accepts is on that one
+    /// board, so the column reads in one vocabulary instead of one per row.
+    pub fn slot(&self, slot: u8) -> String {
+        match self.naming {
+            SlotNaming::Drives => format!("{}:", (b'A' + slot) as char),
+            SlotNaming::Boards => {
+                super::boot_machine::BootMachine::slot_label(Some(&self.machine), self.board_len(), slot)
+                    .unwrap_or_else(|| format!("slot {slot}"))
+            }
+        }
+    }
+
+    /// A size on the booted disk's board, for [`Self::slot`].
+    ///
+    /// `slot_label` asks by size because that is how a board is chosen
+    /// everywhere else; here the board is already known, so any size it takes
+    /// answers the same question. The booted image's own is the honest one.
+    fn board_len(&self) -> u64 {
+        self.boot_len.unwrap_or(0)
+    }
+
+    /// Is a disk booting at all?
+    pub fn booting(&self) -> bool {
+        self.board.is_some()
+    }
+}
+
 /// What CP/M is *actually* going to run for a given configuration.
 ///
 /// `cpm_boot_image` is a preference, not an outcome. An operator can delete the
@@ -969,6 +1064,98 @@ pub(crate) mod tests {
             "the emulator first, then the disks, sorted — and no readme"
         );
         assert!(choices[1].1.starts_with("Boot "), "{}", choices[1].1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The mount screens follow what is going to run.**
+    ///
+    /// The defect this closes was reported as "I mounted a disk on B: and the
+    /// booted disk cannot see it, and B: says Bad Sector". Nothing was broken:
+    /// the board an image lands on is chosen by its *size*, so a floppy mounted
+    /// beside a booted hard disk went to the 88-DCDD while the guest talked only
+    /// to the 88-HDSK — mounted, correct, unreachable — and the guest's own B:
+    /// was an empty platter.
+    ///
+    /// Two halves, and both are checked here because either alone still leaves
+    /// the operator guessing: an image that cannot be reached is not offered,
+    /// and a slot is named by the board it will really be on.
+    #[test]
+    fn test_the_mount_screens_follow_what_will_run() {
+        let dir = std::env::temp_dir().join("egw_mount_context_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Under `CPM/`, because that is where `boot_target` looks.
+        let images = super::super::image::images_dir(&super::super::layout::cpm_dir(
+            &dir.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&images).unwrap();
+
+        let floppy = bootable_image();
+        std::fs::write(images.join("floppy.dsk"), &floppy).unwrap();
+        let hd_len = super::super::boot_machine::BootMachine::bootable_media()
+            .into_iter()
+            .find(|m| m.label.contains("88-HDSK"))
+            .expect("the hard disk is a bootable medium")
+            .bytes;
+
+        // **The emulator takes anything**: our BDOS reads the image's own
+        // filesystem, so no board has to agree to it, and the slots are drives.
+        let emu = MountContext::resolve(&dir.to_string_lossy(), "", "auto");
+        assert!(emu.accepts(floppy.len() as u64));
+        assert!(emu.accepts(hd_len));
+        assert!(!emu.booting());
+        assert_eq!(emu.slot(0), "A:");
+        assert_eq!(emu.slot(1), "B:");
+
+        // **Booting the floppy**: a hard disk is on a board this guest never
+        // reads, so it is not offered -- and the slots stop being drive letters.
+        //
+        // The floppy is a real bootable image because `boot_target` cold-starts
+        // it now; a stub would resolve to `NotBootable`, run the emulator, and
+        // this would silently test the emulator twice.
+        let on_floppy = MountContext::resolve(&dir.to_string_lossy(), "floppy.dsk", "auto");
+        assert!(on_floppy.booting(), "a disk is booting");
+        assert!(on_floppy.accepts(floppy.len() as u64), "its own board");
+        assert!(!on_floppy.accepts(hd_len), "a hard disk is on another board");
+        assert_ne!(on_floppy.slot(1), "B:", "a booted machine has no drive letters");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the reported case, which needs a real hard disk: the
+    /// 88-HDSK's slots are **platters**, so mounting beside a booted hard disk
+    /// must say `unit 0.1` and must accept another hard disk rather than a
+    /// floppy.  A synthesised image cannot stand in -- `boot_target` cold-starts
+    /// it, and a zero-filled 4.9 MB file is exactly the data disk it refuses.
+    ///
+    /// Ignored -- set `CPM_HDSK_IMAGE` to an 88-HDSK image that boots.
+    #[test]
+    #[ignore]
+    fn test_mounting_beside_a_booted_hard_disk_names_platters() {
+        let Ok(src) = std::env::var("CPM_HDSK_IMAGE") else {
+            eprintln!("set CPM_HDSK_IMAGE to run this");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("egmountctx{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let images = super::super::image::images_dir(&super::super::layout::cpm_dir(
+            &dir.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&images).unwrap();
+        let hd = std::fs::read(&src).expect("the hard disk image");
+        std::fs::write(images.join("hard.dsk"), &hd).unwrap();
+
+        let ctx = MountContext::resolve(&dir.to_string_lossy(), "hard.dsk", "auto");
+        assert!(ctx.booting(), "{src} did not resolve as a booting disk");
+        assert!(ctx.accepts(hd.len() as u64), "another hard disk is reachable");
+        assert!(
+            !ctx.accepts(bootable_image().len() as u64),
+            "a floppy is on the 88-DCDD and the guest never reads it"
+        );
+        assert!(
+            ctx.slot(1).contains("unit"),
+            "the 88-HDSK's slots are platters, not drives: {}",
+            ctx.slot(1)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

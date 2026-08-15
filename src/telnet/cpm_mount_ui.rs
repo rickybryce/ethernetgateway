@@ -45,6 +45,21 @@ impl TelnetSession {
         crate::cpm::layout::cpm_dir(&cfg.transfer_dir)
     }
 
+    /// What these screens are mounting into: drive letters or board slots, and
+    /// which images the thing that will run could actually reach.
+    ///
+    /// Resolved once per screen rather than per row — it stats the boot image —
+    /// and shared with the web and desktop, so the three cannot disagree about
+    /// what a drive is called.
+    pub(in crate::telnet) fn cpmmount_context(&self) -> crate::cpm::boot::MountContext {
+        let cfg = config::get_config();
+        crate::cpm::boot::MountContext::resolve(
+            &cfg.transfer_dir,
+            &cfg.cpm_boot_image,
+            &cfg.cpm_boot_machine,
+        )
+    }
+
     /// Entry point: mount or unmount?
     /// Offer to fetch the sample disks, then do it.
     ///
@@ -489,15 +504,38 @@ impl TelnetSession {
     /// Mount, step 1: a paginated list of the images folder.
     async fn cpmmount_pick_image(&mut self) -> Result<(), std::io::Error> {
         let base = self.cpmmount_base();
-        let images = image::available_images(&base);
+        let ctx = self.cpmmount_context();
+        let all = image::available_images(&base);
+        // Only images the thing that is going to run could actually reach.
+        // Under the emulator that is all of them; with a disk set to boot it is
+        // the ones on that disk's board, because the board is chosen by size and
+        // a mount on the wrong one is present, correct and invisible.
+        let dir = image::images_dir(&base);
+        let hidden = all.len();
+        let images: Vec<String> = all
+            .into_iter()
+            .filter(|n| {
+                std::fs::metadata(dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false)
+            })
+            .collect();
+        let hidden = hidden - images.len();
         if images.is_empty() {
             self.clear_screen().await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.amber("No disk images found.")))
                 .await?;
             self.send_line("").await?;
-            self.send_line("  Put .dsk files in the transfer dir").await?;
-            self.send_line("  under CPM/images, then try again.").await?;
+            if hidden > 0 {
+                // Never silently: a folder full of images showing "none" is a
+                // mystery, and the operator can act on this one -- change what
+                // boots, or fetch a disk of the right kind.
+                self.send_line(&format!("  {hidden} are in the folder but are")).await?;
+                self.send_line("  not on the booted disk's board,").await?;
+                self.send_line("  so its OS could not read them.").await?;
+            } else {
+                self.send_line("  Put .dsk files in the transfer dir").await?;
+                self.send_line("  under CPM/images, then try again.").await?;
+            }
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.dim("readme.txt there explains the names.")))
                 .await?;
@@ -583,10 +621,8 @@ impl TelnetSession {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        let cfg = config::get_config();
-        let naming =
-            crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
-        let booting = naming == crate::cpm::boot::SlotNaming::Boards;
+        let ctx = self.cpmmount_context();
+        let booting = ctx.booting();
         self.send_line(&format!(
             "  {}",
             self.yellow(if booting { "CHOOSE A SLOT" } else { "CHOOSE A DRIVE" })
@@ -599,14 +635,6 @@ impl TelnetSession {
             .await?;
         self.send_line("").await?;
 
-        // This image's own size, which is what decides the board it would go on
-        // — not the slot it is going into.  Read once for the whole list.
-        let image_len = std::fs::metadata(
-            crate::cpm::image::images_dir(&self.cpmmount_base()).join(filename),
-        )
-        .ok()
-        .map(|md| md.len());
-
         // Drives in use cannot be changed, and are shown saying why rather than
         // silently missing — a drive that vanished from the list would read as
         // a bug.
@@ -618,11 +646,13 @@ impl TelnetSession {
             // Under a booted disk, say what the slot *is* before saying what is
             // in it: the number and the board are the whole answer to "will the
             // guest see this", and the letter is only how `cpm_mounts` spells it.
+            // Named after the *booted disk's* board, not this image's.  The
+            // image picker only offered images on that same board, so the whole
+            // column reads in one vocabulary — which it did not before, when
+            // each row was named after whatever was in it and one screen could
+            // show `unit 0.0` beside `Drive 1`.
             if booting {
-                note.push_str(&format!(
-                    "  {}",
-                    crate::cpm::boot::slot_name(&naming, i, image_len)
-                ));
+                note.push_str(&format!("  {}", ctx.slot(i)));
             }
             if let Some(m) = held {
                 note.push_str(&format!(" - holds {}", m.filename));

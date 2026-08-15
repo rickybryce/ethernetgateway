@@ -34,6 +34,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The mount screens now follow what is going to run.** They offered every
+  image in the folder against sixteen drive letters, whatever was booting, and
+  that produced a real and thoroughly confusing failure: the board an image
+  lands on is chosen by its **size**, so mounting a floppy while a hard disk was
+  set to boot put it on the 88-DCDD while the guest talked only to the 88-HDSK.
+  The disk was mounted, correct, and permanently invisible — and the guest's own
+  B: was an empty platter, so it answered `Bdos Err on B: Bad Sector`. The only
+  hint was a warning printed *after* the boot had already started.
+
+  Now, on all three interfaces: an image is offered only if the machine that
+  will run could actually reach it, and the count that was withheld is shown
+  with the reason rather than the list quietly shrinking. Slots are named by
+  what the boot disk makes them — `A:`–`P:` under the emulator, `unit 0.0` …
+  `unit 3.3` beside a booted 88-HDSK — and named after the *booted* disk's board
+  rather than each row's own image, which is why one screen could previously
+  show `unit 0.0` beside `Drive 1`, two vocabularies in one list. The telnet
+  screen retitles itself **CHOOSE A SLOT** when a disk is booting.
+
+  One `MountContext` answers all of it, so the three interfaces cannot drift.
+
 - **There is one way to boot a disk now.** The telnet CP/M Disk Images screen
   carried a `B  Boot an image`, which ran a disk for one visit and remembered
   nothing, while `cpm_boot_image` decided what the CP/M menu item ran and

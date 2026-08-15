@@ -1166,7 +1166,25 @@ impl App {
             crate::cpm::boot::boot_target(&self.cfg.transfer_dir, &self.cfg.cpm_boot_image)
                 .slot_naming();
         let booting = naming == crate::cpm::boot::SlotNaming::Boards;
-        let images = crate::cpm::image::available_images(&base);
+        // The same `MountContext` the telnet and web screens use.  Under a
+        // booted disk it decides both what a slot is called and which images can
+        // reach the guest at all -- the board is chosen by the image's size, so
+        // an image on another board mounts correctly and is invisible.
+        let ctx = crate::cpm::boot::MountContext::resolve(
+            &self.cfg.transfer_dir,
+            &self.cfg.cpm_boot_image,
+            &self.cfg.cpm_boot_machine,
+        );
+        let img_dir = crate::cpm::image::images_dir(&base);
+        let all_images = crate::cpm::image::available_images(&base);
+        let hidden_images = all_images.len();
+        let images: Vec<String> = all_images
+            .into_iter()
+            .filter(|n| {
+                std::fs::metadata(img_dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false)
+            })
+            .collect();
+        let hidden_images = hidden_images - images.len();
         let mounts = crate::cpm::image::registry::all();
         let usage = crate::cpm::image::registry::usage();
 
@@ -1191,7 +1209,10 @@ impl App {
                             .and_then(crate::cpm::boot::slot_board)
                             .map(|b| format!(" on the {b}"))
                             .unwrap_or_default();
-                        format!("{}{board}", crate::cpm::boot::slot_name(&naming, idx as u8, len))
+                        // Named after the booted disk's board, not this row's
+                        // image: every image offered is on that board now, so
+                        // the column reads in one vocabulary.
+                        format!("{}{board}", ctx.slot(idx as u8))
                     })
                     .collect()
             } else {
@@ -1212,6 +1233,23 @@ impl App {
             "A mounted drive uses the files inside the image instead of the files in its folder. The folder's files are not touched and return when you unmount.".to_string()
         };
         ui.add(egui::Label::new(intro).wrap());
+        // Say what is missing and why.  A folder the operator can open, offering
+        // fewer disks than it holds, is a mystery; the reason is something they
+        // can act on -- change what boots, or fetch a disk of the right kind.
+        if hidden_images > 0 {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{hidden_images} more image{} in the folder {} not offered: with a disk set to boot, an image only reaches the guest if it lands on the same board, and the board is chosen by the image's size.",
+                        if hidden_images == 1 { "" } else { "s" },
+                        if hidden_images == 1 { "is" } else { "are" },
+                    ))
+                    .small()
+                    .color(AMBER_DIM),
+                )
+                .wrap(),
+            );
+        }
         // The offer goes here — above the drives, beside the message that says
         // there is nothing to mount — and not in the footer under sixteen rows
         // where it was first put.  "Where do I get a disk?" is asked at the top
