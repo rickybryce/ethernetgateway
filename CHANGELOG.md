@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The CP/M printer captures to a text file by default.** It was `off`, on the
+  reasoning that a feature which writes files into the operator's transfer
+  directory should be asked for. That rule is right in general and was wrong
+  here: nothing is written until a guest actually prints, so someone who never
+  uses `LST:` never sees a file — what `off` really bought was that the first
+  person to print anything had their output scattered across the terminal with
+  no way to get it back. Text rather than `odt` because it is the format that
+  cannot disappoint; `odt` still carries overstrike through as real bold and
+  underline, and `off` still sends everything to the terminal.
+
+- **The CP/M controls line up.** Every row of the desktop's CP/M popup started
+  its dropdown wherever its own label happened to end, and the dropdowns were
+  ragged on the right too — `ComboBox::width` is a *minimum*, so a longer value
+  grew the box and the edges moved as settings changed. Labels are now
+  right-aligned in one column so the colons agree, and every control is exactly
+  the same width. The Groq key, Home, Weather location and Units rows join the
+  same column, so the popup reads as one form. (Two faults only the screenshot
+  caught: the column clipped the `B` off *Booted disk's backspace:*, and the one
+  row with a button after its dropdown had the button drawn *inside* the control
+  box, on top of a value cut off mid-port.)
+
+- **A brighter logo**, `eglogobrightsmall.png`, in both the desktop window and
+  the web page — the same 366×183 as the file it replaces, which the GUI blits
+  1:1 because minifying a larger source once put a mauve cast in the gradient.
+
 - **The booted-disk screen is reachable from the desktop, not only a browser.**
   A **VDM / Dazzler…** button sits beside *Mount CP/M Drives…* and opens the
   page — at the screen itself (`/vdm`), on the port the running server is

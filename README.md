@@ -88,8 +88,10 @@ options, and the full AT command set.
   transfer protocols. Serves both CP/M machines by two different routes: in the
   emulator the printer is an OS service (BDOS 5 and the BIOS `LIST` vector), so
   WordStar, MBASIC's `LPRINT` and `PIP LST:=FILE.TXT` all arrive; a booted disk
-  drives a printer **board** instead (`cpm_printer_port`). Off by default, in
-  which case printer output goes to your terminal as it always has.
+  drives a printer **board** instead (`cpm_printer_port`). Captures to a text
+  file by default — nothing is written until a guest actually prints — and
+  `cpm_printer = off` sends the output to your terminal instead, where it
+  cannot be recovered.
 - **Modem emulator** — Hayes-compatible AT command set on **two physically
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.

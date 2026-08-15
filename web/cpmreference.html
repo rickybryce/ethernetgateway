@@ -1412,7 +1412,7 @@ altairhd_cobol.dsk</code></pre>
 
             <div class="section" id="printing">
                 <div class="section-title">Printing &mdash; <code>cpm_printer</code></div>
-                <p class="intro">CP/M software prints to a device called <code>LST:</code>. Turn <code>cpm_printer</code> on and what it sends is captured and left in your transfer directory as a document you can collect over XMODEM, ZMODEM, Kermit or any of the others &mdash; an <strong>OpenDocument</strong> file that opens in LibreOffice, Word or Google Docs, or plain text.</p>
+                <p class="intro">CP/M software prints to a device called <code>LST:</code>, and what it sends is captured and left in your transfer directory as a document you can collect over XMODEM, ZMODEM, Kermit or any of the others &mdash; plain text by default, or an <strong>OpenDocument</strong> file that opens in LibreOffice, Word or Google Docs. Nothing is written until a guest actually prints; <code>cpm_printer = off</code> sends the output to your terminal instead, which is where it used to go and where it cannot be recovered.</p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two machines, two routes, one document</h3>
                 <p>
