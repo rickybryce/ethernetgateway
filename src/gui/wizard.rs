@@ -102,6 +102,13 @@ pub(super) struct Wizard {
     cpm_enabled: bool,
     /// Maps to `cpm_emu_uart`: on = the default UART profile, off = `"off"`.
     cpm_dialout: bool,
+    /// Fetch the sample disks once the answers are saved.
+    ///
+    /// Not a config key and never written to one: the wizard edits a draft, so
+    /// there is no settled transfer directory to download into while it is
+    /// open.  The editor reads it through [`Wizard::wants_sample_disks`] on
+    /// Finish and starts the same download its own button starts.
+    cpm_fetch_disks: bool,
 
     /// "standalone" | "master" | "slave" — same values as `gateway_role`.
     role: String,
@@ -111,7 +118,30 @@ pub(super) struct Wizard {
     master_password: String,
 }
 
+/// "34 disks (42 MB) from …" — what the sample-disk offer costs, said before
+/// anything is fetched.  Read from the catalogue rather than from the images
+/// folder: on a first run the folder does not exist yet, and the transfer
+/// directory is still a draft the operator can change on an earlier screen.
+fn sample_disk_offer() -> String {
+    let all = crate::cpm::fetch::catalogue();
+    let mb = all.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+    format!(
+        "{} sample disks ({:.0} MB) can be fetched from {} — only the ones this gateway is \
+         known to run",
+        all.len(),
+        mb,
+        crate::cpm::fetch::source_repos().join(" and "),
+    )
+}
+
 impl Wizard {
+    /// Whether the operator asked for the sample disks on the CP/M screen.
+    /// Read by the editor on Finish, once `apply_to` has settled the transfer
+    /// directory the download needs.
+    pub(super) fn wants_sample_disks(&self) -> bool {
+        self.cpm_enabled && self.cpm_fetch_disks
+    }
+
     /// Seed the draft from the config in effect.  On a true first run that is
     /// the freshly written defaults; on a re-run it is what the operator
     /// already has, so nothing is silently reset.
@@ -136,6 +166,12 @@ impl Wizard {
             pending_dir_pick: None,
             cpm_enabled: cfg.cpm_emu_enabled,
             cpm_dialout: cfg.cpm_emu_uart != "off",
+            // Ticked: a CP/M emulator with no disks is the state nearly
+            // every new operator has to get themselves out of, and the
+            // screen says the count, the size and the repositories above
+            // the box, so accepting it is informed rather than silent.
+            // Untick it and nothing is fetched.
+            cpm_fetch_disks: true,
             role: cfg.gateway_role.clone(),
             master_host: cfg.slave_master_host.clone(),
             master_port: cfg.slave_master_port.to_string(),
@@ -569,7 +605,7 @@ impl Wizard {
             "Serial modem emulator — Hayes AT commands over a real UART, so vintage \
              terminal software can \"dial\" the internet.",
             "CP/M emulator — runs real Z80 or 8080 .COM software, and ships with our \
-             own EGT8080 terminal program in a build for each.",
+             own EGT8080 terminal program, which runs on either.",
             "Gateway Shell — a CP/M-style file manager over the transfer directory.",
             "Extras — a text-mode web browser, a weather service and an AI chat client.",
         ] {
@@ -778,6 +814,23 @@ impl Wizard {
             );
         });
         ui.add_space(6.0);
+        ui.add_enabled_ui(self.cpm_enabled, |ui| {
+            ui.checkbox(
+                &mut self.cpm_fetch_disks,
+                "Download the sample CP/M disks when I finish",
+            );
+        });
+        note(
+            ui,
+            &format!(
+                "{}. They are not ours — this fetches them for you when you finish, into \
+                 {}/CPM/images, and anything already there is left alone. You can do it \
+                 later instead from Mount CP/M Drives.",
+                sample_disk_offer(),
+                self.transfer_dir.trim(),
+            ),
+        );
+        ui.add_space(6.0);
         note(
             ui,
             &format!(
@@ -979,6 +1032,9 @@ impl Wizard {
                 (true, false) => "on, no dial-out",
             },
         );
+        if self.cpm_enabled && self.cpm_fetch_disks {
+            summary(ui, "Sample disks", "download when this finishes");
+        }
         if self.role == "slave" {
             summary(
                 ui,
@@ -1657,6 +1713,54 @@ mod tests {
         assert!(ports[0].1.contains("slave links"));
         w.apply_to(&mut cfg);
         assert!(cfg.ssh_enabled);
+    }
+
+    #[test]
+    fn test_the_sample_disk_offer_is_opt_in_and_dies_with_the_emulator() {
+        // Ticked to begin with — an emulator with no disks is the state a
+        // new operator would otherwise have to dig themselves out of.
+        let mut w = wiz();
+        w.cpm_enabled = true;
+        assert!(w.wants_sample_disks(), "the offer starts ticked");
+
+        // And it is an offer: unticking it is respected.
+        w.cpm_fetch_disks = false;
+        assert!(!w.wants_sample_disks());
+        w.cpm_fetch_disks = true;
+
+        // Turning the emulator off after ticking the box leaves nothing to
+        // download into: the disks are only reachable through it.
+        w.cpm_enabled = false;
+        assert!(!w.wants_sample_disks());
+
+        // It is an action, not a setting — `apply_to` must leave no trace of
+        // it in the config, or an upgrade would re-download every restart.
+        // Both sides differ in the tick and in nothing else.
+        let mut ticked = wiz();
+        ticked.cpm_enabled = true;
+        ticked.cpm_fetch_disks = true;
+        let mut cfg = Config::default();
+        ticked.apply_to(&mut cfg);
+        let mut plain = Config::default();
+        let mut untick = wiz();
+        untick.cpm_enabled = true;
+        untick.cpm_fetch_disks = false;
+        untick.apply_to(&mut plain);
+        assert_eq!(
+            cfg, plain,
+            "asking for the disks must not change a single config key"
+        );
+    }
+
+    #[test]
+    fn test_the_sample_disk_offer_says_the_count_and_the_size() {
+        let offer = sample_disk_offer();
+        let n = crate::cpm::fetch::catalogue().len();
+        assert!(offer.contains(&n.to_string()), "{offer}");
+        assert!(offer.contains("MB"), "{offer}");
+        for repo in crate::cpm::fetch::source_repos() {
+            assert!(offer.contains(&repo), "{offer} is missing {repo}");
+        }
     }
 
     #[test]

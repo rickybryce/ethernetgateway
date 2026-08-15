@@ -789,7 +789,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>4. Access control</td><td>Require login, disable IP safety, and block connections from the router &mdash; each explained in plain language, with the router's real address read from this machine's routing table.</td></tr>
                     <tr><td>5. Web configuration server</td><td>On/off and port (default <code>8080</code>), plus the URL you'll use.</td></tr>
                     <tr><td>6. Transfer directory</td><td>Typed or picked with a folder browser. Holds the CP/M drives and the Gateway Shell's drive A:.</td></tr>
-                    <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT8080.COM is placed on drive A: for you.</td></tr>
+                    <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT8080.COM is placed on drive A: for you. It also offers, ticked to begin with, to download the <strong>sample CP/M disks</strong> once you finish &mdash; it says how many, how many megabytes and which repositories before you decide, and leaves anything already in the images folder alone.</td></tr>
                     <tr><td>8. Gateway role</td><td>Standalone, Master, or Slave. Master arms relay acceptance and, if you left SSH off, explains that slave links ride the master's SSH port &mdash; with a button to enable it, and a warning if you decline. Slave adds a screen for the master's host, port, and credentials.</td></tr>
                     <tr><td>9. Review and finish</td><td>A summary, the exact <code>telnet</code> / <code>ssh</code> / <code>http://</code> commands for what you chose, and the inbound TCP ports to allow on your firewall &mdash; then <em>Save and Restart Server</em>.</td></tr>
                 </table>
@@ -1501,6 +1501,25 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Max sessions</td><td>50</td><td>Maximum concurrent connections</td></tr>
                     <tr><td>Idle timeout</td><td>900s (15 min)</td><td>Disconnect after inactivity (0 = disabled)</td></tr>
                 </table>
+                <p class="dim-text">
+                    <strong>Testing the ports.</strong>  <em>Test ports</em> in the desktop's
+                    Server <em>More&hellip;</em> window and on the web page, or <code>F</code> on
+                    the telnet CONFIGURATION menu, connects to every listener that really bound
+                    &mdash; at this machine's own network address &mdash; and reports what
+                    answered.  One that does not answer is being blocked by something on this
+                    machine: the word <strong>Port</strong> turns red beside it on the graphical
+                    pages, and the telnet screens mark it with a&nbsp;<code>*</code>.  It runs
+                    once at start-up as well.
+                </p>
+                <p class="dim-text">
+                    A port that <em>does</em> answer is deliberately never reported as open.  On
+                    Windows the Filtering Platform exempts traffic a machine sends to its own
+                    address, and macOS's firewall is per-application and does not filter
+                    self-traffic, so on those two a blocked port answers anyway.  The failing
+                    direction is trustworthy on all three; the passing direction is worth
+                    nothing on two of them, and no test running here can see a router that is
+                    not forwarding a port.  Open the ports on your firewall either way.
+                </p>
 
                 <div class="cat">Master/Slave Settings</div>
                 <p class="dim-text">

@@ -11,6 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A port test, on all three interfaces.** *Test ports* on the desktop's
+  Server *More…* window and on the web page, `F` on the telnet CONFIGURATION
+  menu: it connects to every listener that really bound, at this machine's own
+  network address, and reports what answered. A port that does not answer is
+  something local blocking it — the desktop and web pages turn the word **Port**
+  red beside it and redden the *More…* button that leads to the detail, and the
+  telnet screens mark it with a `*`.
+
+  **A pass is deliberately never reported as "open".** On Windows the Filtering
+  Platform exempts traffic a machine sends to its own address, and macOS's
+  firewall is per-application and does not filter self-traffic — so on those two
+  a blocked port answers anyway. The failing direction is trustworthy
+  everywhere; the passing direction is worth nothing on two platforms out of
+  three. Both popups therefore carry the same platform table (one source in
+  `portcheck`, also in the manual at §5.6.1) saying exactly that, with the
+  running platform's column marked, and the telnet CONFIGURATION menu carries a
+  permanent `* open ports on firewall` line so the advice is there even when
+  the check has found nothing.
+
+  It runs once at start-up too — an operator should not have to know to ask —
+  and only against listeners that actually took their port, because a listener
+  that failed to bind is not a firewall problem and reporting it as one would
+  send someone to the wrong place. A result that could not be got at all (no
+  network address on this host yet, no route) is a third state and says so;
+  reporting it as an answer would be an all-clear the check did not earn.
+
+- **The setup wizard offers to download the sample CP/M disks.** Ticked to begin
+  with, on the CP/M screen, saying how many disks, how many megabytes and which
+  two repositories they come from before you decide — a CP/M emulator with no
+  disks is the state nearly every new operator would otherwise have to dig
+  themselves out of. It is an action and not a setting: nothing about it reaches
+  `egateway.conf`, and the download starts once *Save and Restart Server* has
+  settled the transfer directory it needs. Same one implementation as the
+  *Download sample disks* button on every disk screen, so the two offers cannot
+  come to disagree about what they fetch, and anything already in the images
+  folder is left alone.
+
 - **Four more sample disks, from a second collection.** The downloader now also
   draws on Jim McNeely's `AltairDuino-Disks`, which has disks David Hansel's
   Altair 8800 simulator does not: the **Infocom adventures** hard disk
@@ -35,6 +72,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uniquely has, since 26 of its images are byte-identical to Hansel's.
 
 ### Changed
+
+- **The desktop's configuration frames line up.** The six frames are three rows
+  of two, and each row's two frames ended at different heights — a floor was
+  being applied to some of them, and a floor does not align anything: whichever
+  frame's content ran past it grew alone. Raising the floor until nothing
+  exceeded it did straighten them, and left a band of dead space under every
+  frame that pushed the logo down under the console. So the shorter frame is
+  padded to match the taller one instead, from the height its content actually
+  came to. The Security frame's hand-cut spacer — added long ago to keep it
+  level with Server — is gone with it, and that row is 8 px shorter than before
+  rather than taller.
+
+- **The setup wizard's text is no longer against the window edges.** It owns the
+  whole window while it is open, so unlike the editor's framed rows nothing else
+  was holding it off the glass.
+
+- **The desktop window and the web page now use the logo's own background
+  colour** (`#00040e`), which removes the visible edge where the artwork met the
+  page.
+
+- **SSH sessions now honour the client's `TERM`.** It arrives in the pty
+  request and was being discarded, so every SSH session was assumed to be ANSI
+  whatever the client said — a `dumb` terminal was sent colour it cannot
+  render, and a Commodore-side client was sent ANSI instead of PETSCII. Telnet
+  has always taken this from TTYPE; both transports now go through one
+  function, so they cannot come to disagree about what a terminal name means.
 
 - **The CP/M printer captures to a text file by default.** It was `off`, on the
   reasoning that a feature which writes files into the operator's transfer
@@ -176,6 +239,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mount changes made with the CP/M emulator switched off reported success and
+  were silently discarded.** The live table is deliberately not authoritative
+  while the emulator is off, so the configuration was written back with its old
+  value — but nothing stopped the screens acting, so all three confirmed a
+  change that vanished at the next restart. They now refuse with the reason,
+  from the one function every mount path already passes through.
+
+- **A controller reporting a longer write than its own buffer would panic the
+  session.** The only unguarded index on the disk write path; both ends are now
+  bounded and a short buffer refuses the write rather than committing a partial
+  sector.
+
 - **A stray `^@` appeared at a booted CP/M prompt, and it was a real keystroke.**
   RFC 854 says a telnet client spells a bare CR as `CR NUL`, and the gateway
   forwarded that padding NUL to the guest as if it were typed. A booted CP/M
@@ -293,27 +368,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `egui-winit`, for opening a link from the desktop GUI — the gateway's own
   text-mode browser is unrelated code — so exposure was limited, but the fix is
   a lockfile bump.
-
-- **Mount changes made with the CP/M emulator switched off reported success and
-  were silently discarded.** The live table is deliberately not authoritative
-  while the emulator is off, so the configuration was written back with its old
-  value — but nothing stopped the screens acting, so all three confirmed a
-  change that vanished at the next restart. They now refuse with the reason,
-  from the one function every mount path already passes through.
-
-- **A controller reporting a longer write than its own buffer would panic the
-  session.** The only unguarded index on the disk write path; both ends are now
-  bounded and a short buffer refuses the write rather than committing a partial
-  sector.
-
-### Changed
-
-- **SSH sessions now honour the client's `TERM`.** It arrives in the pty
-  request and was being discarded, so every SSH session was assumed to be ANSI
-  whatever the client said — a `dumb` terminal was sent colour it cannot
-  render, and a Commodore-side client was sent ANSI instead of PETSCII. Telnet
-  has always taken this from TTYPE; both transports now go through one
-  function, so they cannot come to disagree about what a terminal name means.
 
 ## [0.9.1] - 2026-08-10
 

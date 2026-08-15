@@ -630,7 +630,19 @@ The screens, in order:
     <li><strong>CP/M emulator</strong> — whether to enable it, and whether to
     give it the virtual modem it can dial out with
     (<code>cpm_emu_uart</code>). Notes that EGT8080.COM is placed on drive A: for
-    you.</li>
+    you. It also offers, ticked to begin with, to <strong>download the sample
+    CP/M disks</strong> — the same set the <em>Download sample disks</em> button on
+    every disk screen fetches (§6.4.3), and the same one implementation,
+    so the two offers cannot disagree about what they fetch. The screen says how
+    many disks, how many megabytes, and which repositories they come from before
+    you decide; the disks are not ours, and this fetches them on your behalf, so
+    untick it if you would rather fetch them yourself or not at all.
+    Ticking it is not a setting and nothing about it is written to
+    <code>egateway.conf</code>: the download starts once you press <em>Save and
+    Restart Server</em>, lands in the transfer directory you chose on the
+    previous screen, and leaves any file already in the images folder alone. It
+    runs in the background, so the window stays usable, and the console line
+    tells you how it went.</li>
     <li><strong>Gateway role</strong> — Standalone, Master, or Slave, with a
     description of each. Choosing Master arms
     <code>master_accept_relays</code>. It does <em>not</em> silently switch the
@@ -1208,7 +1220,7 @@ immediately to running services where possible.
     <dt><span class="kbd">M</span> Serial Configuration</dt>
     <dd>Opens an A/B picker submenu listing both ports with their current status.  Pick a port to enter that port's settings menu, where you can cycle its mode (per-port <span class="kbd">T</span>: <em>Mode: Modem/Console/Kermit</em>), set its device, baud, framing, flow control, AT-state, dialup mapping, and ring emulator.  Each port's settings are fully independent and persist under separate <code>serial_a_*</code> / <code>serial_b_*</code> keys (<code>serial_a_mode</code> / <code>serial_b_mode</code> = <code>modem</code>, <code>console</code>, or <code>kermit</code>).  The per-port <span class="kbd">T</span> item is hidden from sessions that arrived over a serial port (flipping that port would tear down the caller's own connection before it could confirm).</dd>
     <dt><span class="kbd">S</span> Server Configuration</dt>
-    <dd>Listen ports and enable flags for telnet, SSH, the standalone Kermit server, and the configuration web UI; max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
+    <dd>Listen ports and enable flags for telnet, SSH, the standalone Kermit server, and the configuration web UI; max sessions, idle timeout, the network-safety opt-out (<code>disable_ip_safety</code>), and <span class="kbd">F</span> <em>Test ports</em> (&sect;5.6.1).</dd>
     <dt><span class="kbd">F</span> File Transfer</dt>
     <dd>Per-protocol timeouts and retries for XMODEM, ZMODEM, Kermit, and Punter, plus the Kermit server toggle / port and <code>allow_atdt_kermit</code>.</dd>
     <dt><span class="kbd">C</span> CP/M Settings</dt>
@@ -1218,6 +1230,67 @@ immediately to running services where possible.
     <dt><span class="kbd">R</span> Reset Defaults</dt>
     <dd>Restore every recognised key to its built-in default. Confirms with <em>Y/N</em> first; credentials are reset to <code>admin</code> / <code>changeme</code>, so you'll want to set new ones immediately afterward if security is enabled.</dd>
 </dl>
+
+<h3 id="ch5-portcheck">5.6.1 Testing the ports</h3>
+
+<p>
+A listener can bind its port perfectly and still be unreachable, because
+something on the machine is dropping the connections.  <strong>Test ports</strong>
+&mdash; <span class="kbd">F</span> on the telnet Server Configuration screen, and a
+button inside <em>Server &mdash; More</em> in the web and desktop interfaces &mdash;
+connects to each bound listener at this machine&rsquo;s own network address and
+reports what answered.  It also runs once by itself at start-up, so you do not have
+to know to ask.
+</p>
+
+<p>
+A port that does not answer is marked: its <strong>Port</strong> label turns red in
+the web and desktop interfaces (and the frame&rsquo;s <em>More&hellip;</em> button
+turns red with it, to point at the detail), and the telnet screen marks the row with
+a <code>*</code>.  Both graphical interfaces also raise a summary window naming every
+listener and how it answered.  Nothing polls: a red label is a snapshot from the last
+test, and stays red until the next one.
+</p>
+
+<aside class="note">
+<span class="label">What the test actually proves</span>
+This matters more than the result, and it is different on each platform.  The probe
+connects to <em>this machine&rsquo;s own address</em>, and whether such a connection
+meets the firewall at all is an operating-system decision:
+
+<table>
+    <thead><tr><th></th><th>Linux</th><th>Windows</th><th>macOS</th></tr></thead>
+    <tbody>
+        <tr><td>Finds a firewall on this machine</td><td><strong>yes</strong></td><td>no</td><td>no</td></tr>
+        <tr><td>Can raise a false alarm</td><td>no</td><td>no</td><td>no</td></tr>
+        <tr><td>Sees a router not forwarding</td><td>no</td><td>no</td><td>no</td></tr>
+    </tbody>
+</table>
+
+On <strong>Linux</strong> a connection to your own non-loopback address still passes
+through the <code>INPUT</code> chain, so an <code>iptables</code> or
+<code>nftables</code> rule that drops the port really is caught.  On
+<strong>Windows</strong> the Filtering Platform exempts traffic a machine sends to its
+own address, so a port that Windows Defender is blocking answers anyway; on
+<strong>macOS</strong> the application firewall is per-<em>application</em> rather than
+per-port and does not filter this traffic either.  On those two the test can only ever
+come back clear, which is why nothing here ever reports a port as &ldquo;open&rdquo;
+&mdash; the windows say <em>answered on this machine</em>, and say plainly that
+answering is not the same as reachable.
+<br><br>
+The middle row is the one that makes the test worth having: it never cries wolf.  A red
+label always means something real, on every platform.  And no row is a <em>yes</em> for
+the router: nothing running on this machine can see a port that your router is not
+forwarding, so the standing advice to <strong>open these ports on your firewall</strong>
+holds whether or not the test found anything.
+</aside>
+
+<p>
+Each probe is a real inbound connection to the gateway&rsquo;s own listener, so it
+occupies a session slot briefly and appears in the log as a connection from yourself.
+That is why the test runs on demand and at start-up rather than on a timer.
+</p>
+
 
 <aside class="note">
 <span class="label">GUI vs terminal config</span>
@@ -1499,7 +1572,9 @@ mount wizard, the web <em>Mount CP/M Drives</em> page and the desktop
 <em>Mount CP/M Drives</em> window &mdash; offers to <strong>download the sample
 disks</strong> before you mount anything, and so does the CP/M settings screen
 on all three, because you can pick a <em>boot</em> disk without ever opening the
-mount screen.  It fetches about 42&nbsp;MB into
+mount screen.  The desktop setup wizard offers it too, on its CP/M screen
+(§3.1), so a fresh install can arrive with the disks already in place.
+It fetches about 42&nbsp;MB into
 <code>CPM/images</code>, where the gateway finds them without any further
 setup, and it offers <strong>only the disks this gateway is known to run</strong>
 &mdash; thirty-four of them, from the two collections named below.  Four are

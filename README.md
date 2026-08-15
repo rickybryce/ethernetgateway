@@ -107,6 +107,11 @@ options, and the full AT command set.
   worldwide (Open-Meteo, no key required).
 - **Three interfaces to configure it** — an in-session telnet/SSH menu, an
   optional web UI, and a desktop GUI (eframe/egui) with live console output.
+- **A port test** — connects to each bound listener at this machine's own
+  address and marks any that something local is blocking. On all three
+  interfaces, and once at start-up. A port that answers is *not* reported as
+  open: on Windows and macOS a self-connection skips the firewall entirely, so
+  only the failing direction means anything there.
 
 ## Building from Source
 

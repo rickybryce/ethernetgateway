@@ -979,11 +979,11 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
             // Never "all ports are open".  A self-connection skips the firewall
             // on Windows and macOS, so a pass is not evidence -- and this page
             // is read on all three.
-            "Port check: every bound listener answered on this machine. That rules              out a local block on Linux; on Windows and macOS a connection to your              own address skips the firewall, and nothing here can see a router that              is not forwarding a port."
+            "Port check: every bound listener answered on this machine. That rules out a local block on Linux; on Windows and macOS a connection to your own address skips the firewall, and nothing here can see a router that is not forwarding a port."
                 .to_string()
         } else {
             format!(
-                "Port check: {blocked} bound port{} did not answer on this machine —                  marked below.",
+                "Port check: {blocked} bound port{} did not answer on this machine — marked below.",
                 if blocked == 1 { "" } else { "s" }
             )
         };
@@ -1937,9 +1937,9 @@ fn frame_server(cfg: &Config) -> String {
         ssh_label = port_label("SSH"),
         kermit_label = port_label("Kermit"),
         telnet_chk = checkbox("telnet_enabled", "Telnet", cfg.telnet_enabled),
-        telnet_port = port_input_for("telnet_port", cfg.telnet_port, None, Some("telnet")),
+        telnet_port = port_input_for("telnet_port", cfg.telnet_port, None),
         ssh_chk = checkbox("ssh_enabled", "SSH", cfg.ssh_enabled),
-        ssh_port = port_input_for("ssh_port", cfg.ssh_port, None, Some("SSH")),
+        ssh_port = port_input_for("ssh_port", cfg.ssh_port, None),
         web_chk = checkbox_with_attr(
             "web_enabled",
             "Web Server",
@@ -1950,7 +1950,6 @@ fn frame_server(cfg: &Config) -> String {
             "web_port",
             cfg.web_port,
             Some("onchange=\"warnIfChangingWebPort(this)\""),
-            Some("web"),
         ),
         kermit_chk = checkbox_with_attr(
             "kermit_server_enabled",
@@ -1958,7 +1957,7 @@ fn frame_server(cfg: &Config) -> String {
             cfg.kermit_server_enabled,
             "onchange=\"warnOnEnable(this, 'warn-kermit-server')\"",
         ),
-        kermit_port = port_input_for("kermit_server_port", cfg.kermit_server_port, None, Some("Kermit")),
+        kermit_port = port_input_for("kermit_server_port", cfg.kermit_server_port, None),
     )
 }
 
@@ -1970,7 +1969,10 @@ fn frame_server(cfg: &Config) -> String {
 ///
 /// **The label carries the signal, not a tag beside it.** The Server frame is a
 /// fixed seven-column grid laid out by position; an extra item per row would
-/// shear every row after it. Colouring a word already in the grid moves nothing.
+/// shear every row after it. Colour changes no metrics — which is why the CSS
+/// sets a colour and deliberately not a weight: the columns are `max-content`,
+/// so bolding this word would widen its column and de-align the colons the grid
+/// exists to line up.
 ///
 /// Only a blocked port is coloured — a pass is not evidence, see
 /// [`crate::portcheck`].
@@ -1994,12 +1996,7 @@ fn port_label(listener: &str) -> String {
 /// "open" marker to balance it — a self-connection does not meet the firewall
 /// at all on Windows or macOS, so a pass is not evidence. See
 /// [`crate::portcheck`].
-fn port_input_for(
-    name: &str,
-    value: u16,
-    extra_attr: Option<&str>,
-    listener: Option<&str>,
-) -> String {
+fn port_input_for(name: &str, value: u16, extra_attr: Option<&str>) -> String {
     let attr = extra_attr.unwrap_or("");
     let input = format!(
         "<input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"6\" class=\"port-num\" data-orig=\"{value}\" {attr}>",
@@ -2007,7 +2004,6 @@ fn port_input_for(
         value = value,
         attr = attr,
     );
-    let _ = listener;
     input
 }
 
@@ -2561,7 +2557,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         )
     } else if images.is_empty() {
         format!(
-            "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in              {}/images — readme.txt there explains the naming — or make an empty one below.</span></div>",
+            "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in {}/images — readme.txt there explains the naming — or make an empty one below.</span></div>",
             html_escape(&base.display().to_string())
         )
     } else {
@@ -2683,11 +2679,19 @@ fn render_port_check_modal() -> String {
             "<div class=\"row\"><span class=\"label\">{name} {port}</span>{verdict}</div>",
             name = html_escape(name),
             port = port,
+            // Three states, not two: a probe that never reached a
+            // connection attempt is not an answer, and reporting it as one
+            // would be an all-clear this check did not earn.
             verdict = if reach.is_blocked() {
-                "<span class=\"port-blocked\" style=\"font-weight:700\">did not answer</span>"
-                    .to_string()
+                format!(
+                    "<span class=\"port-blocked\" style=\"font-weight:700\">{}</span>",
+                    html_escape(&reach.verdict_phrase())
+                )
             } else {
-                "<span class=\"sub\">answered on this machine</span>".to_string()
+                format!(
+                    "<span class=\"sub\">{}</span>",
+                    html_escape(&reach.verdict_phrase())
+                )
             },
         ));
     }
@@ -2698,12 +2702,60 @@ fn render_port_check_modal() -> String {
          {rows}\
          {blocked_note}\
          <div class=\"row\"><span class=\"hint\">&ldquo;Answered&rdquo; is not the same as \
-         reachable. On Windows and macOS a connection to your own address skips the firewall, \
-         so a port can answer here and still be blocked for everyone else &mdash; and nothing \
-         here can see a router that is not forwarding a port. Open these ports on your \
-         firewall.</span></div>\
+         reachable, and what this test can prove depends on the platform:</span></div>\
+         {platforms}\
+         <div class=\"row\"><span class=\"hint\">{closing}</span></div>\
          </div></div>",
         title = if blocked > 0 { "Port test — something is blocking" } else { "Port test" },
+        // The same table the desktop popup and the manual render, from the one
+        // source in `portcheck` -- a capability claim that drifted between
+        // surfaces would be worse than not making it.
+        platforms = {
+            let here = crate::portcheck::this_platform();
+            let head = ["Linux", "Windows", "macOS"]
+                .iter()
+                .map(|n| {
+                    format!(
+                        "<th{}>{n}</th>",
+                        if here == Some(n) { " class=\"pc-here\"" } else { "" }
+                    )
+                })
+                .collect::<String>();
+            let rows = crate::portcheck::WHAT_THE_TEST_PROVES
+                .iter()
+                .map(|f| {
+                    let cells = [("Linux", f.linux), ("Windows", f.windows), ("macOS", f.macos)]
+                        .iter()
+                        .map(|(n, v)| {
+                            let cls = if here == Some(n) {
+                                if *v == "yes" { " class=\"pc-here pc-yes\"" } else { " class=\"pc-here pc-no\"" }
+                            } else {
+                                ""
+                            };
+                            format!("<td{cls}>{v}</td>")
+                        })
+                        .collect::<String>();
+                    format!("<tr><th scope=\"row\">{}</th>{cells}</tr>", html_escape(f.question))
+                })
+                .collect::<String>();
+            format!(
+                "<table class=\"pc-table\"><thead><tr><th></th>{head}</tr></thead>\
+                 <tbody>{rows}</tbody></table>"
+            )
+        },
+        // From the table's own first row rather than by naming a platform here.
+        closing = if crate::portcheck::WHAT_THE_TEST_PROVES
+            .first()
+            .and_then(|f| f.here())
+            != Some("yes")
+        {
+            "So on this platform a pass means very little: a connection to your own address \
+             does not meet the firewall at all. Open the ports on your firewall and test from \
+             another machine."
+        } else {
+            "Nothing here can see past this machine, so a router that is not forwarding a port \
+             looks fine from in here. Open these ports on your firewall."
+        },
         rows = rows,
         blocked_note = if blocked > 0 {
             "<div class=\"row\"><span class=\"hint\">A port that did not answer is being \
@@ -3691,21 +3743,30 @@ button.refresh {
    6ch was BOTH too wide for the row to fit and too narrow to show five digits,
    because the padding ate into it. */
 .server-grid .port-num { width: calc(5ch + 14px); }
-/* The port input and its check marker share one grid cell.  A second grid
-   child per row would shear every row after it -- the grid is seven columns
-   and the rows are laid out by position. */
-.port-cell { display: flex; align-items: center; gap: 6px; }
 /* Only a blocked port is ever marked; there is no open-port counterpart,
    because a self-connection does not meet the firewall on Windows or macOS. */
 /* Specific enough to win.  `.server-grid .port-label` sets the colour at two
    classes, so a one-class `.port-blocked` lost the colour and kept only the
    weight -- the label came out bold and unchanged, which reads as emphasis
    rather than as a warning.  Three classes takes it back. */
-.server-grid .port-label.port-blocked { color: #ff5a4a; font-weight: 700; cursor: help; }
+/* Colour only, deliberately no `font-weight`.  The grid's content columns are
+   `max-content`, so bolding `Port:` widens the column and shifts the row --
+   de-aligning the very colons the grid exists to line up, and pushing the row
+   past the width the frame's minimum was computed for.  Colour changes no
+   metrics. */
+.server-grid .port-label.port-blocked { color: #ff5a4a; cursor: help; }
 /* The frame says there is something to look at; the popup says what.  A row of
    its own carrying a button and an advisory cost the frame a line it does not
    have to spare, and sat there whether or not a check had ever run. */
 button.more.alert { color: #ff5a4a; border-color: #ff5a4a; }
+/* What a port test proves, per platform.  The running platform's column is the
+   one the operator is in; the others are there to show why it differs. */
+.pc-table { border-collapse: collapse; margin: 4px 0 8px; font-size: 0.82rem; }
+.pc-table th, .pc-table td { padding: 3px 10px; text-align: center; }
+.pc-table th[scope=row] { text-align: left; font-weight: 400; }
+.pc-table .pc-here { font-weight: 700; }
+.pc-table .pc-yes { color: #33cc33; }
+.pc-table .pc-no { color: #ff5a4a; }
 .server-grid button.more { justify-self: end; margin-left: 0; }
 /* Tight row: keeps the contents on a single line.  Used by the
    File Transfer XMODEM tunables row so the right-floated More

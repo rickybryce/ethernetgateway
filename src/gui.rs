@@ -38,6 +38,9 @@ const GREEN: Color32 = Color32::from_rgb(0x33, 0xff, 0x33);
 /// For the one thing on a configuration screen that is a *finding* rather than
 /// a setting: a bound port that did not answer.  Bright enough to read against
 /// the panel without being the alarm red the must-acknowledge popups use.
+/// Space between the setup wizard's text and the window edges.
+const WIZARD_MARGIN: i8 = 14;
+
 const RED_ALERT: Color32 = Color32::from_rgb(0xff, 0x5a, 0x4a);
 const CONSOLE_TEXT: Color32 = Color32::from_rgb(0x33, 0xcc, 0x33);
 const SCRIPTURE: Color32 = Color32::from_rgb(0xc0, 0xaa, 0x60);  // lighter amber for verse
@@ -648,6 +651,26 @@ struct App {
     /// The check runs on its own thread -- four connect timeouts would freeze
     /// the window -- so the result comes back through a channel the frame loop
     /// polls, exactly as the sample-disk download does.
+    /// The taller of each config row's two columns' **natural** content
+    /// height, measured last repaint.
+    ///
+    /// **`set_min_height` is a floor, and a floor does not align anything.**
+    /// Whichever column's content ran past it grew alone, so the two bottom
+    /// borders sat 6-8 px apart and the row read as staggered.  Raising the
+    /// floor until nothing exceeded it aligned them and left a band of dead
+    /// space under every frame, which pushed the logo below the console.
+    ///
+    /// So the shorter column is padded to match the taller one instead.  What
+    /// is stored is the height the content came to **before** that padding —
+    /// feeding a padded frame's own height back in would make the row a little
+    /// taller every repaint, without limit, and the window grows visibly while
+    /// you watch it.  Naturals do not include the padding, so the value is
+    /// whatever the content actually needs and it settles at once.
+    ///
+    /// egui lays out in a single pass and cannot know the second column's
+    /// height while drawing the first, so a one-repaint lag is the only way to
+    /// do this; layout is stable, so it settles on the first repaint.
+    config_row_h: [f32; 3],
     port_check_rx: Option<std::sync::mpsc::Receiver<usize>>,
     /// Whether the port-check result popup is open.
     ///
@@ -881,6 +904,7 @@ impl App {
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
             running_web,
+            config_row_h: [0.0; 3],
             port_check_rx: None,
             port_check_popup_open: false,
             vdm_web_offer_open: false,
@@ -1106,8 +1130,15 @@ impl App {
         // log -- so running it on a timer would fill the log with the operator
         // connecting to themselves.
         ui.horizontal(|ui| {
+            let busy = self.port_check_rx.is_some();
             if ui
-                .add(egui::Button::new(egui::RichText::new("Test ports").color(AMBER_BRIGHT)))
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(
+                        egui::RichText::new(if busy { "Testing…" } else { "Test ports" })
+                            .color(AMBER_BRIGHT),
+                    ),
+                )
                 .on_hover_text(
                     "Connect to each bound listener at this machine's own network \
                      address. A port that does not answer has its Port label \
@@ -1118,15 +1149,24 @@ impl App {
                 )
                 .clicked()
             {
-                // Off the frame thread: four connect timeouts is over a second
-                // of blocking, and the window would freeze for it.  The count
-                // comes back through a channel so the popup opens when the
-                // check is actually finished rather than a guess later.
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.port_check_rx = Some(rx);
-                std::thread::spawn(move || {
-                    let _ = tx.send(crate::portcheck::run_check());
-                });
+                // One at a time.  Two clicks used to leave two threads racing
+                // into `store()`, so the popup -- opened by the second -- could
+                // be showing the first run's table, and the log carried two
+                // interleaved sequences.
+                if self.port_check_rx.is_none() {
+                    // Off the frame thread: four connect timeouts is over a
+                    // second of blocking, and the window would freeze for it.
+                    // The count comes back through a channel so the popup opens
+                    // when the check is actually finished rather than a guess
+                    // later.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.port_check_rx = Some(rx);
+                    let cycle = crate::portcheck::cycle();
+                    std::thread::spawn(move || {
+                        let blocked = crate::portcheck::run_check_for_cycle(cycle);
+                        let _ = tx.send(blocked);
+                    });
+                }
             }
             let blocked =
                 crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
@@ -1352,27 +1392,44 @@ impl App {
             ))
             .clicked()
         {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.cpm_fetch = Some(rx);
-            self.cpm_fetch_note = String::new();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
-                    Ok(r) => {
-                        let mut m = r.summary();
-                        for (name, why) in r.failed.iter().take(3) {
-                            m.push_str(&format!("  {name}: {why}"));
-                        }
-                        m
-                    }
-                    Err(e) => e,
-                };
-                let _ = tx.send(msg);
-                // Wake the UI: without this the result sits in the channel
-                // until something else happens to cause a repaint.
-                ctx.request_repaint();
-            });
+            self.start_cpm_fetch(ui.ctx());
         }
+    }
+
+    /// Start the sample-disk download on its own thread.
+    ///
+    /// Shared by the button above and by the setup wizard, which offers the
+    /// same download on its CP/M screen and starts it once the answers are
+    /// saved — the wizard edits a draft, so it has no folder to download into
+    /// until then.  One implementation, so the two offers cannot drift apart
+    /// over which disks are fetched or what the result says.
+    fn start_cpm_fetch(&mut self, ctx: &egui::Context) {
+        if self.cpm_fetch.is_some() {
+            return;
+        }
+        let images = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir)
+            .join(crate::cpm::image::IMAGES_DIR);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cpm_fetch = Some(rx);
+        self.cpm_fetch_note = String::new();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
+                Ok(r) => {
+                    let mut m = r.summary();
+                    for (name, why) in r.failed.iter().take(3) {
+                        m.push_str(&format!("  {name}: {why}"));
+                    }
+                    m
+                }
+                Err(e) => e,
+            };
+            logger::log(format!("CP/M sample disks: {}", msg.trim()));
+            let _ = tx.send(msg);
+            // Wake the UI: without this the result sits in the channel
+            // until something else happens to cause a repaint.
+            ctx.request_repaint();
+        });
     }
 
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
@@ -1872,10 +1929,10 @@ impl App {
                     // and change nothing; say what went wrong instead.
                     WebScreenState::Failed { port, in_use } => logger::log(if in_use {
                         format!(
-                            "The VDM / Dazzler screen needs the web server, and port {port} is                              already in use — most often a second copy of the gateway. Stop that                              one, or give this one a different web port."
+                            "The VDM / Dazzler screen needs the web server, and port {port} is already in use — most often a second copy of the gateway. Stop that one, or give this one a different web port."
                         )
                     } else {
-                        format!("The web server could not bind port {port}, so there is no                                  screen to open. See the log above for the reason.")
+                        format!("The web server could not bind port {port}, so there is no screen to open. See the log above for the reason.")
                     }),
                     WebScreenState::Off => self.vdm_web_offer_open = true,
                 }
@@ -1957,7 +2014,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless \"a booted                  disk may WRITE\" is ticked above, and that answer covers the                  mounted disks too.",
+            "A booted disk runs its OWN operating system and owns every drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not apply inside it.  Disks are opened read-only unless \"a booted disk may WRITE\" is ticked above, and that answer covers the mounted disks too.",
         );
         // Which machine a BOOTED disk believes it is running on -- specifically
         // where it finds its console.  The same `MACHINE_CHOICES` list the telnet
@@ -1985,7 +2042,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "Where a BOOTED disk finds its console.  Ignored by the CP/M                  emulator, which has no console to place.  A disk that loads                  its operating system and then goes quiet is usually looking                  for a console that is not there, and will sit polling a                  keyboard port for ever.  Not autodetected: what a guest polls                  cannot tell the machine it wants from another machine's                  keyboard at the same address.",
+            "Where a BOOTED disk finds its console.  Ignored by the CP/M emulator, which has no console to place.  A disk that loads its operating system and then goes quiet is usually looking for a console that is not there, and will sit polling a keyboard port for ever.  Not autodetected: what a guest polls cannot tell the machine it wants from another machine's keyboard at the same address.",
         );
         // What a BOOTED disk is handed for the Backspace key.  The same
         // `BACKSPACE_CHOICES` list the telnet and web screens render -- and the
@@ -2177,7 +2234,7 @@ impl App {
                 reset_uart = ui
                     .small_button("Default port")
                     .on_hover_text(
-                        "Reset the CP/M virtual modem to the port EGT8080 expects                          (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
+                        "Reset the CP/M virtual modem to the port EGT8080 expects (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
                     )
                     .clicked();
             },
@@ -3169,6 +3226,7 @@ impl App {
     /// Render the first-run setup wizard and act on its result.  Called
     /// instead of the normal editor while `self.wizard` is `Some`.
     fn draw_wizard(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let outcome = {
             // Disjoint field borrows: the wizard needs a read-only view of the
             // live config (for the settings it doesn't edit) plus the detected
@@ -3202,6 +3260,7 @@ impl App {
                     // Same reason as the Exit arm: apply the answers on top of
                     // the config as it stands now, not the copy we opened with.
                     self.refresh_from_global();
+                    let fetch_disks = w.wants_sample_disks();
                     w.apply_to(&mut self.cfg);
                     // The numeric text buffers back-feed into cfg on save
                     // (sync_numeric_fields), so they must be refreshed from the
@@ -3209,6 +3268,13 @@ impl App {
                     self.sync_buffers_from_cfg();
                     self.dirty = false;
                     logger::log("Setup wizard finished.".into());
+                    // After `apply_to`, so the download lands in the transfer
+                    // directory the operator just chose rather than the one
+                    // that was in effect when the wizard opened.
+                    if fetch_disks {
+                        logger::log("CP/M sample disks: downloading…".into());
+                        self.start_cpm_fetch(&ctx);
+                    }
                     self.save_and_restart_all();
                 }
             }
@@ -3782,7 +3848,13 @@ impl eframe::App for App {
         if self.wizard.is_some() {
             self.track_window_geometry(ui.ctx());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-            self.draw_wizard(ui);
+            // A little air at the edges: the wizard owns the whole window,
+            // so unlike the editor's framed rows nothing else holds its text
+            // off the glass.  Applied here rather than inside the wizard so
+            // one margin covers every screen it can ever draw.
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(WIZARD_MARGIN, 0))
+                .show(ui, |ui| self.draw_wizard(ui));
             return;
         }
 
@@ -3817,7 +3889,22 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 let avail = ui.available_width();
                 let half = (avail - 16.0) / 2.0;
-                // Row height based on line spacing so frames match
+                // Row height based on line spacing so frames match.
+                //
+                // **A floor both frames of a row clear, not an average.**  Each
+                // frame grows past this if its own content needs more, and then
+                // it alone is taller -- which is what left the columns visibly
+                // staggered, the Security frame ending 8 px below Server and the
+                // Serial frame 7 px below General.  Four and a half lines clears
+                // the tallest paired content there is (three control rows plus a
+                // header), so every frame sits exactly on the floor and the
+                // borders line up.
+                //
+                // A feedback loop -- measure both frames, apply the taller next
+                // frame -- was tried and is not worth it here: the height it
+                // converged on was far larger than the content, and a layout that
+                // depends on its own previous output is a poor trade for a
+                // constant that one test can hold.
                 let line_h = ui.text_style_height(&egui::TextStyle::Body);
                 let row_h = line_h * 3.5 + 16.0;
 
@@ -3849,13 +3936,18 @@ impl eframe::App for App {
                 ui.add_space(4.0);
 
                 // ── Row 1: Server + Security ──────────────────
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
+                // Each frame is padded out to the taller of the row's two
+                // columns, measured last repaint (see `config_row_h`).
+                let target0 = row_h.max(self.config_row_h[0]);
+                let target1 = row_h.max(self.config_row_h[1]);
+                let target2 = row_h.max(self.config_row_h[2]);
+
+                let row0 = ui.horizontal_top(|ui| {
+                    let col_a = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Server").strong().color(AMBER));
@@ -3869,16 +3961,21 @@ impl eframe::App for App {
                                     }
                                 });
                                 self.draw_server_controls(ui, true);
+                                let natural = ui.min_rect().height();
+                                if target0 > natural {
+                                    ui.add_space(target0 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
 
-                    ui.allocate_ui_with_layout(
+                    let col_b = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Security").strong().color(AMBER));
@@ -3964,27 +4061,27 @@ impl eframe::App for App {
                                     labeled_field(ui, "User:", &mut self.cfg.username, 70.0);
                                     labeled_password(ui, "Pass:", &mut self.cfg.password);
                                 });
-                                // Spacer row replaces the dropped SSH row
-                                // so the Security frame retains the same
-                                // height as the adjacent Server frame.
-                                // Without this the Security frame would
-                                // shrink and break the side-by-side
-                                // row-pair layout.
-                                ui.allocate_space(egui::vec2(0.0, line_h));
+                                let natural = ui.min_rect().height();
+                                if target0 > natural {
+                                    ui.add_space(target0 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
+                    col_a.max(col_b)
                 });
+                self.config_row_h[0] = row0.inner;
                 ui.add_space(4.0);
 
                 // ── Row 2: File Transfer + AI/Browser ─────────
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
+                let row1 = ui.horizontal_top(|ui| {
+                    let col_a = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("File Transfer (XMODEM)").strong().color(AMBER));
@@ -3998,16 +4095,21 @@ impl eframe::App for App {
                                     }
                                 });
                                 self.draw_file_transfer_controls(ui, true);
+                                let natural = ui.min_rect().height();
+                                if target1 > natural {
+                                    ui.add_space(target1 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
 
-                    ui.allocate_ui_with_layout(
+                    let col_b = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_min_height(row_h);
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("AI Chat, Browser, Weather & CP/M").strong().color(AMBER));
@@ -4037,10 +4139,18 @@ impl eframe::App for App {
                                         self.ai_browser_popup_open = true;
                                     }
                                 });
+                                let natural = ui.min_rect().height();
+                                if target1 > natural {
+                                    ui.add_space(target1 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
+                    col_a.max(col_b)
                 });
+                self.config_row_h[1] = row1.inner;
                 ui.add_space(4.0);
 
                 // ── Row 3: Serial Ports (left) + General (right) ──
@@ -4050,12 +4160,12 @@ impl eframe::App for App {
                 // popup).  General frame on the right shares the row,
                 // matching the half-width layout of the other paired
                 // frames above.
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
+                let row2 = ui.horizontal_top(|ui| {
+                    let col_a = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Serial Port A").strong().color(AMBER));
@@ -4069,15 +4179,21 @@ impl eframe::App for App {
                                 });
                                 self.draw_serial_primary_row(ui, crate::config::SerialPortId::A);
                                 self.draw_serial_primary_row(ui, crate::config::SerialPortId::B);
+                                let natural = ui.min_rect().height();
+                                if target2 > natural {
+                                    ui.add_space(target2 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
 
-                    ui.allocate_ui_with_layout(
+                    let col_b = ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                            let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("General").strong().color(AMBER));
@@ -4106,10 +4222,18 @@ impl eframe::App for App {
                                 // The CP/M emulator toggle + runaway ceiling live
                                 // in the "AI, Browser & Weather — More" popup
                                 // (no room left on the main screen).
+                                let natural = ui.min_rect().height();
+                                if target2 > natural {
+                                    ui.add_space(target2 - natural);
+                                }
+                                natural
                             });
+                            framed.inner
                         },
-                    );
+                    ).inner;
+                    col_a.max(col_b)
                 });
+                self.config_row_h[2] = row2.inner;
                 ui.add_space(6.0);
 
                 // ── User Manual button ────────────────────────
@@ -4743,15 +4867,20 @@ impl eframe::App for App {
                                 .strong()
                                 .color(TEXT_PRIMARY),
                         );
-                        if reach.is_blocked() {
-                            ui.label(
-                                egui::RichText::new("did not answer").strong().color(RED_ALERT),
-                            );
+                        // Three states, not two.  A probe that never got as
+                        // far as a connection -- no address for this host, no
+                        // route -- is neither blocked nor an answer, and
+                        // calling it one would be this feature telling the
+                        // operator everything is fine on the strength of a
+                        // test it did not manage to run.
+                        let phrase = egui::RichText::new(reach.verdict_phrase());
+                        ui.label(if reach.is_blocked() {
+                            phrase.strong().color(RED_ALERT)
+                        } else if reach.is_untested() {
+                            phrase.color(AMBER)
                         } else {
-                            ui.label(
-                                egui::RichText::new("answered on this machine").color(AMBER_DIM),
-                            );
-                        }
+                            phrase.color(AMBER_DIM)
+                        });
                     });
                 }
             }
@@ -4784,12 +4913,65 @@ impl eframe::App for App {
                 ui.add_space(4.0);
             }
             ui.label(
-                "\"Answered\" is not the same as reachable. On Windows and macOS a \
-                 connection to your own address skips the firewall, so a port can \
-                 answer here and still be blocked for everyone else -- and nothing \
-                 here can see a router that is not forwarding a port. Open these \
-                 ports on your firewall.",
+                "\"Answered\" is not the same as reachable, and what this test can \
+                 prove depends on the platform:",
             );
+            ui.add_space(6.0);
+            // The same table the web page and the manual render, from one
+            // source -- a capability claim that drifted between surfaces would
+            // be worse than not making it.
+            let here = crate::portcheck::this_platform();
+            egui::Grid::new("port_check_platforms").num_columns(4).striped(true).show(ui, |ui| {
+                ui.label(egui::RichText::new("").small());
+                for name in ["Linux", "Windows", "macOS"] {
+                    let head = egui::RichText::new(name).small().strong();
+                    ui.label(if here == Some(name) {
+                        head.color(AMBER_BRIGHT)
+                    } else {
+                        head.color(AMBER_DIM)
+                    });
+                }
+                ui.end_row();
+                for fact in crate::portcheck::WHAT_THE_TEST_PROVES {
+                    ui.label(egui::RichText::new(fact.question).small().color(TEXT_PRIMARY));
+                    for (name, value) in
+                        [("Linux", fact.linux), ("Windows", fact.windows), ("macOS", fact.macos)]
+                    {
+                        let cell = egui::RichText::new(value).small();
+                        // The running platform is the column the operator is
+                        // actually in; the others are there to show why.
+                        ui.label(if here == Some(name) {
+                            cell.strong().color(if value == "yes" { CONSOLE_TEXT } else { RED_ALERT })
+                        } else {
+                            cell.color(AMBER_DIM)
+                        });
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            // From the table's own first row rather than by naming a platform
+            // here: the question is "can this build detect a block", and the
+            // table is where that is decided.
+            let detects_here = crate::portcheck::WHAT_THE_TEST_PROVES
+                .first()
+                .and_then(|f| f.here())
+                == Some("yes");
+            if !detects_here {
+                ui.label(
+                    egui::RichText::new(
+                        "So on this platform a pass means very little: a connection to \
+                         your own address does not meet the firewall at all. Open the \
+                         ports on your firewall and test from another machine.",
+                    )
+                    .color(AMBER),
+                );
+            } else {
+                ui.label(
+                    "Nothing here can see past this machine, so a router that is not \
+                     forwarding a port looks fine. Open these ports on your firewall.",
+                );
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui

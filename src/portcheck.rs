@@ -91,6 +91,30 @@ impl Reach {
         matches!(self, Reach::Blocked { .. })
     }
 
+    /// Was the probe unable to say anything at all?
+    ///
+    /// The third state, and the one a two-way rendering loses: a check that
+    /// never reached a connection attempt is neither a block nor an answer.
+    pub fn is_untested(&self) -> bool {
+        matches!(self, Reach::Unknown(_))
+    }
+
+    /// How this result reads in a results list.
+    ///
+    /// **Here rather than in each surface**, because the desktop popup and the
+    /// web modal print the same three phrases and a surface that lost the third
+    /// one would report "answered on this machine" for a probe that never ran --
+    /// an all-clear this check did not earn. Callers pick the colour from
+    /// [`Reach::is_blocked`] and [`Reach::is_untested`]; the words are one
+    /// implementation.
+    pub fn verdict_phrase(&self) -> String {
+        match self {
+            Reach::Blocked { .. } => "did not answer".to_string(),
+            Reach::Unknown(why) => format!("could not be tested — {why}"),
+            Reach::Answered => "answered on this machine".to_string(),
+        }
+    }
+
     /// What to show when hovering, for a surface that has room.
     pub fn hover(&self, port: u16) -> Option<String> {
         match self {
@@ -107,6 +131,80 @@ impl Reach {
     }
 }
 
+/// One row of "what this test actually proves", per platform.
+///
+/// **In one table because two surfaces render it**, and a capability claim that
+/// drifted between the desktop and the web page would be worse than not making
+/// it. The values are the module comment's argument in a form an operator can
+/// read at the moment they are looking at a result.
+pub struct PlatformFact {
+    pub question: &'static str,
+    pub linux: &'static str,
+    pub windows: &'static str,
+    pub macos: &'static str,
+}
+
+/// What a port test can and cannot tell you, by platform.
+///
+/// The middle row is the one that makes the feature worth having at all: it
+/// never cries wolf anywhere. The first row is the one that stops an operator
+/// on Windows reading silence as an all-clear.
+pub const WHAT_THE_TEST_PROVES: &[PlatformFact] = &[
+    PlatformFact {
+        question: "Finds a firewall on this machine",
+        // A connection to your own non-loopback address still traverses the
+        // INPUT chain here, so a DROP really does block it.
+        linux: "yes",
+        // The Filtering Platform exempts traffic a machine sends to its own
+        // address, so a port Defender is blocking answers anyway.
+        windows: "no",
+        // The application firewall is per-application, not per-port, and does
+        // not filter self-traffic.
+        macos: "no",
+    },
+    PlatformFact {
+        question: "Can raise a false alarm",
+        linux: "no",
+        windows: "no",
+        macos: "no",
+    },
+    PlatformFact {
+        question: "Sees a router not forwarding",
+        linux: "no",
+        windows: "no",
+        macos: "no",
+    },
+];
+
+/// The platform this build is running on, as the table names it.
+///
+/// `None` for anything not in the table, which is honest rather than guessing
+/// a column: a BSD is not Linux for this purpose even though the probe may well
+/// behave the same.
+pub fn this_platform() -> Option<&'static str> {
+    if cfg!(target_os = "linux") {
+        Some("Linux")
+    } else if cfg!(target_os = "windows") {
+        Some("Windows")
+    } else if cfg!(target_os = "macos") {
+        Some("macOS")
+    } else {
+        None
+    }
+}
+
+impl PlatformFact {
+    /// This row's answer for the platform we are running on.
+    pub fn here(&self) -> Option<&'static str> {
+        match this_platform()? {
+            "Linux" => Some(self.linux),
+            "Windows" => Some(self.windows),
+            "macOS" => Some(self.macos),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// listener name -> (port, what the last probe found)
@@ -114,6 +212,15 @@ struct State {
     /// Has a check ever been run this cycle?  Distinguishes "nothing is
     /// blocked" from "nobody has looked", which are different answers.
     ran: bool,
+    /// Which server cycle this table belongs to.
+    ///
+    /// A check started just before a restart can still be inside
+    /// `connect_timeout` when the new cycle calls [`reset`] -- the desktop runs
+    /// it on a plain thread, which the runtime shutdown does not reach. Without
+    /// this it would then store the *previous* cycle's ports over a cleared
+    /// table, reddening a port the new cycle never tested: precisely the stale
+    /// result `reset` exists to prevent.
+    cycle: u64,
     /// When the last check ran, so a surface can say how old its answer is.
     ///
     /// A red label is not live -- nothing here polls -- so it means "the last
@@ -165,7 +272,18 @@ pub fn reset() {
         s.results.clear();
         s.ran = false;
         s.ran_at = None;
+        s.cycle = s.cycle.wrapping_add(1);
     });
+}
+
+/// The current server cycle, for a caller that will store a result later.
+pub fn cycle() -> u64 {
+    with(|s| s.cycle)
+}
+
+/// [`run_check`], discarding the result if the server restarted meanwhile.
+pub fn run_check_for_cycle(cycle: u64) -> usize {
+    run_check_inner(Some(cycle))
 }
 
 /// Run a check once the listeners have settled, in the background.
@@ -234,9 +352,17 @@ pub fn probe_addr(addr: SocketAddr, timeout: Duration) -> Reach {
 /// again, and a leftover entry would tell them it had not worked. Every surface
 /// reads `is_blocked` straight from this table, so clearing here is what turns
 /// the labels and the More button back to their ordinary colour.
-fn store(found: Vec<(String, u16, Reach)>) -> usize {
+/// Refuses to write if `cycle` is `Some` and is not the current one.
+fn store_for(found: Vec<(String, u16, Reach)>, cycle: Option<u64>) -> usize {
     let blocked = found.iter().filter(|(_, _, r)| r.is_blocked()).count();
     with(|s| {
+        if let Some(c) = cycle
+            && c != s.cycle
+        {
+            // The server restarted while this check was in flight.  Its ports
+            // belong to a machine that no longer exists.
+            return;
+        }
         s.results = found.into_iter().map(|(n, p, r)| (n, (p, r))).collect();
         s.ran = true;
         s.ran_at = Some(std::time::Instant::now());
@@ -250,8 +376,40 @@ fn store(found: Vec<(String, u16, Reach)>) -> usize {
 /// number found blocked, so a caller can say something without re-reading the
 /// table.
 pub fn run_check() -> usize {
+    run_check_inner(None)
+}
+
+fn run_check_inner(cycle: Option<u64>) -> usize {
     let host = crate::serial::primary_local_ip();
     let listeners = bound_listeners();
+    // **Loopback is not an address we can learn anything from.**
+    // `primary_local_ip` falls back to 127.0.0.1 when the host has no
+    // non-loopback IPv4 -- an IPv6-only machine, or one that started the gateway
+    // before DHCP finished, which the startup check can easily beat. Probing
+    // that answers unconditionally, and every surface would then say "every
+    // bound port answered" on the strength of a test that looked under the wrong
+    // lamp. "We could not look" is a different answer from "nothing is blocked",
+    // and this module exists to keep them apart.
+    let usable_host = host
+        .parse::<std::net::IpAddr>()
+        .map(|ip| !ip.is_loopback())
+        .unwrap_or(true);
+    if !usable_host {
+        glog!(
+            "Port check: this machine has no network address of its own yet (only {host}), \
+             so there is nothing to test against. Try again once it has one."
+        );
+        store_for(
+            listeners
+                .into_iter()
+                .map(|(n, p)| {
+                    (n, p, Reach::Unknown("no non-loopback address on this host".into()))
+                })
+                .collect(),
+            cycle,
+        );
+        return 0;
+    }
     if listeners.is_empty() {
         with(|s| {
             s.results.clear();
@@ -287,7 +445,7 @@ pub fn run_check() -> usize {
         found.push((name, port, reach));
     }
 
-    let blocked = store(found);
+    let blocked = store_for(found, cycle);
     if blocked == 0 {
         // Deliberately not "all ports are open".  On Windows and macOS a pass
         // proves nothing, and this line is read by operators on all three.
@@ -354,6 +512,72 @@ mod tests {
         }
     }
 
+    /// **A result that could not be got is not a pass.**
+    ///
+    /// Both popups list every listener with a phrase beside it. They rendered
+    /// two states for a while, so an `Unknown` -- no address for this host, no
+    /// route -- came out as "answered on this machine": the one sentence this
+    /// module exists to avoid printing when it does not know.
+    #[test]
+    fn test_an_untested_port_never_reads_as_an_answer() {
+        let answered = Reach::Answered.verdict_phrase();
+        let untested = Reach::Unknown("no route".into()).verdict_phrase();
+        let blocked = Reach::Blocked { refused: true }.verdict_phrase();
+
+        assert_ne!(untested, answered);
+        assert_ne!(untested, blocked);
+        assert!(untested.contains("no route"), "it must say why: {untested}");
+
+        // And the three predicates partition the three states, so a surface
+        // choosing a colour cannot land on the wrong one.
+        assert!(!Reach::Answered.is_blocked() && !Reach::Answered.is_untested());
+        assert!(Reach::Unknown(String::new()).is_untested());
+        assert!(!Reach::Unknown(String::new()).is_blocked());
+        assert!(Reach::Blocked { refused: false }.is_blocked());
+        assert!(!Reach::Blocked { refused: false }.is_untested());
+    }
+
+    /// **The capability table answers for the platform this build is on.**
+    ///
+    /// Both graphical surfaces and the manual render this table, so it is the
+    /// one place a claim about what the test proves can be made — and the row
+    /// that matters is the running platform's. The Linux answer is the only
+    /// `yes` in it, which is the point: a self-connection meets the `INPUT`
+    /// chain here and meets nothing at all on the other two.
+    #[test]
+    fn test_the_capability_table_answers_for_this_platform() {
+        let facts = WHAT_THE_TEST_PROVES;
+        assert!(facts.len() >= 3, "the table lost a row");
+
+        // Every row answers for every column, and for here.
+        for f in facts {
+            for v in [f.linux, f.windows, f.macos] {
+                assert!(v == "yes" || v == "no", "{}: {v:?} is not an answer", f.question);
+            }
+            if this_platform().is_some() {
+                assert!(f.here().is_some(), "{}: no answer for this platform", f.question);
+            }
+        }
+
+        // The detection row: Linux yes, the other two no.  If this ever flips,
+        // it is because somebody measured something new — and the manual and
+        // both popups say so from this table, so they follow automatically.
+        let detect = &facts[0];
+        assert_eq!(detect.linux, "yes");
+        assert_eq!(detect.windows, "no", "self-connections skip the Windows firewall");
+        assert_eq!(detect.macos, "no", "the macOS application firewall is per-application");
+
+        // And the promise that makes the feature worth shipping at all: it
+        // never cries wolf, anywhere.
+        let false_alarm = facts.iter().find(|f| f.question.contains("false alarm")).expect("row");
+        for v in [false_alarm.linux, false_alarm.windows, false_alarm.macos] {
+            assert_eq!(v, "no", "a red label must always mean something real");
+        }
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(detect.here(), Some("yes"));
+    }
+
     /// **A passing re-check clears the red.**
     ///
     /// The operator opens their firewall and presses the button again. If a
@@ -366,10 +590,10 @@ mod tests {
         reset();
 
         assert_eq!(
-            store(vec![
+            store_for(vec![
                 ("telnet".into(), 2323, Reach::Blocked { refused: false }),
                 ("web".into(), 8080, Reach::Answered),
-            ]),
+            ], None),
             1
         );
         assert!(result_of("telnet").unwrap().1.is_blocked());
@@ -378,17 +602,20 @@ mod tests {
         // Firewall opened, checked again: nothing is blocked, and nothing is
         // left over to keep a surface red.
         assert_eq!(
-            store(vec![
-                ("telnet".into(), 2323, Reach::Answered),
-                ("web".into(), 8080, Reach::Answered),
-            ]),
+            store_for(
+                vec![
+                    ("telnet".into(), 2323, Reach::Answered),
+                    ("web".into(), 8080, Reach::Answered),
+                ],
+                None,
+            ),
             0
         );
         assert!(!result_of("telnet").unwrap().1.is_blocked(), "the red must clear");
         assert_eq!(results().iter().filter(|(_, _, r)| r.is_blocked()).count(), 0);
 
         // A listener that has gone away leaves no trace either.
-        store(vec![("web".into(), 8080, Reach::Answered)]);
+        store_for(vec![("web".into(), 8080, Reach::Answered)], None);
         assert!(result_of("telnet").is_none(), "a listener that is gone is gone");
 
         // And a reset puts it back to "nobody has looked", which is a third
