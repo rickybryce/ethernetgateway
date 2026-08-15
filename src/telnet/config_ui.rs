@@ -1305,6 +1305,16 @@ impl TelnetSession {
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
             self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
             self.send_line(&format!("  {}  Cycle the CPU (Z80 / 8080)", self.cyan("C"))).await?;
+            // The row that took the boot picker's place.  Writes used to be a
+            // question asked once per visit on a screen that no longer exists;
+            // as a standing setting it is a stronger thing, so it shows its
+            // state here rather than only in the file.
+            self.send_line(&format!(
+                "  {}  Disk writes: {}",
+                self.cyan("W"),
+                if cfg.cpm_boot_writable { self.amber("ALLOWED") } else { self.green("off") }
+            ))
+            .await?;
             // State and action on one row: this screen is at exactly 22 and a
             // separate status line for a boolean would cost a second.
             self.send_line(&format!(
@@ -1405,9 +1415,20 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "w" => {
+                    // Read at the moment a boot starts, so this needs no
+                    // restart -- but it applies to the *next* boot, not to a
+                    // session already running its disk.
+                    let v = (!cfg.cpm_boot_writable).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_writable", &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "q" => return Ok(()),
                 _ => {
-                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, S, or Q."))).await?;
+                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, W, S, or Q."))).await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }

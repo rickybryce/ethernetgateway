@@ -34,6 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **There is one way to boot a disk now.** The telnet CP/M Disk Images screen
+  carried a `B  Boot an image`, which ran a disk for one visit and remembered
+  nothing, while `cpm_boot_image` decided what the CP/M menu item ran and
+  remembered everything. Two boots that asked different questions and disagreed
+  about what would happen next was the single largest source of confusion in the
+  feature — you could set a boot disk on one screen, boot a different one from
+  the other, and have no way to tell which you were looking at. `B` is gone;
+  that screen is configuration, and booting is what the CP/M menu item does.
+
+- **New `cpm_boot_writable` — "Disk writes" on the CP/M Boot Settings screen,
+  a checkbox in the web and desktop UIs.** The removed picker was the *only*
+  place that asked "Allow writes?", and every other route booted read-only, so
+  deleting it would have quietly deleted the ability to boot a disk writable.
+  The question became a setting instead. Off by default, and it is a stronger
+  thing than the question it replaces: a standing setting applies to everyone
+  who reaches CP/M, not to one person for one visit, and it covers the boot disk
+  **and** every image mounted beside it — which is what a machine with the
+  write-protect tabs off is.
+
+  With the picker went its per-disk Backspace question too, so
+  `cpm_boot_backspace` is now the whole answer: set `rubout` before booting a
+  CP/M 1.x disk.
+
 - **"What CP/M runs" is a picker now, not a cycling key.** `R` on the telnet
   CP/M Boot Settings screen opened nothing — it advanced the setting by one and
   redrew a one-line status. That was fine when the answer was "the emulator or

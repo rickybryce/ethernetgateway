@@ -404,6 +404,19 @@ mod generate {
         let duino = std::env::var("DUINO_DISKS")
             .unwrap_or_else(|_| format!("{home}/AltairRepos/AltairDuino-Disks"));
 
+        // **Both collections or nothing.**  `tools/cpm-live-gates` runs every
+        // `#[ignore]` test, so this one runs on any machine that has Hansel's
+        // disks — and writing a manifest from whichever collections happened to
+        // be present would quietly drop four disks from the shipped catalogue
+        // and look like a successful regeneration.  Skipping says so instead.
+        for (what, dir) in [("ALTAIR_DISKS", &hansel), ("DUINO_DISKS", &duino)] {
+            if !std::path::Path::new(dir).is_dir() {
+                eprintln!("skipping: {what} is not a directory ({dir}) — both collections are \
+                           needed to regenerate the manifest, so nothing was written");
+                return;
+            }
+        }
+
         // Which source serves which disk.  Hansel's collection is taken whole;
         // McNeely's contributes only what Hansel does not have, because the four
         // names they share are *different disks* and Hansel's are the documented

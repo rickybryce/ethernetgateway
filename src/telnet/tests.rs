@@ -2501,46 +2501,6 @@ fn test_cpm_boot_settings_row_count() {
     assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
 }
 
-/// **The boot picker's page has to fit a 40x22 PETSCII screen**, which is why
-/// it shows eight images per page where every other listing shows ten.
-///
-/// This screen spends four lines explaining that a booted disk runs its own
-/// operating system — the distinction the whole feature rests on — before it
-/// lists anything, and it carries the same page/nav footer as the mount picker.
-/// With `TRANSFER_PAGE_SIZE` entries that comes to 24 rows on a 22-row screen.
-///
-/// The list length is read out of the source rather than restated, because the
-/// number being right is the entire point: a hand-copied constant agrees with
-/// the screen only until somebody changes one of them.
-#[test]
-fn test_cpm_boot_picker_page_fits_petscii() {
-    let src = include_str!("cpm_mount_ui.rs");
-    let decl = src.find("const BOOT_PAGE: usize =").expect("the page-size constant");
-    let per_page: usize = src[decl..]
-        .split('=')
-        .nth(1)
-        .and_then(|s| s.trim().split(';').next())
-        .and_then(|s| s.trim().parse().ok())
-        .expect("a parseable page size");
-
-    let header = 3; // sep + title + sep
-    let intro = 1 + 4; // blank + the four "runs its OWN operating system" lines
-    let footer = 1 + 1 + 1 + 1 + 1; // blank + page info + blank + nav + prompt
-    let rows = header + intro + per_page + footer;
-    assert!(
-        rows <= 22,
-        "the boot picker is {rows} rows at {per_page} per page, over the 22-row PETSCII budget"
-    );
-    // And it must not have shrunk pointlessly: an unnecessarily short page
-    // means more paging than the screen requires.
-    assert_eq!(rows, 22, "the boot picker is {rows} rows; it should fill the budget");
-    assert!(
-        per_page < TelnetSession::TRANSFER_PAGE_SIZE,
-        "if this screen can afford the usual {} per page, use that constant instead",
-        TelnetSession::TRANSFER_PAGE_SIZE
-    );
-}
-
 /// The "choose what CP/M runs" picker has the same 22-row budget, and its page
 /// size is proven the same way rather than counted by hand.
 ///
@@ -2558,17 +2518,20 @@ fn test_cpm_runs_picker_page_fits_petscii() {
         .and_then(|s| s.trim().parse().ok())
         .expect("a parseable page size");
 
+    // Counted against the screen as it is actually drawn, blank lines
+    // included.  The first version of this model omitted the blank between the
+    // intro and the list and computed 21 for a screen that draws 22 — which
+    // would have let a later `RUNS_PAGE = 10` pass while scrolling the heading
+    // off a C64.  A row model that is short is worse than no model, because it
+    // reads as headroom.
     let header = 3; // sep + title + sep
-    let intro = 1 + 3; // blank + the three "boots its OWN operating system" lines
+    let intro = 1 + 3 + 1; // blank + three dim lines + blank
     let footer = 1 + 1 + 1 + 1 + 1; // blank + page info + blank + nav + prompt
     let rows = header + intro + per_page + footer;
-    assert!(
-        rows <= 22,
-        "the runs picker is {rows} rows at {per_page} per page, over the 22-row PETSCII budget"
-    );
-    assert!(
-        rows >= 21,
-        "the runs picker is only {rows} rows; a shorter page means needless paging"
+    assert_eq!(
+        rows, 22,
+        "the runs picker draws {rows} rows at {per_page} per page; the PETSCII budget is 22 \
+         exactly — under it wastes a row and over it scrolls the heading away"
     );
 }
 
@@ -2582,9 +2545,9 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
     let body = &src[start..end];
 
-    let hint = "Press R, M, B, C, S, or Q.";
+    let hint = "Press R, M, B, C, W, S, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["R", "M", "B", "C", "S"] {
+    for key in ["R", "M", "B", "C", "W", "S"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -2595,75 +2558,6 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
         );
         assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
     }
-}
-
-/// **The boot confirmation is a screen, not a footnote under the picker.**
-///
-/// The two questions a boot asks — allow writes, and how this disk wants
-/// Backspace — used to print *underneath* the boot picker, which is itself at
-/// its full 22 rows. On a PETSCII terminal the heading and the top of the disk
-/// list scrolled away while the operator was being asked to authorise writes to
-/// their disks: the worst moment to lose the context of what was chosen.
-///
-/// Same rule, and the same fix, as `other_set_field`: a screen that asks a
-/// question has to clear and draw a heading first. This one also reports what
-/// was picked and points at `repodisks.txt`, because the picker shows a bare
-/// filename and the sample disks do not describe themselves.
-#[test]
-fn test_the_boot_confirmation_is_its_own_screen_and_fits() {
-    let src = include_str!("cpm_mount_ui.rs");
-    let start = src.find("async fn cpmmount_pick_boot").expect("the picker fn");
-    let body = &src[start..];
-    let ask = body.find("Allow writes to the disks?").expect("the write question");
-    let before = &body[..ask];
-
-    // It must clear and draw its own heading before asking.
-    let cleared = before.rfind("self.clear_screen()").expect("no clear before the question");
-    let heading = before.rfind("BOOT THIS DISK?").expect("the confirmation heading");
-    assert!(cleared < heading, "the heading must be drawn after the clear");
-    // And that clear must come after the *list* was drawn, i.e. it is a new
-    // screen rather than the picker's own.
-    let list = before.rfind("Page {} of {}").expect("the picker's page line");
-    assert!(list < cleared, "the question still shares the picker's screen");
-
-    // The review lines the operator needs before committing.
-    for needed in ["Disk:", "Media:", "Size:", "repodisks.txt"] {
-        assert!(before.contains(needed), "the confirmation must show {needed}");
-    }
-
-    // The path is built from the configured transfer dir, not written out as a
-    // literal — an operator who moved it would otherwise be sent to a folder
-    // that is not theirs by the one line whose job is to say where to look.
-    // From the configured transfer dir, joined through the same constants the
-    // layout is built from — not `cpmmount_base()`, which canonicalises and
-    // would print the absolute path of the working directory, and not a
-    // hardcoded "transfer/CPM/images" either.
-    let sign_start = before.find("let listing").expect("the repodisks signpost");
-    let sign = &before[sign_start..];
-    let sign = &sign[..sign.find(';').map(|i| i + 1).unwrap_or(sign.len())];
-    assert!(
-        sign.contains("config::get_config().transfer_dir")
-            && sign.contains("layout::CPM_DIR")
-            && sign.contains("image::IMAGES_DIR"),
-        "the repodisks path must be composed from the configured transfer dir \
-         and the layout constants, not written out: {sign}"
-    );
-    // Scoped to the signpost itself: `images_dir(&base)` is correct a few lines
-    // above, where the *real* path to open the image is built.
-    assert!(
-        !sign.contains("images_dir("),
-        "images_dir canonicalises; a signpost must show the configured path"
-    );
-
-    // Row budget: header(3) + blank + 3 review + blank + 2 repodisks note
-    // + blank + 1 writes note + 1 writes prompt, then the Backspace question's
-    // 2 notes + 1 prompt land under it once the first is answered (+1 for the
-    // echoed newline).
-    let rows = 3 + 1 + 3 + 1 + 2 + 1 + 1 + 1 + 1 + 2 + 1;
-    assert!(
-        rows <= 22,
-        "the boot confirmation reaches {rows} rows, over the 22-row PETSCII budget"
-    );
 }
 
 /// **Every key the CP/M Disk Images screen displays must be one it handles.**
@@ -2692,7 +2586,10 @@ fn test_cpm_disk_images_keys_are_displayed_and_handled() {
     let end = src[start..].find("\n    /// Make a new, empty").expect("the next fn") + start;
     let body = &src[start..end];
 
-    for key in ["M", "B", "N", "D", "U"] {
+    // No "B": the boot picker left this screen in 0.9.2.  This screen is
+    // configuration; booting is what the CP/M menu item does, from
+    // `cpm_boot_image`.
+    for key in ["M", "N", "D", "U"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -2738,11 +2635,13 @@ fn test_cpm_boot_screen_row_count() {
     let rows = drawn - 2 + 1;
     assert!(rows <= 22, "CP/M boot screen is {rows} rows, over the 22-row PETSCII budget");
     assert_eq!(
-        rows, 21,
-        "this screen was full at 22 until 0.9.2, when the CPU note lost its second \
-         line — it said \"Run EGT8080 on the 8080\", a choice between two terminals \
-         on drive A:, and there is one now. If it has shrunk again, say why here \
-         before filling it back up."
+        rows, 22,
+        "this screen is full. It was 22, briefly 21 when the CPU note lost its \
+         second line — it said \"Run EGT8080 on the 8080\", a choice between two \
+         terminals on drive A:, and there is one now — and 22 again since the \
+         boot picker left the disks screen and its \"Allow writes?\" question \
+         became the standing `W` row here. There is no room left: a new row \
+         needs one of these to go first."
     );
 }
 
@@ -8085,45 +7984,34 @@ fn test_cpmemu_idle_nap_paces_only_an_established_idle_loop() {
 /// sizes, for as long as hard disks had been booting.
 #[test]
 fn test_bootable_size_lines_fit_petscii_and_name_every_medium() {
-    let lines = TelnetSession::bootable_size_lines();
+    // The screen that listed every bootable size went with the boot picker in
+    // 0.9.2, but the *labels* did not: they still reach a 40-column PETSCII
+    // terminal on the boot banner and in the mount result, so the budget they
+    // have to fit is unchanged and is checked here directly rather than through
+    // a screen helper that no longer exists.  The line these were printed on
+    // was two spaces, a seven-character size and a separator, which is what
+    // leaves 30 for the label.
+    const LABEL_BUDGET: usize = 30;
     let media = crate::cpm::boot_machine::BootMachine::bootable_media();
-    assert_eq!(lines.len(), media.len(), "one line per medium");
     assert!(media.len() >= 3, "the floppy, the minidisk and the hard disk at least");
 
-    for line in &lines {
+    for m in &media {
         assert!(
-            line.chars().count() <= PETSCII_WIDTH,
-            "{} chars, over the {PETSCII_WIDTH}-column budget: {line:?}",
-            line.chars().count(),
+            m.label.chars().count() <= LABEL_BUDGET,
+            "{} chars, over the {LABEL_BUDGET}-column budget: {:?}",
+            m.label.chars().count(),
+            m.label,
         );
     }
 
-    // And the screen they sit on must still fit, which is the half a width
-    // check cannot see. This list grows every time a board lands — three lines
-    // arrived with the Cromemco alone — and it is printed in full on the
-    // "nothing here can boot" screen, whose other ten lines are fixed:
-    // separator, title, separator, blank, the notice, blank, two lines of
-    // explanation, blank, and the prompt. A board that pushed this over the
-    // budget would scroll the title off a 40-column client, and nothing else
-    // here would notice.
-    const FIXED_ROWS: usize = 10;
-    assert!(
-        FIXED_ROWS + lines.len() <= 22,
-        "the no-bootable-images screen is {} rows, exceeds 22 — {} media now",
-        FIXED_ROWS + lines.len(),
-        lines.len(),
-    );
+    // The screen that printed them is gone, so what remains to guard is that
+    // every bootable medium is *nameable* at all: a board whose label was empty
+    // or whose size was zero would still pass the width check above by being
+    // vacuously short.  This is what the completeness half of the old test was
+    // really for -- it caught a screen claiming "only Altair 88-DCDD floppies
+    // can boot" for as long as hard disks had been booting.
     for m in &media {
-        assert!(
-            lines.iter().any(|l| l.contains(m.label)),
-            "no line names the bootable {}: {lines:?}",
-            m.label,
-        );
-        assert!(
-            lines.iter().any(|l| l.contains(&m.bytes.to_string())),
-            "no line gives the size of {} ({} bytes)",
-            m.label,
-            m.bytes,
-        );
+        assert!(!m.label.trim().is_empty(), "a bootable medium with no name");
+        assert!(m.bytes > 0, "{}: a bootable medium of no size", m.label);
     }
 }

@@ -1170,6 +1170,7 @@ fn collect_form_updates(
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "cpm_emu_enabled",
         "cpm_screen_input",
+        "cpm_boot_writable",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
@@ -2774,6 +2775,7 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <div class=\"row\">{cpm}</div>\
          <div class=\"row\">{cpmscreen}</div>\
+         <div class=\"row\">{cpmwrite}</div>\
          <div class=\"row\">{cpmmax}\
              <span class=\"hint\">Runaway ceiling for one CP/M emulator program, \
              in millions of instructions (2000 = 2 billion). A compute-bound \
@@ -2806,6 +2808,11 @@ fn render_more_popups(cfg: &Config) -> String {
             "cpm_screen_input",
             "Disk Screen may type at a booted disk (the screen is readable either way)",
             cfg.cpm_screen_input,
+        ),
+        cpmwrite = checkbox(
+            "cpm_boot_writable",
+            "A booted disk may WRITE to its images (off keeps every disk safe)",
+            cfg.cpm_boot_writable,
         ),
         cpmmax = numfield(
             "cpm_emu_max_minstr",

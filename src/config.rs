@@ -385,6 +385,16 @@ const DEFAULT_CPM_EMU_ENABLED: bool = true;
 /// exit gesture is deliberately not honoured from a browser — ending a session
 /// somebody else is sitting at is not a keystroke.
 const DEFAULT_CPM_SCREEN_INPUT: bool = true;
+
+/// Booting is read-only unless the operator says otherwise.
+///
+/// The safe answer, and the one that was already in force: until 0.9.2 a
+/// writable boot could only be asked for on the telnet mount wizard's boot
+/// picker, one visit at a time, and every other route booted read-only.  When
+/// that picker went — two ways to boot one disk was the confusion it caused —
+/// the *question* had to survive it, or removing a screen would have quietly
+/// removed a capability.
+const DEFAULT_CPM_BOOT_WRITABLE: bool = false;
 /// Refuse connections whose source address ends in `.1` — typically the router
 /// on the local subnet — while the IP allowlist is in force.
 ///
@@ -852,6 +862,14 @@ pub struct Config {
     /// The screen is always readable; this decides whether it is also a
     /// keyboard.  See [`DEFAULT_CPM_SCREEN_INPUT`].
     pub cpm_screen_input: bool,
+    /// May a booted disk write to the images it is running?
+    ///
+    /// **Off, because a booted disk has no guard left that understands its
+    /// requests.**  Mounting goes through our own filesystem and can refuse a
+    /// bad one; a booted guest owns the whole image and rewrites the file when
+    /// it leaves, so the only protections that remain are blunt — this, and one
+    /// session per image.  See [`DEFAULT_CPM_BOOT_WRITABLE`].
+    pub cpm_boot_writable: bool,
     /// Refuse connections from `*.*.*.1` (the local router, typically) while
     /// the IP allowlist applies.  Off by default; see
     /// [`DEFAULT_DISABLE_GATEWAY_CONNECTIONS`].  Loopback is never affected.
@@ -1086,6 +1104,7 @@ impl Default for Config {
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             cpm_screen_input: DEFAULT_CPM_SCREEN_INPUT,
+            cpm_boot_writable: DEFAULT_CPM_BOOT_WRITABLE,
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
@@ -1698,6 +1717,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_screen_input")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_SCREEN_INPUT),
+        cpm_boot_writable: map
+            .get("cpm_boot_writable")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_CPM_BOOT_WRITABLE),
         disable_gateway_connections: map
             .get("disable_gateway_connections")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -2475,9 +2498,20 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   characters interleave if they do it at once, which is what a shared
 #   terminal is.  The ESC ESC exit gesture is NOT honoured from a browser:
 #   ending a session somebody else is sitting at is not a keystroke.
+# cpm_boot_writable: may a booted disk WRITE to the images it is running?
+#   Off by default, and think before turning it on.  A mounted image is read
+#   through our own filesystem, which can refuse a request it does not like; a
+#   booted disk owns the whole image and rewrites the file when it leaves, so
+#   there is no guard left that understands what the guest is asking for.  What
+#   remains is blunt: this key, and one session per image.  It applies to the
+#   boot disk AND to every image that comes along mounted, because they are all
+#   in the same machine.  Off means the guest's writes are accepted and
+#   discarded, which is what most vintage software expects to be able to do
+#   without you losing the disk.
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_screen_input", cfg.cpm_screen_input);
+    write_kv(&mut content, "cpm_boot_writable", cfg.cpm_boot_writable);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
     content.push_str("\
@@ -3189,6 +3223,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_screen_input" => cfg.cpm_screen_input = value.eq_ignore_ascii_case("true"),
+        "cpm_boot_writable" => cfg.cpm_boot_writable = value.eq_ignore_ascii_case("true"),
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_mounts" => cfg.cpm_mounts = value.to_string(),
         "cpm_boot_image" => {
@@ -4057,6 +4092,7 @@ mod tests {
             cpm_boot_image: "altair8_cpm.dsk".to_string(),
             // Deliberately not the default, so the roundtrip proves the key is
             // written and read back rather than merely defaulting twice.
+            cpm_boot_writable: true,
             cpm_boot_machine: "console_04_cuter".to_string(),
             // Likewise not the default: `rubout` is what a CP/M 1.x operator
             // sets, and it has to survive a write/read cycle to be worth having.

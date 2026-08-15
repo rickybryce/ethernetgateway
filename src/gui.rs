@@ -1502,6 +1502,15 @@ impl App {
             &mut self.cfg.cpm_screen_input,
             "Disk Screen may type at a booted disk (the screen is readable either way)",
         );
+        // Writes by a *booted* disk.  A standing setting since 0.9.2, when the
+        // telnet boot picker -- which asked it once per visit -- was removed for
+        // being a second way to boot.  Kept beside the CP/M controls rather than
+        // with the disk mounting, because it is about what the guest may do,
+        // not about which image is where.
+        ui.checkbox(
+            &mut self.cfg.cpm_boot_writable,
+            "A booted disk may WRITE to its images (off keeps every disk safe)",
+        );
         ui.horizontal(|ui| {
             labeled_field(
                 ui,

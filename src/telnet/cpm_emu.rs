@@ -391,17 +391,23 @@ impl TelnetSession {
         // confusing: nothing below this line — the drives, EGT8080, the `A>`
         // prompt — exists inside a booted disk.
         if let Some(path) = self.cpmemu_boot_target().await {
-            // Read-only.  The per-session picker asks whether to allow writes,
-            // because there a person is choosing one disk for one visit; a
-            // standing setting that quietly let every visitor write to the same
-            // image is a different proposition, and the safe answer is the one
-            // that cannot lose a disk.
-            // No picker on this path, so `cpm_boot_backspace` is the whole
-            // answer here rather than a seed for a question.
-            let erase = crate::cpm::boot::backspace_erases(
-                &config::get_config().cpm_boot_backspace,
-            );
-            return self.cpm_boot_session(&path, false, erase).await;
+            // Both answers come from the config now, because this is the only
+            // way to boot.  The per-visit picker on the disks screen asked them
+            // as questions and was removed in 0.9.2 -- two ways to boot one
+            // disk, differing in what they asked and what they remembered, was
+            // the confusion it caused.
+            //
+            // `cpm_boot_writable` is off by default and it is a standing
+            // setting, so turning it on lets *every* visitor write to the
+            // image, not one person for one visit.  That is a real change in
+            // kind from the question the picker asked, which is why the key
+            // says so in `egateway.conf` and on all three screens rather than
+            // reading as a convenience.
+            let cfg = config::get_config();
+            let erase = crate::cpm::boot::backspace_erases(&cfg.cpm_boot_backspace);
+            let writable = cfg.cpm_boot_writable;
+            drop(cfg);
+            return self.cpm_boot_session(&path, writable, erase).await;
         }
 
         // The processor this visit runs on, read ONCE.  The banner below, the
@@ -589,6 +595,20 @@ impl TelnetSession {
             }
             crate::cpm::boot::BootTarget::Missing(name) => {
                 glog!("CP/M: cpm_boot_image '{}' is not in CPM/images — running the emulator", name);
+            }
+            // The third fallback, and the one that would otherwise be silent
+            // in the worst way: the disk IS there, so nothing looks wrong.
+            // Before the boot lists began cold-starting images, a disk like
+            // this reached the boot session and printed its `BootError` in red
+            // on the operator's terminal; now it never gets that far, so
+            // without this line the only trace is a `(not bootable)` mark on a
+            // configuration screen they have no reason to open.
+            crate::cpm::boot::BootTarget::NotBootable(name) => {
+                glog!(
+                    "CP/M: cpm_boot_image '{}' carries no boot program — running the emulator. \
+                     A disk of programs for another disk is one to MOUNT, not to boot.",
+                    name
+                );
             }
             _ => {}
         }

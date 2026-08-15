@@ -72,11 +72,18 @@ fn boards_to_controller(board: super::console::Board) -> Box<dyn Controller> {
 /// Every board any machine here can carry, for the questions that are about the
 /// gateway rather than about one machine.
 ///
-/// [`BootMachine::medium_for`] and [`BootMachine::bootable_media`] answer "could
-/// this file be booted *at all*", which is a different question from "does the
-/// currently configured machine carry it" — the boot picker and the generated
-/// readme both want the former. Built from the machine list rather than written
-/// out, so a board reachable from no machine cannot claim to be bootable.
+/// [`BootMachine::bootable_media`] answers "could this file be booted *at all*",
+/// which is a different question from "does the currently configured machine
+/// carry it" — the generated readme wants the former. Built from the machine
+/// list rather than written out, so a board reachable from no machine cannot
+/// claim to be bootable.
+///
+/// There was a `medium_for(len)` here that answered the same question for one
+/// file, and it was the boot picker's filter. It went with the picker in 0.9.2:
+/// a *size* is not a boot program, so it offered every data disk in the
+/// collection and every one of them failed when chosen. What replaced it asks
+/// the configured machine to actually cold-start the image — see
+/// `cpm::boot::image_can_boot`.
 fn all_controllers() -> Vec<Box<dyn Controller>> {
     let mut seen = Vec::new();
     let mut out = Vec::new();
@@ -950,20 +957,6 @@ impl BootMachine {
     /// Position-register reads without the disk moving on.
     pub fn stuck_polls(&self) -> u32 {
         self.controllers.iter().map(|c| c.stuck_polls()).max().unwrap_or(0)
-    }
-
-    /// What medium an image of this size is, if any controller here takes it.
-    ///
-    /// The one place that answers "can this file be booted", so the boot
-    /// picker, the survey and the generated readme cannot disagree about it —
-    /// and so a new controller becomes bootable everywhere by existing, rather
-    /// than by being added to three lists.
-    pub fn medium_for(image_len: u64) -> Option<&'static str> {
-        // Every board, not the default machine's — "can this be booted" must not
-        // depend on which machine happens to be configured, or a z80pack disk
-        // would be missing from the boot picker until the operator had already
-        // switched machines to see it.
-        all_controllers().iter().find_map(|c| c.accepts(image_len))
     }
 
     /// Every medium a booted machine here can carry, board by board.
@@ -3947,11 +3940,17 @@ mod tests {
         let mut spoke = 0;
         for name in &names {
             let bytes = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
-            let Some(medium) = BootMachine::medium_for(bytes.len() as u64) else {
+            // Any board on any machine here, which is what the survey wants:
+            // a z80pack disk must not be "skipped" merely because the machine
+            // this run happens to be configured for cannot carry it.
+            let len = bytes.len() as u64;
+            if !BootMachine::bootable_media()
+                .iter()
+                .any(|m| len >= m.bytes && len <= m.bytes + m.trailer)
+            {
                 println!("  skipped  {name}  ({} bytes — no controller takes it)", bytes.len());
                 continue;
-            };
-            let _ = medium;
+            }
             let mut m = BootMachine::new();
             // The survey is the one place that sees a bring-up move as a whole,
             // so it has to be able to survey a *machine* and not just a disk:

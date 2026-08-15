@@ -682,7 +682,8 @@
                         <tr><td><code>cpm_mounts</code></td><td><em>(empty)</em></td><td>Images mounted on drives, as <code>A=name.dsk,C=other.dsk</code>. Bare filenames inside <code>CPM/images</code>. See <a href="#disks">Disk Images</a>.</td></tr>
                         <tr><td><code>cpm_boot_image</code></td><td><em>(empty)</em></td><td>What the CP/M menu item runs: empty = the CP/M emulator, or a bare filename in <code>CPM/images</code> to cold-boot that disk. A name that is not there falls back to the emulator, shown as <code>(missing)</code>. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_boot_machine</code></td><td><code>altair_2sio</code></td><td>Which machine a <em>booted</em> disk thinks it is on &mdash; specifically where it finds its console. Ignored by the emulator, which has no console to place. See <a href="#booting">Booting</a>.</td></tr>
-                        <tr><td><code>cpm_boot_backspace</code></td><td><code>backspace</code></td><td>What a <em>booted</em> disk is handed when you press Backspace &mdash; <code>backspace</code> (BS, <code>08h</code>) or <code>rubout</code> (DEL, <code>7Fh</code>). Ignored by the emulator, which reads its own console line and accepts either. The telnet boot picker asks again per disk and starts from this. See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_boot_backspace</code></td><td><code>backspace</code></td><td>What a <em>booted</em> disk is handed when you press Backspace &mdash; <code>backspace</code> (BS, <code>08h</code>) or <code>rubout</code> (DEL, <code>7Fh</code>). Ignored by the emulator, which reads its own console line and accepts either. This is the whole answer: the per-disk question went with the boot picker in 0.9.2. See <a href="#booting">Booting</a>.</td></tr>
+                        <tr><td><code>cpm_boot_writable</code></td><td><code>false</code></td><td>May a <em>booted</em> disk WRITE to the images it is running? Off by default. A mounted image is read through our own filesystem, which can refuse a request it does not like; a booted disk owns the whole image and rewrites the file when it leaves, so no guard remains that understands what the guest is asking for. Covers the boot disk <strong>and</strong> every image mounted beside it, and it is a standing setting rather than the per-visit question the old boot picker asked. Ignored by the emulator. See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_cpu</code></td><td><code>z80</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the emulator's transient programs and a booted disk's whole operating system. <code>z80</code> is a strict superset of the 8080, so it runs every disk here; <code>8080</code> is the processor the Altair actually shipped with. <strong><code>EGT8080.COM</code></strong> is placed on drive A:: built to the 8080's instruction set, so it runs on <em>either</em> setting. A separate Z80 build was retired in 0.9.2 &mdash; it crashed an 8080, so shipping both meant shipping a wrong answer beside the right one. The <code>hbios_*</code> modem profiles emulate RomWBW &mdash; Z80/Z180 firmware &mdash; so other people's software that looks for it is generally Z80 code and will not run on an 8080, though our HBIOS itself answers an 8080 perfectly well (<code>RST 8</code> is an 8080 instruction). See <a href="#booting">Booting</a>.</td></tr>
                         <tr><td><code>cpm_printer</code></td><td><code>off</code></td><td>Where CP/M printer output goes &mdash; <code>off</code> (your terminal, as it always has), <code>odt</code> (an OpenDocument text file) or <code>text</code>. Reaches <strong>both</strong> CP/M machines, by two different routes: in the emulator the printer is an OS <em>service</em> (BDOS function 5 and the BIOS <code>LIST</code> vector), so WordStar, MBASIC's <code>LPRINT</code> and <code>PIP LST:=FILE.TXT</code> all arrive; a booted disk drives the <em>board</em> below. The document lands in a <code>printer</code> folder inside the transfer directory, named <code>PRINT-YYYYMMDD-HHMMSS</code>, 5&nbsp;seconds after the last character printed &mdash; and in the emulator also the moment the program returns to <code>A&gt;</code>, which is exact. See <a href="#printing">Printing</a>.</td></tr>
                         <tr><td><code>cpm_printer_port</code></td><td><code>altair_c</code></td><td>Which printer board a <em>booted</em> disk finds: <code>altair_c</code> (Altair line printer, data register <code>03h</code>) or <code>off</code>. Ignored by the emulator, whose printer is a BDOS service with no port at all, and ignored entirely when <code>cpm_printer</code> is off. See <a href="#printing">Printing</a>.</td></tr>
@@ -944,10 +945,9 @@ altairhd_cobol.dsk</code></pre>
                 <table class="data-table">
                     <thead><tr><th>Where</th><th>How</th></tr></thead>
                     <tbody>
-                        <tr><td>Telnet / SSH</td><td>Settings &rarr; CP/M Emulator &rarr; <code>B</code> cycles through the emulator and each image.</td></tr>
+                        <tr><td>Telnet / SSH</td><td>Settings &rarr; CP/M Emulator &rarr; <code>B</code> (Boot settings) &rarr; <code>R</code>, which opens a list of the emulator and every disk that boots.</td></tr>
                         <tr><td>Web</td><td>AI, Browser, Weather &amp; CP/M &rarr; More &rarr; <strong>CP/M runs</strong>.</td></tr>
                         <tr><td>Desktop</td><td>Same group &rarr; <strong>CP/M runs</strong>.</td></tr>
-                        <tr><td>One visit only</td><td>The telnet mount wizard's boot picker, which also offers to allow writes.</td></tr>
                     </tbody>
                 </table>
                 <p>
@@ -1057,13 +1057,14 @@ altairhd_cobol.dsk</code></pre>
                 </p>
                 <div class="callout">
                     <p>
-                        <strong>The boot picker asks again, per disk.</strong> Because the right
-                        answer is a property of the operating system on the disk and not of the
-                        gateway, the telnet picker asks after &ldquo;Allow writes?&rdquo; and starts
-                        from <code>cpm_boot_backspace</code> &mdash; so the usual case is Return and
-                        a CP/M 1.4 disk costs one keypress instead of a config edit. The emulator is
-                        unaffected either way: it reads its own console line and has always accepted
-                        both bytes.
+                        <strong>It is a setting, not a question.</strong> The right answer is a
+                        property of the operating system on the disk rather than of the gateway, and
+                        until 0.9.2 the telnet boot picker asked it per disk, seeded from
+                        <code>cpm_boot_backspace</code>. That picker was a second way to boot and
+                        was removed; the key is now the whole answer, so a CP/M 1.x disk wants
+                        <code>rubout</code> set before you boot it. The emulator is unaffected
+                        either way: it reads its own console line and has always accepted both
+                        bytes.
                     </p>
                 </div>
 
@@ -1155,13 +1156,16 @@ altairhd_cobol.dsk</code></pre>
                         Disks are opened <strong>read-only</strong> and a booted image is held by
                         <strong>one session</strong> at a time. A booted guest writes raw sectors,
                         and nothing above it understands the format well enough to notice a
-                        mistake &mdash; so writing is a decision you make in the boot picker, not a
-                        default. It is <em>one</em> decision, and it covers <strong>every disk in
-                        the machine</strong>: say yes and the guest can write the disk it booted
-                        and every disk mounted beside it, which is what a machine with the
-                        write-protect tabs off is. The one thing that still refuses a write is the
-                        host refusing the file &mdash; an image the operating system will not let
-                        us write stays read-only whatever the picker was told. There is no
+                        mistake &mdash; so writing is a decision you take deliberately, with
+                        <code>cpm_boot_writable</code>, and it is off by default. It is <em>one</em>
+                        decision, and it covers <strong>every disk in the machine</strong>: turn it
+                        on and the guest can write the disk it booted and every disk mounted beside
+                        it, which is what a machine with the write-protect tabs off is. It is also a
+                        <em>standing</em> decision now rather than the per-visit question the old
+                        boot picker asked, so it applies to everyone who reaches CP/M until you turn
+                        it off again. The one thing that still refuses a write is the host refusing
+                        the file &mdash; an image the operating system will not let us write stays
+                        read-only whatever the setting says. There is no
                         instruction ceiling on a booted disk: an operating system sitting at its
                         own prompt is supposed to run indefinitely. An abandoned session is closed
                         by the ordinary idle timeout instead.
