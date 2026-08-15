@@ -154,6 +154,49 @@ pub fn image_can_boot(path: &std::path::Path) -> bool {
     verdict
 }
 
+/// Which machine an image really boots on, resolving `auto` by reading it.
+///
+/// Cached exactly like [`image_can_boot`], and for the same reason: the mount
+/// screens ask this while drawing, `auto` is the default, and answering it means
+/// reading the disk's system tracks. Keyed on the file's identity and the
+/// configured value, so changing either asks again.
+///
+/// A non-`auto` setting is returned untouched — the operator has said which
+/// machine, and detection does not get to overrule them.
+pub fn machine_for_image(path: &std::path::Path, configured: &str) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    if configured != super::console::AUTO_MACHINE {
+        return configured.to_string();
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return configured.to_string();
+    };
+    let key = (path.to_path_buf(), meta.len(), meta.modified().ok(), configured.to_string());
+
+    /// Its own key type: four fields, not the bootability answer's five — that
+    /// one also varies with `cpm_cpu`, which cannot change which machine a disk
+    /// is for.
+    type MachineKey = (std::path::PathBuf, u64, Option<std::time::SystemTime>, String);
+    static CACHE: OnceLock<Mutex<HashMap<MachineKey, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return hit;
+    }
+    let answer = match std::fs::read(path) {
+        Ok(bytes) => super::detect::machine_for(configured, &bytes).0,
+        Err(_) => configured.to_string(),
+    };
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= 512 {
+            c.clear();
+        }
+        c.insert(key, answer.clone());
+    }
+    answer
+}
+
 /// The identity a bootability verdict is remembered against.
 ///
 /// Named rather than inlined because it is five fields and one of them is an
@@ -283,18 +326,27 @@ pub struct MountContext {
 
 impl MountContext {
     /// Resolve from the configuration.
+    ///
+    /// **`auto` has to be resolved, not passed on.** `resolve_machine` does not
+    /// know the sentinel and falls back to the default Altair, so asking it
+    /// about boards under the default setting answered for an Altair whatever
+    /// disk was booting — which would have hidden every z80pack and Cromemco
+    /// image from the mount screens. The boot itself resolves `auto` by reading
+    /// the disk (`detect::machine_for`), so this does too, through the same
+    /// cache the bootability answer uses.
     pub fn resolve(transfer_dir: &str, boot_image: &str, machine: &str) -> MountContext {
         let target = boot_target(transfer_dir, boot_image);
         let naming = target.slot_naming();
-        // The booted disk's own size decides its board, exactly as `insert`
-        // will when the boot happens.
-        let boot_len = match &target {
-            BootTarget::Image(path) => std::fs::metadata(path).ok().map(|md| md.len()),
-            _ => None,
+        let (boot_len, machine) = match &target {
+            BootTarget::Image(path) => (
+                std::fs::metadata(path).ok().map(|md| md.len()),
+                machine_for_image(path, machine),
+            ),
+            _ => (None, machine.to_string()),
         };
         let board = boot_len
-            .and_then(|len| super::boot_machine::BootMachine::board_for(Some(machine), len));
-        MountContext { naming, machine: machine.to_string(), board, boot_len }
+            .and_then(|len| super::boot_machine::BootMachine::board_for(Some(&machine), len));
+        MountContext { naming, machine, board, boot_len }
     }
 
     /// Can an image of this size be reached by whatever is going to run?
@@ -304,6 +356,10 @@ impl MountContext {
     /// guest cannot see however correctly we mount it.
     pub fn accepts(&self, image_len: u64) -> bool {
         match self.board {
+            // Either the emulator runs -- where every image is welcome -- or a
+            // disk is booting on a board we could not name.  Both answer "yes":
+            // the second is a state we cannot judge, and a filter that hides
+            // disks on a hunch is worse than one that does not fire.
             None => true,
             Some(want) => {
                 super::boot_machine::BootMachine::board_for(Some(&self.machine), image_len)
@@ -336,9 +392,20 @@ impl MountContext {
         self.boot_len.unwrap_or(0)
     }
 
+    /// The board the booted disk is on, for a surface with room to name it.
+    pub fn board(&self) -> Option<&'static str> {
+        self.board
+    }
+
     /// Is a disk booting at all?
+    ///
+    /// From the naming, not from whether a board could be named: those are
+    /// different questions, and answering this one with `board.is_some()` let
+    /// them disagree.  A disk that boots on a board this context could not
+    /// identify is still a boot, and a screen that called it "CHOOSE A DRIVE"
+    /// while another called it a slot is the split this type exists to prevent.
     pub fn booting(&self) -> bool {
-        self.board.is_some()
+        self.naming == SlotNaming::Boards
     }
 }
 
@@ -415,13 +482,19 @@ impl BootTarget {
 
 /// Resolve `cpm_boot_image` against the images folder under `transfer_dir`.
 ///
-/// **Two syscalls, not one** — [`super::layout::cpm_dir`] canonicalizes the
-/// container and then the image is `stat`ed. Nothing here is expensive, but a
-/// caller drawing a screen wants exactly one of these for the whole screen
-/// rather than one per row: the mount screens are already listing the images
-/// folder beside this, while the two telnet `Runs:` rows are not, and the
-/// desktop's is on a panel that redraws four times a second forever. The shape
-/// that stays cheap on all three is to resolve once and pass the answer down.
+/// **Resolve once per screen and pass the answer down.** It was two syscalls —
+/// [`super::layout::cpm_dir`] canonicalizes the container and the image is
+/// `stat`ed — and since it also asks [`image_can_boot`] it is two syscalls plus
+/// a cache lookup, or, on the *first* call for a given file, a full read and a
+/// cold start. That is bounded (the answer is cached against the file's
+/// identity) but it is no longer free, so the rule this doc always stated now
+/// matters more, not less: one of these per screen, never one per row. The
+/// desktop's is on a panel that redraws four times a second forever.
+///
+/// Callers on an async runtime should reach it through `spawn_blocking` for the
+/// same reason the download beside them does — the first call can read a 4.9 MB
+/// hard disk, and a runtime worker blocked on that stalls every other session's
+/// timers.
 pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
     let name = boot_image.trim();
     if name.is_empty() {
@@ -450,8 +523,7 @@ pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
 /// the first draft of this put the board name in here: at 31 characters it made
 /// a 45-character row and truncated the *filename* away, which is the one thing
 /// on the line the operator needs. The board is available separately from
-/// [`slot_board`], for the surfaces that have room and for the boot screen's
-/// mismatch warning, where it is the whole point.
+/// [`MountContext::board`], for the surfaces that have room.
 ///
 /// `image_len` is `None` for an empty slot or one whose file cannot be read;
 /// under [`SlotNaming::Boards`] the board is chosen by the image's *size*, so
@@ -495,11 +567,6 @@ pub fn mount_refuses_writes(
         SlotNaming::Drives => mount.read_only,
         SlotNaming::Boards => mount.host_read_only,
     }
-}
-
-/// The board an image this size goes on, for the surfaces with room to say it.
-pub fn slot_board(image_len: u64) -> Option<&'static str> {
-    super::boot_machine::BootMachine::board_for(None, image_len)
 }
 
 /// The `cpm_boot_backspace` value that hands a booted guest BS (0x08).
@@ -915,19 +982,23 @@ pub(crate) mod tests {
 
         // The board itself is a separate question, asked by the surfaces with
         // room for the answer — see `test_a_slot_name_leaves_room_for_the_filename`
-        // for why it is not in the name.
+        // for why it is not in the name.  Asked through `board_for` now: the
+        // `slot_board(len)` wrapper went when the screens stopped naming a board
+        // from each *row's* image and started asking the booted disk's context,
+        // which is what stops one column reading `unit 0.1 on the 88-DCDD`.
+        let board = |len| super::super::boot_machine::BootMachine::board_for(None, len);
         assert!(
-            super::slot_board(platter).is_some_and(|b| b.contains("88-HDSK")),
+            board(platter).is_some_and(|b| b.contains("88-HDSK")),
             "the board is still nameable: {:?}",
-            super::slot_board(platter)
+            board(platter)
         );
-        assert_ne!(super::slot_board(floppy), super::slot_board(platter));
+        assert_ne!(board(floppy), board(platter));
 
         // A size no board takes, and an unknown size, both fall back to the bare
         // number — never to a drive letter, which would be the one answer that
         // says something untrue.  The board reads as absent rather than guessed.
         assert_eq!(slot_name(&SlotNaming::Boards, 2, Some(4_242)), "slot 2");
-        assert_eq!(super::slot_board(4_242), None);
+        assert_eq!(board(4_242), None);
         assert_eq!(slot_name(&SlotNaming::Boards, 3, None), "slot 3");
     }
 

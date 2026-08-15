@@ -189,9 +189,11 @@ impl TelnetSession {
             // a `cpm_boot_image` naming a disk that has since been deleted runs
             // the emulator, and a screen that named board slots there would be
             // describing a machine nobody is going to get.
-            let cfg = config::get_config();
-            let naming =
-                crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image).slot_naming();
+            // One context for the whole screen: the naming and the slot names
+            // both come from it, so this list cannot disagree with the two
+            // screens it leads to.
+            let ctx = self.cpmmount_context();
+            let naming = ctx.naming.clone();
             let lent = image::registry::boot_loans();
             let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
             if any {
@@ -202,11 +204,12 @@ impl TelnetSession {
                 .await?;
                 for (i, m) in mounts.iter().enumerate() {
                     let Some(m) = m else { continue };
-                    let slot = crate::cpm::boot::slot_name(
-                        &naming,
-                        i as u8,
-                        std::fs::metadata(&m.path).ok().map(|md| md.len()),
-                    );
+                    // Named by the booted disk's board, like every other slot
+                    // on these screens.  It was named by *this row's* image, so
+                    // a mount made under a different boot setting could still
+                    // print `Drive 1` in a column of `unit 0.x` -- the mixture
+                    // this was all meant to end.
+                    let slot = ctx.slot(i as u8);
                     // Whose read-only answer applies depends on which CP/M is
                     // set to run — see `mount_refuses_writes`.  Marking a disk
                     // R/O here on our BDOS's verdict, while a booted guest was
@@ -232,9 +235,10 @@ impl TelnetSession {
                     .await?;
                 }
                 for (drive0, name) in &lent {
-                    // No length: the file is in a booted session's hands, and a
-                    // stat of it would name a board for bytes nobody can rely on.
-                    let slot = crate::cpm::boot::slot_name(&naming, *drive0, None);
+                    // From the context, not from the file: it is in a booted
+                    // session's hands, and a stat of it would name a board for
+                    // bytes nobody can rely on.
+                    let slot = ctx.slot(*drive0);
                     let width = if self.terminal_type == TerminalType::Petscii { 20 } else { 52 };
                     self.send_line(&format!(
                         "   {} {} {}",
@@ -511,14 +515,19 @@ impl TelnetSession {
         // the ones on that disk's board, because the board is chosen by size and
         // a mount on the wrong one is present, correct and invisible.
         let dir = image::images_dir(&base);
-        let hidden = all.len();
-        let images: Vec<String> = all
-            .into_iter()
-            .filter(|n| {
-                std::fs::metadata(dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false)
-            })
-            .collect();
-        let hidden = hidden - images.len();
+        // Counted only when a disk is booting, and only for files we could
+        // actually read.  A file that vanished between the listing and the stat
+        // is not "on the wrong board", and saying so with no disk booting
+        // explains a state that does not exist.
+        let mut hidden = 0usize;
+        let mut images: Vec<String> = Vec::new();
+        for n in all {
+            match std::fs::metadata(dir.join(&n)) {
+                Ok(m) if ctx.accepts(m.len()) => images.push(n),
+                Ok(_) => hidden += 1,
+                Err(_) => {}
+            }
+        }
         if images.is_empty() {
             self.clear_screen().await?;
             self.send_line("").await?;
@@ -563,6 +572,19 @@ impl TelnetSession {
                 .await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
+            // Said whether none or only some are withheld.  It was said only
+            // when the list came out empty, which left the commonest case --
+            // two of thirty disks offered -- with no explanation at all, on the
+            // surface the retro hardware actually uses.
+            if hidden > 0 {
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim(&format!("{hidden} more are not on the booted"))
+                ))
+                .await?;
+                self.send_line(&format!("  {}", self.dim("disk's board."))).await?;
+                self.send_line("").await?;
+            }
             let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
             for (i, name) in shown.iter().enumerate() {
                 self.send_line(&format!(

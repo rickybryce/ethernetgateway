@@ -694,8 +694,8 @@ impl BootMachine {
     /// different verdict than the boot the operator is about to attempt.
     ///
     /// A cheaper rule was available and is deliberately not used: the picker
-    /// filtered on [`BootMachine::medium_for`], which asks only whether some
-    /// board could *carry* a disk that size. Every data disk in the Altair
+    /// filtered on a `medium_for(len)` (since deleted), which asked only whether
+    /// some board could *carry* a disk that size. Every data disk in the Altair
     /// collection passes that — `DISK0B` is a normal 337,568-byte 8" image whose
     /// first sector holds a volume label and 112 zero bytes — so all four of them
     /// were offered and all four failed when chosen. A size is not a boot

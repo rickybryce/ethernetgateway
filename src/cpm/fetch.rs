@@ -9,7 +9,7 @@
 //!
 //! Three rules make the offer honest rather than a lucky dip.
 //!
-//! **Only disks that are known to run.** Thirty-five of them, and the list is
+//! **Only disks that are known to run.** Thirty-four of them, and the list is
 //! not typed out: the generator cold-starts every candidate *from the bytes its
 //! pinned URL really serves* and drops the ones that do not start. Four are
 //! dropped — `DISK0B`, `DISK0D`, `DISK0F` and `TDISK06`, each a companion disk
@@ -45,13 +45,16 @@ use std::path::Path;
 /// and the second was added on 2026-08-15 after measuring what each holds.
 /// `dhansel/Altair8800` documents `DISK13`–`DISK16` as CP/M 3.0 disk 1 and 2,
 /// the Felix animation system and CP/M 2.2 MITS+Tarbell. `jpmcneely/
-/// AltairDuino-Disks` has five the other does not — the Infocom adventures hard
-/// disk, BASIC, COBOL, dBase II and the IMP modem executive — but *also* carries
-/// four files called `DISK13`–`DISK16` which are different disks entirely, are
-/// undocumented in its own catalogue (that stops at `DISK12`), and one of which
-/// does not boot.
+/// AltairDuino-Disks` has four hard disks the other does not — the Infocom
+/// adventures, BASIC, COBOL and dBase II — but *also* carries four files called
+/// `DISK13`–`DISK16` which are different disks entirely, are undocumented in its
+/// own catalogue (that stops at `DISK12`), and one of which does not boot.
 ///
-/// So the contested four come from Hansel and the unique five from McNeely, and
+/// A fifth name looked unique and was not: its `DISK17` is Hansel's `DISK12`
+/// byte for byte, the IMP modem executive filed under a second number, so
+/// offering it would have downloaded one disk twice.
+///
+/// So the contested four come from Hansel and the unique four from McNeely, and
 /// a disk names its source rather than the fetcher assuming one. **A filename is
 /// not an identity** — the same lesson the disk survey learned when three
 /// basenames collided across the z80pack libraries.

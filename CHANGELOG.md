@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Five more sample disks, from a second collection.** The downloader now also
+- **Four more sample disks, from a second collection.** The downloader now also
   draws on Jim McNeely's `AltairDuino-Disks`, which has disks David Hansel's
   Altair 8800 simulator does not: the **Infocom adventures** hard disk
   (`HDSK04`), **BASIC** (`HDSK05`), **COBOL** (`HDSK06`), **dBase II**
@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   better repo" wholesale would have silently swapped four working, documented
   disks for four different ones under the same names. So a manifest line now
   names its own source, the contested four come from Hansel, and only the five
-  above come from McNeely. A filename is not an identity.
+  above come from McNeely. A filename is not an identity — which bit twice: its
+  `DISK17` is a name Hansel has no disk for and is his `DISK12` byte for byte,
+  so it is not offered either.
 
   `repodisks.txt` catalogues the new disks — every file on each, read through
   the same mount path the gateway uses — and lists only what that collection
@@ -96,39 +98,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for. ("most 8080 code" rather than "most 8080 code too" only because 26
   characters is all a 40-column PETSCII row gives.)
 
-### Fixed
-
-- **The boot menus no longer offer disks that cannot boot.** Both selectors —
-  the `cpm_boot_image` list on all three configuration screens, and the boot
-  picker on the telnet mount screens — listed every image in the folder. The
-  picker filtered by *size*, which sounds like a bootability test and is not:
-  a data disk is the same size as the system disk it carries programs for, so
-  all four of the collection's data companions were offered and all four failed
-  when chosen.
-
-  Both now ask `BootMachine::would_boot`, which **replays the cold start the
-  boot session itself runs**, so a list cannot promise what a boot refuses. The
-  verdict distinguishes the two failures that look alike: a disk with no boot
-  program is withheld, while a disk this machine simply has no *board* for is
-  still offered, because that one is a `cpm_boot_machine` setting the operator
-  can change and a disk vanishing when they change it would be a worse mystery
-  than a boot that fails naming the boards. The answer is cached against each
-  file's identity, since one of the callers is a panel that redraws four times
-  a second.
-
-  Measured across all five collections: withheld are exactly the data disks and
-  second volumes — `DISK0B/0D/0F`, `TDISK06`, `cpm3-2`, `ucsd-*-2`, `z80tests`,
-  `dazzler_stuff`, `vio-stuff` and their kin. The mount selectors are
-  deliberately **not** filtered: mounting a data disk beside the system disk it
-  belongs to is exactly what those disks are for.
-
-  The download manifest is now generated the same way — each candidate is
-  cold-started from *the bytes the pinned URL serves* before it earns a line,
-  rather than from an exclusion list typed in from a survey run elsewhere. It
-  independently reproduced the same four exclusions.
-
-### Changed
-
 - **Booting a disk now confirms on a screen of its own.** The two questions a
   boot asks — allow writes, and how the disk wants Backspace — printed
   *underneath* the boot picker, which is itself at its full 22 rows, so on a
@@ -153,7 +122,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no error hint — is gone with it. A key that works but is invisible is the
   same class of defect as one that is shown but does nothing.
 
+
 ### Fixed
+
+- **The boot menus no longer offer disks that cannot boot.** Both selectors —
+  the `cpm_boot_image` list on all three configuration screens, and the boot
+  picker on the telnet mount screens — listed every image in the folder. The
+  picker filtered by *size*, which sounds like a bootability test and is not:
+  a data disk is the same size as the system disk it carries programs for, so
+  all four of the collection's data companions were offered and all four failed
+  when chosen.
+
+  Both now ask `BootMachine::bootability`, which **replays the cold start the
+  boot session itself runs**, so a list cannot promise what a boot refuses. The
+  verdict distinguishes the two failures that look alike: a disk with no boot
+  program is withheld, while a disk this machine simply has no *board* for is
+  still offered, because that one is a `cpm_boot_machine` setting the operator
+  can change and a disk vanishing when they change it would be a worse mystery
+  than a boot that fails naming the boards. The answer is cached against each
+  file's identity, since one of the callers is a panel that redraws four times
+  a second.
+
+  Measured across all five collections: withheld are exactly the data disks and
+  second volumes — `DISK0B/0D/0F`, `TDISK06`, `cpm3-2`, `ucsd-*-2`, `z80tests`,
+  `dazzler_stuff`, `vio-stuff` and their kin. The mount selectors are
+  deliberately **not** filtered: mounting a data disk beside the system disk it
+  belongs to is exactly what those disks are for.
+
+  The download manifest is now generated the same way — each candidate is
+  cold-started from *the bytes the pinned URL serves* before it earns a line,
+  rather than from an exclusion list typed in from a survey run elsewhere. It
+  independently reproduced the same four exclusions.
 
 - **`Q` did not leave the CP/M Disk Images screen.** It was displayed as
   `Q=Back` from the day the screen shipped and never handled: it fell into the
@@ -219,6 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gating CI job now builds at the declared minimum — it caught the second wrong
   answer (1.88) on its first run, and `versionchange.txt` now carries the
   command that measures the floor rather than an instruction to reason about it.
+
 
 ### Security
 

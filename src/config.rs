@@ -941,11 +941,10 @@ pub struct Config {
     /// * Digital Research's own CP/M 2.2 accepts either, so neither setting can
     ///   hurt it.
     ///
-    /// `backspace` is the default because it is right for the large majority and
-    /// because the operator meets the choice again in the boot picker, which
-    /// seeds from this key — so the disks in the second group cost one keypress
-    /// rather than a config edit.  See
-    /// [`crate::telnet::cpm_boot_ui::boot_key_for_guest`].
+    /// `backspace` is the default because it is right for the large majority.
+    /// It is also the whole answer now: the boot picker that used to ask again
+    /// per disk, seeding from this key, went with the second boot path in 0.9.2,
+    /// so a CP/M 1.x disk wants `rubout` set before it is booted.
     pub cpm_boot_backspace: String,
     /// What to do with CP/M printer output: `off`, `odt` or `text`.
     ///
@@ -2544,7 +2543,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   which carries four to a drive.  The guest names them itself and reaches
 #   only as many as its own BIOS knows - four drives for stock Altair CP/M, and
 #   for the 88-HDSK CP/M the fixed platter as its B:.  Disks are opened
-#   READ-ONLY unless the boot picker is told otherwise, and that answer covers
+#   READ-ONLY unless cpm_boot_writable is on, and that answer covers
 #   the mounted disks as well as the booted one.
 #   A name that is no longer in CPM/images runs the EMULATOR instead and says
 #   so in the log: this is a preference about which machine to run, so deleting
@@ -2580,7 +2579,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push_str("\
 # cpm_boot_backspace: what a BOOTED disk (above) is handed when you press
 #   Backspace.  Ignored by the CP/M emulator, which reads its own console line
-#   and already accepts either.  The boot picker asks again per boot and starts
+#   and already accepts either.  This is the ruling, not a default: the boot
 #   from whatever is set here, so this is the default rather than the ruling.
 #     backspace  DEFAULT - send BS (0x08), which the disk erases on
 #     rubout     send the key as your terminal did (DEL, 0x7F)

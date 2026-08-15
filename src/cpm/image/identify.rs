@@ -149,7 +149,7 @@ impl std::fmt::Display for Unknown {
                 f,
                 "no known format is {size} bytes - nothing here mounts a disk \
                  that size, and renaming cannot change that. It may still be \
-                 bootable: try the boot picker (see readme.txt)"
+                 bootable: set it as the boot disk (see readme.txt)"
             ),
             // Says what to do about it, like its sibling above.  A disk with a
             // size we know but no CP/M directory is very often a disk that is
@@ -161,7 +161,7 @@ impl std::fmt::Display for Unknown {
             Unknown::NoDirectory { candidates } => write!(
                 f,
                 "no CP/M directory found - this is probably not a CP/M disk. It \
-                 may still boot its own operating system: try the boot picker. \
+                 may still boot its own operating system: set it as the boot disk. \
                  (tried {})",
                 candidates.join(", ")
             ),
@@ -1356,7 +1356,7 @@ mod tests {
         }
         assert!(err.to_string().contains("probably not a CP/M disk"));
         // And it says what to do instead: these disks very often boot.
-        assert!(err.to_string().contains("boot picker"));
+        assert!(err.to_string().contains("boot disk"));
     }
 
     #[test]

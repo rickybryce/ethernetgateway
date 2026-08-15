@@ -567,7 +567,17 @@ struct App {
     /// What [`App::cpm_slot_labels`] was computed from: the draft, and whether
     /// a boot image is configured (which decides whether slots are named for a
     /// board at all).
-    cpm_slot_labels_from: (Vec<String>, bool),
+    cpm_slot_labels_from: (Vec<String>, bool, String, String),
+    /// Whether the bootability cache has been warmed for this window.
+    ///
+    /// Asking whether an image boots means cold-starting it, and the first
+    /// answer for a given file reads the whole thing — 4.9 MB for a hard disk,
+    /// about 42 MB for the sample set.  Every other surface can push that onto a
+    /// blocking task; a desktop window has only the frame thread, so opening the
+    /// "CP/M runs:" list on a cold cache would freeze it.  Warmed on a plain
+    /// thread the first time the CP/M controls are drawn, which is the moment
+    /// the operator is most likely to be about to open it.
+    cpm_boot_cache_warmed: bool,
     /// Cache behind [`App::cpm_boot_label`]: `(label, the setting it was
     /// resolved from, when)`, and `None` until the first frame asks.
     ///
@@ -742,7 +752,8 @@ impl App {
             cpm_fetch_note: String::new(),
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_slot_labels: Vec::new(),
-            cpm_slot_labels_from: (Vec::new(), false),
+            cpm_slot_labels_from: (Vec::new(), false, String::new(), String::new()),
+            cpm_boot_cache_warmed: false,
             cpm_boot_label_cache: None,
             cpm_mount_notice: String::new(),
             cpm_new_format: String::new(),
@@ -1156,7 +1167,6 @@ impl App {
 
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
-        let cpm_base = base.clone();
         // What will actually run, not what the key says: a `cpm_boot_image`
         // naming a disk that is no longer in the images folder falls back to
         // the emulator, and these rows describe the machine that starts.
@@ -1176,55 +1186,76 @@ impl App {
             &self.cfg.cpm_boot_machine,
         );
         let img_dir = crate::cpm::image::images_dir(&base);
-        let all_images = crate::cpm::image::available_images(&base);
-        let hidden_images = all_images.len();
-        let images: Vec<String> = all_images
-            .into_iter()
-            .filter(|n| {
-                std::fs::metadata(img_dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false)
-            })
-            .collect();
-        let hidden_images = hidden_images - images.len();
+        // Only files we could read, and only hidden when a disk is booting: an
+        // unreadable file is not "on the wrong board", and with the emulator
+        // running nothing is.
+        let mut hidden_images = 0usize;
+        let mut images: Vec<String> = Vec::new();
+        for n in crate::cpm::image::available_images(&base) {
+            match std::fs::metadata(img_dir.join(&n)) {
+                Ok(m) if ctx.accepts(m.len()) => images.push(n),
+                Ok(_) => hidden_images += 1,
+                Err(_) => {}
+            }
+        }
         let mounts = crate::cpm::image::registry::all();
         let usage = crate::cpm::image::registry::usage();
 
         // Slot labels, rebuilt only when the answer could have changed — see
         // `cpm_slot_labels`.  Under the emulator there are no board slots to
         // name, so the work is skipped outright rather than done and ignored.
-        if self.cpm_slot_labels_from.0 != self.cpm_mount_draft
-            || self.cpm_slot_labels_from.1 != booting
-        {
+        // Keyed on what the labels actually depend on.  It was `(draft, booting)`
+        // while the labels came from each row's own image; they come from the
+        // boot setting now, so changing the boot disk from a floppy to a hard
+        // disk left `Drive 1` on screen where `unit 0.1` had become correct --
+        // for the rest of the session, because nothing in the key had changed.
+        let labels_key = (
+            self.cpm_mount_draft.clone(),
+            booting,
+            self.cfg.cpm_boot_image.clone(),
+            self.cfg.cpm_boot_machine.clone(),
+        );
+        if self.cpm_slot_labels_from != labels_key {
             self.cpm_slot_labels = if booting {
                 self.cpm_mount_draft
                     .iter()
                     .enumerate()
                     .map(|(idx, name)| {
-                        let len = (!name.is_empty())
-                            .then(|| std::fs::metadata(crate::cpm::image::images_dir(&cpm_base).join(name)).ok())
-                            .flatten()
-                            .map(|md| md.len());
-                        // With the board named: the desktop has room for it
-                        // where a 40-column PETSCII screen does not.
-                        let board = len
-                            .and_then(crate::cpm::boot::slot_board)
+                        let _ = name;
+                        // Both halves from the booted disk's board -- the slot
+                        // name and the board it is on.  Taking the board from
+                        // *this row's* image instead could render
+                        // `unit 0.1 on the MITS 88-DCDD`, which is the mixture
+                        // this whole change removes.  The desktop has room to
+                        // name it where a 40-column PETSCII screen does not.
+                        let board = ctx
+                            .board()
                             .map(|b| format!(" on the {b}"))
                             .unwrap_or_default();
-                        // Named after the booted disk's board, not this row's
-                        // image: every image offered is on that board now, so
-                        // the column reads in one vocabulary.
                         format!("{}{board}", ctx.slot(idx as u8))
                     })
                     .collect()
             } else {
                 Vec::new()
             };
-            self.cpm_slot_labels_from = (self.cpm_mount_draft.clone(), booting);
+            self.cpm_slot_labels_from = labels_key;
         }
 
         // These strings are single-line on purpose: a Rust line continuation
         // inside them is easy to lose in editing, and what is left behind is a
         // literal run of spaces that renders as a ragged gap mid-sentence.
-        let intro = if images.is_empty() {
+        let intro = if images.is_empty() && hidden_images > 0 {
+            // Not "No images found" beside "N are hidden": that pair reads as a
+            // contradiction.  When everything is filtered out, the filter is
+            // the whole story.
+            format!(
+                "None of the {hidden_images} image{} in {}/images {} on the booted disk's board, so its operating system could not read {}. Change what boots, or add a disk of the right kind.",
+                if hidden_images == 1 { "" } else { "s" },
+                base.display(),
+                if hidden_images == 1 { "is" } else { "are" },
+                if hidden_images == 1 { "it" } else { "them" },
+            )
+        } else if images.is_empty() {
             format!(
                 "No images found. Put .dsk files in {}/images — readme.txt there explains the naming.",
                 base.display()
@@ -1236,7 +1267,7 @@ impl App {
         // Say what is missing and why.  A folder the operator can open, offering
         // fewer disks than it holds, is a mystery; the reason is something they
         // can act on -- change what boots, or fetch a disk of the right kind.
-        if hidden_images > 0 {
+        if hidden_images > 0 && !images.is_empty() {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(format!(
@@ -1610,6 +1641,18 @@ impl App {
         // and web screens build, so the three cannot drift apart.
         // Resolved before the closure borrows `self` mutably, and cached — see
         // `cpm_boot_label`.
+        // Warm the bootability answers off the frame thread, once.  The list
+        // below is drawn inside a combo closure that runs on this thread, and
+        // its first draw on a cold cache would otherwise read every image in the
+        // folder to find out which of them boot.
+        if !self.cpm_boot_cache_warmed {
+            self.cpm_boot_cache_warmed = true;
+            let dir = self.cfg.transfer_dir.clone();
+            std::thread::spawn(move || {
+                let base = crate::cpm::layout::cpm_dir(&dir);
+                let _ = crate::cpm::boot::boot_choices(&base);
+            });
+        }
         let boot_label = self.cpm_boot_label();
         ui.horizontal(|ui| {
             ui.label("CP/M runs:");
@@ -1716,7 +1759,7 @@ impl App {
              then printing the character they deleted, so TESTING backspaced \
              over reads TESTINGGNIT.  CP/M 1.3, 1.4 and the 1975 build are the \
              opposite: the rubout is their editing key and BS prints a literal \
-             ^H.  The telnet boot picker asks again per disk and starts from \
+             ^H.  This is the whole answer: set it to match the disk you \
              this setting.",
         );
         // Which processor BOTH CP/M machines run.  The same `CPU_CHOICES` list

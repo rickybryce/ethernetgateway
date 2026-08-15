@@ -375,13 +375,26 @@ async fn handle_connection(
             // Doing it on the connection's own task would stall every other
             // session's timers, which is the trap this file already names.
             let render_cfg = cfg.clone();
-            let body = tokio::task::spawn_blocking(move || render_main_page(&render_cfg, notice))
-                .await
-                .unwrap_or_else(|e| format!("<h1>500</h1><p>{e}</p>"));
+            // A join failure means the render panicked.  Answer 500, not 200
+            // with an error page in it: a monitor polling `/` would read a 200
+            // as healthy.  The payload is not interpolated -- a panic message
+            // can carry anything, including markup, and this page is served
+            // behind the operator's own credentials but is still a page.
+            let (code, reason, body) =
+                match tokio::task::spawn_blocking(move || render_main_page(&render_cfg, notice))
+                    .await
+                {
+                    Ok(html) => (200, "OK", html),
+                    Err(e) => {
+                        glog!("Web: rendering the configuration page failed: {e}");
+                        (500, "Internal Server Error", "<h1>500</h1><p>The configuration page \
+                         could not be rendered. See the gateway log.</p>".to_string())
+                    }
+                };
             write_response(
                 &mut stream,
-                200,
-                "OK",
+                code,
+                reason,
                 "text/html; charset=utf-8",
                 body.as_bytes(),
                 false,
@@ -2319,13 +2332,18 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     // the board is chosen by size, so an image on another board mounts
     // perfectly and is invisible to the guest.
     let dir = crate::cpm::image::images_dir(&base);
-    let all_images = crate::cpm::image::available_images(&base);
-    let total_images = all_images.len();
-    let images: Vec<String> = all_images
-        .into_iter()
-        .filter(|n| std::fs::metadata(dir.join(n)).map(|m| ctx.accepts(m.len())).unwrap_or(false))
-        .collect();
-    let hidden_images = total_images - images.len();
+    // Only files we could read, and only counted as hidden when a disk is
+    // actually booting: a file that vanished between the listing and the stat is
+    // not "on the wrong board", and with the emulator running nothing is.
+    let mut hidden_images = 0usize;
+    let mut images: Vec<String> = Vec::new();
+    for n in crate::cpm::image::available_images(&base) {
+        match std::fs::metadata(dir.join(&n)) {
+            Ok(m) if ctx.accepts(m.len()) => images.push(n),
+            Ok(_) => hidden_images += 1,
+            Err(_) => {}
+        }
+    }
     let mut rows = String::new();
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let letter = (b'A' + drive0) as char;
@@ -2357,10 +2375,18 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         // vanish from its own row and read as "no image".
         if let Some(m) = mounted {
             if !images.contains(&m.filename) {
+                // Two different reasons a mounted image is not in the list, and
+                // they are not interchangeable: the file may be gone, or it may
+                // be sitting in the folder and filtered out because the booted
+                // disk's board cannot reach it.  Saying "missing from folder"
+                // for the second sends the operator hunting for a file that is
+                // right where they left it.
+                let present = std::fs::metadata(dir.join(&m.filename)).is_ok();
                 opts.push_str(&format!(
-                    "<option value=\"{}\" selected>{} (missing from folder)</option>",
+                    "<option value=\"{}\" selected>{} ({})</option>",
                     html_escape(&m.filename),
-                    html_escape(&m.filename)
+                    html_escape(&m.filename),
+                    if present { "not on the booted disk's board" } else { "missing from folder" },
                 ));
             }
         }
@@ -2392,13 +2418,15 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
                 .map(|md| md.len());
             // The board is named here and not in the telnet rows: a web page has
             // room for it, a 40-column PETSCII screen does not.
-            let board = len
-                .and_then(crate::cpm::boot::slot_board)
+            // Both halves from the same place.  The board used to come from
+            // *this row's* image while the slot name came from the booted disk,
+            // so a mount left over from a different boot setting could render
+            // `unit 0.1 on the MITS 88-DCDD` — the very mixture this is for.
+            let board = ctx
+                .board()
                 .map(|b| format!(" on the {b}"))
                 .unwrap_or_default();
-            // The slot's name comes from the *booted disk's* board, not from
-            // whatever happens to be in this row: every image offered above is
-            // on that one board now, so the column reads in one vocabulary.
+            let _ = len;
             note.push_str(&format!(
                 " <span class=\"sub\">{}{}</span>",
                 html_escape(&ctx.slot(drive0)),
@@ -2422,7 +2450,17 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         ));
     }
 
-    let intro = if images.is_empty() {
+    let intro = if images.is_empty() && hidden_images > 0 {
+        format!(
+            "<div class=\"row\"><span class=\"sub\">None of the {hidden_images} image{} in {}/images \
+             {} on the booted disk's board, so its operating system could not read {}. Change what \
+             boots, or add a disk of the right kind.</span></div>",
+            if hidden_images == 1 { "" } else { "s" },
+            html_escape(&base.display().to_string()),
+            if hidden_images == 1 { "is" } else { "are" },
+            if hidden_images == 1 { "it" } else { "them" },
+        )
+    } else if images.is_empty() {
         format!(
             "<div class=\"row\"><span class=\"sub\">No images found. Put .dsk files in              {}/images — readme.txt there explains the naming — or make an empty one below.</span></div>",
             html_escape(&base.display().to_string())
@@ -2436,7 +2474,11 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     // the operator can see the contents of, offering fewer disks than it holds,
     // is a mystery; naming the reason makes it something they can act on --
     // change what boots, or fetch a disk of the right kind.
-    let intro = if hidden_images > 0 {
+    // Not beside "No images found": that pair reads as a contradiction, and the
+    // empty case has already been given the real reason by the branch above --
+    // which is what the telnet screen does.  Only appended when there is a list
+    // for it to qualify.
+    let intro = if hidden_images > 0 && !images.is_empty() {
         format!(
             "{intro}<div class=\"row\"><span class=\"sub\">{hidden_images} more image{} in the \
              folder {} not offered: with a disk set to boot, an image only reaches the guest if it \
@@ -2890,7 +2932,7 @@ fn render_more_popups(cfg: &Config) -> String {
              read your terminal's DEL as a Teletype rubout \u{2014} deleting the \
              character and then printing the character they deleted. CP/M 1.x is \
              the opposite: the rubout is its editing key and BS prints a literal \
-             ^H. The telnet boot picker asks again per disk and starts from \
+             ^H. This is the whole answer: set it to match the disk you \
              this.</span>\
              <span class=\"label\">Printer output:</span>\
              <select name=\"cpm_printer\">{cpm_printer_options}</select>\

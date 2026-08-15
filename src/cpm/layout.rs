@@ -147,11 +147,11 @@ Hard Disk BASIC, and CP/M 3.0.
 
 Inside a booted disk there is no jail, no A> from us and no EGT8080.  Press
 ESC twice to get back to the gateway.  A booted image is held by one session
-at a time.  Disks are opened READ-ONLY unless the boot picker is told
-otherwise, and that one answer covers the mounted disks as well as the booted
-one - the guest may write any of them, exactly as a machine with the
-write-protect tabs off would.  An image the host will not let us write stays
-read-only whatever the picker was told.
+at a time.  Disks are opened READ-ONLY unless cpm_boot_writable is on, and
+that one answer covers the mounted disks as well as the booted one - the
+guest may write any of them, exactly as a machine with the write-protect
+tabs off would.  An image the host will not let us write stays read-only
+whatever that setting says.
 
 Your mounted images do come along: each rides the controller slot its
 drive letter names (B: is slot 1, C: is slot 2), and the disk being booted
@@ -166,9 +166,17 @@ exactly as the real board does, so selecting one looks like a hang;
 ESC ESC still works.
 
 Set what the CP/M menu item runs with cpm_boot_image (the 'CP/M runs'
-setting in every UI), or boot one for a single visit from the telnet boot
-picker.  What can be booted is decided by size alone - see FORMATS YOU CAN
-BOOT below.
+setting in every UI).  That is the only way to boot: a second, per-visit
+boot picker lived on the telnet disks screen until 0.9.2 and was removed,
+because two boots that asked different questions and remembered different
+things was the most confusing thing here.  A disk is offered only if it
+really cold-starts - see FORMATS YOU CAN BOOT below.
+
+The mount screens follow it.  With a disk set to boot they offer only the
+images on that disk's own board, and name the slots the way that board
+does; under the emulator they offer everything and the slots are drives
+A: to P:.  That is why a floppy can vanish from the list while a hard disk
+is booting: the guest could never have read it.
 
 
 NAMING: PUT THE FORMAT IN THE FILENAME
@@ -246,16 +254,11 @@ Booting runs the disk's own operating system on the whole machine.  There
 is no A> from us, no jail, no EGT8080 and no EXIT - press ESC twice to come
 back to the gateway.
 
-For a single visit, from telnet or SSH:
+To make a disk what the CP/M menu item runs, set cpm_boot_image:
 
-  C (Configuration), O (Other Settings), E (CP/M settings), I (Mount/
-  unmount disk images), then B (Boot an image, runs its own OS).  Pick
-  the disk.  This changes no settings - it boots that disk once, now.
-
-To make a disk what the CP/M menu item always runs, set cpm_boot_image:
-
-  Telnet or SSH   C, O, E, then B (Boot settings), then R (Cycle what
-                  CP/M runs).
+  Telnet or SSH   C (Configuration), C (CP/M Settings), B (Boot settings),
+                  then R (Choose what CP/M runs) and pick it from the list.
+                  The emulator is the first entry.
   Web UI          the \"CP/M runs:\" list in the CP/M panel.
   Desktop         the \"CP/M runs:\" list.
 
@@ -265,9 +268,10 @@ alone unless something misbehaves: the machine (auto - the disk is asked)
 and the processor.
 
 A booted image is held by ONE session at a time, and one disk cannot be
-booted and mounted at the same moment.  It opens READ-ONLY unless the
-picker is told otherwise.  Whatever you have mounted comes along for the
-ride, each disk at the controller slot its drive letter names.
+booted and mounted at the same moment.  It opens READ-ONLY unless
+cpm_boot_writable is on (W on the telnet Boot settings screen, a checkbox
+in the web and desktop UIs).  Whatever you have mounted comes along for
+the ride, each disk at the controller slot its drive letter names.
 
 
 FORMATS YOU CAN MOUNT

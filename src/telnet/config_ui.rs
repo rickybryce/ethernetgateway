@@ -1110,16 +1110,6 @@ impl TelnetSession {
         }
     }
 
-    /// Boot settings, reached from the CP/M screen → `B`.  Two questions that
-    /// only matter together: what the CP/M menu item runs, and — if that is a
-    /// disk rather than our emulator — which machine the disk thinks it is
-    /// running on.
-    ///
-    /// Its own screen because the CP/M settings screen is at exactly 22 rows,
-    /// the same reason `E` opens that submenu and `L` opens the log one. It also
-    /// has room to grow, which this pair specifically will: when a second
-    /// controller claims a disk size the Tarbell already claims, *which board*
-    /// takes an ambiguous image becomes a third question on exactly this screen.
     /// Choose what the CP/M menu item runs: our emulator, or a disk to boot.
     ///
     /// **A picker rather than the cycling key this used to be.** Every other
@@ -1145,10 +1135,28 @@ impl TelnetSession {
         // Off the async runtime: `boot_choices` cold-starts every image in the
         // folder on a cold cache, which is tens of megabytes with the sample
         // disks taken.
-        let choices =
+        let mut choices =
             tokio::task::spawn_blocking(move || crate::cpm::boot::boot_choices(&base))
                 .await
                 .map_err(std::io::Error::other)?;
+        // A setting naming a disk the filter withheld would otherwise have no
+        // row, so this screen -- whose whole job is to show what is set -- would
+        // mark nothing at all and read as though the emulator were selected.
+        // The web select and the desktop combo both re-add it for the same
+        // reason; this one did not, which made three surfaces disagree about a
+        // config file none of them could change by accident.
+        let cfg = config::get_config();
+        if !cfg.cpm_boot_image.is_empty()
+            && !choices.iter().any(|(v, _)| *v == cfg.cpm_boot_image)
+        {
+            let target =
+                crate::cpm::boot::boot_target(&cfg.transfer_dir, &cfg.cpm_boot_image);
+            choices.push((
+                cfg.cpm_boot_image.clone(),
+                crate::cpm::boot::boot_setting_label(&target, &cfg.cpm_boot_image),
+            ));
+        }
+        drop(cfg);
 
         // Nine, the same as the mount wizard's boot picker, and for the same
         // reason: this screen carries a header, two lines of note, the page
@@ -1237,6 +1245,17 @@ impl TelnetSession {
         }
     }
 
+    /// Boot settings, reached from the CP/M screen → `B`.  The questions that
+    /// only matter together: what the CP/M menu item runs, which machine a
+    /// booted disk thinks it is running on, which byte its Backspace sends,
+    /// which processor it runs on, and whether it may write to its disks.
+    ///
+    /// Its own screen because the CP/M settings screen is at exactly 22 rows,
+    /// the same reason `E` opens that submenu and `L` opens the log one.  It had
+    /// room to grow and has now used it: `W  Disk writes` arrived when the boot
+    /// picker — the only place that used to ask — left the disks screen, and
+    /// this screen is at its 22 again.  A new row needs one of these to go
+    /// first, which `test_cpm_boot_screen_row_count` will say.
     pub(in crate::telnet) async fn cpm_boot_settings(&mut self) -> Result<(), std::io::Error> {
         loop {
             let cfg = config::get_config();

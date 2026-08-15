@@ -2393,7 +2393,15 @@ fn test_cpm_settings_ceiling_row_fits_petscii() {
 fn test_cpm_printer_screen_literals_fit_petscii() {
     let src = include_str!("config_ui.rs").replace('\r', "");
     let start = src.find("pub(in crate::telnet) async fn cpm_printer_settings").expect("the fn");
-    let end = src[start..].find("\n    /// Boot settings, reached from").expect("the next fn") + start;
+    // Bounded by the *next item's* doc comment rather than by naming one: the
+    // marker used to be "/// Boot settings, reached from", and when that doc was
+    // moved to sit with the function it describes, this scan ran on into the
+    // next screen and reported its wider rows as a printer-screen regression.
+    // A doc comment at four spaces is the next item; the body's are at eight.
+    let end = src[start..]
+        .find("\n    /// ")
+        .map(|i| i + start)
+        .expect("a following item");
     let body = &src[start..end];
 
     // Both shapes this screen prints: `"  {}"` wrapping a colour helper (the

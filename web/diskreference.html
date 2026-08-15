@@ -1201,7 +1201,7 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                     Every guard that worked by understanding the guest's request
                     is gone, because there is no request to understand &mdash;
                     just sectors. Two blunt ones remain: an image opens
-                    <strong>read-only</strong> unless the boot picker is told
+                    <strong>read-only</strong> unless <code>cpm_boot_writable</code> is
                     otherwise, and it is held <strong>exclusively by one
                     session</strong>. There is deliberately no instruction
                     ceiling: a booted operating system <em>is</em> the session
