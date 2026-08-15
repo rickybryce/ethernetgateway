@@ -677,7 +677,7 @@
                     </thead>
                     <tbody>
                         <tr><td><code>cpm_emu_enabled</code></td><td><code>true</code></td><td>Whether the CP/M System menu item exists at all. Set <code>false</code> to refuse guest code entirely.</td></tr>
-                        <tr><td><code>cpm_screen_input</code></td><td><code>true</code></td><td>May the web UI's <em>Disk Screen</em> page type at a booted disk? The screen is readable either way. See <a href="#vdm">Screens</a>.</td></tr>
+                        <tr><td><code>cpm_screen_input</code></td><td><code>true</code></td><td>May the web UI's <em>VDM / Dazzler</em> page type at a booted disk? The screen is readable either way. See <a href="#vdm">Screens</a>.</td></tr>
                         <tr><td><code>cpm_emu_max_minstr</code></td><td><code>2000</code></td><td>Instruction ceiling in <em>millions</em> before a running program is stopped. The runaway guard. Minimum 1, maximum 1000000 &mdash; a larger value is capped rather than refused, so a setting meant as &ldquo;no limit&rdquo; is kept as far as it goes. Bounds one transient in the emulator; a <a href="#booting">booted</a> disk has no ceiling.</td></tr>
                         <tr><td><code>cpm_mounts</code></td><td><em>(empty)</em></td><td>Images mounted on drives, as <code>A=name.dsk,C=other.dsk</code>. Bare filenames inside <code>CPM/images</code>. See <a href="#disks">Disk Images</a>.</td></tr>
                         <tr><td><code>cpm_boot_image</code></td><td><em>(empty)</em></td><td>What the CP/M menu item runs: empty = the CP/M emulator, or a bare filename in <code>CPM/images</code> to cold-boot that disk. A name that is not there falls back to the emulator, shown as <code>(missing)</code>. See <a href="#booting">Booting</a>.</td></tr>
@@ -1221,9 +1221,10 @@ altairhd_cobol.dsk</code></pre>
                     before boot would cry wolf on two images in three. A Dazzler announces
                     itself when the guest switches one on, and the session list marks it then.</li>
                     <li>Open <code>http://&lt;gateway&gt;:8080/vdm</code>, or press
-                    <strong>Disk Screen</strong> in the configuration page's
-                    <em>AI Chat, Browser, Weather &amp; CP/M</em> frame, and pick the session from
-                    the list.</li>
+                    <strong>VDM / Dazzler</strong> &mdash; in the configuration page's
+                    <em>AI Chat, Browser, Weather &amp; CP/M</em> frame, or in the desktop UI's
+                    CP/M <em>More</em> popup, which opens the same page in your browser &mdash;
+                    and pick the session from the list.</li>
                     <li>Keep typing in your telnet or SSH session. The keyboard is a perfectly
                     ordinary port &mdash; <code>04h</code>/<code>05h</code> on the VDM-1 disks, and
                     a normal serial console on the Dazzler ones &mdash; because only the

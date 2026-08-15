@@ -36,6 +36,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The booted-disk screen is reachable from the desktop, not only a browser.**
+  A **VDM / Dazzler…** button sits beside *Mount CP/M Drives…* and opens the
+  page — at the screen itself (`/vdm`), on the port the running server is
+  actually on, which is the *saved* one: a port typed into the box and not saved
+  is a port nothing is listening on.
+
+  It stays one screen rather than two. Rendering the picture natively in the
+  desktop UI would mean a second implementation of the VDM-1 grid and the
+  Dazzler's four modes to keep in step with the first, for a page the gateway
+  already serves.
+
+  If the web server is off, the button **offers to turn it on** rather than
+  doing nothing. That offer says out loud that enabling it **restarts the
+  gateway** — the listener only binds at start-up, and the restart ends every
+  telnet and SSH session in progress — and the operator confirms before any of
+  it happens. After the restart the screen opens by itself, so they do not have
+  to find the button a second time; the intent rides across in a one-shot
+  `open_screen_after_restart` marker, which is cleared as it is read so a launch
+  that failed to open a browser cannot keep trying at every start.
+
 - **The web "Disk Screen" button is now "VDM / Dazzler".** It reads like a
   screen *about disks*, which is not what it is: it shows what a booted guest
   paints on a Processor Technology VDM-1 or a Cromemco Dazzler. The page, its

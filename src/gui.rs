@@ -619,6 +619,21 @@ struct App {
     /// popup.  Confirming flips `kermit_server_enabled`; cancelling
     /// leaves it false because the click never reached `cfg`.
     kermit_server_warn_open: bool,
+    /// Whether the "turn the web server on to see the screen?" popup is open.
+    ///
+    /// The VDM / Dazzler screen is served by the web server, so the desktop's
+    /// button opens a browser at it — and if the listener is off there is
+    /// nothing to open.  Offering to start it beats a dead button, but starting
+    /// a listener is outward-facing, so it is offered and never done silently.
+    vdm_web_offer_open: bool,
+    /// When to open the screen in a browser, once the web server has had a
+    /// moment to bind.
+    ///
+    /// Enabling the listener goes through a full server restart, so opening the
+    /// page in the same click would race the bind and hand the operator
+    /// "connection refused" for a feature that is about to work.  Set to a
+    /// deadline instead, and opened from `update` when it passes.
+    vdm_open_at: Option<std::time::Instant>,
     /// Whether the security-warning popup for `Disable IP Safety` is
     /// open.  Same posture as `kermit_server_warn_open` — off→on opens
     /// the popup, the visible checkbox stays unchecked until the
@@ -640,7 +655,19 @@ struct App {
 }
 
 impl App {
-    fn new(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
+    fn new(mut cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
+        // Clear the one-shot screen marker the moment it is read, and before
+        // anything is opened.  A marker that survived a launch which failed to
+        // open a browser would open one at every launch afterwards, which is a
+        // far worse fault than the one it exists to fix.  Written straight to
+        // the file rather than left for the next Save, because the operator may
+        // never press one.
+        let open_screen_asked = cfg.open_screen_after_restart;
+        if open_screen_asked {
+            cfg.open_screen_after_restart = false;
+            config::update_config_value("open_screen_after_restart", "false");
+        }
+        let cfg = cfg;
         // Seed saved_geom from the config so we don't rewrite the identical
         // geometry we just restored on first launch.
         let saved_geom = parse_window_geometry(&cfg.gui_window_geometry);
@@ -761,6 +788,22 @@ impl App {
             atdt_kermit_warn_open: false,
             relay_ssh_warn_open: false,
             kermit_server_warn_open: false,
+            vdm_web_offer_open: false,
+            // If the operator got here by asking for the screen and agreeing
+            // to the restart, finish the job.  The marker is in the config
+            // because the restart destroys this window -- `gui::run` returns,
+            // `main` re-spawns everything and builds a fresh `App` -- and the
+            // config is re-read on every restart cycle.
+            //
+            // Cleared below, before the page is opened, so a launch that never
+            // manages to open one does not try again for ever.
+            //
+            // The delay is because this runs as the window is built, while the
+            // freshly-spawned server is still binding: a browser pointed at it
+            // now would show "connection refused" for a page that is a second
+            // away from working.
+            vdm_open_at: open_screen_asked
+                .then(|| std::time::Instant::now() + std::time::Duration::from_millis(2500)),
             disable_ip_safety_warn_open: false,
             pending_dir_pick: None,
             wizard,
@@ -1635,6 +1678,39 @@ impl App {
             } else {
                 format!("{n} mounted")
             });
+        });
+        // The VDM / Dazzler screen.  A booted disk can paint to a video *card*
+        // with no serial line at all, and then the session it was started from
+        // stays blank for ever -- the picture is the guest's own memory, and it
+        // needs a viewer that can repaint.  The web page is that viewer; this
+        // is the desktop's way to it, because "only in the browser" is a poor
+        // answer for someone sitting at the console.
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("VDM / Dazzler…").color(AMBER_BRIGHT),
+                ))
+                .on_hover_text(
+                    "Opens the booted-disk screen in your browser. Served by the \
+                     gateway's own web server, so that has to be running.",
+                )
+                .clicked()
+            {
+                if self.vdm_web_running() {
+                    self.open_vdm_page(ui.ctx());
+                } else {
+                    self.vdm_web_offer_open = true;
+                }
+            }
+            ui.label(
+                egui::RichText::new(if self.vdm_web_running() {
+                    self.vdm_url()
+                } else {
+                    "web server is off".to_string()
+                })
+                .small()
+                .color(AMBER_DIM),
+            );
         });
         // What the CP/M menu item runs: our emulator, or a disk image booted
         // on emulated Altair hardware.  The same `boot_choices` list the telnet
@@ -2827,6 +2903,42 @@ impl App {
             Ok(()) => logger::log("Configuration saved.".into()),
             Err(e) => logger::log(format!("Configuration NOT saved: {}", e)),
         }
+    }
+
+    /// The screen's own address, not the configuration page's.
+    ///
+    /// **`/vdm`, deliberately.** Sending someone to the root and letting them
+    /// find it is how a button becomes a hint; they pressed it because they
+    /// wanted the screen.  Loopback because the desktop UI runs in the same
+    /// process as the server it is opening — no address to guess, and nothing
+    /// that depends on which interface the listener bound.
+    /// **The port the server is actually on, not the one in the text box.**
+    /// `cfg` carries unsaved edits — a port typed and not yet saved is a port
+    /// nothing is listening on — while `last_synced_cfg` is what was persisted
+    /// and therefore what the running listener was started from. Opening the
+    /// typed one would hand the operator a refused connection and look like the
+    /// screen was broken.
+    fn vdm_url(&self) -> String {
+        format!("http://127.0.0.1:{}/vdm", self.last_synced_cfg.web_port)
+    }
+
+    /// Is the web server actually up? Same reasoning as [`Self::vdm_url`]: a
+    /// ticked-but-unsaved checkbox has not started anything.
+    fn vdm_web_running(&self) -> bool {
+        self.last_synced_cfg.web_enabled
+    }
+
+    /// Hand the screen's URL to the desktop's browser.
+    ///
+    /// Through egui's own `open_url` rather than a spawned `xdg-open`/`open`:
+    /// eframe already carries that for every platform, and shelling out for one
+    /// button would be a second way to do it -- and a process spawn built from
+    /// a formatted string, which is the shape of the argument-injection advisory
+    /// this project already patched once.
+    fn open_vdm_page(&self, ctx: &egui::Context) {
+        let url = self.vdm_url();
+        logger::log(format!("Opening the VDM / Dazzler screen at {url}"));
+        ctx.open_url(egui::OpenUrl::new_tab(url));
     }
 
     /// Persist config and trigger a full server restart.  Used by the
@@ -4245,6 +4357,92 @@ impl eframe::App for App {
         }
         self.kermit_server_warn_open = ks_warn_open;
 
+        // "The screen you asked for needs the web server" -- offered, and never
+        // done quietly.  Two things make this a confirmation rather than a
+        // convenience: starting a listener is outward-facing, and the listener
+        // only binds on a server restart, which drops every session anybody
+        // else is in the middle of.  The operator has to be told that before
+        // they agree, not discover it.
+        let mut vdm_offer_open = self.vdm_web_offer_open;
+        let mut vdm_close = false;
+        let mut vdm_commit = false;
+        egui::Window::new(
+            egui::RichText::new("Turn the web server on?").strong().color(AMBER_BRIGHT),
+        )
+        .open(&mut vdm_offer_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(460.0)
+        .frame(warn_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                "The VDM / Dazzler screen is a page served by this gateway's own \
+                 web server, and the web server is switched off.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Enabling it restarts the gateway.").strong().color(AMBER),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                "The listener only binds when the server starts, so the setting \
+                 alone is not enough. The restart ends every telnet and SSH \
+                 session in progress, including any booted CP/M disk somebody is \
+                 sitting at -- so the screen you are about to open will be of \
+                 whatever boots next, not of the session running now.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "The page is behind the same credentials as the rest of the web \
+                 interface, and the screen is readable but only types at a guest \
+                 when \"may type at a booted disk\" is on.",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Enable and Restart").strong().color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    vdm_commit = true;
+                    vdm_close = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("Cancel").strong()))
+                    .clicked()
+                {
+                    vdm_close = true;
+                }
+            });
+        });
+        if vdm_commit {
+            self.cfg.web_enabled = true;
+            // Armed before the restart, because the restart takes this window
+            // with it: `save_and_restart_all` unwinds the server, `gui::run`
+            // returns and `main` builds a fresh `App`.  That one picks the
+            // intent up and opens the page, so the operator does not have to
+            // find the button again after everything has come back.
+            self.cfg.open_screen_after_restart = true;
+            self.save_and_restart_all();
+        }
+        if vdm_close {
+            vdm_offer_open = false;
+        }
+        self.vdm_web_offer_open = vdm_offer_open;
+
+        // The deferred open, once the restarted listener has had its moment.
+        if let Some(at) = self.vdm_open_at {
+            if std::time::Instant::now() >= at {
+                self.vdm_open_at = None;
+                self.open_vdm_page(&ctx);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
+
         // Disable-IP-safety enable-confirmation popup.  Off→on arms the
         // popup; the checkbox visible state stays false until the
         // operator clicks Enable.  Cancel leaves `disable_ip_safety`
@@ -4394,6 +4592,67 @@ mod tests {
     }
 
     // ── App::new initialization ──────────────────────────────
+
+    /// **The one-shot marker arms the open, and is spent on the way in.**
+    ///
+    /// Turning the web server on from the screen button restarts the gateway,
+    /// and the restart destroys this window — `gui::run` returns and `main`
+    /// builds a fresh `App`. The marker in the config is how the new window
+    /// knows to finish the job. It has to be *spent*: one that survived a launch
+    /// which never managed to open a browser would open one at every launch
+    /// afterwards, which is a worse fault than the one it fixes.
+    #[test]
+    fn test_the_screen_marker_arms_the_open_and_is_spent() {
+        let plain = test_app();
+        assert!(plain.vdm_open_at.is_none(), "an ordinary launch opens nothing");
+
+        let asked = App::new(
+            Config { open_screen_after_restart: true, ..Config::default() },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(asked.vdm_open_at.is_some(), "the marker must arm the open");
+        // Not immediately: the server it is about to open is still binding.
+        assert!(
+            asked.vdm_open_at.unwrap() > std::time::Instant::now(),
+            "opening in the same instant races the listener's bind"
+        );
+        // Spent on the way in, so the *App* no longer carries the request.
+        assert!(!asked.cfg.open_screen_after_restart, "the marker must be cleared when read");
+    }
+
+    /// **The desktop button opens the screen, at the port the server is on.**
+    ///
+    /// Three things this pins, each of which was a way to get it wrong:
+    /// the path is the screen's and not the configuration page's, because the
+    /// operator pressed a button that named the screen; the port comes from the
+    /// *saved* config, since a port typed into the box and not saved is a port
+    /// nothing is listening on; and the same rule decides whether the button
+    /// opens a browser or offers to start the server, so a ticked-but-unsaved
+    /// checkbox cannot make it open a page that is not being served.
+    #[test]
+    fn test_the_desktop_screen_button_opens_the_screen_not_the_root() {
+        let mut app = test_app();
+        app.last_synced_cfg.web_enabled = true;
+        app.last_synced_cfg.web_port = 9123;
+
+        let url = app.vdm_url();
+        assert!(url.ends_with("/vdm"), "it must land on the screen: {url}");
+        assert!(url.contains(":9123/"), "the configured port is not in {url}");
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert!(app.vdm_web_running());
+
+        // An unsaved edit changes neither answer: the running server is still
+        // where it was, and that is where the browser has to be sent.
+        app.cfg.web_port = 4444;
+        app.cfg.web_enabled = false;
+        assert_eq!(app.vdm_url(), "http://127.0.0.1:9123/vdm");
+        assert!(app.vdm_web_running(), "the saved state is what is running");
+
+        // And with the server really off, the button has nothing to open.
+        app.last_synced_cfg.web_enabled = false;
+        assert!(!app.vdm_web_running());
+    }
 
     #[test]
     fn test_parse_window_geometry() {

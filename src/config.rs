@@ -862,6 +862,20 @@ pub struct Config {
     /// The screen is always readable; this decides whether it is also a
     /// keyboard.  See [`DEFAULT_CPM_SCREEN_INPUT`].
     pub cpm_screen_input: bool,
+    /// One-shot: open the VDM / Dazzler screen once the gateway is back up.
+    ///
+    /// **Not a setting, and deliberately not on any configuration screen** —
+    /// the same posture as [`Config::setup_wizard_completed`]. It is a marker
+    /// the desktop UI leaves for itself: turning the web server on from the
+    /// screen button restarts the gateway, which destroys the window that was
+    /// asked, so the intent has to outlive it. In the file rather than in
+    /// memory because the config is re-read on every restart cycle and would
+    /// survive the process actually exiting, which a memory flag would not.
+    ///
+    /// Cleared when it is read, *before* the browser is opened: a marker that
+    /// outlived one failed attempt would open a window at every launch, which
+    /// is a much worse fault than not opening one.
+    pub open_screen_after_restart: bool,
     /// May a booted disk write to the images it is running?
     ///
     /// **Off, because a booted disk has no guard left that understands its
@@ -1104,6 +1118,7 @@ impl Default for Config {
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             cpm_screen_input: DEFAULT_CPM_SCREEN_INPUT,
             cpm_boot_writable: DEFAULT_CPM_BOOT_WRITABLE,
+            open_screen_after_restart: false,
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
             cpm_emu_max_minstr: DEFAULT_CPM_EMU_MAX_MINSTR,
             cpm_emu_uart: crate::cpm::uart::DEFAULT_UART.to_string(),
@@ -1720,6 +1735,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_writable")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_BOOT_WRITABLE),
+        open_screen_after_restart: map
+            .get("open_screen_after_restart")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
         disable_gateway_connections: map
             .get("disable_gateway_connections")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -2507,10 +2526,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   in the same machine.  Off means the guest's writes are accepted and
 #   discarded, which is what most vintage software expects to be able to do
 #   without you losing the disk.
+# open_screen_after_restart: NOT a setting -- a one-shot marker the desktop UI
+#   leaves for itself.  Turning the web server on from the VDM / Dazzler button
+#   restarts the gateway, and this is how the window that comes back knows to
+#   finish opening the screen you asked for.  It is cleared as soon as it is
+#   read.  Setting it by hand just opens a browser once on the next start.
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_screen_input", cfg.cpm_screen_input);
     write_kv(&mut content, "cpm_boot_writable", cfg.cpm_boot_writable);
+    write_kv(&mut content, "open_screen_after_restart", cfg.open_screen_after_restart);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
     write_kv(&mut content, "cpm_emu_uart", &cfg.cpm_emu_uart);
     content.push_str("\
@@ -3223,6 +3248,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_screen_input" => cfg.cpm_screen_input = value.eq_ignore_ascii_case("true"),
         "cpm_boot_writable" => cfg.cpm_boot_writable = value.eq_ignore_ascii_case("true"),
+        "open_screen_after_restart" => {
+            cfg.open_screen_after_restart = value.eq_ignore_ascii_case("true")
+        }
         "cpm_emu_enabled" => cfg.cpm_emu_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_mounts" => cfg.cpm_mounts = value.to_string(),
         "cpm_boot_image" => {
@@ -4092,6 +4120,10 @@ mod tests {
             // Deliberately not the default, so the roundtrip proves the key is
             // written and read back rather than merely defaulting twice.
             cpm_boot_writable: true,
+            // A one-shot marker, not a setting -- but it round-trips like any
+            // other key and a roundtrip test that skipped it would not notice
+            // it being dropped from the writer.
+            open_screen_after_restart: true,
             cpm_boot_machine: "console_04_cuter".to_string(),
             // Likewise not the default: `rubout` is what a CP/M 1.x operator
             // sets, and it has to survive a write/read cycle to be worth having.
