@@ -2719,9 +2719,14 @@ fn test_config_menu_row_count() {
     // CONFIGURATION submenu now carries the "Server addresses:" banner
     // at the top (relocated here from Server Config, §4.7):
     // header(3) + address block [label(1) + N addrs + ATD example(1)]
-    // + blank + 7 items (E, G, M, S, F, O, R) + blank + Q/H + prompt.
+    // + blank + 8 items (E, G, M, S, F, C, O, R) + blank + Q/H + prompt.
     // Worst case is N = SERVER_ADDR_DISPLAY_CAP.
-    let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 7 + 1 + 1 + 1; // 19
+    //
+    // `C` (CP/M) moved up from Other Settings, which was at exactly 22 rows
+    // while carrying the entry that keeps growing.  This screen had the room:
+    // 19 -> 20 in the worst case, and the worst case needs three detected
+    // addresses.
+    let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 8 + 1 + 1 + 1; // 20
     assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
     // Server configuration: header(3) + 5 status (telnet, ssh,
     // kermit, web, ip-safety) + blank + 7 item rows (T/P, S/O, K/J,
@@ -2841,15 +2846,24 @@ fn test_security_help_screen_row_count() {
 }
 
 /// Other settings menu row count:
-/// header(3) + blank + 5 values + blank + 9 item rows + blank + Q/H + prompt = 22
+/// header(3) + blank + 5 values + blank + 8 item rows + blank + Q/H + prompt = 21
 /// (Verbose+GUI and Gateway-debug+CP/M each share a value row, folding 7
-/// statuses into 5 lines; the `E` "CP/M settings" submenu entry is the 8th item
-/// row, and the 9th carries BOTH `L` Log file and `R` Restart server — the menu
-/// is at its budget, so a new entry has to pair with an existing one.)
+/// statuses into 5 lines; the last item row carries BOTH `L` Log file and `R`
+/// Restart server.)
+///
+/// **This screen used to be at exactly 22** — its own comment said a new entry
+/// had to pair with an existing one. Moving CP/M up to the CONFIGURATION menu
+/// as `C` bought a row back, which is most of why it moved: the screen with no
+/// room to spare was the one carrying the entry that keeps growing (an
+/// emulator, a disk-image wizard, a boot picker and a printer).
+///
+/// The `L`/`R` pairing is kept rather than spent on un-pairing them: two
+/// entries that read fine together are not worth the only spare row.
 #[test]
 fn test_other_settings_menu_row_count() {
-    let rows = 3 + 1 + 5 + 1 + 9 + 1 + 1 + 1; // 22
+    let rows = 3 + 1 + 5 + 1 + 8 + 1 + 1 + 1; // 21
     assert!(rows <= 22, "other settings menu is {} rows, exceeds 22", rows);
+    assert_eq!(rows, 21, "the CP/M entry moved out; this screen should have a row spare");
 }
 
 /// **A screen that asks a question has to be a screen.**

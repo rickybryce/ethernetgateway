@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.2] - Unreleased
 
+### Changed
+
+- **CP/M moved up a level on the telnet menus: CONFIGURATION → `C`.** It had
+  been under Other Settings since it was a single on/off toggle, and it is now
+  an emulator, a disk-image wizard, a boot picker and a printer — a feature
+  area like Serial or File Transfer rather than a general setting. It also
+  relieves the screen that needed it most: Other Settings sat at *exactly* its
+  22-row PETSCII budget, so the one screen with no room to spare was carrying
+  the entry that keeps growing. CONFIGURATION had the room (19 → 20 rows in the
+  worst case, with three detected addresses).
+
+  The undocumented `I` shortcut on the CONFIGURATION menu — which jumped
+  straight to the disk-image wizard while being displayed nowhere and named in
+  no error hint — is gone with it. A key that works but is invisible is the
+  same class of defect as one that is shown but does nothing.
+
 ### Fixed
 
 - **`Q` did not leave the CP/M Disk Images screen.** It was displayed as

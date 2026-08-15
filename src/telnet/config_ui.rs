@@ -158,6 +158,18 @@ impl TelnetSession {
                 self.cyan("F")
             ))
             .await?;
+            // CP/M sits here rather than under Other Settings, where it lived
+            // until it had grown into an emulator, a disk-image wizard, a boot
+            // picker and a printer.  Two reasons, and the second is the real
+            // one: it is a feature area like Serial or File Transfer, not a
+            // "general setting"; and Other Settings was at *exactly* its 22-row
+            // PETSCII budget, so the screen that had no room to spare was the
+            // one carrying the entry that keeps growing.
+            self.send_line(&format!(
+                "  {}  CP/M Settings",
+                self.cyan("C")
+            ))
+            .await?;
             self.send_line(&format!(
                 "  {}  Other Settings",
                 self.cyan("O")
@@ -213,12 +225,15 @@ impl TelnetSession {
                     );
                     self.show_help_page("CONFIGURATION HELP", lines).await?;
                 }
-                "i" => {
-                    self.cpm_mount_wizard().await?;
+                "c" => {
+                    self.cpm_settings().await?;
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press E, F, G, M, O, R, S, H, or Q.").await?;
+                    // No serial comma before "or": `show_error` indents by two,
+                    // and with it this line is exactly 40 columns — the width a
+                    // PETSCII screen wraps at.
+                    self.show_error("Press C, E, F, G, M, O, R, S, H or Q.").await?;
                 }
             }
         }
@@ -345,14 +360,16 @@ impl TelnetSession {
                 self.cyan("D")
             ))
             .await?;
-            self.send_line(&format!(
-                "  {}  CP/M settings",
-                self.cyan("E")
-            ))
-            .await?;
-            // L shares this row with R: the menu is already at exactly 22 rows
-            // (see test_other_settings_menu_row_count), so the log-file entry
-            // has to pair with an existing item rather than add a line.
+            // CP/M moved up to the CONFIGURATION menu as `C`.  It is a feature
+            // area, not a general setting, and this screen was at exactly its
+            // 22-row budget while the CP/M entry was the one still growing.
+            //
+            // L shares this row with R: the menu was at exactly 22 rows (see
+            // test_other_settings_menu_row_count), so the log-file entry had to
+            // pair with an existing item rather than add a line.  It keeps the
+            // pairing — losing CP/M bought one row back, and spending it to
+            // un-pair two entries that read fine together would leave the
+            // screen full again for no gain.
             self.send_line(&format!(
                 "  {}  Log file         {}  Restart server",
                 self.cyan("L"),
@@ -445,13 +462,6 @@ impl TelnetSession {
                     })
                     .await
                     .ok();
-                }
-                "e" => {
-                    // The CP/M emulator has two settings now (enable +
-                    // runaway ceiling), so `E` opens their own submenu rather
-                    // than toggling in place — keeps this menu inside the
-                    // 22-row PETSCII budget.
-                    self.cpm_settings().await?;
                 }
                 "l" => {
                     self.log_settings().await?;
@@ -566,8 +576,6 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
                 "  D  Toggle gateway debug trace",
-                "  E  CP/M emulator settings",
-                "     (enable + runaway ceiling)",
                 "  L  Log file (size, how many kept)",
                 "  R  Restart the server",
             ]
@@ -583,8 +591,6 @@ impl TelnetSession {
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
                 "  D  Toggle gateway debug trace",
-                "  E  CP/M emulator settings (enable +",
-                "     runaway instruction ceiling)",
                 "  L  Log file (name, size limit, how",
                 "     many old logs are kept)",
                 "  R  Restart the server",
