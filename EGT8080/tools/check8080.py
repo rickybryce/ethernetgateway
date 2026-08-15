@@ -24,9 +24,8 @@ a rarely-taken path assembles, links, ships, and then crashes an Altair
 in whatever menu nobody exercised.  The live gate runs the terminal but
 it cannot run every path.  This can.
 
-Run by `make port` and `make EGT8080.COM`; it needs no CP/M tooling, so
-it is also the one part of the EGT80 build a machine without zxcc can
-run.
+Run by `make EGT8080.COM`; it needs no CP/M tooling, so it is also the
+one part of the EGT8080 build a machine without zxcc can run.
 """
 
 import re

@@ -12,15 +12,17 @@ the pairing wrong and the program is simply silent.
 EGT8080 asks instead. One `.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-It ships as **two binaries, one per processor**:
+It ships as **one binary that runs on either processor**:
 
 | File | Runs on | Notes |
 |---|---|---|
-| `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. **Reach for this one.** |
-| RETIRED in 0.9.2: `EGT80.COM` | The Z80 only | The original, and the source this one was generated from. Smaller, and it used the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
+| `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. |
+| RETIRED in 0.9.2: `EGT80.COM` | The Z80 only | The original, and the ancestor of this source. Smaller, and it used the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
 
-Each saves its settings into *its own* file, so configuring one does not
-configure the other.
+The retired build is listed because an operator who upgraded still has it on
+drive A: — placement never overwrites — and it still holds *its* settings. The
+two must never share a filename, which is what
+`test_the_shipped_terminal_carries_its_own_name` holds.
 
 **Status: complete (v0.7)** — a working terminal with all five port families,
 settings that survive a restart, and XMODEM file transfer in both directions.
@@ -51,9 +53,11 @@ does not.
 
 ## Getting it
 
-Nothing to install: both builds are compiled into the gateway binary and placed
-on CP/M drive A: when the emulator first creates its drive folders. `DIR` shows
-them, and typing `EGT8080` runs it.
+Nothing to install: it is compiled into the gateway binary and placed on CP/M
+drive A: when the emulator first creates its drive folders. `DIR` shows it, and
+typing `EGT8080` runs it. A second copy goes in the transfer directory, where
+the file-transfer menus can reach it — that is the one to send to a real CP/M
+machine, since drive A: lives inside `CPM/` and those menus do not list it.
 
 That copy is **never overwritten** afterwards. EGT8080 stores its settings inside
 its own `.COM`, so replacing the file on each launch would silently discard the
@@ -113,42 +117,48 @@ break by accident and impossible to notice in a modern assembler.
 
 **CI cannot rebuild this.** Assembling needs SLR's `Z80ASM.COM` and `zxcc`, and
 neither is in the repository — the assembler is third-party software we do not
-vendor. So both `.COM`s are committed artifacts, and the risk is drift: a source
+vendor. So the `.COM` is a committed artifact, and the risk is drift: a source
 edit whose binary was never rebuilt. Unit tests in `src/telnet/cpm_emu.rs` close
-that gap with no tooling at all, and they ask every one of these of **both**
-builds through the same table the placement uses: a whole number of 128-byte
+that gap with no tooling at all, asking every one of these through the same
+table the placement uses: a whole number of 128-byte
 records, the `JP` over the patch area, the `EGT80CFG` signature at file offset
 `0x80` (where the save routine rewrites record 1), and the version string its
 own source declares. The version check catches the realistic mistake of bumping
 the version without rebuilding.
 
-Two more exist only because there are two builds.
-`test_the_8080_build_is_not_the_z80_build` catches a `make` run without a
-`make port` — which produces two files that pass every shape check while the
-one on drive A: crashes an Altair. Its sharper witness is the filename compiled
-into the settings FCB: if `EGT8080.COM` carried `EGT80   COM`, it would save
-its configuration into the other build's file.
+`test_the_shipped_terminal_carries_its_own_name` reads the filename compiled
+into the settings FCB. It has to be this program's own — a build carrying
+`EGT80   COM` would save its configuration into the retired Z80 build's file,
+which an upgrader still has on drive A: because placement never overwrites.
 `test_bundled_terminals_match_pinned_hashes` covers what the shape checks
 cannot: a code change made *without* touching the version. It asserts an
-explicit `sha256` of each committed binary, so the bytes users run cannot change
+explicit `sha256` of the committed binary, so the bytes users run cannot change
 unless someone edits the hash in the same commit — which puts it in front of a
 reviewer. **So after any legitimate rebuild:**
 
 ```sh
 make && make check          # the real gate — three assemblers
-sha256sum EGT8080.COM             # paste into PINNED in that test
+sha256sum EGT8080.COM       # paste into PINNED in that test
 ```
 
-The hashes pin the artifacts, not their correspondence to the sources; only
+The hash pins the artifact, not its correspondence to the source; only
 `make` proves that, so run it before a release cut.
 
-## The 8080 build
+## Why it is written to the 8080's instruction set
 
-`EGT8080.Z80` is **derived**, not hand-maintained. `tools/port8080.py`
-once generated it from `EGT80.Z80`; since 0.9.2 this file IS the source, edited directly,
-run `make port`, and the 8080 build is the same program again. Every difference
-between them is a named rule in that script with its reason attached, and a
-rule that stops matching is a hard error rather than a silent no-op.
+There is one terminal and it is 8080 code, because the 8080's instructions are a
+strict subset of the Z80's: one binary then runs whichever processor `cpm_cpu`
+selects. A separate Z80 build existed until 0.9.2 — smaller, using relative
+jumps and `IN A,(C)` — and was generated from this file's ancestor by a porter
+script. It went because it crashed the moment an operator chose the 8080, so
+shipping both put a wrong answer on drive A: beside the right one. This file is
+the source now, edited directly; the porter and the Z80 binary are gone.
+
+The one capability that went with it is the Z180 ASCI ports. Detecting a Z180
+needs `MLT BC` (`DB 0EDH,4CH`), and on a true 8080 an `ED` byte is an
+undocumented `CALL` — the probe would not fail, it would jump into the weeds —
+so those bytes cannot be in an 8080 binary at all. Restoring them needs an
+8080/Z80 flag test that uses no `ED` byte, ahead of any Z180 probe.
 
 The source stays in Zilog mnemonics and is assembled by the same SLR `Z80ASM`,
 because what has to be inside the 8080's set is the *opcodes emitted*, not the

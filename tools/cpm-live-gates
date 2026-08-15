@@ -2,7 +2,7 @@
 # Run every CP/M live gate — the `#[ignore]` tests that need real disk images.
 #
 # These are the project's ground truth: booting, mounting, writing, the virtual
-# modem, EGT80 and the CPU exercisers, measured against disks somebody else
+# modem, EGT8080 and the CPU exercisers, measured against disks somebody else
 # made.  They are `#[ignore]` because CI has no images, and each one reads its
 # own environment variable — which meant the *set* of variables lived only in
 # whoever last ran them.  Guessing it wrongly does not look like a mistake: the

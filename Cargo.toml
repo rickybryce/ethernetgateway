@@ -53,8 +53,8 @@ iz80 = "0.5.1"
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["test-util"] }
-# Only used to pin the checked-in EGT80.COM against an explicit hash (see
-# test_bundled_egt80_matches_pinned_hash).  Already in the tree via russh,
+# Only used to pin the checked-in EGT8080.COM against an explicit hash (see
+# test_bundled_terminals_match_pinned_hashes).  Already in the tree via russh,
 # so this adds nothing to the build.
 sha2 = "0.10"
 

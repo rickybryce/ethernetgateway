@@ -2907,22 +2907,24 @@ mod egt80_tests {
         }
     }
 
-    /// **The 8080 build must not be the Z80 one under another name.**
+    /// **The shipped terminal must not be the retired Z80 build under another
+    /// name.**
     ///
-    /// The failure this catches is a build that ran `make` without `make port`
-    /// — or a `port8080.py` whose rules all silently matched nothing. Both
-    /// produce two files, both pass every shape check above, and the one on
-    /// drive A: crashes an Altair.
+    /// **It carries its own name**, which is not a formality: that string is
+    /// the FCB EGT8080 opens to save its settings, so a wrong one writes the
+    /// operator's configuration into a file that is not this program.
     ///
-    /// **The shipped terminal carries its own name**, which is not a
-    /// formality: that string is the FCB EGT8080 opens to save its settings,
-    /// so a wrong one writes the operator's configuration into a file that is
-    /// not this program.
+    /// It also has to *not* carry `EGT80   COM`. That build was retired in
+    /// 0.9.2 and an upgrader keeps their old `EGT80.COM` on drive A: —
+    /// placement never overwrites — so the two must stay distinct owners of
+    /// their own settings rather than this one silently saving into that.
     ///
-    /// It also has to *not* carry `EGT80`. That build was retired in 0.9.2 and
-    /// an upgrader keeps their old `EGT80.COM` on drive A: — placement never
-    /// overwrites — so the two must stay distinct owners of their own settings
-    /// rather than this one silently saving into that.
+    /// **Both literals are FCB fields, not display names**: 8 characters of
+    /// name padded with spaces, then 3 of extension, 11 bytes with no dot.
+    /// Spelling them out matters — the 0.9.2 rename rewrote `EGT80   COM`
+    /// into `EGT8080   COM`, which is thirteen bytes and therefore cannot
+    /// occur in any FCB, so this guard passed while proving nothing.  A
+    /// literal that is a *layout* is not a name to be search-and-replaced.
     #[test]
     fn test_the_shipped_terminal_carries_its_own_name() {
         let fcb_name = |bytes: &[u8], want: &[u8]| {
@@ -2934,28 +2936,27 @@ mod egt80_tests {
              settings somewhere else"
         );
         assert!(
-            !fcb_name(EGT8080_COM, b"EGT8080   COM"),
+            !fcb_name(EGT8080_COM, b"EGT80   COM"),
             "EGT8080.COM carries the retired Z80 build's filename"
         );
     }
 
     /// The one check that closes the "code change without a version bump" gap
-    /// the sibling tests above cannot: an explicit hash of each committed
+    /// the sibling tests above cannot: an explicit hash of the committed
     /// binary.
     ///
-    /// These are compiled into every release with `include_bytes!` but no CI
-    /// runner can rebuild them — that needs a period Z80 assembler under zxcc
-    /// — so the checked-in artifacts, not the `.Z80` sources, are what users
-    /// actually run.  Pinning them here means the bytes cannot change without
+    /// It is compiled into every release with `include_bytes!` but no CI
+    /// runner can rebuild it — that needs a period Z80 assembler under zxcc
+    /// — so the checked-in artifact, not the `.Z80` source, is what users
+    /// actually run.  Pinning it here means the bytes cannot change without
     /// someone updating this constant in the same commit, which puts the
     /// change in front of a reviewer.  It does *not* prove a binary matches
     /// its source; only `make` in `EGT8080/` does that.
     ///
-    /// **When you legitimately rebuild**, run `make port` if you edited
-    /// `EGT8080.Z80`, then `make` (which gates on three independent assemblers
-    /// for the Z80 build and on the 8080 instruction-set check for the other),
-    /// then update these from:
-    ///     sha256sum EGT8080/EGT8080.COM EGT8080/EGT8080.COM
+    /// **When you legitimately rebuild**, run `make` in `EGT8080/` (which
+    /// gates on three independent assemblers and on the 8080 instruction-set
+    /// check), then update this from:
+    ///     sha256sum EGT8080/EGT8080.COM
     #[test]
     fn test_bundled_terminals_match_pinned_hashes() {
         use sha2::{Digest, Sha256};
@@ -2996,13 +2997,12 @@ mod egt80_tests {
     /// described in it.  Two rows are reserved for the "Press any key" prompt
     /// that follows a full-screen page.
     ///
-    /// **Both sources**, and that is the one that needed adding: the 8080
-    /// build renames fourteen strings from `EGT8080` to `EGT8080`, so every
-    /// message carrying the program's name is two columns wider than the one
-    /// this test was written against.  A block already near the limit would
-    /// wrap with nothing failing.  `port8080.py` also refuses to emit a line
-    /// over 80 columns, but that bounds the *source* line, not the rendered
-    /// screen — two different limits, and only this one is about the display.
+    /// This was written against a source whose program name was `EGT80`, and
+    /// the fourteen strings carrying that name are two columns wider now that
+    /// it is `EGT8080` — a block already near the limit would have wrapped
+    /// with nothing failing.  `make check` also refuses a *source* line over
+    /// 80 columns, but that is a different limit: only this one is about the
+    /// rendered screen.
     #[test]
     fn test_egt80_screens_fit_a_24_by_80_terminal() {
         check_screens_fit("EGT8080.Z80", include_str!("../../EGT8080/EGT8080.Z80"));

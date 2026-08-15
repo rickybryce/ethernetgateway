@@ -82,9 +82,13 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #      `Copy-Item`); a file added to one and not the other is worse than one
 #      added to neither, because it ships on some platforms only.
 #
+#      The Z80 build was retired in 0.9.2 and there is one terminal now, so
+#      this particular pair cannot recur -- but the shape can, which is why
+#      the story stays.
+#
 #      When you add something users are meant to receive, add it there and
 #      say so here.  Currently shipped alongside the binary:
-#        README.md  LICENSE  EGT80/EGT8080.COM  EGT80/EGT80.COM
+#        README.md  LICENSE  EGT8080/EGT8080.COM
 #
 #   2. A generated file edited by hand.  THIRD-PARTY-NOTICES.md is produced
 #      wholesale from `about.toml` + `about.hbs` and says so at the top.  Our
