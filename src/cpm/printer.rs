@@ -67,9 +67,12 @@ pub const DEFAULT_PRINTER: &str = PRINTER_OFF;
 /// [`super::uart::UART_CHOICES`] serves the virtual modem — so the three
 /// cannot offer different answers.
 pub const PRINTER_CHOICES: &[(&str, &str)] = &[
+    // `transfer/printer/`, with both slashes: it is a path, and written as
+    // "transfer printer/" it read as a description of a folder rather than the
+    // place to go and find the document.
     (PRINTER_OFF, "Off - printer output goes to the screen"),
-    (PRINTER_ODT, "OpenDocument (.odt) in transfer printer/"),
-    (PRINTER_TEXT, "Plain text (.txt) in transfer printer/"),
+    (PRINTER_ODT, "OpenDocument (.odt) in transfer/printer/"),
+    (PRINTER_TEXT, "Plain text (.txt) in transfer/printer/"),
 ];
 
 /// A printer board a *booted* disk can drive: where its data register lives.

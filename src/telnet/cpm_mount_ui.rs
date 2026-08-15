@@ -617,9 +617,30 @@ impl TelnetSession {
         }
         self.send_line(&format!("  Size:  {} bytes", self.amber(&len.to_string()))).await?;
         self.send_line("").await?;
-        self.send_line(&format!("  {}", self.dim("repodisks.txt in the images"))).await?;
-        self.send_line(&format!("  {}", self.dim("folder lists what each disk"))).await?;
-        self.send_line(&format!("  {}", self.dim("holds."))).await?;
+        // The whole relative path, not "the images folder": the operator has to
+        // go and open this, and a name without a path is a thing to hunt for.
+        //
+        // Built from the configured `transfer_dir` rather than written out as
+        // `transfer/CPM/images/`, which is only the default — an operator who
+        // moved their transfer directory would be sent to a folder that is not
+        // theirs, by a line whose whole purpose is to say where to look.
+        //
+        // And from the *configured* string, not from `cpmmount_base()`, which
+        // canonicalises: that is right for a jail check and wrong for a
+        // signpost.  With the default `transfer_dir = transfer` it printed the
+        // whole absolute path of the working directory, truncated to the screen
+        // — the operator learned less than the word "images" had told them.
+        // Joined through the same `CPM_DIR` / `IMAGES_DIR` the layout is built
+        // from, so the sign cannot point somewhere the folders are not.
+        let note_w = if self.terminal_type == TerminalType::Petscii { 38 } else { 76 };
+        let listing = std::path::Path::new(&config::get_config().transfer_dir)
+            .join(crate::cpm::layout::CPM_DIR)
+            .join(crate::cpm::image::IMAGES_DIR)
+            .join("repodisks.txt")
+            .display()
+            .to_string();
+        self.send_line(&format!("  {}", self.dim("What each disk holds is listed in"))).await?;
+        self.send_line(&format!("  {}", self.dim(&truncate_to_width(&listing, note_w)))).await?;
         self.send_line("").await?;
 
         // Writing is a decision, not a default: a booted guest writes raw

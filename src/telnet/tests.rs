@@ -2597,11 +2597,35 @@ fn test_the_boot_confirmation_is_its_own_screen_and_fits() {
         assert!(before.contains(needed), "the confirmation must show {needed}");
     }
 
-    // Row budget: header(3) + blank + 3 review + blank + 3 repodisks note
+    // The path is built from the configured transfer dir, not written out as a
+    // literal — an operator who moved it would otherwise be sent to a folder
+    // that is not theirs by the one line whose job is to say where to look.
+    // From the configured transfer dir, joined through the same constants the
+    // layout is built from — not `cpmmount_base()`, which canonicalises and
+    // would print the absolute path of the working directory, and not a
+    // hardcoded "transfer/CPM/images" either.
+    let sign_start = before.find("let listing").expect("the repodisks signpost");
+    let sign = &before[sign_start..];
+    let sign = &sign[..sign.find(';').map(|i| i + 1).unwrap_or(sign.len())];
+    assert!(
+        sign.contains("config::get_config().transfer_dir")
+            && sign.contains("layout::CPM_DIR")
+            && sign.contains("image::IMAGES_DIR"),
+        "the repodisks path must be composed from the configured transfer dir \
+         and the layout constants, not written out: {sign}"
+    );
+    // Scoped to the signpost itself: `images_dir(&base)` is correct a few lines
+    // above, where the *real* path to open the image is built.
+    assert!(
+        !sign.contains("images_dir("),
+        "images_dir canonicalises; a signpost must show the configured path"
+    );
+
+    // Row budget: header(3) + blank + 3 review + blank + 2 repodisks note
     // + blank + 1 writes note + 1 writes prompt, then the Backspace question's
     // 2 notes + 1 prompt land under it once the first is answered (+1 for the
     // echoed newline).
-    let rows = 3 + 1 + 3 + 1 + 3 + 1 + 1 + 1 + 1 + 2 + 1;
+    let rows = 3 + 1 + 3 + 1 + 2 + 1 + 1 + 1 + 1 + 2 + 1;
     assert!(
         rows <= 22,
         "the boot confirmation reaches {rows} rows, over the 22-row PETSCII budget"

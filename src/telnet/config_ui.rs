@@ -1036,7 +1036,7 @@ impl TelnetSession {
                 // are held by `test_cpm_printer_screen_literals_fit_petscii`
                 // rather than by a number in a comment here.
                 self.send_line(&format!("  {}", self.dim("A document lands in your"))).await?;
-                self.send_line(&format!("  {}", self.dim("transfer printer/ folder, 5s"))).await?;
+                self.send_line(&format!("  {}", self.dim("transfer/printer/ folder, 5s"))).await?;
                 self.send_line(&format!("  {}", self.dim("after the last character."))).await?;
             }
             self.send_line("").await?;
