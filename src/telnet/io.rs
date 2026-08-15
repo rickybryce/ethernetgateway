@@ -197,6 +197,20 @@ impl TelnetSession {
                 }
                 let byte = buf[0];
                 if !filter_iac || byte != IAC {
+                    // Drop the NUL of an RFC 854 `CR NUL` pair.  It is how a
+                    // telnet client spells a bare CR, not a byte the user
+                    // typed, and passing it on printed `^@` at a booted CP/M
+                    // prompt.  Only ever one, and only straight after a CR:
+                    // a NUL anywhere else is the peer's own and is passed
+                    // through.
+                    //
+                    // The LF of a `CR LF` pair is deliberately NOT dropped.
+                    // That one is a real newline to plenty of guest software,
+                    // and no client sends it as padding.
+                    let was_cr = std::mem::replace(&mut self.last_was_cr, byte == b'\r');
+                    if was_cr && byte == 0 {
+                        continue;
+                    }
                     return Ok(Some(byte));
                 }
                 // Committed to an IAC sequence: mark the resume point before

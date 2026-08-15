@@ -694,6 +694,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
         mid_iac_cmd: false,
+        last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
         neg_sent_do: Box::new([false; 256]),
         neg_sent_wont: Box::new([false; 256]),
@@ -747,6 +748,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
         mid_iac_cmd: false,
+        last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
         neg_sent_do: Box::new([false; 256]),
         neg_sent_wont: Box::new([false; 256]),
@@ -5110,6 +5112,52 @@ async fn test_drain_input_until_quiet_clears_buffered_then_stops() {
     peer.write_all(b"Z").await.unwrap();
     let got = session.session_read_byte().await.unwrap();
     assert_eq!(got, Some(b'Z'), "drain should have consumed all stale bytes");
+}
+
+/// **The NUL of an RFC 854 `CR NUL` pair is not a keystroke.**
+///
+/// A telnet client spells a bare CR as `CR NUL`, and forwarding the NUL to a
+/// booted CP/M guest printed `^@` at its next prompt — the CCP echoes control
+/// characters. Reported from a real session: `A>b:`, `B>dir`, `B>a:`, then
+/// `A>^@`. It showed only after a command that did no console I/O to swallow it
+/// first, which is why `DIR` and logging in a drive looked clean and
+/// re-selecting the current drive did not — so a test that only sends one CR
+/// would have passed against the bug.
+#[tokio::test]
+async fn test_a_bare_cr_does_not_deliver_its_padding_nul() {
+    use tokio::io::AsyncWriteExt;
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+
+    // Two commands' worth, because the defect is about what survives *to the
+    // next prompt*: the padding must not reappear as the first byte of the
+    // following line.
+    peer.write_all(b"a:\r\x00b:\r\x00").await.unwrap();
+    let mut got = Vec::new();
+    for _ in 0..6 {
+        got.push(session.session_read_byte().await.unwrap().unwrap());
+    }
+    assert_eq!(&got, b"a:\rb:\r", "the padding NUL reached the guest: {got:?}");
+}
+
+/// The other half: a NUL that is *not* padding is the peer's own byte, and the
+/// LF of a `CR LF` is a real newline plenty of guest software wants.
+#[tokio::test]
+async fn test_only_the_nul_straight_after_a_cr_is_dropped() {
+    use tokio::io::AsyncWriteExt;
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+
+    // A lone NUL, a NUL after something that is not a CR, the second NUL of a
+    // run (only one is padding), and the LF of a CR LF.
+    peer.write_all(b"\x00A\x00\r\x00\x00\r\n").await.unwrap();
+    let mut got = Vec::new();
+    for _ in 0..7 {
+        got.push(session.session_read_byte().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        &got,
+        b"\x00A\x00\r\x00\r\n",
+        "only the one NUL straight after a CR is padding: {got:?}"
+    );
 }
 
 #[tokio::test]

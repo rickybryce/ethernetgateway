@@ -779,6 +779,16 @@ pub(crate) struct TelnetSession {
     // the CP/M out-of-band drain's zero-timeout) resumes at the command byte
     // instead of losing the IAC and desyncing telnet parsing.
     mid_iac_cmd: bool,
+    // RFC 854 NVT: a bare CR is sent as `CR NUL`, so the NUL that follows a CR
+    // is an encoding artefact and not a keystroke.  Set when a CR is handed to a
+    // caller, cleared by the next byte.  Telnet only -- a serial or SSH client
+    // sends CR alone, and a NUL from those is the peer's own byte.
+    //
+    // Why it matters: a booted CP/M guest is handed raw keys, and its CCP echoes
+    // control characters, so the stray NUL printed as `^@` at the next prompt --
+    // but only after a command that did no console I/O to swallow it first,
+    // which is why `DIR` looked clean and re-selecting the current drive did not.
+    last_was_cr: bool,
     // Telnet option negotiation state. Each per-option flag records a
     // reply we've already sent so we never loop on repeated requests.
     neg_sent_will: Box<[bool; 256]>,
@@ -865,6 +875,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -923,6 +934,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -997,6 +1009,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
             neg_sent_wont: Box::new([false; 256]),
@@ -1625,6 +1638,7 @@ pub fn start_server(
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                     pushback: None,
                                     mid_iac_cmd: false,
+            last_was_cr: false,
                                     neg_sent_will: Box::new([false; 256]),
                                     neg_sent_do: Box::new([false; 256]),
                                     neg_sent_wont: Box::new([false; 256]),

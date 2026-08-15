@@ -1458,7 +1458,7 @@ fn render_vdm_page(cfg: &Config) -> String {
     let mut out = String::with_capacity(8 * 1024);
     out.push_str("<!doctype html><html lang=\"en\"><head>");
     out.push_str("<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    out.push_str("<title>Ethernet Gateway — Disk Screen</title>");
+    out.push_str("<title>Ethernet Gateway — VDM / Dazzler</title>");
     out.push_str(STYLE);
     out.push_str(VDM_STYLE);
     out.push_str("</head><body>");
@@ -1469,7 +1469,7 @@ fn render_vdm_page(cfg: &Config) -> String {
          a Cromemco <strong>Dazzler</strong> wherever the guest put it, or both</div>",
     );
     out.push_str("<section class=\"frame\"><div class=\"frame-head\">\
-         <span class=\"title\">Screen</span>\
+         <span class=\"title\">VDM / Dazzler</span>\
          <span class=\"head-right\"><a class=\"backlink\" href=\"/\">&larr; Configuration</a></span>\
          </div>");
     out.push_str(
@@ -2080,7 +2080,7 @@ fn frame_ai_browser(cfg: &Config) -> String {
          <div class=\"row\"><span class=\"label\">Weather location:</span>\
          <input type=\"text\" name=\"weather_location\" value=\"{loc}\" \
          placeholder=\"city or postal code\">\
-         <a class=\"row-right linkbtn\" href=\"/vdm\">Disk Screen</a></div>\
+         <a class=\"row-right linkbtn\" href=\"/vdm\">VDM / Dazzler</a></div>\
          <div class=\"row\"><span class=\"label\">Home:</span>\
          <input type=\"text\" name=\"browser_homepage\" value=\"{home}\">\
          <button type=\"button\" class=\"more\" data-target=\"more-ai\">More\u{2026}</button></div>\
@@ -2883,7 +2883,7 @@ fn render_more_popups(cfg: &Config) -> String {
         ),
         cpmscreen = checkbox(
             "cpm_screen_input",
-            "Disk Screen may type at a booted disk (the screen is readable either way)",
+            "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
             cfg.cpm_screen_input,
         ),
         cpmwrite = checkbox(
@@ -3345,7 +3345,7 @@ h1 { color: var(--amber-bright); font-weight: bold; margin: 0; font-size: 22px; 
    line of them does not read as a row of buttons. */
 .backlink { color: var(--amber); text-decoration: none; }
 .backlink:hover { text-decoration: underline; }
-/* A link wearing the small button's clothes — the Disk Screen control, which
+/* A link wearing the small button's clothes — the VDM / Dazzler control, which
    lines up under this frame's Save and above its More… and so has to match
    them.  Deliberately an anchor: it navigates away, and a `<button>` in this
    form would want a `type` to avoid submitting it. */

@@ -1569,7 +1569,7 @@ impl App {
         // operator looking for it will be looking at the CP/M controls.
         ui.checkbox(
             &mut self.cfg.cpm_screen_input,
-            "Disk Screen may type at a booted disk (the screen is readable either way)",
+            "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
         );
         // Writes by a *booted* disk.  A standing setting since 0.9.2, when the
         // telnet boot picker -- which asked it once per visit -- was removed for

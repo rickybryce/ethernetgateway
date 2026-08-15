@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The web "Disk Screen" button is now "VDM / Dazzler".** It reads like a
+  screen *about disks*, which is not what it is: it shows what a booted guest
+  paints on a Processor Technology VDM-1 or a Cromemco Dazzler. The page, its
+  title and the "may type at a booted disk" setting on the web and desktop all
+  say the same thing now.
+
 - **The mount screens now follow what is going to run.** They offered every
   image in the folder against sixteen drive letters, whatever was booting, and
   that produced a real and thoroughly confusing failure: the board an image
@@ -124,6 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Fixed
+
+- **A stray `^@` appeared at a booted CP/M prompt, and it was a real keystroke.**
+  RFC 854 says a telnet client spells a bare CR as `CR NUL`, and the gateway
+  forwarded that padding NUL to the guest as if it were typed. A booted CP/M
+  echoes control characters, so it printed `^@` — and it was *in the line
+  buffer*, so the next command had to be backspaced clear before it would run.
+
+  It only showed after a command that did no console I/O to swallow it first,
+  which is why `DIR` and logging in a drive looked clean while re-selecting the
+  current drive did not: reported as `A>b:`, `B>dir`, `B>a:`, then `A>^@`. Only
+  the one NUL directly after a CR is dropped, and only on telnet — a NUL
+  anywhere else is the peer's own byte, and the LF of a `CR LF` is a real
+  newline that guest software wants. File transfers are untouched: they read
+  through `tnio`, which documents that it deliberately does no CR-NUL
+  processing, because a payload byte is a payload byte.
 
 - **The boot menus no longer offer disks that cannot boot.** Both selectors —
   the `cpm_boot_image` list on all three configuration screens, and the boot
