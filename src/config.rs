@@ -358,7 +358,7 @@ const DEFAULT_WEB_PORT: u16 = 8080;
 /// the emulator is bounded on three axes (every file call jailed under
 /// `transfer_dir/CPM`, a runaway stopped by `cpm_emu_max_minstr`, a double-`ESC`
 /// always returning to `A>`), it services BDOS/BIOS only and has no path to a
-/// host command, and it now ships with a terminal of its own (EGT80) that lands
+/// host command, and it now ships with a terminal of its own (EGT8080) that lands
 /// on drive A: by itself — so the feature is useful the moment someone opens it
 /// rather than something they have to discover and enable.
 ///
@@ -886,7 +886,7 @@ pub struct Config {
     /// **Booting is not mounting.**  A mounted image is one drive among sixteen
     /// with our BDOS underneath; a booted one runs its own operating system and
     /// owns the hardware (mounted images ride along at the unit their drive
-    /// letter names), so the jail, the CCP-lite prompt, EGT80 and
+    /// letter names), so the jail, the CCP-lite prompt, EGT8080 and
     /// `cpm_emu_uart` do not apply inside it.  That is why this is a separate
     /// key from `cpm_mounts` and not another entry in it.
     pub cpm_boot_image: String,
@@ -961,7 +961,7 @@ pub struct Config {
     /// Altair and because period 8080 diagnostics — which detect the CPU from
     /// `DCR A` setting parity rather than overflow — are correct to fail on a
     /// Z80.  It no longer costs the terminal: `EGT8080.COM` is placed on drive
-    /// A: beside `EGT80.COM` and runs on either processor.  See
+    /// A: beside `EGT8080.COM` and runs on either processor.  See
     /// [`crate::cpm::cpu`].
     pub cpm_cpu: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from
@@ -2451,7 +2451,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   run -- jailed to the CPM/ directory under transfer_dir and bounded by
 #   cpm_emu_max_minstr; set false to hide the menu item and reject the key.
 #   The guest reaches the network only through cpm_emu_uart, which now defaults
-#   to rc2014_1b (the port the bundled EGT80 terminal expects); set it to off
+#   to rc2014_1b (the port the bundled EGT8080 terminal expects); set it to off
 #   to leave the emulator with no modem.
 # cpm_emu_max_minstr: runaway ceiling per program run, in millions of
 #   instructions (2000 = 2 billion).  A compute-bound .COM that never reads
@@ -2496,13 +2496,13 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "cpm_mounts", &cfg.cpm_mounts);
     content.push_str("\
 # cpm_boot_image: what the CP/M menu item runs.  Empty (default) = the CP/M
-#   emulator: our BDOS, drives A:-P: under CPM/, EGT80 and the virtual modem.
+#   emulator: our BDOS, drives A:-P: under CPM/, EGT8080 and the virtual modem.
 #   A bare filename in CPM/images instead COLD-BOOTS that disk on whichever
 #   emulated MITS controller its size names - an 88-DCDD floppy board or an
 #   88-HDSK hard disk - and the disk's own operating system takes the whole
 #   machine.  Altair CP/M 2.2 and 3.0, Altair DOS, Disk Extended BASIC, Time
 #   Sharing BASIC and Hard Disk BASIC all boot this way.  Booting is not mounting: inside a booted
-#   disk there is no jail, no A> from us and no EGT80, because the guest is
+#   disk there is no jail, no A> from us and no EGT8080, because the guest is
 #   talking to hardware rather than to our BDOS.  Your MOUNTED images do come
 #   along, each on the controller SLOT its drive letter names (B: is slot 1,
 #   C: slot 2), with the booted disk always slot 0 - but what a slot IS belongs
@@ -2630,10 +2630,9 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #           Z80 upgrade board.
 #     8080  an Intel 8080 - the processor the Altair actually shipped with, and
 #           the more literal machine for these disks.
-#   WHICH TERMINAL: this gateway places TWO on CP/M drive A:.  EGT8080.COM is
-#   built to the 8080's instruction set and runs on EITHER setting, so it is
-#   the one to reach for.  EGT80.COM is the Z80 build - slightly smaller, and
-#   it takes CP/M down with it on an 8080.  Choose the 8080 when you are
+#   THE TERMINAL: this gateway places EGT8080.COM on CP/M drive A:.  It is
+#   built to the 8080's instruction set, so it runs on EITHER setting - which
+#   is why it is the only one shipped.  Choose the 8080 when you are
 #   running period 8080 software - notably diagnostics that identify the CPU
 #   from DCR A setting parity rather than overflow, and are therefore RIGHT to
 #   fail on a Z80.
@@ -5257,7 +5256,7 @@ mod tests {
     #[test]
     fn test_apply_config_key_cpm_emu_uart() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.cpm_emu_uart, "rc2014_1b"); // default: EGT80's port
+        assert_eq!(cfg.cpm_emu_uart, "rc2014_1b"); // default: EGT8080's port
 
         apply_config_key(&mut cfg, "cpm_emu_uart", "rc2014_1b");
         assert_eq!(cfg.cpm_emu_uart, "rc2014_1b");

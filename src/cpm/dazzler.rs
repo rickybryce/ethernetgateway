@@ -26,7 +26,7 @@
 //!   sense switches.
 //!
 //! **CLEAN-ROOM.** Written from the *Cromemco Dazzler Manual* (1979), a
-//! published document — the same discriminator settled for Punter, HBIOS, EGT80
+//! published document — the same discriminator settled for Punter, HBIOS, EGT8080
 //! and the VDM-1: does an independent authority exist?  The register tables and
 //! the memory map below are that manual's, and the four measured programs above
 //! decode correctly under them, which is the cross-check.  Another emulator's

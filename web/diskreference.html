@@ -1031,7 +1031,7 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                 <p>
                     Three ports. Taken from the published description of the
                     88-DCDD and cross-checked against observed behaviour &mdash;
-                    the same clean-room posture as Punter, HBIOS and EGT80. Other
+                    the same clean-room posture as Punter, HBIOS and EGT8080. Other
                     emulators' sources were a check on measurements, not a source
                     of code.
                 </p>
@@ -1114,7 +1114,7 @@ NO ERRORS FOUND ON THIS DISKETTE.</code></pre>
                 <table class="data-table">
                     <thead><tr><th>Part</th><th>What it is</th></tr></thead>
                     <tbody>
-                        <tr><td>CPU</td><td>A Z80 by default, or an 8080 &mdash; <code>cpm_cpu</code>, and the same key serves the emulator next door. The Altair shipped with an 8080, but the Z80 is the default because it is a superset that runs all of it, Altairs were commonly fitted with Z80 upgrade boards, and the emulator next door is on the same setting. The 8080 no longer costs the terminal: <code>EGT8080.COM</code> is placed on drive A: beside <code>EGT80.COM</code> and runs on either processor. Choose the 8080 when you are running period 8080 software &mdash; notably diagnostics that identify the CPU from <code>DCR A</code> setting parity rather than overflow, which are <em>right</em> to fail on a Z80.</td></tr>
+                        <tr><td>CPU</td><td>A Z80 by default, or an 8080 &mdash; <code>cpm_cpu</code>, and the same key serves the emulator next door. The Altair shipped with an 8080, but the Z80 is the default because it is a superset that runs all of it, Altairs were commonly fitted with Z80 upgrade boards, and the emulator next door is on the same setting. The 8080 no longer costs the terminal: <code>EGT8080.COM</code> is placed on drive A: beside <code>EGT8080.COM</code> and runs on either processor. Choose the 8080 when you are running period 8080 software &mdash; notably diagnostics that identify the CPU from <code>DCR A</code> setting parity rather than overflow, which are <em>right</em> to fail on a Z80.</td></tr>
                         <tr><td>Memory</td><td>A flat 64&nbsp;KB. The guest's operating system owns all of it.</td></tr>
                         <tr><td>Console</td><td>An 88-2SIO at <code>10h</code>/<code>11h</code>, bridged to the session both ways.</td></tr>
                         <tr><td>Sense switches</td><td>Port <code>FFh</code>, reading <code>0x00</code> &mdash; see the warning below.</td></tr>

@@ -1012,7 +1012,7 @@ impl TelnetSession {
 
     /// Create a session for a call the **CP/M emulator's virtual modem** placed
     /// to this gateway's own menu (`ATDT ethernetgateway` from inside a CP/M
-    /// terminal such as EGT80).
+    /// terminal such as EGT8080).
     ///
     /// The bytes cross an in-memory duplex to a guest that speaks to a UART, so
     /// they carry raw serial semantics end to end — `new_relay`'s I/O behavior

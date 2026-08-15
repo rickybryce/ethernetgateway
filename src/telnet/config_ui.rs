@@ -721,7 +721,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Default modem port (pairs with EGT80)",
+                "  {}  Default modem port (pairs with EGT8080)",
                 self.cyan("D")
             ))
             .await?;
@@ -783,7 +783,7 @@ impl TelnetSession {
                     .await?;
                 }
                 "d" => {
-                    // Back to the shipped default, which is also the port EGT80
+                    // Back to the shipped default, which is also the port EGT8080
                     // defaults to — the one-key answer to "I changed something
                     // and now nothing connects".
                     let def = crate::cpm::uart::DEFAULT_UART.to_string();
@@ -1175,10 +1175,14 @@ impl TelnetSession {
             // Always said, both branches: the CPU is the exception on this
             // screen, and an operator who reads "applies to a booted disk"
             // two lines above would otherwise carry that over to it.
-            // Two rows, as before: this screen is full at 22 and a third
-            // would push the menu off a PETSCII terminal.
-            self.send_line(&format!("  {}", self.dim("The CPU applies to both. Run"))).await?;
-            self.send_line(&format!("  {}", self.dim("EGT8080 on the 8080."))).await?;
+            //
+            // One row now.  The second said "Run EGT8080 on the 8080", which
+            // was a choice back when two terminals sat on drive A: and one of
+            // them crashed that setting.  Since 0.9.2 there is one, built to
+            // the 8080's instruction set, so there is nothing left to choose
+            // and the row was telling an operator to do what they would do
+            // anyway.  The screen was full at 22 and is now 21.
+            self.send_line(&format!("  {}", self.dim("The CPU applies to both."))).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;

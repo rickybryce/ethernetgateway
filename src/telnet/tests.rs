@@ -2490,11 +2490,14 @@ fn test_cpm_boot_settings_row_count() {
     let header = 3;
     let status = 1 + 4; // blank + Runs/Machine/Backspace/CPU
     let note = 1 + 2; // blank + the longest of the two explanations
-    let cpu_note = 2; // "The CPU applies to both. Run EGT8080 on the 8080."
+    // One row since 0.9.2: it read "The CPU applies to both. Run EGT8080 on
+    // the 8080", and the second sentence was a choice between two terminals on
+    // drive A:.  There is one now, and it runs on either processor.
+    let cpu_note = 1; // "The CPU applies to both."
     let actions = 1 + 5; // blank + R, M, B, C, S
     let footer = 1 + 1 + 1; // blank + Back + prompt
     let rows = header + status + note + cpu_note + actions + footer;
-    assert_eq!(rows, 22, "the CP/M boot settings screen is {rows} rows");
+    assert_eq!(rows, 21, "the CP/M boot settings screen is {rows} rows");
     assert!(rows <= 22, "CP/M boot settings is {rows} rows, exceeds 22");
 }
 
@@ -2704,8 +2707,11 @@ fn test_cpm_boot_screen_row_count() {
     let rows = drawn - 2 + 1;
     assert!(rows <= 22, "CP/M boot screen is {rows} rows, over the 22-row PETSCII budget");
     assert_eq!(
-        rows, 22,
-        "this screen was full at 22; if it has shrunk, say why here before filling it again"
+        rows, 21,
+        "this screen was full at 22 until 0.9.2, when the CPU note lost its second \
+         line — it said \"Run EGT8080 on the 8080\", a choice between two terminals \
+         on drive A:, and there is one now. If it has shrunk again, say why here \
+         before filling it back up."
     );
 }
 
@@ -7913,7 +7919,7 @@ fn test_cpm_banner_lines_fit_petscii() {
     // took HELP away from the screen where a new operator meets the emulator.
     assert!(crate::telnet::cpm_emu::CPM_BANNER.contains("HELP"));
     // And the note has to name the processor and the terminal that runs on
-    // it.  `EGT8080`, not `EGT80`: both files are on drive A:, and naming the
+    // it.  `EGT8080`, not `EGT8080`: both files are on drive A:, and naming the
     // Z80 one here would send an 8080 operator to the build that crashes.
     assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("8080"));
     assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("EGT8080"));
@@ -7926,7 +7932,7 @@ fn test_cpm_banner_lines_fit_petscii() {
 /// This used to be `tokio::time::timeout(Duration::ZERO, …)`, which reads like
 /// "don't wait" but rounds up to tokio's next timer tick: ~1.1 ms a call,
 /// capping emulated console output at ~840 char/s no matter how fast the Z80
-/// core ran.  A screen-painting program (EGT80) crawled at what looked like 150
+/// core ran.  A screen-painting program (EGT8080) crawled at what looked like 150
 /// baud.  The bound below is deliberately loose — the real cost is nanoseconds
 /// and the bug's was ~1.1 s for this many calls, so there is no borderline case
 /// to be flaky about; it only has to catch a timer creeping back onto the path.
@@ -7991,7 +7997,7 @@ fn test_cpmemu_trust_warning_fits_petscii() {
 /// The emulator's idle-poll pacing. A status call answering "nothing available"
 /// ends the CPU batch, so a comms program's idle loop costs one driver pass per
 /// turn. Once those passes stopped waiting on a timer, nothing bounded the loop
-/// and an idle EGT80 terminal span the host at **161% CPU**; pacing brought it
+/// and an idle EGT8080 terminal span the host at **161% CPU**; pacing brought it
 /// to 1.4%.
 ///
 /// The rule has to hold two things at once, which is what this pins:

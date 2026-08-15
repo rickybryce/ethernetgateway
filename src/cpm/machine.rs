@@ -32,7 +32,7 @@ pub struct CpmMachine {
     /// reads `0xFF`, believes a byte arrived, reads the data port, gets `0xFF`
     /// again, prints it, and does that as fast as the host will let it.
     ///
-    /// Measured with `cpm_emu_uart = off` and EGT80 in terminal mode, which is
+    /// Measured with `cpm_emu_uart = off` and EGT8080 in terminal mode, which is
     /// not a contrived setup — that setting is documented as the way to shut
     /// the emulator's network door, and the terminal's shipped default port is
     /// the gateway's own: **52-65% of a core**, indefinitely, with *nothing*

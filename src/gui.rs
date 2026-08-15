@@ -1610,7 +1610,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT80 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless the boot                  picker is told otherwise, and that answer covers the mounted                  disks too.",
+            "A booted disk runs its OWN operating system and owns every                  drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not                  apply inside it.  Disks are opened read-only unless the boot                  picker is told otherwise, and that answer covers the mounted                  disks too.",
         );
         // Which machine a BOOTED disk believes it is running on -- specifically
         // where it finds its console.  The same `MACHINE_CHOICES` list the telnet
@@ -1695,10 +1695,8 @@ impl App {
              8080 is the processor the Altair actually shipped with, and is \
              what period diagnostics that identify the CPU from DCR A setting \
              parity rather than overflow expect -- those are RIGHT to fail on a \
-             Z80.  Two terminals are placed on CP/M drive A:: EGT8080.COM is \
-             built to the 8080's instruction set and runs on EITHER setting, \
-             so it is the one to reach for; EGT80.COM is the Z80 build and \
-             takes CP/M down with it on an 8080.",
+             Z80.  EGT8080.COM is placed on CP/M drive A: -- built to the \
+             8080's instruction set, so it runs on EITHER setting.",
         );
         // Where CP/M printer output goes.  Beside the CPU because it is the
         // other setting that reaches both machines, and immediately above the
@@ -1828,12 +1826,12 @@ impl App {
                         );
                     }
                 });
-            // One click back to the port EGT80 also defaults to: the answer to
+            // One click back to the port EGT8080 also defaults to: the answer to
             // "I changed something and now the CP/M terminal cannot connect".
             if ui
                 .small_button("Default port")
                 .on_hover_text(
-                    "Reset the CP/M virtual modem to the port EGT80 expects                      (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
+                    "Reset the CP/M virtual modem to the port EGT8080 expects                      (RC2014 SIO/2 board 1 channel B, 0x82/0x83)",
                 )
                 .clicked()
             {

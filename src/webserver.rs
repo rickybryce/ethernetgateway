@@ -881,7 +881,7 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // "Default port" resets the CP/M virtual-modem port whatever the select
     // was showing, so it works as a one-click recovery rather than needing the
     // operator to first find the right entry in the list.  It is the same port
-    // EGT80 defaults to, which is the point: the pair works together again.
+    // EGT8080 defaults to, which is the point: the pair works together again.
     if fields.get("action").map(String::as_str) == Some("cpm_port_default") {
         let def = crate::cpm::uart::DEFAULT_UART;
         updates.retain(|(k, _)| k != "cpm_emu_uart");
@@ -2728,7 +2728,7 @@ fn render_more_popups(cfg: &Config) -> String {
                 // same reason as the backspace select above: a hand-edited
                 // value neither choice matches must show as the processor the
                 // gateway is really running, or saving this form would change
-                // a setting nobody touched — and this one takes EGT80 down.
+                // a setting nobody touched — and this one takes EGT8080 down.
                 if crate::cpm::cpu::is_8080(&cfg.cpm_cpu) == crate::cpm::cpu::is_8080(value) {
                     " selected"
                 } else {
@@ -2884,10 +2884,9 @@ fn render_more_popups(cfg: &Config) -> String {
              emulator as well as to a booted disk. The Z80 runs the 8080 \
              software these disks are made of; the 8080 is the processor the \
              Altair shipped with, and is what period diagnostics that identify \
-             the CPU from DCR A expect. Two terminals are placed on drive A:: \
-             <b>EGT8080.COM</b> is built to the 8080's instruction set and runs \
-             on either setting, so it is the one to reach for; EGT80.COM is the \
-             Z80 build and will crash an 8080.</span>",
+             the CPU from DCR A expect. <b>EGT8080.COM</b> is placed on drive \
+             A:: built to the 8080's instruction set, so it runs on either \
+             setting.</span>",
         ),
         cpmdisks = {
             // Before the mount button, and only while there is something to

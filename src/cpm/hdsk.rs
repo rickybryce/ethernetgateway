@@ -2,7 +2,7 @@
 //!
 //! Written from the published manual — `88-HDSK.pdf`, §3-4 and §3-5 — and its
 //! errata sheets, cross-checked against observed behaviour. Not transcribed
-//! from another emulator; same clean-room posture as Punter, HBIOS and EGT80.
+//! from another emulator; same clean-room posture as Punter, HBIOS and EGT8080.
 //! `web/diskreference.html` holds the write-up this was built from.
 //!
 //! # How it differs from the floppy, and why that shaped the seam

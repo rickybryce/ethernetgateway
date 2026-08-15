@@ -27,4 +27,4 @@ ethernetgatewaylogo.png.orig
 # Runtime data, and images are often large and third-party.
 transfer/CPM/
 diskcontrollerplan.md
-EGT80/tools/__pycache__/
+EGT8080/tools/__pycache__/

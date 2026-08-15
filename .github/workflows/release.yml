@@ -75,17 +75,18 @@ jobs:
           mkdir -p "dist/${NAME}"
           cp "target/${{ matrix.target }}/release/ethernetgateway" "dist/${NAME}/"
           cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
-          # Both terminals are also compiled into the binary (they land on
-          # CP/M drive A: by themselves), but ship the loose files too: they
-          # are what you send to a real CP/M machine over XMODEM, and that
-          # should not require starting the emulator to get at.
+          # The terminal is also compiled into the binary (it lands on CP/M
+          # drive A: by itself), but ship the loose file too: it is what you
+          # send to a real CP/M machine over XMODEM, and that should not
+          # require starting the emulator to get at.
           #
-          # BOTH, and EGT8080 first because it is the one to reach for: it is
-          # built to the 8080's instruction set, so it runs whichever processor
-          # `cpm_cpu` selects, while EGT80.COM is the Z80 build.  v0.9.0
-          # shipped only the Z80 one, which is the terminal the manual tells
-          # you *not* to start with.
-          cp EGT80/EGT8080.COM EGT80/EGT80.COM "dist/${NAME}/" 2>/dev/null || true
+          # One file now.  There were two until 0.9.2 and this step is where
+          # that cost something twice: v0.9.0 shipped only the Z80 build --
+          # the terminal the manual tells you *not* to start with -- because a
+          # version-bump checklist cannot catch a file that should have been
+          # ADDED.  EGT8080 is built to the 8080's instruction set, so it runs
+          # whichever processor `cpm_cpu` selects.
+          cp EGT8080/EGT8080.COM "dist/${NAME}/" 2>/dev/null || true
           tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
           echo "ARTIFACT=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
 
@@ -99,8 +100,7 @@ jobs:
           if (Test-Path "README.md") { Copy-Item "README.md" "dist\$name\" }
           if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist\$name\" }
           # See the tar.gz step: shipped loose as well as compiled in.
-          if (Test-Path "EGT80\EGT8080.COM") { Copy-Item "EGT80\EGT8080.COM" "dist\$name\" }
-          if (Test-Path "EGT80\EGT80.COM") { Copy-Item "EGT80\EGT80.COM" "dist\$name\" }
+          if (Test-Path "EGT8080\EGT8080.COM") { Copy-Item "EGT8080\EGT8080.COM" "dist\$name\" }
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
 

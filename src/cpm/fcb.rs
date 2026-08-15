@@ -401,8 +401,8 @@ mod tests {
         assert_eq!(&e, b"TXT");
 
         // A concrete name is a legal (if narrow) pattern.
-        let (_, n, e) = parse_dir_operand("EGT80.COM").unwrap();
-        assert_eq!(&n, b"EGT80   ");
+        let (_, n, e) = parse_dir_operand("EGT8080.COM").unwrap();
+        assert_eq!(&n, b"EGT8080 ");
         assert_eq!(&e, b"COM");
 
         // Case-insensitive, and surrounding space is not an operand.

@@ -27,7 +27,7 @@
 //! likely to be mistaken for a wrong memory address.
 //!
 //! **CLEAN-ROOM.**  The VDM-1 has a published manual, so by the discriminator
-//! settled for Punter, HBIOS and EGT80 — does an independent authority exist? —
+//! settled for Punter, HBIOS and EGT8080 — does an independent authority exist? —
 //! this is written from the documented behaviour of the card.  z80pack's
 //! `iodevices/proctec-vdm.c` is a cross-check afterwards, not a source, unlike
 //! `z80pack.rs` which is correctly labelled derived.

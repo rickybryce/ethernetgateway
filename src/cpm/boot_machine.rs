@@ -341,7 +341,7 @@ impl BootMachine {
     /// commonly fitted with Z80 upgrade boards, and the CP/M emulator next door
     /// is on the same setting.
     ///
-    /// This used to be settled by our own terminal: `EGT80.COM` is Z80 code,
+    /// This used to be settled by our own terminal: `EGT8080.COM` is Z80 code,
     /// so on an 8080 core it loaded, executed a Z80-only opcode as something
     /// else, and took CP/M down with it — the sign-on came back corrupted on
     /// the warm boot.  `EGT8080.COM` runs on either processor and is placed
@@ -1477,10 +1477,10 @@ mod tests {
     const CONSOLE_STATUS_PORT: u8 = 0x10;
     const CONSOLE_DATA_PORT: u8 = 0x11;
 
-    /// The EGT80 binary, for the gates that put it on a disk and then check what
+    /// The EGT8080 binary, for the gates that put it on a disk and then check what
     /// came back. Module-level so the helper that writes it and the assertions
     /// that compare against it cannot end up looking at different bytes.
-    const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+    const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
 
     fn image(geom: Geometry) -> Vec<u8> {
         vec![0u8; geom.image_len() as usize]
@@ -2726,13 +2726,13 @@ mod tests {
     /// use its own operating system to list its own directory, run **our**
     /// terminal on it, and check that our virtual modem's ports reach it.
     ///
-    /// EGT80 is the sharpest probe available for this. It is a real CP/M
+    /// EGT8080 is the sharpest probe available for this. It is a real CP/M
     /// program, built by a period assembler, that drives a UART directly — so
     /// if it comes up and talks to `0x12`/`0x13` inside a booted Altair, then
     /// the controller, the bootstrap, the CPU, the console, the guest's own
     /// BDOS and our modem ports are all working together.
     ///
-    /// **Blocked on getting EGT80 onto an Altair floppy in the first place**,
+    /// **Blocked on getting EGT8080 onto an Altair floppy in the first place**,
     /// which is the same unsolved mapping that keeps `altair8` out of
     /// `image::format::FORMATS`. Writing the file in with `cpmtools` — using
     /// the measured geometry and the skew recovered from the disk's own boot
@@ -2745,11 +2745,11 @@ mod tests {
     ///
     /// The way in that does not need us to understand the layout at all is the
     /// guest's own: these disks carry `PCGET.COM`, Mike Douglas's XMODEM
-    /// receiver for the 88-2SIO, so the guest can pull EGT80 in over our
+    /// receiver for the 88-2SIO, so the guest can pull EGT8080 in over our
     /// virtual modem port and write it with its own BDOS. That is the next
     /// thing to try, and it would test more of the path than this does.
     ///
-    /// Ignored: set `CPM_DATA_IMAGE` to an Altair CP/M floppy — EGT80 is written
+    /// Ignored: set `CPM_DATA_IMAGE` to an Altair CP/M floppy — EGT8080 is written
     /// into a copy of it by our own writer, so this also exercises that path
     /// end to end. Framing an image back up needs two sector checksums, both
     /// measured from the disks themselves and holding for every sector of
@@ -2760,11 +2760,11 @@ mod tests {
     #[ignore]
     fn test_run_egt80_inside_a_booted_disk() {
         // Built here rather than demanded of the operator.  This asked for
-        // `CPM_BOOT_IMAGE` to be "an image carrying EGT80.COM", which no test
+        // `CPM_BOOT_IMAGE` to be "an image carrying EGT8080.COM", which no test
         // produces and none keeps — so it could not be run, and an `#[ignore]`
         // test that cannot be run looks exactly like one that passes.
         let Ok(path) = std::env::var("CPM_DATA_IMAGE") else {
-            eprintln!("set CPM_DATA_IMAGE to an Altair CP/M floppy (EGT80 is written into a copy)");
+            eprintln!("set CPM_DATA_IMAGE to an Altair CP/M floppy (EGT8080 is written into a copy)");
             return;
         };
         let bytes = altair_floppy_carrying_egt80(&path);
@@ -2791,19 +2791,19 @@ mod tests {
         let dir = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
         println!("--- DIR ---\n{dir}");
         assert!(
-            dir.to_ascii_uppercase().contains("EGT80"),
-            "the guest's own DIR does not list EGT80: {dir:?}"
+            dir.to_ascii_uppercase().contains("EGT8080"),
+            "the guest's own DIR does not list EGT8080: {dir:?}"
         );
 
         // Now run it.
-        for &b in b"EGT80\r" {
+        for &b in b"EGT8080\r" {
             m.send_key(b);
         }
         let screen = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
-        println!("--- EGT80 ---\n{screen}");
+        println!("--- EGT8080 ---\n{screen}");
         assert!(
-            screen.to_ascii_uppercase().contains("EGT80"),
-            "EGT80 did not start: {screen:?}"
+            screen.to_ascii_uppercase().contains("EGT8080"),
+            "EGT8080 did not start: {screen:?}"
         );
         println!(
             "modem: guest wrote {:?}, rx free {}",
@@ -3002,7 +3002,7 @@ mod tests {
     #[ignore]
     fn test_pcget_pulls_egt80_in_over_the_virtual_modem() {
         /// Our own terminal, the thing worth putting on the disk.
-        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
 
         let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
             eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
@@ -3026,7 +3026,7 @@ mod tests {
         assert!(signon.contains("CP/M"), "no sign-on: {signon:?}");
 
         // Ask the guest to receive, on the port our modem is wired to.
-        for &b in b"PCGET EGT80.COM B\r" {
+        for &b in b"PCGET EGT8080.COM B\r" {
             m.send_key(b);
         }
         let prompt = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
@@ -3036,7 +3036,7 @@ mod tests {
             "PCGET did not ask for the file: {prompt:?}"
         );
 
-        let (done, during) = xmodem_send_to_guest(&mut m, &mut cpu, EGT80_COM, 4_000_000_000);
+        let (done, during) = xmodem_send_to_guest(&mut m, &mut cpu, EGT8080_COM, 4_000_000_000);
         println!("--- transfer ---\n{}", printable(&during));
         // Whatever the guest managed to write, for inspection when this fails:
         // a sector the guest wrote and cannot read back is a fault in our
@@ -3059,13 +3059,13 @@ mod tests {
         );
 
         // The disk's own directory is the only witness that counts.
-        for &b in b"DIR EGT80.COM\r" {
+        for &b in b"DIR EGT8080.COM\r" {
             m.send_key(b);
         }
         let dir = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
         println!("--- DIR ---\n{dir}");
         assert!(
-            dir.to_ascii_uppercase().contains("EGT80"),
+            dir.to_ascii_uppercase().contains("EGT8080"),
             "the guest wrote the file but does not list it: {dir:?}"
         );
 
@@ -3073,7 +3073,7 @@ mod tests {
         // check that the bytes on the disk are the bytes we sent: it uses the
         // guest's filesystem, its block mapping and its BIOS, none of which we
         // understand well enough to verify ourselves.
-        for &b in b"PCPUT EGT80.COM B\r" {
+        for &b in b"PCPUT EGT8080.COM B\r" {
             m.send_key(b);
         }
         let ready = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
@@ -3081,24 +3081,24 @@ mod tests {
         let (got, _) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
         let got = got.expect("the guest never sent the file back");
         assert!(
-            got.len() >= EGT80_COM.len(),
+            got.len() >= EGT8080_COM.len(),
             "got {} bytes back, sent {}",
             got.len(),
-            EGT80_COM.len()
+            EGT8080_COM.len()
         );
         // XMODEM pads the last block, so compare only what we sent.
         assert_eq!(
-            &got[..EGT80_COM.len()],
-            EGT80_COM,
+            &got[..EGT8080_COM.len()],
+            EGT8080_COM,
             "the file came back different from the one we sent"
         );
-        println!("round trip: {} bytes, identical", EGT80_COM.len());
+        println!("round trip: {} bytes, identical", EGT8080_COM.len());
 
         // And it is in the image the caller would persist.
         let dirty = m.take_dirty();
         assert_eq!(dirty.len(), 1, "the written image comes back for saving");
         assert!(
-            dirty[0].1.windows(5).any(|w| w == b"EGT80"),
+            dirty[0].1.windows(5).any(|w| w == b"EGT8080"),
             "the directory entry is in the image we would write out"
         );
     }
@@ -3130,7 +3130,7 @@ mod tests {
     /// wants the same disk.
     ///
     /// `name` because there are two terminals now, and `PCGET` is told the
-    /// filename: putting EGT8080 on the disk under EGT80's name would leave
+    /// filename: putting EGT8080 on the disk under EGT8080's name would leave
     /// the 8080 gate running the Z80 build and reporting success.
     #[cfg(test)]
     fn image_with_terminal(path: &str, name: &str, egt80: &[u8]) -> Vec<u8> {
@@ -3179,7 +3179,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_egt8080_runs_on_an_8080() {
-        const EGT8080_COM: &[u8] = include_bytes!("../../EGT80/EGT8080.COM");
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
         let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
             eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
             return;
@@ -3244,15 +3244,15 @@ mod tests {
         }
     }
 
-    /// **Every comms port EGT80 offers, driven from inside a booted disk.**
+    /// **Every comms port EGT8080 offers, driven from inside a booted disk.**
     ///
     /// The question this answers is not "does the modem work" — `PCGET` already
-    /// showed that — but "does the port the *operator* picks in EGT80 line up
+    /// showed that — but "does the port the *operator* picks in EGT8080 line up
     /// with the port they picked in the gateway". Those are two independent
     /// settings that have to name the same hardware, and nothing until now
     /// checked that they do.
     ///
-    /// Each case boots the disk fresh, runs EGT80, walks its menus to select a
+    /// Each case boots the disk fresh, runs EGT8080, walks its menus to select a
     /// port, and then moves bytes both ways over that port. The mismatch case
     /// at the end is the control: if it passed, the others would prove nothing,
     /// because a modem answering at every address would satisfy them all.
@@ -3261,27 +3261,27 @@ mod tests {
     #[test]
     #[ignore]
     fn test_egt80_comms_ports_inside_a_booted_disk() {
-        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
         let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
             eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
             return;
         };
-        let disk = image_with_terminal(&path, "EGT80.COM", EGT80_COM);
-        println!("EGT80 is on the disk; now testing its ports.\n");
+        let disk = image_with_terminal(&path, "EGT8080.COM", EGT8080_COM);
+        println!("EGT8080 is on the disk; now testing its ports.\n");
 
-        // (gateway profile, EGT80 menu keys, what its Port: line should say,
+        // (gateway profile, EGT8080 menu keys, what its Port: line should say,
         //  whether the two should reach each other)
-        // The expected text is EGT80's own "Port:" wording — the chip family
+        // The expected text is EGT8080's own "Port:" wording — the chip family
         // *and* the address — because a bare address matches all sorts of
         // unrelated things on that screen and would let a case pass without the
         // port having been selected at all.
         let cases: &[(&str, &[u8], &str, bool)] = &[
             // The pairing a booted Altair wants: 2SIO port B at both ends.
             ("altair_2sio2", b"SP32", "6850 ACIA at 12", true),
-            // The gateway's own default port, which EGT80 offers by our name.
+            // The gateway's own default port, which EGT8080 offers by our name.
             ("rc2014_1b", b"SP1", "Z80 SIO/2 at 82", true),
             // The original MITS board.
-            // `4` then `1`: EGT80 asks which address, as it does for the 2SIO.
+            // `4` then `1`: EGT8080 asks which address, as it does for the 2SIO.
             ("altair_sio", b"SP41", "Altair 88-SIO at 00", true),
             // The control: both ends working, aimed at different addresses.
             ("altair_2sio2", b"SP1", "Z80 SIO/2 at 82", false),
@@ -3301,10 +3301,10 @@ mod tests {
             m.boot(&mut cpu, 0).expect("boots");
             run_until_quiet(&mut m, &mut cpu, 60_000_000);
 
-            let start = type_at(&mut m, &mut cpu, b"EGT80\r", 400_000_000);
+            let start = type_at(&mut m, &mut cpu, b"EGT8080\r", 400_000_000);
             assert!(
                 start.contains("Ethernet Gateway Terminal"),
-                "EGT80 did not start under {uart}: {start:?}"
+                "EGT8080 did not start under {uart}: {start:?}"
             );
 
             // Settings -> Serial port -> the choice for this case.
@@ -3312,15 +3312,15 @@ mod tests {
             if !picked.contains(want_port) {
                 // The screen is the evidence: a menu that asked something we
                 // did not answer looks identical to a port that did not take.
-                println!("--- {uart}: EGT80 after {} ---\n{picked}", String::from_utf8_lossy(keys));
-                panic!("EGT80 does not report {want_port:?} under {uart}");
+                println!("--- {uart}: EGT8080 after {} ---\n{picked}", String::from_utf8_lossy(keys));
+                panic!("EGT8080 does not report {want_port:?} under {uart}");
             }
 
             // Back out to the main menu and into terminal mode.
             type_at(&mut m, &mut cpu, b"Q", 100_000_000);
             type_at(&mut m, &mut cpu, b"T", 100_000_000);
 
-            // Peer -> guest: what we queue should appear on EGT80's screen.
+            // Peer -> guest: what we queue should appear on EGT8080's screen.
             m.modem().queue_rx(b"PING-FROM-GATEWAY");
             let seen = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
 
@@ -3332,18 +3332,18 @@ mod tests {
             let reached = seen.contains("PING-FROM-GATEWAY");
             let replied = sent.contains("xyz");
             println!(
-                "  {uart:<14} EGT80 {:<6} port {want_port}: in={} out={}",
+                "  {uart:<14} EGT8080 {:<6} port {want_port}: in={} out={}",
                 String::from_utf8_lossy(keys),
                 if reached { "yes" } else { "no " },
                 if replied { "yes" } else { "no" },
             );
             if *should_reach {
-                assert!(reached, "{uart}: EGT80 never showed what we sent — {seen:?}");
+                assert!(reached, "{uart}: EGT8080 never showed what we sent — {seen:?}");
                 assert!(replied, "{uart}: typing never reached the modem — {sent:?}");
             } else {
                 assert!(
                     !reached && !replied,
-                    "{uart} answered a port EGT80 was not pointed at — \
+                    "{uart} answered a port EGT8080 was not pointed at — \
                      the matching cases prove nothing if this one passes"
                 );
             }
@@ -3351,35 +3351,35 @@ mod tests {
     }
 
     /// The deep test of the port a booted Altair actually uses: move a real
-    /// file through **EGT80's own XMODEM**, at volume, and read it back.
+    /// file through **EGT8080's own XMODEM**, at volume, and read it back.
     ///
     /// The port matrix proves each port is wired to the right addresses, but it
     /// does so with a burst of a few bytes. That is not the same as a working
     /// link: a UART that drops a byte under load, or gets its transmit-ready
     /// bit wrong, passes a short burst and fails a file. This sends 4 KB — 32
     /// XMODEM blocks, each acknowledged — through the terminal we ship, has the
-    /// guest write it to its own disk, and then has EGT80 read it back off that
+    /// guest write it to its own disk, and then has EGT8080 read it back off that
     /// disk and send it out again, and
-    /// compares. Every byte has to survive EGT80's receiver, our modem rings,
-    /// the guest's filesystem, the 88-DCDD write and read paths, and EGT80's
+    /// compares. Every byte has to survive EGT8080's receiver, our modem rings,
+    /// the guest's filesystem, the 88-DCDD write and read paths, and EGT8080's
     /// sender — and come back identical.
     ///
     /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
     #[test]
     #[ignore]
     fn test_egt80_transfers_a_file_over_2sio2() {
-        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
         let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
             eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
             return;
         };
-        // Deliberately not EGT80's own bytes: a file that happened to be left
+        // Deliberately not EGT8080's own bytes: a file that happened to be left
         // on the disk would otherwise let this pass without transferring
         // anything. A pattern that is not 8.3-ish text also shows up plainly if
         // it lands in the wrong place.
         let payload: Vec<u8> = (0..4096u32).map(|i| (i as u8) ^ 0x5A).collect();
 
-        let disk = image_with_terminal(&path, "EGT80.COM", EGT80_COM);
+        let disk = image_with_terminal(&path, "EGT8080.COM", EGT8080_COM);
         let mut m = BootMachine::new();
         m.insert(0, disk, false).unwrap();
         assert_eq!(
@@ -3391,8 +3391,8 @@ mod tests {
         m.boot(&mut cpu, 0).expect("boots");
         run_until_quiet(&mut m, &mut cpu, 60_000_000);
 
-        // EGT80, on 88-2SIO port B.
-        let start = type_at(&mut m, &mut cpu, b"EGT80\r", 400_000_000);
+        // EGT8080, on 88-2SIO port B.
+        let start = type_at(&mut m, &mut cpu, b"EGT8080\r", 400_000_000);
         assert!(start.contains("Ethernet Gateway Terminal"), "{start:?}");
         let picked = type_at(&mut m, &mut cpu, b"SP32", 200_000_000);
         assert!(picked.contains("6850 ACIA at 12"), "{picked:?}");
@@ -3402,19 +3402,19 @@ mod tests {
         let ask = type_at(&mut m, &mut cpu, b"D", 200_000_000);
         assert!(
             ask.contains("Receive as which file?"),
-            "EGT80 did not ask for a name: {ask:?}"
+            "EGT8080 did not ask for a name: {ask:?}"
         );
         type_at(&mut m, &mut cpu, b"XFER.DAT\r", 200_000_000);
 
         let (done, seen) = xmodem_send_to_guest(&mut m, &mut cpu, &payload, 4_000_000_000);
-        assert!(done, "EGT80 never finished receiving: {}", printable(&seen));
+        assert!(done, "EGT8080 never finished receiving: {}", printable(&seen));
         let after = printable(&run_until_quiet(&mut m, &mut cpu, 400_000_000));
-        println!("--- EGT80 receive ---\n{}{after}", printable(&seen));
-        assert!(after.contains("Received."), "EGT80 did not report success: {after:?}");
+        println!("--- EGT8080 receive ---\n{}{after}", printable(&seen));
+        assert!(after.contains("Received."), "EGT8080 did not report success: {after:?}");
 
-        // Verified from the image itself rather than by driving EGT80's exit
+        // Verified from the image itself rather than by driving EGT8080's exit
         // path.  The first attempt typed `X` then `DIR XFER.DAT`, and when the
-        // exit did not land where expected those keystrokes went into EGT80's
+        // exit did not land where expected those keystrokes went into EGT8080's
         // own menu — where the *echo* of what was typed contained "XFER" and
         // made the check pass while proving nothing.  The bytes the guest
         // committed to the disk cannot be faked by an echo.
@@ -3428,35 +3428,35 @@ mod tests {
             img.windows(64).any(|w| w == &payload[..64]),
             "the file's own bytes are not on the disk"
         );
-        println!("{} bytes through EGT80's own XMODEM, onto the guest's disk", payload.len());
+        println!("{} bytes through EGT8080's own XMODEM, onto the guest's disk", payload.len());
 
-        // The other half: EGT80's *send* path, reading the file back off the
+        // The other half: EGT8080's *send* path, reading the file back off the
         // guest's disk and pushing it out the same port.  That closes the loop
         // through the terminal we ship rather than through the disk's own
         // tools.
         //
-        // EGT80 ends a transfer with "Press any key." before it returns to its
+        // EGT8080 ends a transfer with "Press any key." before it returns to its
         // menu, so a key comes first.  Getting that wrong is what made an
         // earlier attempt type its next command into the menu instead of at
         // `A>`.
         let back_at_menu = type_at(&mut m, &mut cpu, b" ", 200_000_000);
         assert!(
             back_at_menu.contains("Choice:"),
-            "EGT80 did not come back to its menu: {back_at_menu:?}"
+            "EGT8080 did not come back to its menu: {back_at_menu:?}"
         );
         let ask = type_at(&mut m, &mut cpu, b"U", 200_000_000);
         if !ask.contains("Send which file?") {
-            println!("--- EGT80 after U ---\n{ask}");
-            panic!("EGT80 did not ask which file to send");
+            println!("--- EGT8080 after U ---\n{ask}");
+            panic!("EGT8080 did not ask which file to send");
         }
         type_at(&mut m, &mut cpu, b"XFER.DAT\r", 400_000_000);
 
         let (back, sending) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
-        println!("--- EGT80 send ---\n{}", printable(&sending));
-        let back = back.expect("EGT80 never sent the file back");
+        println!("--- EGT8080 send ---\n{}", printable(&sending));
+        let back = back.expect("EGT8080 never sent the file back");
         assert!(
             back.len() >= payload.len(),
-            "EGT80 sent {} bytes of {}",
+            "EGT8080 sent {} bytes of {}",
             back.len(),
             payload.len()
         );
@@ -3464,10 +3464,10 @@ mod tests {
         assert_eq!(
             &back[..payload.len()],
             &payload[..],
-            "what EGT80 sent back differs from what it received"
+            "what EGT8080 sent back differs from what it received"
         );
         println!(
-            "{} bytes in through EGT80's XMODEM, onto the disk, and back out again",
+            "{} bytes in through EGT8080's XMODEM, onto the disk, and back out again",
             payload.len()
         );
     }
@@ -4951,7 +4951,7 @@ mod tests {
         use crate::cpm::image::fs::ImageFs;
         use crate::cpm::image::media::FileMedia;
 
-        const EGT80_COM: &[u8] = include_bytes!("../../EGT80/EGT80.COM");
+        const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
 
         let Ok(tool) = std::env::var("CPM_TOOL_IMAGE") else {
             eprintln!("set CPM_TOOL_IMAGE to run this");
@@ -4969,10 +4969,10 @@ mod tests {
         assert!(!fs.is_read_only(), "a fresh blank must not arrive damaged");
         assert!(fs.entries().is_empty(), "a fresh blank has no files on it");
         let mut name = [b' '; 8];
-        name[..5].copy_from_slice(b"EGT80");
+        name[..5].copy_from_slice(b"EGT8080");
         let ext = *b"COM";
         fs.create(0, &name, &ext).unwrap();
-        for (rec, chunk) in EGT80_COM.chunks(128).enumerate() {
+        for (rec, chunk) in EGT8080_COM.chunks(128).enumerate() {
             let mut buf = [0x1Au8; 128];
             buf[..chunk.len()].copy_from_slice(chunk);
             fs.write_record(0, &name, &ext, rec as u32, &buf).unwrap();
@@ -5000,11 +5000,11 @@ mod tests {
         let dir = type_at(&mut m, &mut cpu, b"DIR B:\r", 400_000_000);
         println!("--- DIR B: ---\n{dir}");
         assert!(
-            dir.to_ascii_uppercase().contains("EGT80"),
+            dir.to_ascii_uppercase().contains("EGT8080"),
             "the guest does not list the file on the disk we made: {dir:?}"
         );
 
-        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT80.COM B\r", 400_000_000);
+        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT8080.COM B\r", 400_000_000);
         println!("--- PCPUT ---\n{ready}");
         assert!(
             !ready.contains("Bad Sector"),
@@ -5014,8 +5014,8 @@ mod tests {
         let got = got
             .unwrap_or_else(|| panic!("the guest never sent it back: {}", printable(&during)));
         assert_eq!(
-            &got[..EGT80_COM.len()],
-            EGT80_COM,
+            &got[..EGT8080_COM.len()],
+            EGT8080_COM,
             "the file came back different from the one we put on our own disk"
         );
         println!(
@@ -5031,17 +5031,17 @@ mod tests {
     /// would do.  Our writer has to get three separate things right at once —
     /// the block mapping, the disk's stated `EXM 0`, and the per-sector
     /// checksum — and each of them fails *quietly* on its own: a wrong mapping
-    /// A copy of `data_image` with EGT80 written into it by *our own* writer.
+    /// A copy of `data_image` with EGT8080 written into it by *our own* writer.
     ///
     /// Extracted because two gates need the same disk and only one of them used
     /// to make it. The other asked for `CPM_BOOT_IMAGE` to be "an Altair CP/M
-    /// image carrying EGT80.COM" — an image nothing produces and nothing keeps,
+    /// image carrying EGT8080.COM" — an image nothing produces and nothing keeps,
     /// since the test that writes one deletes it again. So that gate could not
     /// be run at all, which is the quiet way a test stops being evidence: it is
     /// listed, it is never green, and nobody notices because `#[ignore]` hides
     /// both states equally.
     ///
-    /// The payload is EGT80 because it is byte-exact, to hand, and a genuinely
+    /// The payload is EGT8080 because it is byte-exact, to hand, and a genuinely
     /// useful thing to have on one of these disks.
     #[cfg(test)]
     fn altair_floppy_carrying_egt80(data_image: &str) -> Vec<u8> {
@@ -5065,10 +5065,10 @@ mod tests {
         .expect("mounts read-write");
         assert!(!fs.is_read_only(), "the image arrived in a writable state");
         let mut name = [b' '; 8];
-        name[..5].copy_from_slice(b"EGT80");
+        name[..5].copy_from_slice(b"EGT8080");
         let ext = *b"COM";
         fs.create(0, &name, &ext).expect("creates the file");
-        for (rec, chunk) in EGT80_COM.chunks(128).enumerate() {
+        for (rec, chunk) in EGT8080_COM.chunks(128).enumerate() {
             let mut buf = [0x1Au8; 128];
             buf[..chunk.len()].copy_from_slice(chunk);
             fs.write_record(0, &name, &ext, rec as u32, &buf).expect("writes a record");
@@ -5085,7 +5085,7 @@ mod tests {
     /// Booting the disk afterwards catches all three, because the guest's own
     /// `DIR` and its own reader are the acceptance test.
     ///
-    /// The payload is EGT80, which is a genuinely useful thing to put on one of
+    /// The payload is EGT8080, which is a genuinely useful thing to put on one of
     /// these disks and is also byte-exact and to hand.
     ///
     /// Ignored:
@@ -5125,13 +5125,13 @@ mod tests {
         let dir = type_at(&mut m, &mut cpu, b"DIR B:\r", 400_000_000);
         println!("--- DIR B: ---\n{dir}");
         assert!(
-            dir.to_ascii_uppercase().contains("EGT80"),
+            dir.to_ascii_uppercase().contains("EGT8080"),
             "the guest does not list the file we wrote: {dir:?}"
         );
 
         // The guest's own reader: this is what a wrong checksum or a wrong
         // block mapping fails.
-        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT80.COM B\r", 400_000_000);
+        let ready = type_at(&mut m, &mut cpu, b"PCPUT B:EGT8080.COM B\r", 400_000_000);
         println!("--- PCPUT ---\n{ready}");
         assert!(
             !ready.contains("Bad Sector"),
@@ -5140,19 +5140,19 @@ mod tests {
         let (got, during) = xmodem_receive_from_guest(&mut m, &mut cpu, 4_000_000_000);
         let got = got.unwrap_or_else(|| panic!("the guest never sent it back: {}", printable(&during)));
         assert!(
-            got.len() >= EGT80_COM.len(),
+            got.len() >= EGT8080_COM.len(),
             "got {} bytes back, wrote {}",
             got.len(),
-            EGT80_COM.len()
+            EGT8080_COM.len()
         );
         assert_eq!(
-            &got[..EGT80_COM.len()],
-            EGT80_COM,
+            &got[..EGT8080_COM.len()],
+            EGT8080_COM,
             "what we wrote from the host is not what the guest reads back"
         );
         println!(
             "{} bytes written by the host, read back byte-identical by the guest's own CP/M",
-            EGT80_COM.len()
+            EGT8080_COM.len()
         );
     }
 

@@ -274,7 +274,7 @@ impl CpmModem {
     async fn feed_command_byte(&mut self, b: u8, out: &mut Vec<u8>) {
         // Backspace / DEL edit the line, and the echo must *erase*: a bare BS
         // only walks the cursor left (the character stays on the screen), and a
-        // bare DEL prints as litter on a printing terminal — EGT80 drops it
+        // bare DEL prints as litter on a printing terminal — EGT8080 drops it
         // outright.  Echoing the raw byte therefore made the command line look
         // uneditable even though the buffer really had been trimmed, so a typo
         // could only be fixed by starting the line again.  Nothing is echoed
@@ -580,7 +580,7 @@ impl CpmModem {
                 // the escape handling in `serial.rs`, which holds and only
                 // flushes on a broken sequence).  Sending them on meant every
                 // peer saw "+++" whenever a guest hung up, and a guest that
-                // hangs up on exit - EGT80 now does - makes that every
+                // hangs up on exit - EGT8080 now does - makes that every
                 // session.  If the run turns out not to be an escape, the held
                 // characters are flushed below in order, so nothing is lost;
                 // only delayed by the byte that breaks the run.
@@ -1003,10 +1003,10 @@ mod tests {
         assert!(third.contains("OK") && !third.contains("ERROR"), "third: {third}");
     }
 
-    /// Reported from a real EGT80 session: backspacing a typo at the AT prompt
+    /// Reported from a real EGT8080 session: backspacing a typo at the AT prompt
     /// did nothing visible.  The byte *was* removed from the line buffer, but
     /// the echo was the raw BS/DEL — a bare BS leaves the character on screen
-    /// and EGT80's filter drops DEL entirely.  The echo must erase.
+    /// and EGT8080's filter drops DEL entirely.  The echo must erase.
     #[tokio::test]
     async fn test_backspace_erases_and_edits_the_command_line() {
         for erase in [0x08u8, 0x7F] {

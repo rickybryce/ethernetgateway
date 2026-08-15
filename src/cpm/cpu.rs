@@ -21,7 +21,7 @@
 //!
 //! **This setting used to cost the terminal**, and that is worth recording
 //! because it was the deciding argument for the default and is no longer
-//! true. `EGT80.COM` is Z80 code; placed on drive A: on first launch, it
+//! true. `EGT8080.COM` is Z80 code; placed on drive A: on first launch, it
 //! executed a Z80-only opcode as something else on an 8080 and took CP/M down
 //! with it. `EGT8080.COM` is the same terminal built to the 8080's
 //! instruction set — 8080 opcodes being a strict subset, it runs on *either*

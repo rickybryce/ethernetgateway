@@ -145,7 +145,7 @@ its OWN operating system runs — so booting reaches the disks that are not
 CP/M at all: Altair DOS, Altair Disk Extended BASIC, Time Sharing BASIC,
 Hard Disk BASIC, and CP/M 3.0.
 
-Inside a booted disk there is no jail, no A> from us and no EGT80.  Press
+Inside a booted disk there is no jail, no A> from us and no EGT8080.  Press
 ESC twice to get back to the gateway.  A booted image is held by one session
 at a time.  Disks are opened READ-ONLY unless the boot picker is told
 otherwise, and that one answer covers the mounted disks as well as the booted
@@ -234,8 +234,8 @@ Mounts are saved in cpm_mounts and survive a restart, and they take effect
 in every session at once.  Unmount from the same screen.
 
 Two things worth knowing before you choose a drive.  Mounting on A: hides
-both bundled terminals, because EGT8080.COM and EGT80.COM live in the A:
-folder - so B: or later is usually what you want.  And a drive somebody is
+the bundled terminal, because EGT8080.COM lives in the A: folder - so B:
+or later is usually what you want.  And a drive somebody is
 using cannot have its disk changed; the screens show which are in use.
 
 
@@ -243,7 +243,7 @@ HOW TO BOOT ONE
 ---------------
 
 Booting runs the disk's own operating system on the whole machine.  There
-is no A> from us, no jail, no EGT80 and no EXIT - press ESC twice to come
+is no A> from us, no jail, no EGT8080 and no EXIT - press ESC twice to come
 back to the gateway.
 
 For a single visit, from telnet or SSH:
@@ -435,12 +435,12 @@ They do not need changing: the file is inspected either way.
 A drive someone is currently using cannot have its disk changed.  The mount
 screens show which drives are in use.
 
-Mounting an image on drive A: hides BOTH bundled terminals, because
-EGT8080.COM and EGT80.COM live in the A: folder.  Since transferring
-files in and out of a mounted image is done with XMODEM from inside the
-terminal, you usually want to mount images on B: or later and leave A:
-as it is.  (EGT8080 is the one to run: it is built to the 8080's
-instruction set, so it works whichever processor cpm_cpu selects.)
+Mounting an image on drive A: hides the bundled terminal, because
+EGT8080.COM lives in the A: folder.  Since transferring files in and out
+of a mounted image is done with XMODEM from inside the terminal, you
+usually want to mount images on B: or later and leave A: as it is.
+(EGT8080 is built to the 8080's instruction set, so it works whichever
+processor cpm_cpu selects.)
 ",
     );
     s

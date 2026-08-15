@@ -18,7 +18,7 @@
 //! only makes sense as a bitmap.
 //!
 //! **CLEAN-ROOM**, from that manual — the same discriminator settled for
-//! Punter, HBIOS, EGT80, the VDM-1 and the Dazzler. Deliberately *not* read out
+//! Punter, HBIOS, EGT8080, the VDM-1 and the Dazzler. Deliberately *not* read out
 //! of z80pack's `cromemcosim`, which is what made `z80pack.rs` the one
 //! derived device in this codebase; its `IO-PORTS` file was used only to learn
 //! that `40h` is the bank select at all, which is a fact about a port number

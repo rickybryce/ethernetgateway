@@ -12,7 +12,7 @@
 //! named after a board.
 //!
 //! **So it is derived work, not clean-room.** Everywhere else here — Punter,
-//! HBIOS, EGT80, `image::format` — another implementation was a cross-check
+//! HBIOS, EGT8080, `image::format` — another implementation was a cross-check
 //! only, never a source. That posture protects against two harms: copyright
 //! entanglement, and transcribing somebody's *reading* of a spec as though it
 //! were a measurement. Neither applies when the other implementation defines the

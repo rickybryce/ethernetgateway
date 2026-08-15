@@ -1,6 +1,6 @@
-# EGT80 — "Ethernet Gateway Terminal"
+# EGT8080 — "Ethernet Gateway Terminal"
 
-A CP/M terminal program for the Ethernet Gateway, written in Z80 assembly for
+A CP/M terminal program for the Ethernet Gateway, written in 8080 assembly for
 **real hardware** as much as for the gateway's CP/M emulator.
 
 Every period terminal we tested was built for one machine's serial port. QTERM
@@ -9,7 +9,7 @@ ships a separate binary per port (`qterm82` for an RC2014 SIO/2 at 0x82,
 Altair 2SIO build; KERCPM22's generic overlay has no serial driver at all. Get
 the pairing wrong and the program is simply silent.
 
-EGT80 asks instead. One `.COM` presents a menu, you pick the port, and it
+EGT8080 asks instead. One `.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
 It ships as **two binaries, one per processor**:
@@ -17,7 +17,7 @@ It ships as **two binaries, one per processor**:
 | File | Runs on | Notes |
 |---|---|---|
 | `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. **Reach for this one.** |
-| `EGT80.COM` | The Z80 only | The original. Smaller, and it uses the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
+| RETIRED in 0.9.2: `EGT80.COM` | The Z80 only | The original, and the source this one was generated from. Smaller, and it used the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
 
 Each saves its settings into *its own* file, so configuring one does not
 configure the other.
@@ -28,20 +28,20 @@ settings that survive a restart, and XMODEM file transfer in both directions.
 Verified in the gateway's CP/M emulator, each family against the matching
 `cpm_emu_uart` profile: `AT` → `OK` and `ATI4` identifying the modem through
 Z80 SIO/2 (`rc2014_1b`), 6850 ACIA (`altair_2sio1`), RomWBW HBIOS
-(`hbios_1`) and CP/M AUX (`aux`); settings saved, EGT80 exited and re-run,
+(`hbios_1`) and CP/M AUX (`aux`); settings saved, EGT8080 exited and re-run,
 picking the saved port and filter mode back up; a deliberately corrupted
 settings block falling back to defaults with a message; HBIOS refused with an
 explanation on a machine with no `RST 8` vector; and the ASCII filter reducing a
 colour ANSI menu to clean text (18 escape sequences in, 0 out, all text intact).
 
 **Transfers** were tested end to end against the gateway's own File Transfer
-menu, dialled from inside EGT80: a file uploaded from CP/M arrived byte-identical
+menu, dialled from inside EGT8080: a file uploaded from CP/M arrived byte-identical
 (once the trailing `^Z` record padding is trimmed), and a file downloaded to CP/M
 matched the original for its whole length with `^Z` padding to the block
 boundary — which is what CP/M's record granularity means for XMODEM.
 
 **And then on real hardware**, which is where it counts: an SC126 running RomWBW,
-EGT80 on HBIOS unit 1, over the gateway's serial modem at 9600 8N1. A 8,704-byte
+EGT8080 on HBIOS unit 1, over the gateway's serial modem at 9600 8N1. A 8,704-byte
 `.COM` and a 104,960-byte `.DAT` — 820 XMODEM blocks — round-tripped
 **byte-identical in both directions**. That pairing is also what found the
 register-discipline bug documented below: before it, those same files arrived the
@@ -53,9 +53,9 @@ does not.
 
 Nothing to install: both builds are compiled into the gateway binary and placed
 on CP/M drive A: when the emulator first creates its drive folders. `DIR` shows
-them, and typing `EGT8080` (or `EGT80` on a Z80) runs one.
+them, and typing `EGT8080` runs it.
 
-That copy is **never overwritten** afterwards. EGT80 stores its settings inside
+That copy is **never overwritten** afterwards. EGT8080 stores its settings inside
 its own `.COM`, so replacing the file on each launch would silently discard the
 port you chose — and you may be deliberately running an older or locally-modified
 build. Delete it if you want the shipped copy back on the next launch.
@@ -64,7 +64,7 @@ Each release archive also carries both `.COM`s as loose files: those are the cop
 send to real CP/M hardware over XMODEM (from QTERM use `xk`, never Kermit — it is
 text-only there and truncates binaries at the first `^Z`).
 
-The quickest proof it works needs nothing outside the gateway: run `EGT80`, press
+The quickest proof it works needs nothing outside the gateway: run `EGT8080`, press
 `T` for terminal mode, and dial the gateway itself with
 `ATDT ethernetgateway` — the menu answers over the virtual modem, so a
 successful `CONNECT` tests the port, the modem and the terminal in one go.
@@ -72,8 +72,7 @@ successful `CONNECT` tests the port, the modem and the terminal in one go.
 ## Building
 
 ```sh
-make            # assemble EGT80.COM and EGT8080.COM with SLR Z80ASM
-make port       # re-derive EGT8080.Z80 from EGT80.Z80 (after editing the latter)
+make            # assemble EGT8080.COM with SLR Z80ASM
 make check      # prove the source also assembles with M80 and ZMAC
 ```
 
@@ -86,7 +85,7 @@ target machine. If `make` passes here, the source assembles on real CP/M.
 Both the assemblers and `zxcc` come from a RomWBW distribution, which is expected
 at `~/RomWBW`; override with `make CPMBIN=... ZXCCSRC=...` if yours lives
 elsewhere. `zxcc` is compiled on first build into `tools/` (gitignored, third-
-party). `EGT80.COM` **is** committed, so you can copy it to a CP/M drive without
+party). `EGT8080.COM` **is** committed, so you can copy it to a CP/M drive without
 owning any of this.
 
 `make check` is a real gate, not decoration: each assembler must both report a
@@ -127,7 +126,7 @@ Two more exist only because there are two builds.
 `test_the_8080_build_is_not_the_z80_build` catches a `make` run without a
 `make port` — which produces two files that pass every shape check while the
 one on drive A: crashes an Altair. Its sharper witness is the filename compiled
-into the settings FCB: if `EGT8080.COM` carries `EGT80   COM`, it would save
+into the settings FCB: if `EGT8080.COM` carried `EGT80   COM`, it would save
 its configuration into the other build's file.
 `test_bundled_terminals_match_pinned_hashes` covers what the shape checks
 cannot: a code change made *without* touching the version. It asserts an
@@ -136,9 +135,8 @@ unless someone edits the hash in the same commit — which puts it in front of a
 reviewer. **So after any legitimate rebuild:**
 
 ```sh
-make port                   # only if you edited EGT80.Z80
 make && make check          # the real gate — three assemblers
-sha256sum EGT80.COM EGT8080.COM   # paste into PINNED in that test
+sha256sum EGT8080.COM             # paste into PINNED in that test
 ```
 
 The hashes pin the artifacts, not their correspondence to the sources; only
@@ -147,7 +145,7 @@ The hashes pin the artifacts, not their correspondence to the sources; only
 ## The 8080 build
 
 `EGT8080.Z80` is **derived**, not hand-maintained. `tools/port8080.py`
-generates it from `EGT80.Z80`, so the two cannot drift: edit the Z80 source,
+once generated it from `EGT80.Z80`; since 0.9.2 this file IS the source, edited directly,
 run `make port`, and the 8080 build is the same program again. Every difference
 between them is a named rule in that script with its reason attached, and a
 rule that stops matching is a hard error rather than a silent no-op.
@@ -202,7 +200,7 @@ Planned drivers:
 
 **The menu names machines, not chips.** Choosing a port used to mean choosing a
 chip family, which is a question only someone who knows their board can answer.
-The top level now reads: the gateway's own emulated port (the default, so EGT80
+The top level now reads: the gateway's own emulated port (the default, so EGT8080
 and the gateway work together untouched), RomWBW firmware (any such machine), the
 Altair 88-2SIO, the Altair 88-SIO, "other hardware" — which is the old chip list,
 one level down, with the free-form address prompts intact — and the CP/M `AUX:`
@@ -241,7 +239,7 @@ than by running:
 - **The internal I/O base is offered by name, not just as hex.** The Z180's
   serial registers live inside the CPU and the whole internal register block is
   relocatable — the ICR decides where. RomWBW moves it to `C0` on Small Computer
-  Central boards (`cfg_SCZ180.asm`), so EGT80's default of `00` addresses nothing
+  Central boards (`cfg_SCZ180.asm`), so EGT8080's default of `00` addresses nothing
   there and the symptom is this family's usual silence. The ASCI menu therefore
   offers `C0` as a labelled choice: knowing that number is knowledge about
   someone else's firmware, not something a user should have to look up to type
@@ -252,7 +250,7 @@ than by running:
   whatever they leave behind. `MLT` tells the two apart — on a Z180 `ED 4C`
   multiplies `B` by `C`, on a Z80 it is a two-byte no-op — so `2 × 2 = 4`
   identifies the processor with no side effects either way. This half *is*
-  testable here: the emulator has no `MLT`, and EGT80 duly refuses ASCI and
+  testable here: the emulator has no `MLT`, and EGT8080 duly refuses ASCI and
   keeps the previous port.
 - **Latched receive errors are cleared.** `STAT` carries OVRN/PE/FE, and on the
   Z180 an overrun stops the receiver until the error is reset via CNTLA's `EFR`
@@ -294,7 +292,7 @@ saving rewrites one record holding settings and nothing else — no risk of writ
 a half-open FCB or a live variable back into the image. `V` at the menu writes
 that record with a random-record write, pointing the DMA address straight at the
 image so nothing is copied. CP/M never tells a program its own name, so
-`EGT80.COM` is hard-coded in one FCB: a renamed or off-drive copy makes the save
+`EGT8080.COM` is hard-coded in one FCB: a renamed or off-drive copy makes the save
 fail with a message instead of writing to the wrong file. At startup the block is
 validated — signature plus a range check on every field — and anything wrong
 falls back to defaults with a message, so a damaged copy still starts usable.
@@ -314,7 +312,7 @@ Settings → `B` sets speed and framing. What that can *do* depends entirely on
 the family, and the screen says which case you are in rather than offering a knob
 that goes nowhere:
 
-| Family | What EGT80 can set |
+| Family | What EGT8080 can set |
 |--------|--------------------|
 | RomWBW HBIOS | speed **and** framing, in one `CIOINIT` firmware call |
 | Z180 ASCI | speed and framing — the rate genuinely lives in CNTLA/CNTLB |
@@ -324,7 +322,7 @@ that goes nowhere:
 
 A **Z80 SIO/2 has no baud rate generator at all**: the bit rate arrives on a
 clock pin from the board or its CTC. Only framing is inside the chip, and its
-registers are *write-only*, so EGT80 cannot even read what the ROM chose — it
+registers are *write-only*, so EGT8080 cannot even read what the ROM chose — it
 would be reprogramming from a guess, with a silent port as the prize. So it
 declines and explains, which is more useful than a rate field that lies.
 
@@ -333,7 +331,7 @@ direction**: a TCP connection has no bit rate, so the emulated UART accepts
 line-configuration writes and ignores them. Nothing you set here can break the
 gateway link.
 
-Hence the default: **EGT80 programs nothing at all** unless you press `A`. The
+Hence the default: **EGT8080 programs nothing at all** unless you press `A`. The
 port keeps whatever the ROM, the firmware or the OS set up — the arrangement that
 already works on the machine — and `R` returns to that state. `A` also makes the
 setting stick: it is re-applied whenever the port is selected, including at
@@ -565,9 +563,9 @@ port and says what it means. That turns the classic silent hang into a diagnosis
 
 ## Testing
 
-In the gateway's CP/M emulator, put `EGT80.COM` on a drive under `transfer_dir`
+In the gateway's CP/M emulator, put `EGT8080.COM` on a drive under `transfer_dir`
 (e.g. `transfer/CPM/A/`), set `cpm_emu_uart` to the profile matching the driver
 under test, then drive a telnet session with
-`~/claude/gateway-telnet-driver/drive.py`. On real hardware, copy `EGT80.COM`
+`~/claude/gateway-telnet-driver/drive.py`. On real hardware, copy `EGT8080.COM`
 across with XMODEM — from QTERM use `xk`, never Kermit, which is text-only there
 and truncates binaries at the first `^Z`.

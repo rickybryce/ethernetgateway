@@ -290,7 +290,7 @@ impl Cpm {
     /// A fresh machine on the processor `cpm_cpu` names.
     ///
     /// See [`cpu`] for what the choice costs: the 8080 is the more literal
-    /// Altair, and it cannot run EGT80.
+    /// Altair, and it cannot run EGT8080.
     pub fn new_for(cpu_setting: &str) -> Cpm {
         let mut cpm = Cpm {
             cpu: cpu::new_cpu(cpu_setting),
@@ -464,7 +464,7 @@ impl Cpm {
     /// Real RomWBW returns values in `HL` for several functions and uses it
     /// freely inside the others: software must not hold a pointer there across
     /// an `RST 8`.  Ours used to leave it untouched, which is *permissive* — and
-    /// permissiveness here hid a total data-corruption bug in EGT80's own
+    /// permissiveness here hid a total data-corruption bug in EGT8080's own
     /// transfers that only appeared on real hardware (the XMODEM loops walked
     /// the buffer with `HL` across the port driver, so on a real machine every
     /// block "passed" its CRC while the file filled with whatever `HL` had

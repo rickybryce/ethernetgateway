@@ -93,7 +93,7 @@ const LINE_DEFAULT: u16 = 0x0000;
 ///
 /// It used to report 0 on the reasoning that zero meant "no driver" — but 0 is
 /// `CIODEV_UART`, the 16C550 driver, so the answer read as a definite claim to
-/// be a chip we are not.  Nothing caught it until EGT80 started *displaying*
+/// be a chip we are not.  Nothing caught it until EGT8080 started *displaying*
 /// what this call returns, at which point the emulator's own modem listed
 /// itself as "UART base 00".  An out-of-range type is the honest answer: a
 /// program that decodes it learns "not one of the known drivers", which is
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(cpm.read_block(0x2006, 1)[0], 0x00, "wrote past the buffer");
         // HL is an entry parameter, not a documented return, so it must come
         // back scrambled like every other such call — being looser than the
-        // hardware is what let EGT80's HL bug reach a real machine.
+        // hardware is what let EGT8080's HL bug reach a real machine.
         assert_eq!(
             cpm.reg16(iz80::Reg16::HL),
             0xFFFF,
