@@ -1067,6 +1067,27 @@ altairhd_cobol.dsk</code></pre>
                     </p>
                 </div>
 
+                <div class="callout callout-tip">
+                    <p>
+                        <strong>Both boot lists show only disks that boot.</strong> The
+                        <code>cpm_boot_image</code> selector on all three configuration screens and
+                        the telnet boot picker each run the actual cold start &mdash; the same
+                        sequence a real boot runs &mdash; and offer an image only if it reaches an
+                        entry point. This is not a size or a filename test, and it could not be: a
+                        <em>companion</em> disk of programs is exactly the size of the system disk it
+                        belongs to, which is how all four of the Altair collection's companions came
+                        to be listed as bootable and to fail when chosen. They belong on the
+                        <b>mount</b> screen, which is deliberately not filtered &mdash; mounting one
+                        beside its own system disk is the entire point of it.
+                    </p>
+                    <p>
+                        A disk this machine has no <em>board</em> for stays listed, because that is a
+                        <code>cpm_boot_machine</code> setting you can change; a disk that vanished
+                        when you changed a setting would be a worse puzzle than a boot that fails
+                        naming the boards this machine has.
+                    </p>
+                </div>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">The other drives</h3>
                 <p>
                     A booted guest is handed <strong>every mounted image</strong>, each in the
@@ -1328,12 +1349,14 @@ altairhd_cobol.dsk</code></pre>
                     <p>
                         <strong>The gateway can fetch them for you.</strong> Every disk screen
                         &mdash; telnet, web and desktop &mdash; offers to download the sample disks
-                        before you mount anything: about 23&nbsp;MB into <code>CPM/images</code>,
+                        before you mount anything: about 43&nbsp;MB into <code>CPM/images</code>,
                         pinned to a commit and checked against a recorded SHA-256 so what arrives is
-                        what was tested. It offers <strong>only the thirty disks this gateway is
-                        known to run</strong>, not all thirty-four &mdash; three data companions
-                        with no boot program and one blank are left out, because downloading a disk
-                        that does nothing is not a favour. Nothing already in the folder is
+                        what was tested. It offers <strong>only the thirty-five disks this gateway
+                        is known to run</strong> &mdash; four data companions that carry no boot
+                        program are left out, because downloading a disk that does nothing is not a
+                        favour. That is not a remembered list: each candidate is cold-started from
+                        the bytes its pinned URL really serves before it earns a place, so the offer
+                        is measured every time it is regenerated. Nothing already in the folder is
                         overwritten.
                     </p>
                 </div>

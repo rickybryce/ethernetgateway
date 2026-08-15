@@ -1,23 +1,31 @@
 //! Fetching the sample disks, so an operator does not have to go and find them.
 //!
 //! The disks are **not ours** and are never shipped: they are David Hansel's
-//! Altair 8800 simulator collection, and the vintage software on them belongs to
-//! MITS, Microsoft and Digital Research. What this does is fetch them *on the
-//! operator's behalf* from the original repository, which is a different act
-//! from redistributing them and is why nothing here is mirrored or bundled.
+//! Altair 8800 simulator collection and Jim McNeely's Altair-Duino disks, and
+//! the vintage software on them belongs to MITS, Microsoft, Digital Research and
+//! Infocom. What this does is fetch them *on the operator's behalf* from the
+//! original repositories, which is a different act from redistributing them and
+//! is why nothing here is mirrored or bundled.
 //!
 //! Three rules make the offer honest rather than a lucky dip.
 //!
-//! **Only disks that are known to run.** The list is generated from this
-//! project's own boot survey, not typed out: 29 of the collection's 34 boot and
-//! sign on, TDISK04 boots and paints a VDM-1 screen, and the remaining four are
-//! deliberately left out — three are data companions with no boot program and
-//! one is a blank. Offering those would make the feature a catalogue of
-//! disappointments, which is exactly what an operator does not need on their
-//! first evening.
+//! **Only disks that are known to run.** Thirty-five of them, and the list is
+//! not typed out: the generator cold-starts every candidate *from the bytes its
+//! pinned URL really serves* and drops the ones that do not start. Four are
+//! dropped — `DISK0B`, `DISK0D`, `DISK0F` and `TDISK06`, each a companion disk
+//! of programs for a system disk that does boot, carrying no boot program of its
+//! own. `TDISK04` is kept although it prints nothing: it boots and paints a
+//! VDM-1 screen rather than writing to a console port, which is a disk that
+//! works and needs the Disk Screen page to be seen.
+//!
+//! That the list is *derived* matters more than the four names. It was an
+//! exclusion list transcribed from a survey run elsewhere until 2026-08-15, and
+//! it had drifted: it recorded `TDISK06` as "a blank" when the disk is McNeely's
+//! `VDM-1 programs` and its directory is full. The names happened to still be
+//! right; the reason had rotted.
 //!
 //! **Pinned, so what arrives is what was tested.** The URL names a commit, not
-//! a branch. Upstream's `disks/` folder last changed in September 2020, so this
+//! a branch. Neither upstream folder has changed since 2021, so this
 //! is stable — but a pin is what makes "known to run" keep meaning something
 //! rather than quietly rotting the way a stale readme does.
 //!

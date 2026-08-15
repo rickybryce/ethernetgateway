@@ -1456,12 +1456,18 @@ mount wizard, the web <em>Mount CP/M Drives</em> page and the desktop
 <em>Mount CP/M Drives</em> window &mdash; offers to <strong>download the sample
 disks</strong> before you mount anything, and so does the CP/M settings screen
 on all three, because you can pick a <em>boot</em> disk without ever opening the
-mount screen.  It fetches about 23&nbsp;MB into
+mount screen.  It fetches about 43&nbsp;MB into
 <code>CPM/images</code>, where the gateway finds them without any further
 setup, and it offers <strong>only the disks this gateway is known to run</strong>
-&mdash; thirty of the Altair-Duino collection's thirty-four.  The other four are
-left out on purpose: three are data companions with no boot program and one is
-a blank, and downloading those only to find they do nothing is not a favour.
+&mdash; thirty-five of them, from the two collections named below.  Four are
+left out on purpose: <code>DISK0B</code>, <code>DISK0D</code>, <code>DISK0F</code>
+and <code>TDISK06</code> are companion disks of <em>programs</em> for a system
+disk that does boot, and carry no boot program themselves, so downloading them
+only to find they do nothing is not a favour.  You can still fetch those by hand
+if you want them &mdash; they are worth <em>mounting</em> beside the disk they
+belong to, which is what they are for.  That list is not a remembered one: each
+disk is cold-started from the bytes its pinned address really serves before it
+earns a place in the offer.
 Anything already in the folder is <strong>never overwritten</strong>, so a disk
 you have edited or put there yourself is safe.  The download is pinned to a
 particular commit and every file is checked against a recorded SHA-256, so what
@@ -2715,6 +2721,24 @@ boots that disk. It is a cycling selector on the telnet CP/M settings screen
 (<code>B</code>) and a <strong>CP/M runs</strong> dropdown in the web and
 desktop UIs. To boot something for one visit only, use the boot picker in the
 telnet mount wizard &mdash; that is also where you can allow writes.
+</p>
+
+<p>
+<strong>Both of those lists show only disks that will actually boot.</strong>
+A collection of Altair disks contains <em>companion</em> disks &mdash; a disk of
+programs for a system disk, carrying no boot program of its own &mdash; and they
+are the same size as the disk they belong to, so nothing about the file says
+which is which.  The gateway settles it by doing the cold start: an image is
+offered only if the very sequence a real boot would run gets as far as an entry
+point.  A companion disk is therefore missing from both lists, and belongs on
+the <em>mount</em> screen instead, which is where it is useful.
+</p>
+
+<p>
+A disk this machine has no <em>board</em> for is a different case and is still
+listed.  That one you can fix by changing <code>cpm_boot_machine</code>, and a
+disk that quietly vanished from the list when you changed a setting would be a
+worse puzzle than a boot that stops and names the boards the machine has.
 </p>
 
 <p>
