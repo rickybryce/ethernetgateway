@@ -1210,6 +1210,34 @@ altairhd_cobol.dsk</code></pre>
                 <div class="section-title">Screens &mdash; the VDM-1 and the Dazzler</div>
                 <p class="intro">Some disks do not print to a console at all. Two S-100 <em>video cards</em> of the 1970s put their picture in the computer's own memory and gave the program no data port to write to &mdash; the Processor Technology <strong>VDM-1</strong>, a 64&times;16 character screen at <code>CC00</code>, and the Cromemco <strong>Dazzler</strong>, a colour picture the program can put anywhere. Software written for either boots here, takes your keystrokes and leaves the session you started it from completely blank. Both are served in the web UI instead, at <code>/vdm</code>, and one session can have both.</p>
 
+                <h3 style="color: var(--cyan); margin: 22px 0 10px;">Which disks it applies to</h3>
+                <p>
+                    The button is offered for <strong>every</strong> booted session, not only these
+                    &mdash; sampling costs the guest nothing, so withholding a screen on a guess
+                    would only hide one that works. A disk that drives neither card simply shows a
+                    blank grid. These are the ones known to paint something:
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Card</th><th>Disk</th><th>What it is</th></tr></thead>
+                    <tbody>
+                        <tr><td rowspan="5"><strong>VDM-1</strong><br><span class="sub">64&times;16 characters</span></td>
+                            <td><code>TDISK04</code></td><td>CP/M 1.4 for the VDM-1 &mdash; boots, and prints <em>nothing</em> to a port, so the session it was started from stays blank by design</td></tr>
+                        <tr><td><code>TDISK05</code></td><td>CP/M 2.2 for the VDM-1</td></tr>
+                        <tr><td><code>DISK11</code></td><td>VDM-1 programs, and boots CP/M. <strong>The boot banner does not warn for this one</strong> &mdash; its VDM driver lives in a CUTER ROM rather than on the disk, so there is nothing in the system tracks to find</td></tr>
+                        <tr><td><code>TDISK06</code></td><td>VDM-1 programs &mdash; a <em>library</em>, with no boot program of its own. <strong>Mount</strong> it beside <code>TDISK05</code>; it is not on the boot list and is not in the download offer</td></tr>
+                        <tr><td><code>cpm14-vdm</code>, <code>cpm22-vdm</code>, <code>vdm-stuff</code></td><td>z80pack&rsquo;s <code>altairsim</code> library &mdash; two systems and a programs disk</td></tr>
+                        <tr><td rowspan="3"><strong>Dazzler</strong><br><span class="sub">colour, 1976</span></td>
+                            <td><code>DISK10</code></td><td>Dazzler programs, and boots CP/M &mdash; the library disk, around two dozen programs, and the usual place to start</td></tr>
+                        <tr><td><code>DISK15</code></td><td>the Felix animation system for the Dazzler</td></tr>
+                        <tr><td><code>dazzler</code>, <code>dazzlerII</code>, <code>dazzler_graphics</code>, <code>dazzler_stuff</code></td><td>z80pack&rsquo;s <code>imsaisim</code> and <code>cromemcosim</code> libraries</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    Everything above except <code>TDISK06</code> is in the sample-disk download, so
+                    the shortest route to a picture is: fetch the disks, set <code>DISK10</code> to
+                    boot, and press <strong>VDM / Dazzler</strong>.
+                </p>
+
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Using it</h3>
                 <ol class="bullet-list">
                     <li>Turn the web server on (<code>web_enabled</code>, default port

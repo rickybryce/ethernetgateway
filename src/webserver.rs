@@ -3310,7 +3310,9 @@ fn local_ip() -> String {
 
 const STYLE: &str = "<style>
 :root {
-  --bg-darkest: #000510;
+  /* Sampled from the logo's own border, so it has no visible edge against
+     the page.  Kept in step with `BG_DARKEST` in gui.rs. */
+  --bg-darkest: #00040e;
   --bg-dark: #101c3a;
   --bg-mid: #182848;
   --border: #304570;
@@ -3554,7 +3556,7 @@ h3 { color: var(--amber); margin: 12px 0 4px; font-size: 14px; }
 .modal {
   display: none;
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 5, 16, 0.85);
+  background: rgba(0, 4, 14, 0.85);
   align-items: flex-start; justify-content: center;
   padding: 5vh 16px;
   z-index: 50;

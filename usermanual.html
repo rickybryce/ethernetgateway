@@ -1409,6 +1409,42 @@ blank.  There is no character stream to show, because the guest never
 produces one.
 </p>
 
+<aside class="note">
+<span class="label">Which disks this applies to</span>
+The button is offered for <strong>every</strong> booted session, not only the
+disks below &mdash; sampling the guest&rsquo;s memory costs it nothing, so
+withholding a screen on a guess would only hide one that works. A disk driving
+neither card just shows a blank grid. These are the ones known to paint
+something, and all but one are in the sample-disk download:
+<br><br>
+<strong>VDM-1</strong> (64&times;16 characters) &mdash; <code>TDISK04</code>
+(CP/M&nbsp;1.4 for the VDM-1) and <code>TDISK05</code> (CP/M&nbsp;2.2), which
+boot and print nothing to a port at all; <code>DISK11</code>, VDM-1 programs
+that also boot CP/M; and <code>TDISK06</code>, a programs <em>library</em> with
+no boot program of its own &mdash; <em>mount</em> that one beside
+<code>TDISK05</code> rather than looking for it on the boot list. z80pack&rsquo;s
+<code>altairsim</code> library adds <code>cpm14-vdm</code>,
+<code>cpm22-vdm</code> and <code>vdm-stuff</code>.
+<br><br>
+<strong>Dazzler</strong> (colour) &mdash; <code>DISK10</code>, the library disk
+of about two dozen programs, which also boots CP/M and is the usual place to
+start; <code>DISK15</code>, the Felix animation system; and in z80pack,
+<code>dazzler</code> and <code>dazzlerII</code> (<code>imsaisim</code>) and
+<code>dazzler_graphics</code> and <code>dazzler_stuff</code>
+(<code>cromemcosim</code>).
+<br><br>
+The boot banner warns you when a disk&rsquo;s system tracks drive a VDM-1, but
+it cannot for <code>DISK11</code> &mdash; that disk&rsquo;s driver is in a CUTER
+ROM rather than on the disk, so there is nothing to find &mdash; and it cannot
+for a Dazzler at all: the Dazzler&rsquo;s two registers are ordinary low port
+numbers that occur by chance in most disks&rsquo; data, so scanning for them
+would cry wolf on two images in three. A Dazzler announces itself the moment the
+guest switches one on, and the session list marks it then.
+<br><br>
+Shortest route to a picture: fetch the sample disks, set <code>DISK10</code> to
+boot, and press <strong>VDM / Dazzler</strong>.
+</aside>
+
 <p>
 Boot the disk as usual and keep typing in your terminal session — the
 keyboard is an ordinary port, and only the display was ever memory-mapped.
@@ -5128,7 +5164,7 @@ numeric values fall back to the default.
         <tr><td><code>cpm_boot_machine</code></td><td>string</td><td><code>auto</code></td><td><code>auto</code>, <code>altair_2sio</code>, <code>altair_sio</code>, <code>console_04</code>, <code>console_04_cuter</code>, <code>z80pack</code>, <code>cromemco</code></td><td>Which machine a <em>booted</em> disk runs on &mdash; its console <strong>and</strong> the set of disk controllers it carries, which is why a machine is one setting rather than two: z80pack&rsquo;s disk device answers on the same ports as the Altair console, so the two cannot be mixed. <code>auto</code> reads the ports the disk&rsquo;s own boot loader drives and falls back to <code>altair_2sio</code>; the boot screen reports which happened. See §8.11.</td></tr>
         <tr><td><code>cpm_boot_backspace</code></td><td>string</td><td><code>backspace</code></td><td><code>backspace</code>, <code>rubout</code></td><td>Which byte a <em>booted</em> disk gets for the Backspace key. Measured across 38 bootable images: 29 erase on BS (<code>08h</code>) and read DEL as a rubout that reprints the deleted character; 7 accept either; CP/M 1.3, 1.4 and the 1975 build are the opposite and need <code>rubout</code>. Ignored by the emulator. See §8.11.</td></tr>
         <tr><td><code>cpm_boot_writable</code></td><td>bool</td><td><code>false</code></td><td><code>true</code>, <code>false</code></td><td>May a <em>booted</em> disk write to its images? Off by default. Covers the boot disk and every image mounted beside it. Ignored by the emulator. See &sect;8.11.</td></tr>
-        <tr><td><code>cpm_cpu</code></td><td>string</td><td><code>z80</code></td><td><code>z80</code>, <code>8080</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the only CP/M setting that reaches the emulator as well as a booted disk. <code>z80</code> runs everything here; <code>8080</code> is the more literal Altair and is what period 8080 diagnostics expect. Both settings have a terminal: <code>EGT8080.COM</code> is placed on drive A: beside <code>EGT8080.COM</code> and runs on either. See &sect;8.11.</td></tr>
+        <tr><td><code>cpm_cpu</code></td><td>string</td><td><code>z80</code></td><td><code>z80</code>, <code>8080</code></td><td>Which processor <strong>both</strong> CP/M machines run &mdash; the only CP/M setting that reaches the emulator as well as a booted disk. <code>z80</code> runs everything here; <code>8080</code> is the more literal Altair and is what period 8080 diagnostics expect. One terminal serves both settings: <code>EGT8080.COM</code> is placed on drive A: and, being built to the 8080's instruction set, runs on either processor. See &sect;8.11.</td></tr>
         <tr><td><code>cpm_printer</code></td><td>string</td><td><code>text</code></td><td><code>off</code>, <code>odt</code>, <code>text</code></td><td>Where CP/M printer output goes. Reaches <strong>both</strong> CP/M machines, like <code>cpm_cpu</code>, but by two entirely different routes: in the emulator the printer is an operating-system <em>service</em> (BDOS function 5 and the BIOS <code>LIST</code> vector), so WordStar, MBASIC&rsquo;s <code>LPRINT</code> and <code>PIP LST:=FILE.TXT</code> all arrive there; a <em>booted</em> disk drives a printer <em>board</em> instead, chosen with <code>cpm_printer_port</code>. Either way one document is written into a <code>printer</code> folder inside the transfer directory &mdash; its own folder so a printer left on does not scatter files through yours, and not onto a CP/M drive, because it is for you rather than for the guest. <code>odt</code> = OpenDocument text, monospaced, one page per form feed; <code>text</code> = plain text with the form feeds kept; <code>off</code> = printer output appears on your terminal, which is where it has always gone. <strong>Text is the default since 0.9.2</strong> &mdash; nothing is written until a guest actually prints, so an operator who never uses <code>LST:</code> never sees a file, whereas <code>off</code> meant the first printout anyone made was scattered across their terminal with no way to get it back. Named <code>PRINT-YYYYMMDD-HHMMSS</code> from this machine&rsquo;s clock. A job is finished 5&nbsp;seconds after the last character printed &mdash; CP/M has no end-of-print signal, so silence is the only one there is &mdash; and in the emulator also the moment the program returns to <code>A&gt;</code>, which is exact. Bold and underline survive into an <code>.odt</code>: period software does not ask for them, it <strong>overstrikes</strong>, and that is turned into real styling. See §8.11.</td></tr>
         <tr><td><code>cpm_printer_port</code></td><td>string</td><td><code>altair_c</code></td><td><code>off</code>, <code>altair_c</code></td><td>Which printer board a <em>booted</em> disk finds. Ignored by the emulator, whose printer is a BDOS service with no port at all, and ignored entirely when <code>cpm_printer</code> is <code>off</code>. <code>altair_c</code> = the Altair line printer, data register <code>03h</code> &mdash; measured, not reasoned: Altair Hard Disk BASIC answering <code>LINEPRINTER? C</code> initialises with <code>OUT 03h&larr;11h</code> / <code>OUT 02h&larr;00h</code> and then sends one 7-bit ASCII character per byte to <code>03h</code>. <code>off</code> = a booted disk has no printer. The status register is deliberately not emulated: an unclaimed port reads <code>0xFF</code> here and every period convention reads a high bit as ready. The board also carries an <strong>auto-line-feed</strong> setting, the DIP switch real Centronics interfaces had, and for the same reason: a bare CR that does not advance the paper is how <em>overstrike</em> makes bold and underline, while a bare CR that does advance is how much other software ends a line, and only the hardware can settle which. Measured for <code>altair_c</code>: two <code>LPRINT</code>s send <code>ALPHA&lt;CR&gt;BETA&lt;CR&gt;</code> and no line feed at all, so the switch is on &mdash; otherwise a whole report prints on one line. A CR LF pair sent to it has the line feed absorbed rather than double-spacing. See §8.11.</td></tr>
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. Default <code>rc2014_1b</code> &mdash; the port the bundled EGT8080 expects. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>

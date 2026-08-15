@@ -1775,12 +1775,22 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_backspace")
             .cloned()
             .unwrap_or_else(|| crate::cpm::boot::DEFAULT_BACKSPACE.to_string()),
-        // Missing means OFF, so an upgrade never starts writing files into
-        // somebody's transfer folder because they installed a new version.
+        // **Asymmetric, on purpose, exactly like `setup_wizard_completed`.**
+        // A *new* config gets `DEFAULT_PRINTER` (text since 0.9.2) because a
+        // printout that goes nowhere is a printout lost.  A config file that
+        // EXISTS and does not mention the key is an upgrade -- `cpm_printer`
+        // first shipped in 0.9.1, so every 0.9.0 install is one -- and an
+        // upgrade must not start writing files into somebody's transfer folder
+        // because they installed a new version.  They never asked for a
+        // printer; changing a default is not consent.
+        //
+        // The two cases really are distinguishable: a fresh install has the key
+        // written out with everything else, so only an older file can be
+        // missing it.
         cpm_printer: map
             .get("cpm_printer")
             .cloned()
-            .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER.to_string()),
+            .unwrap_or_else(|| crate::cpm::printer::PRINTER_OFF.to_string()),
         cpm_printer_port: map
             .get("cpm_printer_port")
             .cloned()
@@ -3588,6 +3598,53 @@ pub fn lookup_dialup_number(number: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// **A default may change; somebody else's installation may not.**
+    ///
+    /// `cpm_printer` became `text` in 0.9.2, and it first shipped in 0.9.1 — so
+    /// every config file written by 0.9.0 or earlier lacks the key entirely. If
+    /// a missing key resolved to the new default, upgrading would silently start
+    /// writing `PRINT-*.txt` into somebody's transfer folder because they
+    /// installed a new version. They never asked for a printer, and changing a
+    /// default is not consent.
+    ///
+    /// Same asymmetry, and the same reasoning, as `setup_wizard_completed`.
+    #[test]
+    fn test_an_upgrade_does_not_switch_the_printer_on() {
+        let dir = std::env::temp_dir().join("egw_printer_upgrade_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("old.conf");
+
+        // A config file from before the key existed.
+        std::fs::write(&path, "telnet_port = 2323\ncpm_emu_enabled = true\n").unwrap();
+        let upgraded = read_config_file(&path.to_string_lossy());
+        assert_eq!(
+            upgraded.cpm_printer,
+            crate::cpm::printer::PRINTER_OFF,
+            "an upgrade must not start writing files unasked"
+        );
+
+        // A fresh install, which writes every key, gets the new default.
+        assert_eq!(
+            Config::default().cpm_printer,
+            crate::cpm::printer::DEFAULT_PRINTER,
+            "a new install captures printouts rather than losing them"
+        );
+        assert_ne!(
+            Config::default().cpm_printer,
+            upgraded.cpm_printer,
+            "the whole point is that these two differ"
+        );
+
+        // And an explicit `off` is still honoured, which is the other way an
+        // operator says no.
+        std::fs::write(&path, "cpm_printer = off\n").unwrap();
+        assert_eq!(
+            read_config_file(&path.to_string_lossy()).cpm_printer,
+            crate::cpm::printer::PRINTER_OFF
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn test_default_config() {

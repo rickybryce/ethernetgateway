@@ -18,7 +18,12 @@ mod wizard;
 
 // ── Retro amber-on-dark color palette (telnetbible.com inspired) ──
 
-const BG_DARKEST: Color32 = Color32::from_rgb(0x00, 0x05, 0x10); // matches logo background
+// Sampled from the logo's own border rather than chosen: 640 of its edge
+// pixels and all four corners are exactly this, and the old #000510 sat one
+// step brighter and bluer -- close enough to look deliberate and far enough to
+// draw a visible rectangle around the logo.  Measure it again if the artwork is
+// recut; the web page's `--bg-darkest` carries the same value.
+const BG_DARKEST: Color32 = Color32::from_rgb(0x00, 0x04, 0x0e); // sampled from the logo
 const BG_DARK: Color32 = Color32::from_rgb(0x10, 0x1c, 0x3a);   // panel/frame bg
 const BG_MID: Color32 = Color32::from_rgb(0x18, 0x28, 0x48);    // input fields
 const BG_LIGHT: Color32 = Color32::from_rgb(0x22, 0x36, 0x5a);  // hover
@@ -674,15 +679,16 @@ impl App {
         // Clear the one-shot screen marker the moment it is read, and before
         // anything is opened.  A marker that survived a launch which failed to
         // open a browser would open one at every launch afterwards, which is a
-        // far worse fault than the one it exists to fix.  Written straight to
-        // the file rather than left for the next Save, because the operator may
-        // never press one.
-        // Read, never written here.  `App::new` must not touch the process-wide
-        // config or the file: it runs in unit tests, `update_config_value`
-        // replaces the global `CONFIG` and rewrites `egateway.conf`, and doing
-        // that from a plain `#[test]` running beside the rest of the suite is
-        // how one test's config lands in another's lap.  `run` spends the
-        // marker on disk before this is reached.
+        // far worse fault than the one it exists to fix.
+        //
+        // **Read, never written here.**  `App::new` must not touch the
+        // process-wide config or the file: it runs in unit tests,
+        // `update_config_value` replaces the global `CONFIG` and rewrites
+        // `egateway.conf`, and doing that from a plain `#[test]` running beside
+        // the rest of the suite is how one test's config lands in another's
+        // lap.  `run` writes the cleared value to the file before this is
+        // reached -- straight away rather than at the next Save, because the
+        // operator may never press one.
         let open_screen_asked = cfg.open_screen_after_restart;
         cfg.open_screen_after_restart = false;
         // Captured before `cfg` is moved into the struct: this is what `main`
@@ -4467,6 +4473,8 @@ impl eframe::App for App {
         // only binds on a server restart, which drops every session anybody
         // else is in the middle of.  The operator has to be told that before
         // they agree, not discover it.
+        // Read before the closure borrows `self`.
+        let secured = self.cfg.security_enabled;
         let mut vdm_offer_open = self.vdm_web_offer_open;
         let mut vdm_close = false;
         let mut vdm_commit = false;
@@ -4497,11 +4505,32 @@ impl eframe::App for App {
                  whatever boots next, not of the session running now.",
             );
             ui.add_space(6.0);
-            ui.label(
-                "The page is behind the same credentials as the rest of the web \
-                 interface, and the screen is readable but only types at a guest \
-                 when \"may type at a booted disk\" is on.",
-            );
+            // **Do not promise credentials that are not there.**  `security_enabled`
+            // is off by default and the web server honours that -- with login off
+            // there is no password at all, only the private-IP allowlist -- and
+            // this page renders the gateway password and the Groq key into input
+            // values.  A dialog whose whole job is to inform before opening a
+            // listener must not tell somebody their config page is protected when
+            // it is not.
+            if secured {
+                ui.label(
+                    "The page is behind the same credentials as the rest of the \
+                     web interface, and the screen is readable but only types at \
+                     a guest when \"may type at a booted disk\" is on.",
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "Require Login is OFF, so the web interface asks for no \
+                         password -- anyone who can reach this machine on the \
+                         network gets the configuration page, which shows your \
+                         gateway password and API key. Only the private-address \
+                         check stands in the way. Turn Require Login on first if \
+                         this machine shares a network with anyone else.",
+                    )
+                    .color(AMBER),
+                );
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui
