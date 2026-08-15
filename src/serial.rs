@@ -4601,8 +4601,15 @@ fn host_is_local(host: &str, local_ips: &[String]) -> bool {
 /// Resolve a peer-dial address `<Port>@<host>` to a **local** port on this
 /// gateway, or `None` if it doesn't parse or the host isn't us.  Used by the
 /// master's relay peer-dial handler to map a relayed address to one of its
-/// own ports (Phase 2a); a non-local host returns `None` (deferred to the
-/// cross-gateway crossbar, Phase 2b).
+/// own ports.
+///
+/// `None` is not a refusal — it means "not one of mine", and the caller tries
+/// the next thing.  `relay::handle_peer_dial` goes on to the cross-gateway
+/// crossbar (`parse_remote_peer_addr` + `claim_remote_peer`, which bridge to a
+/// port a *slave* registered with this master) and only refuses when neither
+/// answers.  This comment used to call that crossbar deferred future work,
+/// which it stopped being when Phase 2b landed — the sentence outlived the
+/// state it described and made a working path read as a hole.
 pub fn resolve_local_peer_target(addr: &str) -> Option<SerialPortId> {
     let parsed = parse_peer_address(addr)?;
     if host_is_local(&parsed.host, &local_host_ips()) {

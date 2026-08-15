@@ -2735,7 +2735,19 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv_str(&mut content, "slave_master_password", &cfg.slave_master_password);
     content.push('\n');
 
-    content.push_str("# relay_transport: ssh (default, recommended) | raw\n");
+    // The generated config is a documentation surface, and this line offered a
+    // choice that does nothing: `raw` parses and stores, but no raw transport
+    // exists, so the relay still rides SSH.  Setting it warned only in the
+    // startup log — which an operator editing this file by hand has no reason
+    // to be reading.  No UI exposes the key at all (deliberately: see the
+    // web-form key list), so this comment is the only place a hand-editor
+    // learns.
+    content.push_str(
+        "# relay_transport: ssh (default, recommended) | raw\n\
+         #   raw is NOT yet implemented -- setting it changes nothing and the\n\
+         #   relay still uses SSH.  No configuration screen offers this key;\n\
+         #   it is settable only here.\n",
+    );
     write_kv_str(&mut content, "relay_transport", &cfg.relay_transport);
 
     // Write to a per-PID + per-thread tmp file with owner-only mode

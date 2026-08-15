@@ -22,6 +22,22 @@
 // avoids on purpose.  Nothing is being hidden — the let-chain form is used
 // freely where it was written that way, and this only declines to convert the
 // blocks that were not.
+//
+// `cargo clippy --fix` was run to price this rather than guessed at: 22 files,
+// 164 deletions, and the result is *worse* formatted than what it replaced,
+// because clippy swaps `{ if` for `&&` and drops the closing braces without
+// reformatting — it assumes `cargo fmt` follows, and here nothing does.  The
+// `&&` continuations cascade one level deeper each time while the body keeps
+// its old indentation, and in `cpm/fs.rs` it orphaned a comment from the block
+// it explains.  So the real price is hand-reformatting 55 sites, not running a
+// command.
+//
+// WHAT THE ALLOW COSTS, stated plainly: `collapsible_if` also covers plain
+// nested booleans (`if a { if b { } }`), which was enabled and clean before the
+// MSRV moved, so new nesting of that kind now goes unflagged too.  If that is
+// worth reclaiming, collapse these by hand as you happen to touch the
+// surrounding code and delete this attribute when the count reaches zero —
+// there is no need for a sweep.
 #![allow(clippy::collapsible_if)]
 
 mod aichat;
