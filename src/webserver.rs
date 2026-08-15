@@ -53,7 +53,7 @@ const MAX_INFLIGHT: usize = 16;
 
 /// Embedded logo (same PNG the GUI uses) so the web page mirrors the
 /// look of the desktop console without needing an external file.
-const LOGO_PNG: &[u8] = include_bytes!("../ethernetgatewaylogo_small.png");
+const LOGO_PNG: &[u8] = include_bytes!("../eglogobrightsmall.png");
 
 /// Launch the HTTP listener.  No-op when `web_enabled` is false.
 ///

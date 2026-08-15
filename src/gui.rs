@@ -3952,7 +3952,7 @@ impl eframe::App for App {
                         |ui| {
                             ui.add_space(-32.0);
                             ui.add(
-                                egui::Image::new(egui::include_image!("../ethernetgatewaylogo_small.png"))
+                                egui::Image::new(egui::include_image!("../eglogobrightsmall.png"))
                                     .texture_options(egui::TextureOptions {
                                         magnification: egui::TextureFilter::Linear,
                                         minification: egui::TextureFilter::Linear,
@@ -5458,7 +5458,7 @@ mod tests {
         // The display size must match the source PNG exactly so the
         // GPU does a 1:1 blit on a 1.0x-DPI display, avoiding the
         // mauve-cast gradient issue we hit when minifying a larger
-        // source.  ethernetgatewaylogo_small.png is 366x183.
+        // source.  eglogobrightsmall.png is 366x183.
         let logo_w = 366.0_f32;
         let logo_h = 183.0_f32;
         // Logo should fit within a reasonable GUI panel.
