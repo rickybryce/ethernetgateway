@@ -92,9 +92,28 @@ jobs:
   # GATING, not advisory.  A wrong MSRV is not a flaky third-party peer — it is a
   # promise in Cargo.toml, the README and the user manual that the build breaks.
   #
-  # `cargo check` only: this asks "does the declared floor still parse and type-
-  # check", which is the whole claim.  Running the tests here would gate the
-  # release on an old toolchain's behaviour, which is not promised to anyone.
+  # `cargo check --all-targets`: type-check only — running the suite here would
+  # gate the release on an old toolchain's *behaviour*, which is promised to
+  # nobody — but over **every** target, tests included, not just the binary.
+  #
+  # `--all-targets` is deliberate and is the stricter of the two readings.  The
+  # narrow one would match the README's promise exactly (a user runs
+  # `cargo build --release` and never compiles a test), but CLAUDE.md documents
+  # `cargo test` as part of this project's workflow, so a contributor who
+  # installs the declared minimum must be able to run it.  Narrowing the check
+  # to avoid a signal does not make the signal false, it just stops us seeing it.
+  #
+  # The cost of the stricter reading is that a **dev**-dependency raising its own
+  # MSRV turns this job red over something no user ever compiles.  If that
+  # happens, the fix is usually to pin the dev-dependency back — NOT to raise
+  # `rust-version`, because that number is the promise in the README and the user
+  # manual, and raising it turns away people whose toolchain builds the binary
+  # perfectly well.  Only raise it when a *normal* dependency (or our own source)
+  # is what needs the newer compiler.
+  #
+  # Margin as of 0.9.2: normal deps need 1.92 (egui/eframe), dev-deps need at
+  # most 1.85 (proptest), so the tests are nowhere near being what sets the
+  # floor.  `cargo metadata` reports both — see versionchange.txt.
   #
   # RUSTFLAGS is cleared deliberately.  The repo-wide `-D warnings` is a
   # *stable* gate; an older rustc lints differently, and a lint that 1.92 emits
