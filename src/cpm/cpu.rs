@@ -21,11 +21,12 @@
 //!
 //! **This setting used to cost the terminal**, and that is worth recording
 //! because it was the deciding argument for the default and is no longer
-//! true. `EGT8080.COM` is Z80 code; placed on drive A: on first launch, it
-//! executed a Z80-only opcode as something else on an 8080 and took CP/M down
-//! with it. `EGT8080.COM` is the same terminal built to the 8080's
-//! instruction set — 8080 opcodes being a strict subset, it runs on *either*
-//! setting — and it is the one the emulator leads with. Choosing the 8080 now
+//! true. The bundled terminal was Z80 code (`EGT80.COM`, retired in 0.9.2);
+//! placed on drive A: on first launch, it executed a Z80-only opcode as
+//! something else on an 8080 and took CP/M down with it. `EGT8080.COM` is the
+//! same terminal built to the 8080's instruction set — 8080 opcodes being a
+//! strict subset, it runs on *either* setting — and it is the only one
+//! shipped now. Choosing the 8080 now
 //! costs the `hbios_*` modem profiles' usual clientele (RomWBW software is
 //! Z80/Z180 code, though our HBIOS itself answers an 8080 perfectly well) and
 //! nothing else we ship.
@@ -61,8 +62,19 @@ pub const DEFAULT_CPU: &str = CPU_Z80;
 ///
 /// Neither names a cost any more: `EGT8080.COM` runs on both, so the choice is
 /// now only about which processor the software you are running expects.
+///
+/// **"most", not "all".** The Z80's instruction set contains the 8080's, so
+/// almost anything written for an 8080 runs — but the two processors do not
+/// agree on everything, and where they differ the 8080 program is entitled to
+/// notice. `DCR A` sets parity on an 8080 and overflow on a Z80, so a period
+/// diagnostic that identifies its host that way is *right* to fail here; that
+/// is the case `cpm_cpu = 8080` exists for. Saying "runs 8080 code too" told an
+/// operator the setting could not matter, which is the one thing it must not
+/// say. It reads "runs most 8080 code" rather than "runs most 8080 code too"
+/// only because 26 characters is all a 40-column PETSCII row gives, and a label
+/// that arrives cut in half says less than a shorter one that does not.
 pub const CPU_CHOICES: &[(&str, &str)] = &[
-    (CPU_Z80, "Z80 (runs 8080 code too)"),
+    (CPU_Z80, "Z80 (runs most 8080 code)"),
     (CPU_8080, "8080 (what MITS shipped)"),
 ];
 

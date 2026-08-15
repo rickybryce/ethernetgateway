@@ -793,21 +793,6 @@ TARGET.PRN
 >>>>> Altair-Duino disks (Jim McNeely) -- what this collection uniquely has
       https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)
 
->> DISK17.DSK
-8BIT.HEX
-FILES.TXT
-I2A8-1.ASM
-I2A8-1.HEX
-I2FUNC.COM
-I2LIB.COM
-IMP.COM
-IMP245.COM
-IMP8.COM
-MLOAD.COM
-PIP.COM
-README.TXT
-
-
 >> HDSK04.DSK
 ACOPY.ASM
 ACOPY.COM

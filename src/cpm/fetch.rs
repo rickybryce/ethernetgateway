@@ -410,9 +410,16 @@ mod generate {
         // ones.  Listing the five explicitly rather than diffing the folders:
         // a diff would silently pick up whatever a future checkout added, and
         // this file's whole promise is that a human decided each line.
+        // NOT `DISK17.DSK`, and the reason is the whole point of this list being
+        // hand-decided.  It is a name Hansel's collection does not have, so a
+        // by-name comparison called it unique and it was very nearly shipped —
+        // but its bytes are `DISK12.DSK`'s exactly, the IMP modem executive
+        // under a second number.  Offering it would have downloaded one disk
+        // twice.  A filename is not an identity, and a *missing* filename is not
+        // missing content: the check that matters is the hash, which is why
+        // `test_no_disk_is_offered_twice` now holds it.
         let from_duino: &[(&str, &str)] = &[
             ("HDSK04.DSK", "duino"),
-            ("DISK17.DSK", "duino"),
             ("HDSK05.DSK", "duino-extra"),
             ("HDSK06.DSK", "duino-extra"),
             ("HDSK07.DSK", "duino-extra"),
@@ -463,12 +470,22 @@ mod generate {
             );
             // The bytes the URL serves are the ones cold-started, not the local
             // copy: what a user downloads is what has to boot.
-            if let Err(e) =
-                crate::cpm::boot_machine::BootMachine::would_boot(served, &mach, &cpu)
-            {
-                withheld.push(format!("{name} ({e})"));
-                eprintln!("  WITHHELD {name}: {e}");
-                continue;
+            // Only a disk with no boot program is dropped.  A board mismatch
+            // would mean the machine this ran on is configured for other
+            // hardware, which says nothing about the disk — and silently
+            // shrinking the shipped catalogue because of a local setting is
+            // exactly the failure this must not have.
+            match crate::cpm::boot_machine::BootMachine::bootability(served, &mach, &cpu) {
+                crate::cpm::boot::Bootability::Boots => {}
+                crate::cpm::boot::Bootability::NoBootProgram(e) => {
+                    withheld.push(format!("{name} ({e})"));
+                    eprintln!("  WITHHELD {name}: {e}");
+                    continue;
+                }
+                crate::cpm::boot::Bootability::NoBoardForIt(e) => panic!(
+                    "{name}: this machine has no board for it ({e}).  The manifest must be \
+                     generated with cpm_boot_machine = auto, or it would drop good disks."
+                ),
             }
             rows.push_str(&format!(
                 "{}\t{}\t{}\t{}\t{}\n",
@@ -636,6 +653,29 @@ mod tests {
         for d in &all {
             assert!(source_for(&d.source).is_some(), "{}: unknown source {}", d.name, d.source);
             let _ = d.url();
+        }
+    }
+
+    /// **No disk is offered twice, under any name.**
+    ///
+    /// With two collections a disk can be unique by *filename* and identical by
+    /// content, and that is not hypothetical: `DISK17.DSK` exists only in
+    /// McNeely's collection, and is `DISK12.DSK` byte for byte. It passed a
+    /// by-name uniqueness check and would have had operators download the IMP
+    /// modem executive twice under two numbers. The hash is what identifies a
+    /// disk; the name is what it happens to be filed under.
+    #[test]
+    fn test_no_disk_is_offered_twice() {
+        let all = catalogue();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(
+                    a.sha256, b.sha256,
+                    "{} and {} are the same disk under two names",
+                    a.name, b.name
+                );
+                assert_ne!(a.name, b.name, "{} is listed twice", a.name);
+            }
         }
     }
 

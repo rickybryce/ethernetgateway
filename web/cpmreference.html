@@ -1349,9 +1349,9 @@ altairhd_cobol.dsk</code></pre>
                     <p>
                         <strong>The gateway can fetch them for you.</strong> Every disk screen
                         &mdash; telnet, web and desktop &mdash; offers to download the sample disks
-                        before you mount anything: about 43&nbsp;MB into <code>CPM/images</code>,
+                        before you mount anything: about 42&nbsp;MB into <code>CPM/images</code>,
                         pinned to a commit and checked against a recorded SHA-256 so what arrives is
-                        what was tested. It offers <strong>only the thirty-five disks this gateway
+                        what was tested. It offers <strong>only the thirty-four disks this gateway
                         is known to run</strong> &mdash; four data companions that carry no boot
                         program are left out, because downloading a disk that does nothing is not a
                         favour. That is not a remembered list: each candidate is cold-started from
@@ -1367,14 +1367,18 @@ altairhd_cobol.dsk</code></pre>
                         <code>TDISK04</code> for the VDM-1, <code>DISK10</code> for the Dazzler
                         &mdash; is the <code>disks/</code> folder of David Hansel's Altair 8800
                         simulator, <a href="https://github.com/dhansel/Altair8800">github.com/dhansel/Altair8800</a>.
-                        Five more &mdash; <code>HDSK04</code> (Infocom adventures), <code>HDSK05</code>
-                        (BASIC), <code>HDSK06</code> (COBOL), <code>HDSK07</code> (dBase II) and
-                        <code>DISK17</code> (IMP modem executive) &mdash; come from Jim McNeely's
+                        Four hard disks more &mdash; <code>HDSK04</code> (Infocom adventures),
+                        <code>HDSK05</code> (BASIC), <code>HDSK06</code> (COBOL) and
+                        <code>HDSK07</code> (dBase II) &mdash; come from Jim McNeely's
                         <a href="https://github.com/jpmcneely/AltairDuino-Disks">github.com/jpmcneely/AltairDuino-Disks</a>,
-                        which the first collection does not have. That second collection also carries
-                        four files named <code>DISK13</code>&ndash;<code>DISK16</code> that are
-                        <em>different disks</em> from Hansel's of the same names and undocumented in its
-                        own catalogue, so the gateway takes those four from Hansel.
+                        which the first collection does not have. Two traps if you browse that one
+                        by hand. It carries four files named <code>DISK13</code>&ndash;<code>DISK16</code>
+                        that are <em>different disks</em> from Hansel's of the same names and
+                        undocumented in its own catalogue, so the gateway takes those four from
+                        Hansel. And its <code>DISK17</code> is a name Hansel has no disk for, but its
+                        bytes are Hansel's <code>DISK12</code> exactly &mdash; the IMP modem
+                        executive under a second number &mdash; so it is not offered either. A unique
+                        filename is not unique content.
                         <code>cpm14-vdm.dsk</code> and the rest are the
                         <code>&lt;sim&gt;/disks/library</code> folders of Udo Munk's z80pack,
                         <a href="https://github.com/udo-munk/z80pack">github.com/udo-munk/z80pack</a>.

@@ -368,7 +368,16 @@ async fn handle_connection(
             let notice = parse_form(&request.query)
                 .remove("notice")
                 .filter(|s| !s.is_empty());
-            let body = render_main_page(&cfg, notice);
+            // Off the async runtime, for the same reason the Save POST below
+            // is: rendering asks `boot_choices` whether each image in the
+            // folder would boot, and on a cold cache that reads every one of
+            // them — tens of megabytes if the operator took the sample disks.
+            // Doing it on the connection's own task would stall every other
+            // session's timers, which is the trap this file already names.
+            let render_cfg = cfg.clone();
+            let body = tokio::task::spawn_blocking(move || render_main_page(&render_cfg, notice))
+                .await
+                .unwrap_or_else(|e| format!("<h1>500</h1><p>{e}</p>"));
             write_response(
                 &mut stream,
                 200,

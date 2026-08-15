@@ -53,10 +53,11 @@ impl TelnetSession {
     /// for a conversation.
     ///
     /// The operator is told the count, the size and **where it comes from**
-    /// before agreeing.  The disks are not ours — they are David Hansel's
-    /// collection, and the software on them belongs to MITS, Microsoft and
-    /// Digital Research — so an operator who would rather fetch them
-    /// themselves should be able to see that and decline.
+    /// before agreeing.  The disks are not ours — they are David Hansel's and
+    /// Jim McNeely's collections, and the software on them belongs to MITS,
+    /// Microsoft, Digital Research and Infocom — so an operator who would rather
+    /// fetch them themselves should be able to see that and decline.  Both
+    /// repositories are named, one per line, from `fetch::source_repos`.
     pub(in crate::telnet) async fn cpmmount_download(&mut self) -> Result<(), std::io::Error> {
         use crate::cpm::fetch;
         let base = self.cpmmount_base();
@@ -455,8 +456,14 @@ impl TelnetSession {
         // failed when chosen.  `image_can_boot` runs the cold start this screen
         // is about to run, so the list cannot promise what the boot refuses.
         let dir = crate::cpm::image::images_dir(&base);
-        let bootable: Vec<String> =
-            images.into_iter().filter(|n| crate::cpm::boot::image_can_boot(&dir.join(n))).collect();
+        // Off the async runtime: on a cold cache this reads and cold-starts
+        // every image in the folder, which is tens of megabytes if the operator
+        // took the sample disks, and a hard disk is 4.9 MB on its own.
+        let bootable: Vec<String> = tokio::task::spawn_blocking(move || {
+            images.into_iter().filter(|n| crate::cpm::boot::image_can_boot(&dir.join(n))).collect()
+        })
+        .await
+        .map_err(std::io::Error::other)?;
 
         // The "nothing to list" screen draws its own header and returns; the
         // paged list below draws one per page.  Nothing is drawn before this
@@ -472,8 +479,18 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.amber("No bootable images found."))).await?;
             self.send_line("").await?;
-            self.send_line("  A bootable image is one of these").await?;
-            self.send_line("  sizes (a short trailer is OK):").await?;
+            // Not "one of these sizes" any more.  The filter cold-starts each
+            // image now, so an operator whose folder holds only companion disks
+            // — which are exactly the size of the system disks they belong to —
+            // was being shown a list of sizes their disks already matched, and
+            // pointed at the wrong problem.  The sizes still earn their place
+            // for the empty folder and the wrong-file cases, but the first line
+            // has to say what is really being asked.
+            self.send_line("  An image has to carry a boot").await?;
+            self.send_line("  program.  A disk of programs for").await?;
+            self.send_line("  another disk has none - mount it").await?;
+            self.send_line("  instead.  Bootable sizes are").await?;
+            self.send_line("  (a short trailer is OK):").await?;
             for line in Self::bootable_size_lines() {
                 self.send_line(&line).await?;
             }
@@ -907,14 +924,18 @@ impl TelnetSession {
                 // Two different facts about slot 0, and which one is true
                 // depends on what is running.  EGT8080 lives in the gateway's own
                 // drive A: folder, which a booted disk never sees.
-                // "terminals", plural: drive A: carries EGT8080.COM and
-                // EGT8080.COM, and a mount hides both.  Article dropped to keep
-                // the row short — this note is appended after the filename and
-                // is the first thing `truncate_to_width` takes away.
+                //
+                // Singular since 0.9.2: this said "terminals" because drive A:
+                // carried the Z80 build beside the 8080 one and a mount hid
+                // both.  One ships now.  An operator who upgraded still has
+                // their old `EGT80.COM` there and a mount still hides it too,
+                // but naming a file we no longer ship, in a note that is the
+                // first thing `truncate_to_width` takes away, would spend the
+                // scarcest characters on the screen for the rarer case.
                 note.push_str(if booting {
                     " - booted disk here"
                 } else {
-                    " - hides terminals"
+                    " - hides terminal"
                 });
             }
             // The *note* is bounded, not the finished line.  `truncate_to_width`

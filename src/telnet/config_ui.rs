@@ -1120,6 +1120,123 @@ impl TelnetSession {
     /// has room to grow, which this pair specifically will: when a second
     /// controller claims a disk size the Tarbell already claims, *which board*
     /// takes an ambiguous image becomes a third question on exactly this screen.
+    /// Choose what the CP/M menu item runs: our emulator, or a disk to boot.
+    ///
+    /// **A picker rather than the cycling key this used to be.** Every other
+    /// choice on the boot screen cycles, and that is right for them — a machine,
+    /// a backspace byte, a CPU are two to six values each. What CP/M *runs* is
+    /// not that: an operator who accepted the sample-disk download has
+    /// thirty-odd images, so cycling meant up to thirty-four keypresses, each
+    /// redrawing the screen to show a one-line status, with no way back if they
+    /// went one past. The list is the thing to look at.
+    ///
+    /// It is modelled on the mount wizard's boot picker deliberately — same
+    /// paging, same `P`/`N`/`Q` footer, same page-relative numbering — because
+    /// the two screens now answer nearly the same question and an operator who
+    /// has learned one has learned the other. The difference is that this one
+    /// *persists* a setting and so offers the emulator as entry 1, which the
+    /// other cannot: booting for one visit has no "run the emulator" option.
+    ///
+    /// `Q` leaves it alone rather than selecting anything. A picker that had to
+    /// be answered would make this the one row on the screen an operator could
+    /// not look at without changing.
+    async fn cpm_pick_what_runs(&mut self) -> Result<(), std::io::Error> {
+        let base = self.cpmmount_base();
+        // Off the async runtime: `boot_choices` cold-starts every image in the
+        // folder on a cold cache, which is tens of megabytes with the sample
+        // disks taken.
+        let choices =
+            tokio::task::spawn_blocking(move || crate::cpm::boot::boot_choices(&base))
+                .await
+                .map_err(std::io::Error::other)?;
+
+        // Nine, the same as the mount wizard's boot picker, and for the same
+        // reason: this screen carries a header, two lines of note, the page
+        // indicator and the nav footer, and ten entries overrun a 22-row
+        // PETSCII screen.  Held by `test_cpm_runs_picker_page_fits_petscii`
+        // rather than counted by hand.
+        const RUNS_PAGE: usize = 9;
+        let mut page: usize = 0;
+        loop {
+            let total_pages = choices.len().div_ceil(RUNS_PAGE).max(1);
+            if page >= total_pages {
+                page = total_pages - 1;
+            }
+            let offset = page * RUNS_PAGE;
+            let end = (offset + RUNS_PAGE).min(choices.len());
+            let shown = &choices[offset..end];
+            let current = config::get_config().cpm_boot_image.clone();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("CHOOSE WHAT CP/M RUNS"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.dim("A disk boots its OWN operating"))).await?;
+            self.send_line(&format!("  {}", self.dim("system. Only disks that boot are"))).await?;
+            self.send_line(&format!("  {}", self.dim("listed here."))).await?;
+            self.send_line("").await?;
+            let width = if self.terminal_type == TerminalType::Petscii { 28 } else { 58 };
+            for (i, (value, label)) in shown.iter().enumerate() {
+                // The one that is set is marked, because this screen replaced a
+                // status line the operator could read at a glance and would
+                // otherwise have to leave and come back to see.
+                let mark = if *value == current { "*" } else { " " };
+                self.send_line(&format!(
+                    "  {} {} {}",
+                    self.cyan(&(i + 1).to_string()),
+                    self.green(mark),
+                    self.amber(&truncate_to_width(label, width))
+                ))
+                .await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  Page {} of {}", page + 1, total_pages)).await?;
+            self.send_line("").await?;
+            let mut nav = Vec::new();
+            if page > 0 {
+                nav.push(self.action_prompt("P", "Prev"));
+            }
+            if page + 1 < total_pages {
+                nav.push(self.action_prompt("N", "Next"));
+            }
+            nav.push(self.action_prompt("Q", "Back"));
+            self.send_line(&format!("  {}", nav.join("  "))).await?;
+            self.send(&format!("{}> ", self.cyan("runs"))).await?;
+            self.flush().await?;
+
+            let Some(input) = self.get_menu_input(false).await? else {
+                return Ok(());
+            };
+            match input.as_str() {
+                "p" => page = page.saturating_sub(1),
+                "n" => {
+                    if page + 1 < total_pages {
+                        page += 1;
+                    }
+                }
+                "q" | "" => return Ok(()),
+                other => {
+                    // Indexed into the page, not the whole list — the numbers
+                    // restart at 1 on every page, so resolving against the full
+                    // list would set a different disk from the one on screen.
+                    if let Ok(n) = other.trim().parse::<usize>()
+                        && let Some((value, _)) = shown.get(n.wrapping_sub(1))
+                    {
+                        let chosen = value.clone();
+                        tokio::task::spawn_blocking(move || {
+                            config::update_config_value("cpm_boot_image", &chosen);
+                        })
+                        .await
+                        .ok();
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
     pub(in crate::telnet) async fn cpm_boot_settings(&mut self) -> Result<(), std::io::Error> {
         loop {
             let cfg = config::get_config();
@@ -1184,7 +1301,7 @@ impl TelnetSession {
             // anyway.  The screen was full at 22 and is now 21.
             self.send_line(&format!("  {}", self.dim("The CPU applies to both."))).await?;
             self.send_line("").await?;
-            self.send_line(&format!("  {}  Cycle what CP/M runs", self.cyan("R"))).await?;
+            self.send_line(&format!("  {}  Choose what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
             self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
             self.send_line(&format!("  {}  Cycle the CPU (Z80 / 8080)", self.cyan("C"))).await?;
@@ -1213,21 +1330,15 @@ impl TelnetSession {
                     // each image in turn.  A cycling key rather than a picker
                     // because that is how every other choice in config works,
                     // and because the list is usually two or three long.
-                    let base = self.cpmmount_base();
-                    let choices = crate::cpm::boot::boot_choices(&base);
-                    let idx = choices
-                        .iter()
-                        .position(|(v, _)| *v == cfg.cpm_boot_image)
-                        // A setting naming an image that is no longer there is
-                        // not in the list.  Land on the emulator next, which is
-                        // both the safe answer and the one that clears it.
-                        .unwrap_or(choices.len() - 1);
-                    let next = choices[(idx + 1) % choices.len()].0.clone();
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("cpm_boot_image", &next);
-                    })
-                    .await
-                    .ok();
+                    //
+                    // It is not.  An operator who has taken the sample disks
+                    // has thirty-odd, and cycling meant pressing R up to
+                    // thirty-four times, reading a one-line status after each,
+                    // to reach the disk they wanted -- and one press too many
+                    // meant going all the way round again.  A picker shows them
+                    // at once, so this now opens a screen and comes back with
+                    // the answer on the `Runs:` row at the top.
+                    self.cpm_pick_what_runs().await?;
                 }
                 "m" => {
                     // `auto` first, then each machine -- the same order every UI

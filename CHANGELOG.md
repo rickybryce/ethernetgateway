@@ -15,8 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draws on Jim McNeely's `AltairDuino-Disks`, which has disks David Hansel's
   Altair 8800 simulator does not: the **Infocom adventures** hard disk
   (`HDSK04`), **BASIC** (`HDSK05`), **COBOL** (`HDSK06`), **dBase II**
-  (`HDSK07`) and the **IMP modem executive** (`DISK17`). Thirty-five disks now,
-  up from thirty.
+  (`HDSK07`). Thirty-four disks now, up from thirty.
 
   Both collections, because neither contains the other, and the reason is a
   trap worth recording: McNeely's also holds four files named `DISK13`–`DISK16`
@@ -32,6 +31,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repodisks.txt` catalogues the new disks — every file on each, read through
   the same mount path the gateway uses — and lists only what that collection
   uniquely has, since 26 of its images are byte-identical to Hansel's.
+
+### Changed
+
+- **"What CP/M runs" is a picker now, not a cycling key.** `R` on the telnet
+  CP/M Boot Settings screen opened nothing — it advanced the setting by one and
+  redrew a one-line status. That was fine when the answer was "the emulator or
+  the one disk you have"; with the sample disks downloaded it meant pressing `R`
+  up to thirty-four times, and one press too many meant going round again. It
+  now opens **CHOOSE WHAT CP/M RUNS**: the emulator as entry 1, then every disk
+  that boots, paged nine to a screen with the same `P`/`N`/`Q` footer as the
+  mount wizard's boot picker, and the current setting marked. Choosing returns
+  to the boot screen with the answer on the `Runs:` row. `Q` changes nothing, so
+  the list can be looked at without committing to it.
+
+- **The CPU choice reads "Z80 (runs most 8080 code)".** It said "runs 8080 code
+  too", which told an operator the setting could not matter to them. It can: the
+  processors disagree where it counts — `DCR A` sets parity on an 8080 and
+  overflow on a Z80 — so a period diagnostic that identifies its host that way
+  is *right* to fail on the Z80, and that is the case `cpm_cpu = 8080` exists
+  for. ("most 8080 code" rather than "most 8080 code too" only because 26
+  characters is all a 40-column PETSCII row gives.)
 
 ### Fixed
 

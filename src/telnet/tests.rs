@@ -2541,6 +2541,37 @@ fn test_cpm_boot_picker_page_fits_petscii() {
     );
 }
 
+/// The "choose what CP/M runs" picker has the same 22-row budget, and its page
+/// size is proven the same way rather than counted by hand.
+///
+/// It replaced a cycling key, and the reason it can afford to exist is that it
+/// fits: a picker that overran would scroll its own heading away on a C64, which
+/// is exactly the fault the boot confirmation screen was split out to fix.
+#[test]
+fn test_cpm_runs_picker_page_fits_petscii() {
+    let src = include_str!("config_ui.rs");
+    let decl = src.find("const RUNS_PAGE: usize =").expect("the page-size constant");
+    let per_page: usize = src[decl..]
+        .split('=')
+        .nth(1)
+        .and_then(|s| s.trim().split(';').next())
+        .and_then(|s| s.trim().parse().ok())
+        .expect("a parseable page size");
+
+    let header = 3; // sep + title + sep
+    let intro = 1 + 3; // blank + the three "boots its OWN operating system" lines
+    let footer = 1 + 1 + 1 + 1 + 1; // blank + page info + blank + nav + prompt
+    let rows = header + intro + per_page + footer;
+    assert!(
+        rows <= 22,
+        "the runs picker is {rows} rows at {per_page} per page, over the 22-row PETSCII budget"
+    );
+    assert!(
+        rows >= 21,
+        "the runs picker is only {rows} rows; a shorter page means needless paging"
+    );
+}
+
 /// Every key the CP/M boot screen displays must also be one it handles and one
 /// its error hint names.  The same three-way drift the CP/M settings screen
 /// suffered twice, guarded the same way.
@@ -3109,7 +3140,9 @@ fn test_the_runs_row_keeps_its_marker_when_the_row_is_too_narrow() {
     let _ = std::fs::remove_dir_all(&dir);
     let images = dir.join("CPM").join(crate::cpm::image::IMAGES_DIR);
     std::fs::create_dir_all(&images).unwrap();
-    std::fs::write(images.join("real.dsk"), [0u8; 8]).unwrap();
+    // A real image: the row resolves through `boot_target`, which cold-starts
+    // the disk now, so eight bytes would correctly earn a "(will not boot)".
+    std::fs::write(images.join("real.dsk"), crate::cpm::boot::tests::bootable_image()).unwrap();
     assert_eq!(cpm_runs_row(&dir.to_string_lossy(), "real.dsk", 60), "Boot real.dsk");
     let _ = std::fs::remove_dir_all(&dir);
 }

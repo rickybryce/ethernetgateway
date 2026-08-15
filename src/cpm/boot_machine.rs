@@ -30,7 +30,7 @@
 //!   last driven, so a guest probing for hardware we do not have sees nothing
 //!   instead of an echo of itself.
 
-use super::boot::{cold_boot, BootError};
+use super::boot::{cold_boot, Bootability, BootError};
 use super::controller::{ColdStart, Controller, HostRequest};
 use super::dcdd::{Dcdd, SECTOR_LEN};
 use super::modem_port::ModemPort;
@@ -672,7 +672,12 @@ impl BootMachine {
         Ok(())
     }
 
-    /// **Would this image boot, if it were selected?**
+    /// **Would this image boot, if it were selected?** — and if not, whose fault.
+    ///
+    /// The two answers are not interchangeable and the callers must not have to
+    /// work the difference out themselves. They did once, each repeating the
+    /// same `Err(_) => cannot boot` classification, and all three agreed with
+    /// each other and with the bug.
     ///
     /// The question the two boot lists need answered before they offer a disk,
     /// and the only honest way to answer it is to *do* the cold start: build the
@@ -694,20 +699,35 @@ impl BootMachine {
     /// an interactive list can pay, so this is bounded honestly: it removes the
     /// disks that *cannot* boot, and does not promise that the rest will get
     /// somewhere useful.
-    pub fn would_boot(
-        bytes: Vec<u8>,
-        machine_setting: &str,
-        cpu_setting: &str,
-    ) -> Result<(), BootError> {
+    pub fn bootability(bytes: Vec<u8>, machine_setting: &str, cpu_setting: &str) -> Bootability {
         let (machine_key, _note) = super::detect::machine_for(machine_setting, &bytes);
         let mut m = BootMachine::new();
         m.set_machine(&machine_key);
         // Read-only, always: this is a question, and a question must not be able
         // to write to the operator's disk.  Nothing here reaches `take_dirty`
         // either, so there is no path from asking to a write-back.
-        m.insert(0, bytes, true).map_err(BootError::Unreadable)?;
+        //
+        // **`insert` failing IS the board mismatch**, and reading it as anything
+        // else was a real defect: it refuses when no controller on this machine
+        // accepts the image's size, and its message names the media the machine
+        // does carry.  Mapping that to a "cannot boot" was enough to make a
+        // perfectly good Altair disk vanish from every list under
+        // `cpm_boot_machine = cromemco` — the exact outcome the split below
+        // exists to prevent.
+        if let Err(e) = m.insert(0, bytes, true) {
+            return Bootability::NoBoardForIt(e);
+        }
         let mut cpu = BootMachine::new_cpu_for(cpu_setting);
-        m.boot(&mut cpu, 0)
+        match m.boot(&mut cpu, 0) {
+            Ok(()) => Bootability::Boots,
+            // This machine has no board that can start it — fixable by changing
+            // `cpm_boot_machine`.
+            Err(e @ (BootError::NoBootstrap | BootError::NoDisk(_))) => {
+                Bootability::NoBoardForIt(e.to_string())
+            }
+            // The disk itself carries no boot program.  No configuration helps.
+            Err(e) => Bootability::NoBootProgram(e.to_string()),
+        }
     }
 
     /// The cold start proper: whatever this drive's controller says its PROM

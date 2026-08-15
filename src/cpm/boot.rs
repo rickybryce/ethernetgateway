@@ -104,16 +104,9 @@ fn boot_choices_by(
 /// two settings that could change it. An edited disk has a new mtime and is
 /// asked again; a disk nobody touched is one `stat` and a hash lookup.
 ///
-/// **The verdict is about the disk, not about this machine's boards.** A cold
-/// start can fail three ways that mean "there is no boot program here" —
-/// [`BootError::NotBootable`] (the sector holds nothing that could be code),
-/// [`BootError::Unreadable`] (it could not supply a boot sector) and
-/// [`BootError::NeverPositioned`] — and two that mean "this machine has no board
-/// for it", [`BootError::NoBootstrap`] and [`BootError::NoDisk`]. Only the first
-/// three take a disk off the lists. The other two are a configuration the
-/// operator can change, and a disk that vanishes when they change
-/// `cpm_boot_machine` would be a worse mystery than a boot that fails saying
-/// which boards this machine has.
+/// **The verdict is about the disk, not about this machine's boards** — see
+/// [`Bootability`], which is where that distinction is drawn once so that the
+/// list, the picker and the manifest generator cannot each draw it differently.
 pub fn image_can_boot(path: &std::path::Path) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -139,19 +132,12 @@ pub fn image_can_boot(path: &std::path::Path) -> bool {
         return hit;
     }
 
+    // The classification lives in `Bootability::offer`, not here: this was three
+    // separate `match` arms in three files, and when they were wrong they were
+    // wrong together.
     let verdict = match std::fs::read(path) {
         Err(_) => false,
-        Ok(bytes) => match super::boot_machine::BootMachine::would_boot(bytes, &machine, &cpu) {
-            Ok(()) => true,
-            // The disk has no boot program.  Nothing the operator changes will
-            // make these boot, so they come off the lists.
-            Err(BootError::NotBootable)
-            | Err(BootError::Unreadable(_))
-            | Err(BootError::NeverPositioned) => false,
-            // This machine has no board that can start it.  That *is* fixable —
-            // `cpm_boot_machine` — so keep offering it and let the boot say so.
-            Err(BootError::NoBootstrap) | Err(BootError::NoDisk(_)) => true,
-        },
+        Ok(bytes) => super::boot_machine::BootMachine::bootability(bytes, &machine, &cpu).offer(),
     };
     if let Ok(mut c) = cache.lock() {
         // An images folder is tens of entries and the key carries an mtime, so
@@ -191,10 +177,22 @@ pub fn boot_choice_label(value: &str) -> String {
 
 /// The suffix a setting carries when it is not what is going to run.
 ///
-/// Two words, not one, because the two fallbacks are different mistakes and an
-/// operator fixes them differently: `(missing)` means put the disk back or pick
-/// another, `(invalid name)` means the value in the file could never have named
-/// a disk at all — most likely a path was typed where a bare filename belongs.
+/// Three, not one, because the fallbacks are different mistakes and an operator
+/// fixes them differently: `(missing)` means put the disk back or pick another,
+/// `(invalid name)` means the value in the file could never have named a disk at
+/// all — most likely a path was typed where a bare filename belongs — and
+/// `(not bootable)` means the disk is right there and carries no boot program,
+/// so no amount of looking for it will help.  Fifteen characters exactly, which
+/// is the whole budget `cpm_runs_row` reserves out of a 26-column PETSCII row —
+/// `(will not boot)` read better and was one too long, and the width guard in
+/// `test_a_setting_that_will_not_run_says_so` is what said so.
+///
+/// The third arrived with the boot-list filter and is the reason that filter
+/// could not stop at the list. A withheld disk is absent from the choices, but
+/// a config file can still *name* one — it was set before the filter existed, or
+/// typed in by hand — and the web and desktop screens re-add whatever is set so
+/// the setting cannot silently reset itself. Without a mark of its own it
+/// re-appeared looking exactly like a disk that was about to boot.
 ///
 /// Empty for the cases that *are* going to run, so a caller can append it
 /// unconditionally.
@@ -202,6 +200,7 @@ pub fn boot_setting_mark(target: &BootTarget) -> &'static str {
     match target {
         BootTarget::Missing(_) => " (missing)",
         BootTarget::UnsafeName(_) => " (invalid name)",
+        BootTarget::NotBootable(_) => " (not bootable)",
         BootTarget::Emulator | BootTarget::Image(_) => "",
     }
 }
@@ -283,6 +282,13 @@ pub enum BootTarget {
     UnsafeName(String),
     /// A name that is not in `CPM/images` any more; the emulator runs.
     Missing(String),
+    /// The disk is there and carries no boot program; the emulator runs.
+    ///
+    /// The emulator rather than a boot that fails: the three other fallbacks all
+    /// start the emulator, and starting a session that can only print an error
+    /// would make this the one setting whose failure costs the operator CP/M
+    /// entirely. The screens mark it, which is where the operator finds out.
+    NotBootable(String),
     /// The image that will be booted.
     Image(PathBuf),
 }
@@ -332,6 +338,12 @@ pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
     let path = super::image::images_dir(&super::layout::cpm_dir(transfer_dir)).join(name);
     if std::fs::metadata(&path).is_err() {
         return BootTarget::Missing(name.to_string());
+    }
+    // Cached, so the "two syscalls" this doc promises hold from the second call
+    // on — and the first is the one that reads the disk, which is the same read
+    // the boot itself would do a moment later.
+    if !image_can_boot(&path) {
+        return BootTarget::NotBootable(name.to_string());
     }
     BootTarget::Image(path)
 }
@@ -473,6 +485,37 @@ pub const BOOT_SECTORS: u8 = 4;
 /// console beats the right one that is still loading. That is precisely what
 /// happened — step 4 "won" for five disks and produced nothing but noise.
 pub const BOOT_INTERLEAVE: u8 = 2;
+
+/// The answer to "would this image boot", and whose fault it is if not.
+///
+/// **Two failures that look identical on a screen and are not.** A disk with no
+/// boot program cannot boot on any machine in any configuration, so offering it
+/// wastes the operator's keystrokes. A disk this machine has no *board* for is a
+/// `cpm_boot_machine` setting away from working, so withholding it would hide a
+/// disk that is fine and leave nothing to act on.
+///
+/// One type rather than each caller re-deriving it from a `BootError`: three
+/// places asked this question, all three collapsed it to `Err(_) => no`, and all
+/// three were therefore wrong in the same way at the same time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bootability {
+    /// The cold start reached an entry point.
+    Boots,
+    /// The disk carries nothing that could be a boot program.
+    NoBootProgram(String),
+    /// No board on the configured machine can start this image.
+    NoBoardForIt(String),
+}
+
+impl Bootability {
+    /// Should a boot list offer this image?
+    ///
+    /// Yes for a board mismatch: that failure is worth reaching, because the
+    /// boot names the boards this machine has and the operator can change it.
+    pub fn offer(&self) -> bool {
+        !matches!(self, Bootability::NoBootProgram(_))
+    }
+}
 
 /// Why a boot did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,7 +762,7 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// The emulator names its own drives; a booted machine names a board's.
     ///
@@ -866,6 +909,30 @@ mod tests {
         s
     }
 
+    /// A whole 8" image that really cold-starts, for the tests that need a disk
+    /// rather than a stand-in for one.
+    ///
+    /// Those tests wrote an eight-byte file and asserted it would boot. That was
+    /// fine while the only question asked of an image was whether it existed;
+    /// once the boot lists began cold-starting candidates, an eight-byte file
+    /// was correctly judged unbootable and the tests were asserting something
+    /// untrue. Building the real thing is cheaper than a seam here, and it makes
+    /// "a disk that is really there carries no marker" a fact rather than a
+    /// property of a stub.
+    ///
+    /// The boot sectors go where the controller's own arithmetic puts them, at
+    /// [`BOOT_INTERLEAVE`], so this is laid out by the same rules the cold start
+    /// reads it back with.
+    pub(crate) fn bootable_image() -> Vec<u8> {
+        let geom = Geometry::EIGHT_INCH;
+        let mut image = vec![0u8; geom.image_len() as usize];
+        for i in 0..BOOT_SECTORS {
+            let at = geom.offset(0, i * BOOT_INTERLEAVE) as usize;
+            image[at..at + SECTOR_LEN].copy_from_slice(&boot_sector());
+        }
+        image
+    }
+
     fn with_disk() -> Dcdd {
         let mut c = Dcdd::new();
         c.insert(0, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
@@ -903,6 +970,47 @@ mod tests {
         );
         assert!(choices[1].1.starts_with("Boot "), "{}", choices[1].1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A board mismatch is not a disk that cannot boot**, and the difference
+    /// is measured on a real image rather than asserted.
+    ///
+    /// This is the finding a review caught after the filter shipped: an Altair
+    /// image offered to a machine with only Cromemco boards fails inside
+    /// `insert` — no controller accepts 337,568 bytes — and that refusal was
+    /// being read as "this disk has no boot program". The disk then vanished
+    /// from every boot list and the setting silently fell back to the emulator,
+    /// which is precisely what the split was written to prevent. The bug was
+    /// invisible because all three callers repeated the same classification.
+    #[test]
+    fn test_a_disk_this_machine_has_no_board_for_is_still_offered() {
+        use super::super::boot_machine::BootMachine;
+        use super::Bootability;
+
+        let image = bootable_image();
+        // On the machine it belongs to, it boots.
+        assert_eq!(
+            BootMachine::bootability(image.clone(), "auto", super::super::cpu::DEFAULT_CPU),
+            Bootability::Boots
+        );
+
+        // On a machine whose boards take other media, it is refused — and the
+        // refusal must be about the *machine*, so the disk stays on the lists.
+        let elsewhere =
+            BootMachine::bootability(image, "cromemco", super::super::cpu::DEFAULT_CPU);
+        assert!(
+            matches!(elsewhere, Bootability::NoBoardForIt(_)),
+            "an Altair disk on a Cromemco machine is a board mismatch, not a dud disk: \
+             {elsewhere:?}"
+        );
+        assert!(elsewhere.offer(), "a board mismatch stays on the boot lists");
+
+        // And the thing that really cannot boot is still withheld, so this test
+        // cannot pass by making `offer()` always true.
+        let data = vec![0u8; Geometry::EIGHT_INCH.image_len() as usize];
+        let dud = BootMachine::bootability(data, "auto", super::super::cpu::DEFAULT_CPU);
+        assert!(matches!(dud, Bootability::NoBootProgram(_)), "{dud:?}");
+        assert!(!dud.offer(), "a disk with no boot program is withheld");
     }
 
     /// **A disk that cannot boot is not offered as something to boot.**
@@ -960,11 +1068,34 @@ mod tests {
             boot_setting_mark(&BootTarget::UnsafeName("x".into())),
             " (invalid name)"
         );
-        assert_ne!(
+        // The third: the disk is right there and has no boot program on it, so
+        // neither looking for it nor retyping the name will help.
+        assert_eq!(
+            boot_setting_mark(&BootTarget::NotBootable("x".into())),
+            " (not bootable)"
+        );
+        let marks = [
             boot_setting_mark(&BootTarget::Missing("x".into())),
             boot_setting_mark(&BootTarget::UnsafeName("x".into())),
-            "the two fallbacks must not read the same"
-        );
+            boot_setting_mark(&BootTarget::NotBootable("x".into())),
+        ];
+        for (i, a) in marks.iter().enumerate() {
+            for b in &marks[i + 1..] {
+                assert_ne!(a, b, "two fallbacks must not read the same");
+            }
+        }
+
+        // Every fallback runs the emulator, so every one of them names the
+        // emulator's drives.  A new variant that forgot this would put board
+        // slot names on a screen where drive letters are what is running.
+        for target in [
+            BootTarget::Missing("x".into()),
+            BootTarget::UnsafeName("x".into()),
+            BootTarget::NotBootable("x".into()),
+        ] {
+            assert_eq!(target.slot_naming(), SlotNaming::Drives, "{target:?}");
+            assert!(target.into_image().is_none(), "a fallback boots nothing");
+        }
 
         // The budget `cpm_runs_row` reserves out of a 26-column PETSCII row.
         // Pinned because that doc states the number, and a longer marker would
@@ -975,6 +1106,7 @@ mod tests {
             BootTarget::Image("real.dsk".into()),
             BootTarget::Missing("x".into()),
             BootTarget::UnsafeName("x".into()),
+            BootTarget::NotBootable("x".into()),
         ] {
             let mark = boot_setting_mark(&target);
             assert!(
@@ -1044,7 +1176,8 @@ mod tests {
         }
 
         // And the disk that *is* there boots, at the path the session opens.
-        std::fs::write(images.join("altair8_cpm22.dsk"), [0u8; 8]).unwrap();
+        // A real image, not eight bytes: `boot_target` cold-starts it now.
+        std::fs::write(images.join("altair8_cpm22.dsk"), bootable_image()).unwrap();
         let target = boot_target(&transfer, "altair8_cpm22.dsk");
         assert_eq!(target.slot_naming(), SlotNaming::Boards);
         assert_eq!(
@@ -1363,12 +1496,8 @@ mod tests {
         let mut wrong = Vec::new();
         for n in &names {
             let bytes = std::fs::read(images.join(n)).unwrap();
-            let boots = match super::super::boot_machine::BootMachine::would_boot(
-                bytes, &machine, &cpu,
-            ) {
-                Ok(()) | Err(BootError::NoBootstrap) | Err(BootError::NoDisk(_)) => true,
-                Err(_) => false,
-            };
+            let boots = super::super::boot_machine::BootMachine::bootability(bytes, &machine, &cpu)
+                .offer();
             let listed = offered.iter().any(|o| o == n);
             if boots != listed {
                 wrong.push(format!(

@@ -960,8 +960,8 @@ pub struct Config {
     /// disks are made of.  The 8080 is offered because it is the more literal
     /// Altair and because period 8080 diagnostics — which detect the CPU from
     /// `DCR A` setting parity rather than overflow — are correct to fail on a
-    /// Z80.  It no longer costs the terminal: `EGT8080.COM` is placed on drive
-    /// A: beside `EGT8080.COM` and runs on either processor.  See
+    /// Z80.  It no longer costs the terminal: the one `EGT8080.COM` placed on
+    /// drive A: runs on either processor.  See
     /// [`crate::cpm::cpu`].
     pub cpm_cpu: String,
     /// The CP/M virtual modem's saved AT profile, written by `AT&W` from

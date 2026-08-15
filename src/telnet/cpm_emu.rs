@@ -3000,9 +3000,14 @@ mod egt80_tests {
     /// This was written against a source whose program name was `EGT80`, and
     /// the fourteen strings carrying that name are two columns wider now that
     /// it is `EGT8080` — a block already near the limit would have wrapped
-    /// with nothing failing.  `make check` also refuses a *source* line over
-    /// 80 columns, but that is a different limit: only this one is about the
-    /// rendered screen.
+    /// with nothing failing.
+    ///
+    /// Nothing else checks this.  The retired porter refused to *emit* a source
+    /// line over 80 columns, and when it went that rule went with it — `make
+    /// check` is the M80 and ZMAC portability gates, and `check8080.py` decodes
+    /// opcodes.  Neither has ever had a line-length rule, and the source limit
+    /// was never the same limit as this one anyway: one bounds the assembly
+    /// file, this bounds the screen the program draws.
     #[test]
     fn test_egt80_screens_fit_a_24_by_80_terminal() {
         check_screens_fit("EGT8080.Z80", include_str!("../../EGT8080/EGT8080.Z80"));

@@ -533,7 +533,10 @@ mod generate {
             "Altair-Duino disks (Jim McNeely) -- what this collection uniquely has",
             "AltairRepos/AltairDuino-Disks/original",
             "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
-            &["DISK17.DSK", "HDSK04.DSK"],
+            // Not DISK17.DSK: a name this collection alone has, whose bytes are
+            // Hansel's DISK12.DSK exactly.  Listing it would catalogue one disk
+            // twice under two numbers.
+            &["HDSK04.DSK"],
         ),
         (
             "Altair-Duino disks (Jim McNeely) -- the extra/ folder",
