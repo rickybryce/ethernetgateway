@@ -1127,7 +1127,7 @@ impl App {
                  folder is left alone.",
                 wanted.len(),
                 mb,
-                crate::cpm::fetch::ALTAIR_DUINO_SOURCE,
+                crate::cpm::fetch::source_repos().join(" and "),
             ))
             .clicked()
         {

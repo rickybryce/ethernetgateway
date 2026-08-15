@@ -31,15 +31,76 @@
 
 use std::path::Path;
 
-/// The commit the manifest was generated from and the downloads are pinned to.
+/// One place disks are fetched from: a repository, a commit, and a folder in it.
 ///
-/// A commit rather than `master`: the point of the manifest is that these exact
-/// bytes were booted and surveyed, and a branch name would let upstream change
-/// what "verified" refers to.
-pub const ALTAIR_DUINO_COMMIT: &str = "3a42f6646c193567f1c9859c3fa1d06126088490";
+/// **Two repositories, because neither contains the other.** This began as one,
+/// and the second was added on 2026-08-15 after measuring what each holds.
+/// `dhansel/Altair8800` documents `DISK13`–`DISK16` as CP/M 3.0 disk 1 and 2,
+/// the Felix animation system and CP/M 2.2 MITS+Tarbell. `jpmcneely/
+/// AltairDuino-Disks` has five the other does not — the Infocom adventures hard
+/// disk, BASIC, COBOL, dBase II and the IMP modem executive — but *also* carries
+/// four files called `DISK13`–`DISK16` which are different disks entirely, are
+/// undocumented in its own catalogue (that stops at `DISK12`), and one of which
+/// does not boot.
+///
+/// So the contested four come from Hansel and the unique five from McNeely, and
+/// a disk names its source rather than the fetcher assuming one. **A filename is
+/// not an identity** — the same lesson the disk survey learned when three
+/// basenames collided across the z80pack libraries.
+pub struct Source {
+    /// How a manifest line names this source.
+    pub key: &'static str,
+    /// `owner/repo` on GitHub.
+    pub repo: &'static str,
+    /// A commit, never a branch: the manifest records bytes that were booted,
+    /// and a branch name would let upstream change what "verified" refers to.
+    pub commit: &'static str,
+    /// The folder inside the repository holding the images.
+    pub folder: &'static str,
+}
 
-/// Where the collection comes from, for the operator to see before agreeing.
-pub const ALTAIR_DUINO_SOURCE: &str = "github.com/dhansel/Altair8800";
+/// Every repository the catalogue draws on.
+pub const SOURCES: &[Source] = &[
+    Source {
+        key: "hansel",
+        repo: "dhansel/Altair8800",
+        commit: "3a42f6646c193567f1c9859c3fa1d06126088490",
+        folder: "disks",
+    },
+    Source {
+        key: "duino",
+        repo: "jpmcneely/AltairDuino-Disks",
+        commit: "95a2324461f39562be9f46762b7b22cf1afec445",
+        folder: "original",
+    },
+    Source {
+        key: "duino-extra",
+        repo: "jpmcneely/AltairDuino-Disks",
+        commit: "95a2324461f39562be9f46762b7b22cf1afec445",
+        folder: "extra",
+    },
+];
+
+/// The source a manifest line names, if it names one this build knows.
+pub fn source_for(key: &str) -> Option<&'static Source> {
+    SOURCES.iter().find(|s| s.key == key)
+}
+
+/// The repositories, once each, for the operator to see before agreeing.
+///
+/// Deduplicated by repository rather than by source, because two folders of one
+/// repository are one place to an operator deciding whether to trust it — and
+/// listing `AltairDuino-Disks` twice would read like two different projects.
+pub fn source_repos() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in SOURCES {
+        let shown = format!("github.com/{}", s.repo);
+        if !out.contains(&shown) {
+            out.push(shown);
+        }
+    }
+    out
+}
 
 /// One disk in the catalogue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,16 +111,23 @@ pub struct Disk {
     pub bytes: u64,
     /// SHA-256 of the bytes the pinned URL served when this was generated.
     pub sha256: String,
+    /// Which [`Source`] serves it, by [`Source::key`].
+    pub source: String,
     /// What it is, in a few words, for the operator choosing whether to bother.
     pub note: String,
 }
 
 impl Disk {
     /// Where this disk is fetched from.
+    ///
+    /// Infallible because [`catalogue`] drops any line naming a source this
+    /// build does not have, so a `Disk` that exists has a source that resolves.
+    /// `test_every_disk_names_a_source_that_exists` is what keeps that true.
     pub fn url(&self) -> String {
+        let s = source_for(&self.source).expect("catalogue() rejects unknown sources");
         format!(
-            "https://raw.githubusercontent.com/dhansel/Altair8800/{}/disks/{}",
-            ALTAIR_DUINO_COMMIT, self.name
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            s.repo, s.commit, s.folder, self.name
         )
     }
 }
@@ -87,8 +155,14 @@ pub fn catalogue() -> Vec<Disk> {
             let name = f.next()?.trim().to_string();
             let bytes = f.next()?.trim().parse().ok()?;
             let sha256 = f.next()?.trim().to_string();
+            let source = f.next()?.trim().to_string();
             let note = f.next().unwrap_or("").trim().to_string();
-            (!name.is_empty() && sha256.len() == 64).then_some(Disk { name, bytes, sha256, note })
+            // An unknown source is dropped rather than defaulted: guessing a
+            // repository for a disk would fetch *something* under the right
+            // name, which is the one failure this file's hash pinning exists to
+            // make impossible.
+            (!name.is_empty() && sha256.len() == 64 && source_for(&source).is_some())
+                .then_some(Disk { name, bytes, sha256, source, note })
         })
         .collect()
 }
@@ -297,90 +371,156 @@ mod generate {
 
     /// Regenerate the manifest.
     ///
-    /// Ignored: it needs the local collection *and* the network. It downloads
+    /// Ignored: it needs the local collections *and* the network. It downloads
     /// every candidate from the pinned URL and requires the bytes to match the
     /// local copy this project actually booted — so the manifest records what
     /// the URL really serves, verified against what was tested, rather than a
     /// hash of a local file nobody checked was the same.
     ///
-    /// Set `ALTAIR_DISKS` to the collection (default
-    /// `$HOME/AltairRepos/Altair8800/disks`).
+    /// **Nothing is taken on trust from a folder listing.** A candidate is
+    /// cold-started before it is written to the manifest, and one that does not
+    /// boot is left out and reported. The manifest is what a user downloads by
+    /// pressing one button, so every line in it has to be a disk that runs; the
+    /// previous exclusion list was four names typed in from a survey run
+    /// somewhere else, which is exactly the kind of claim that rots.
+    ///
+    /// Set `ALTAIR_DISKS` to Hansel's collection (default
+    /// `$HOME/AltairRepos/Altair8800/disks`) and `DUINO_DISKS` to a checkout of
+    /// `jpmcneely/AltairDuino-Disks` (default `$HOME/AltairRepos/AltairDuino-Disks`).
     #[test]
     #[ignore]
     fn record_altairduino_manifest() {
-        let dir = std::env::var("ALTAIR_DISKS").unwrap_or_else(|_| {
-            format!("{}/AltairRepos/Altair8800/disks", std::env::var("HOME").unwrap())
-        });
-        let dir = std::path::Path::new(&dir);
+        let home = std::env::var("HOME").unwrap();
+        let hansel = std::env::var("ALTAIR_DISKS")
+            .unwrap_or_else(|_| format!("{home}/AltairRepos/Altair8800/disks"));
+        let duino = std::env::var("DUINO_DISKS")
+            .unwrap_or_else(|_| format!("{home}/AltairRepos/AltairDuino-Disks"));
 
-        // What the boot survey found. Written here rather than re-run because
-        // the survey is a separate, slow gate; these are its results and the
-        // test below pins the exclusions so the two cannot silently disagree.
-        let refused = ["DISK0B.DSK", "DISK0D.DSK", "DISK0F.DSK", "TDISK06.DSK"];
+        // Which source serves which disk.  Hansel's collection is taken whole;
+        // McNeely's contributes only what Hansel does not have, because the four
+        // names they share are *different disks* and Hansel's are the documented
+        // ones.  Listing the five explicitly rather than diffing the folders:
+        // a diff would silently pick up whatever a future checkout added, and
+        // this file's whole promise is that a human decided each line.
+        let from_duino: &[(&str, &str)] = &[
+            ("HDSK04.DSK", "duino"),
+            ("DISK17.DSK", "duino"),
+            ("HDSK05.DSK", "duino-extra"),
+            ("HDSK06.DSK", "duino-extra"),
+            ("HDSK07.DSK", "duino-extra"),
+        ];
 
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .expect("the collection")
+        let mut candidates: Vec<(String, &str, std::path::PathBuf)> = Vec::new();
+        let mut names: Vec<String> = std::fs::read_dir(&hansel)
+            .expect("Hansel's collection")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.to_ascii_uppercase().ends_with(".DSK"))
-            .filter(|n| !refused.contains(&n.as_str()))
             .collect();
         names.sort();
-
-        let mut out = String::new();
-        // Built line by line: a `\`-continued literal keeps the source's own
-        // indentation in the output, which put six spaces in front of every
-        // comment line the first time.
-        for line in [
-            "# Altair-Duino sample disks that this gateway is known to run.".to_string(),
-            "#".to_string(),
-            "# Generated by `record_altairduino_manifest` from the boot survey -- do not".to_string(),
-            "# edit by hand.  Each line is NAME<TAB>BYTES<TAB>SHA256<TAB>NOTE, and the hash".to_string(),
-            "# is of the bytes the pinned URL really served, checked against the local copy".to_string(),
-            "# this project booted.".to_string(),
-            "#".to_string(),
-            format!("# Source: {ALTAIR_DUINO_SOURCE}"),
-            format!("# Pinned at: {ALTAIR_DUINO_COMMIT}"),
-            "#".to_string(),
-            "# The disks are not ours and are not shipped -- this fetches them from the".to_string(),
-            "# original repository on the operator's behalf.  The vintage software on them".to_string(),
-            "# belongs to MITS, Microsoft and Digital Research.".to_string(),
-            "#".to_string(),
-            "# Deliberately NOT offered, because they do not run: DISK0B, DISK0D and DISK0F".to_string(),
-            "# are data companions of disks that do boot and carry no boot program; TDISK06".to_string(),
-            "# is a blank.  Offering them would make this a catalogue of disappointments.".to_string(),
-            "#".to_string(),
-        ] {
-            out.push_str(&line);
-            out.push('\n');
+        for n in &names {
+            candidates.push((n.clone(), "hansel", std::path::Path::new(&hansel).join(n)));
         }
+        for (n, key) in from_duino {
+            let folder = source_for(key).expect("a known source").folder;
+            candidates.push((
+                n.to_string(),
+                key,
+                std::path::Path::new(&duino).join(folder).join(n),
+            ));
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for name in &names {
-            let local = std::fs::read(dir.join(name)).expect("readable");
+        let mut rows = String::new();
+        let mut written = 0usize;
+        let mut withheld: Vec<String> = Vec::new();
+        let cfg = crate::config::get_config();
+        let (mach, cpu) = (cfg.cpm_boot_machine.clone(), cfg.cpm_cpu.clone());
+        drop(cfg);
+
+        for (name, key, path) in &candidates {
+            let local = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let disk = Disk {
                 name: name.clone(),
                 bytes: local.len() as u64,
                 sha256: sha256(&local),
+                source: key.to_string(),
                 note: String::new(),
             };
-            let served = fetch_one(&Disk { sha256: sha256(&local), ..disk.clone() })
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let served = fetch_one(&disk).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(
                 sha256(&served),
                 disk.sha256,
                 "{name}: the pinned URL serves different bytes from the copy that was booted"
             );
-            out.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
+            // The bytes the URL serves are the ones cold-started, not the local
+            // copy: what a user downloads is what has to boot.
+            if let Err(e) =
+                crate::cpm::boot_machine::BootMachine::would_boot(served, &mach, &cpu)
+            {
+                withheld.push(format!("{name} ({e})"));
+                eprintln!("  WITHHELD {name}: {e}");
+                continue;
+            }
+            rows.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
                 disk.name,
                 disk.bytes,
                 disk.sha256,
+                disk.source,
                 describe(&disk.name)
             ));
-            eprintln!("  verified {} ({} bytes)", disk.name, disk.bytes);
+            written += 1;
+            eprintln!("  verified {} ({} bytes, {})", disk.name, disk.bytes, key);
         }
+
+        let mut out = String::new();
+        // Built line by line: a `\`-continued literal keeps the source's own
+        // indentation in the output, which put six spaces in front of every
+        // comment line the first time.
+        let mut header = vec![
+            "# Altair sample disks that this gateway is known to run.".to_string(),
+            "#".to_string(),
+            "# Generated by `record_altairduino_manifest` -- do not edit by hand.  Each line".to_string(),
+            "# is NAME<TAB>BYTES<TAB>SHA256<TAB>SOURCE<TAB>NOTE.  The hash is of the bytes the".to_string(),
+            "# pinned URL really served, checked against the local copy this project booted,".to_string(),
+            "# and those same served bytes were then cold-started -- so every disk here is".to_string(),
+            "# one that boots, not one that was believed to.".to_string(),
+            "#".to_string(),
+            "# SOURCE names a repository and folder in `SOURCES` (src/cpm/fetch.rs):".to_string(),
+        ];
+        for s in SOURCES {
+            header.push(format!("#   {:<12} github.com/{}  ({}/)", s.key, s.repo, s.folder));
+            header.push(format!("#   {:<12} pinned at {}", "", s.commit));
+        }
+        header.extend([
+            "#".to_string(),
+            "# Two repositories because neither contains the other.  Hansel's DISK13-DISK16".to_string(),
+            "# are CP/M 3.0 disk 1 and 2, Felix and CP/M 2.2 MITS+Tarbell, and are documented".to_string(),
+            "# as such; McNeely's four files of those names are DIFFERENT disks, undocumented".to_string(),
+            "# in its own catalogue, one of which does not boot.  So the contested names come".to_string(),
+            "# from Hansel and only the five McNeely uniquely has come from McNeely.".to_string(),
+            "#".to_string(),
+            "# The disks are not ours and are not shipped -- this fetches them from the".to_string(),
+            "# original repositories on the operator's behalf.  The vintage software on them".to_string(),
+            "# belongs to MITS, Microsoft, Digital Research and Infocom.".to_string(),
+            "#".to_string(),
+        ]);
+        if !withheld.is_empty() {
+            header.push("# Offered by neither screen because they did not cold-start when this".to_string());
+            header.push("# was generated -- data companions that carry no boot program:".to_string());
+            for w in &withheld {
+                header.push(format!("#   {w}"));
+            }
+            header.push("#".to_string());
+        }
+        for line in header {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out.push_str(&rows);
         std::fs::write("src/cpm/altairduino.txt", &out).expect("write");
-        eprintln!("wrote src/cpm/altairduino.txt: {} disks", names.len());
+        eprintln!("wrote src/cpm/altairduino.txt: {written} disks, {} withheld", withheld.len());
     }
 
     /// A few words per disk, so the operator choosing whether to download knows
@@ -390,6 +530,14 @@ mod generate {
     fn describe(name: &str) -> &'static str {
         match name {
             "TDISK04.DSK" => "CP/M 1.4 for the VDM-1 - paints the Disk Screen page, not the terminal",
+            // The five from McNeely are named one by one, because unlike the
+            // families below we know exactly what each is: its own catalogue
+            // says so, and they are the reason that repository was added.
+            "HDSK04.DSK" => "Altair 88-HDSK hard disk - Infocom adventures under CP/M",
+            "HDSK05.DSK" => "Altair 88-HDSK hard disk - BASIC (Microsoft BASCOM)",
+            "HDSK06.DSK" => "Altair 88-HDSK hard disk - COBOL",
+            "HDSK07.DSK" => "Altair 88-HDSK hard disk - dBase II",
+            "DISK17.DSK" => "MITS Altair 88-DCDD floppy - IMP modem executive",
             n if n.starts_with("HDSK") => "Altair 88-HDSK hard disk, 4.9 MB",
             n if n.starts_with("CDISK") => "Cromemco 4FDC/16FDC floppy - CDOS or CP/M 2.2",
             n if n.starts_with("TDISK") => "Tarbell 1011 floppy - CP/M",
@@ -444,12 +592,59 @@ mod tests {
 
     /// Pinned to a commit, never a branch: "known to run" refers to particular
     /// bytes, and a branch would let upstream change what that means.
+    ///
+    /// Every disk, not the first one: with more than one source, checking
+    /// `catalogue()[0]` would prove it of whichever repository sorts first and
+    /// say nothing at all about the other.
     #[test]
     fn test_downloads_are_pinned_to_a_commit() {
-        let d = &catalogue()[0];
-        assert!(d.url().contains(ALTAIR_DUINO_COMMIT));
-        assert!(!d.url().contains("/master/"), "a branch is not a pin: {}", d.url());
-        assert!(d.url().starts_with("https://"), "{}", d.url());
+        for d in catalogue() {
+            let url = d.url();
+            let s = source_for(&d.source).expect("a known source");
+            assert!(url.contains(s.commit), "{url} is not pinned to {}", s.commit);
+            assert_eq!(s.commit.len(), 40, "{} is not a full commit id", s.key);
+            assert!(s.commit.chars().all(|c| c.is_ascii_hexdigit()), "{}", s.key);
+            for branch in ["/master/", "/main/", "/HEAD/"] {
+                assert!(!url.contains(branch), "a branch is not a pin: {url}");
+            }
+            assert!(url.starts_with("https://"), "{url}");
+        }
+    }
+
+    /// **Every line resolves to a repository this build knows.**
+    ///
+    /// [`Disk::url`] unwraps its source, which is sound only because
+    /// [`catalogue`] drops a line naming an unknown one — and that silent drop
+    /// is exactly how a typo in the manifest would become a disk that quietly
+    /// stopped being offered. This is what makes the drop loud.
+    #[test]
+    fn test_every_disk_names_a_source_that_exists() {
+        let all = catalogue();
+        let lines = manifest_text()
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count();
+        assert_eq!(all.len(), lines, "a manifest line was dropped by the parser");
+        for d in &all {
+            assert!(source_for(&d.source).is_some(), "{}: unknown source {}", d.name, d.source);
+            let _ = d.url();
+        }
+    }
+
+    /// Two folders of one repository are one place to trust, and are shown once.
+    #[test]
+    fn test_the_repositories_are_listed_once_each() {
+        let repos = source_repos();
+        let mut sorted = repos.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), repos.len(), "a repository is listed twice: {repos:?}");
+        assert!(repos.iter().all(|r| r.starts_with("github.com/")), "{repos:?}");
+        // The telnet screen prints one per line at two-space indent on a
+        // 40-column PETSCII terminal.
+        for r in &repos {
+            assert!(r.len() + 2 <= 40, "{r} does not fit a C64 screen");
+        }
     }
 
     /// **A file already in the images folder is never a candidate.** The

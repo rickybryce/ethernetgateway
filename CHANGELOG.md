@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.2] - Unreleased
 
+### Added
+
+- **Five more sample disks, from a second collection.** The downloader now also
+  draws on Jim McNeely's `AltairDuino-Disks`, which has disks David Hansel's
+  Altair 8800 simulator does not: the **Infocom adventures** hard disk
+  (`HDSK04`), **BASIC** (`HDSK05`), **COBOL** (`HDSK06`), **dBase II**
+  (`HDSK07`) and the **IMP modem executive** (`DISK17`). Thirty-five disks now,
+  up from thirty.
+
+  Both collections, because neither contains the other, and the reason is a
+  trap worth recording: McNeely's also holds four files named `DISK13`–`DISK16`
+  which are **different disks** from Hansel's of those names — his are CP/M 3.0
+  disk 1 and 2, the Felix animation system and CP/M 2.2 MITS+Tarbell, and are
+  documented as such, while McNeely's are undocumented in its own catalogue
+  (which stops at `DISK12`) and one of them does not boot at all. Taking "the
+  better repo" wholesale would have silently swapped four working, documented
+  disks for four different ones under the same names. So a manifest line now
+  names its own source, the contested four come from Hansel, and only the five
+  above come from McNeely. A filename is not an identity.
+
+  `repodisks.txt` catalogues the new disks — every file on each, read through
+  the same mount path the gateway uses — and lists only what that collection
+  uniquely has, since 26 of its images are byte-identical to Hansel's.
+
+### Fixed
+
+- **The boot menus no longer offer disks that cannot boot.** Both selectors —
+  the `cpm_boot_image` list on all three configuration screens, and the boot
+  picker on the telnet mount screens — listed every image in the folder. The
+  picker filtered by *size*, which sounds like a bootability test and is not:
+  a data disk is the same size as the system disk it carries programs for, so
+  all four of the collection's data companions were offered and all four failed
+  when chosen.
+
+  Both now ask `BootMachine::would_boot`, which **replays the cold start the
+  boot session itself runs**, so a list cannot promise what a boot refuses. The
+  verdict distinguishes the two failures that look alike: a disk with no boot
+  program is withheld, while a disk this machine simply has no *board* for is
+  still offered, because that one is a `cpm_boot_machine` setting the operator
+  can change and a disk vanishing when they change it would be a worse mystery
+  than a boot that fails naming the boards. The answer is cached against each
+  file's identity, since one of the callers is a panel that redraws four times
+  a second.
+
+  Measured across all five collections: withheld are exactly the data disks and
+  second volumes — `DISK0B/0D/0F`, `TDISK06`, `cpm3-2`, `ucsd-*-2`, `z80tests`,
+  `dazzler_stuff`, `vio-stuff` and their kin. The mount selectors are
+  deliberately **not** filtered: mounting a data disk beside the system disk it
+  belongs to is exactly what those disks are for.
+
+  The download manifest is now generated the same way — each candidate is
+  cold-started from *the bytes the pinned URL serves* before it earns a line,
+  rather than from an exclusion list typed in from a survey run elsewhere. It
+  independently reproduced the same four exclusions.
+
 ### Changed
 
 - **Booting a disk now confirms on a screen of its own.** The two questions a

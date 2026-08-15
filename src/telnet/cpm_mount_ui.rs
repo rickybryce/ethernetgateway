@@ -87,7 +87,13 @@ impl TelnetSession {
             megabytes
         ))
         .await?;
-        self.send_line(&format!("  {}", self.amber(fetch::ALTAIR_DUINO_SOURCE))).await?;
+        // One line per repository, not one line joined: the widest is
+        // `github.com/jpmcneely/AltairDuino-Disks` at 38 characters, which with
+        // the two-space indent is exactly the 40 a PETSCII C64 has.  Joined with
+        // " and " it would wrap on the screen this menu is most often read on.
+        for repo in fetch::source_repos() {
+            self.send_line(&format!("  {}", self.amber(&repo))).await?;
+        }
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("Only the disks that are known to"))).await?;
         self.send_line(&format!("  {}", self.dim("run here. They are not ours; this"))).await?;
@@ -442,17 +448,15 @@ impl TelnetSession {
     async fn cpmmount_pick_boot(&mut self) -> Result<(), std::io::Error> {
         let base = self.cpmmount_base();
         let images = crate::cpm::image::available_images(&base);
-        let bootable: Vec<String> = images
-            .into_iter()
-            .filter(|n| {
-                std::fs::metadata(crate::cpm::image::images_dir(&base).join(n))
-                    .ok()
-                    .and_then(|m| {
-                        crate::cpm::boot_machine::BootMachine::medium_for(m.len())
-                    })
-                    .is_some()
-            })
-            .collect();
+        // Not a size test.  This filtered on `medium_for(len)` — "could some
+        // board carry a disk this big" — which every data disk in the
+        // collection passes, because they are the same size as the system disks
+        // they carry programs for.  All four were listed here and all four
+        // failed when chosen.  `image_can_boot` runs the cold start this screen
+        // is about to run, so the list cannot promise what the boot refuses.
+        let dir = crate::cpm::image::images_dir(&base);
+        let bootable: Vec<String> =
+            images.into_iter().filter(|n| crate::cpm::boot::image_can_boot(&dir.join(n))).collect();
 
         // The "nothing to list" screen draws its own header and returns; the
         // paged list below draws one per page.  Nothing is drawn before this

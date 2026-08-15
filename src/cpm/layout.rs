@@ -515,16 +515,36 @@ mod generate {
     /// to ship, so a catalogue of software the reader cannot go and get is a
     /// tease.  Read from the checkouts themselves rather than from memory —
     /// `git remote` for the Altair one, the project's own README for z80pack.
-    const REPOS: &[(&str, &str, &str)] = &[
+    /// The fourth field is which images to list: `&[]` means the whole folder.
+    ///
+    /// It exists for one collection. `jpmcneely/AltairDuino-Disks` holds 36
+    /// images of which 26 are byte-identical to Hansel's, so listing the folder
+    /// would repeat a quarter of this file to say nothing new. Named disks
+    /// instead — the ones that collection uniquely has, which are exactly the
+    /// ones the downloader takes from it.
+    const REPOS: &[(&str, &str, &str, &[&str])] = &[
         (
             "Altair-Duino / Altair8800 simulator (David Hansel)",
             "AltairRepos/Altair8800/disks",
             "https://github.com/dhansel/Altair8800  (the disks/ folder)",
+            &[],
         ),
-        ("z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK),
-        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK),
-        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK),
-        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK),
+        (
+            "Altair-Duino disks (Jim McNeely) -- what this collection uniquely has",
+            "AltairRepos/AltairDuino-Disks/original",
+            "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
+            &["DISK17.DSK", "HDSK04.DSK"],
+        ),
+        (
+            "Altair-Duino disks (Jim McNeely) -- the extra/ folder",
+            "AltairRepos/AltairDuino-Disks/extra",
+            "https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)",
+            &[],
+        ),
+        ("z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK, &[]),
+        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK, &[]),
+        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK, &[]),
+        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK, &[]),
         // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
         // a machine this gateway emulates, and it shows: four of its seven
         // disks are CP/M that our format table cannot read. Listing a
@@ -608,7 +628,7 @@ mod generate {
         );
 
         let mut found = 0usize;
-        for (name, rel, from) in REPOS {
+        for (name, rel, from, only) in REPOS {
             let dir = std::path::Path::new(&home).join(rel);
             if !dir.is_dir() {
                 eprintln!("skipping {name}: no {}", dir.display());
@@ -619,6 +639,12 @@ mod generate {
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| {
                     p.extension().map(|e| e.eq_ignore_ascii_case("dsk")).unwrap_or(false)
+                })
+                .filter(|p| {
+                    only.is_empty()
+                        || p.file_name()
+                            .map(|n| only.contains(&n.to_string_lossy().as_ref()))
+                            .unwrap_or(false)
                 })
                 .collect();
             images.sort();

@@ -2467,7 +2467,7 @@ fn get_disks_row(images: &[String]) -> String {
          folder is left alone.</span></div>",
         button = save_button("getdisks", "Download sample disks", "secondary"),
         n = wanted.len(),
-        src = html_escape(crate::cpm::fetch::ALTAIR_DUINO_SOURCE),
+        src = html_escape(&crate::cpm::fetch::source_repos().join(" and ")),
     )
 }
 

@@ -55,21 +55,126 @@ pub const BOOT_EMULATOR_LABEL: &str = "CP/M Emulator (gateway drives A:-P:)";
 /// Each entry is `(value, label)` — the value is what goes in the config file,
 /// the label is what a person reads.
 ///
-/// **Every image is offered, bootable or not, and that is deliberate** — it is
-/// not an oversight next to the telnet boot picker, which filters to what a
-/// controller can carry. The two answer different questions. The picker is a
-/// live action, so a list of things that would fail is only keystrokes wasted;
-/// this is a persisted setting, and a Tarbell image selected here fails at boot
-/// with a message naming the boards this machine actually has, which is more
-/// use to whoever chose it than the file quietly not being in the list. Do not
-/// make one match the other without deciding which of those you want.
+/// **A disk with no boot program on it is not offered; a disk this machine has
+/// no board for still is.** Those are different failures and the operator fixes
+/// them differently, which is why the filter is [`image_can_boot`] rather than
+/// "did the cold start succeed".
+///
+/// This list said the opposite until 2026-08-15, and said so deliberately: the
+/// argument was that a persisted setting should fail loudly at boot, naming the
+/// boards the machine really has, rather than the file quietly not being in the
+/// list. That argument is still right — for a *board mismatch*, which is what it
+/// was reasoned about. It does not cover a data disk, which cannot boot on any
+/// machine, in any configuration, ever: there is nothing for the operator to go
+/// and fix, so offering it is not a useful failure, only a wasted one. Four of
+/// them shipped in the collection this gateway downloads.
 pub fn boot_choices(cpm_base: &std::path::Path) -> Vec<(String, String)> {
+    boot_choices_by(cpm_base, image_can_boot)
+}
+
+/// [`boot_choices`] with the bootability question passed in.
+///
+/// The split is for testing, and for one reason worth naming: the only honest
+/// implementation of that question reads an image and cold-starts it, so a unit
+/// test of *this* function — ordering, labels, which files count as images —
+/// would otherwise need a real bootable disk on disk to check that a `readme.txt`
+/// is skipped. The list-building and the filter are separately checkable, and
+/// the filter's real cover is a live gate against the collections.
+fn boot_choices_by(
+    cpm_base: &std::path::Path,
+    can_boot: impl Fn(&std::path::Path) -> bool,
+) -> Vec<(String, String)> {
     let mut out = vec![(BOOT_EMULATOR.to_string(), BOOT_EMULATOR_LABEL.to_string())];
+    let dir = super::image::images_dir(cpm_base);
     for name in super::image::available_images(cpm_base) {
+        if !can_boot(&dir.join(&name)) {
+            continue;
+        }
         out.push((name.clone(), format!("Boot {name}")));
     }
     out
 }
+
+/// Could this image boot at all — on some machine, in some configuration?
+///
+/// **Cached, because both callers draw screens.** [`boot_target`]'s own comment
+/// is the rule here: the desktop panel redraws four times a second forever, and
+/// a cold start reads the whole image — 4.9 MB for a hard disk. So the answer is
+/// kept against the file's identity (path, length, modification time) and the
+/// two settings that could change it. An edited disk has a new mtime and is
+/// asked again; a disk nobody touched is one `stat` and a hash lookup.
+///
+/// **The verdict is about the disk, not about this machine's boards.** A cold
+/// start can fail three ways that mean "there is no boot program here" —
+/// [`BootError::NotBootable`] (the sector holds nothing that could be code),
+/// [`BootError::Unreadable`] (it could not supply a boot sector) and
+/// [`BootError::NeverPositioned`] — and two that mean "this machine has no board
+/// for it", [`BootError::NoBootstrap`] and [`BootError::NoDisk`]. Only the first
+/// three take a disk off the lists. The other two are a configuration the
+/// operator can change, and a disk that vanishes when they change
+/// `cpm_boot_machine` would be a worse mystery than a boot that fails saying
+/// which boards this machine has.
+pub fn image_can_boot(path: &std::path::Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    let cfg = crate::config::get_config();
+    let (machine, cpu) = (cfg.cpm_boot_machine.clone(), cfg.cpm_cpu.clone());
+    drop(cfg);
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let key = (
+        path.to_path_buf(),
+        meta.len(),
+        meta.modified().ok(),
+        machine.clone(),
+        cpu.clone(),
+    );
+
+    static CACHE: OnceLock<Mutex<HashMap<CacheKey, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).copied()) {
+        return hit;
+    }
+
+    let verdict = match std::fs::read(path) {
+        Err(_) => false,
+        Ok(bytes) => match super::boot_machine::BootMachine::would_boot(bytes, &machine, &cpu) {
+            Ok(()) => true,
+            // The disk has no boot program.  Nothing the operator changes will
+            // make these boot, so they come off the lists.
+            Err(BootError::NotBootable)
+            | Err(BootError::Unreadable(_))
+            | Err(BootError::NeverPositioned) => false,
+            // This machine has no board that can start it.  That *is* fixable —
+            // `cpm_boot_machine` — so keep offering it and let the boot say so.
+            Err(BootError::NoBootstrap) | Err(BootError::NoDisk(_)) => true,
+        },
+    };
+    if let Ok(mut c) = cache.lock() {
+        // An images folder is tens of entries and the key carries an mtime, so
+        // this is bounded by what the operator actually has and how often they
+        // edit it — but a gateway left running for months while a script
+        // rewrites disks would grow it without limit, so it is capped.  Clearing
+        // rather than evicting one: this is a cache of a pure question, so the
+        // cost of a cold start again is time, never correctness.
+        if c.len() >= 512 {
+            c.clear();
+        }
+        c.insert(key, verdict);
+    }
+    verdict
+}
+
+/// The identity a bootability verdict is remembered against.
+///
+/// Named rather than inlined because it is five fields and one of them is an
+/// `Option` that means "this filesystem does not report modification times" —
+/// which is a real answer on some platforms, and one that makes the entry
+/// effectively permanent for that file rather than wrong.
+type CacheKey = (std::path::PathBuf, u64, Option<std::time::SystemTime>, String, String);
 
 /// What to show for the current setting, whether or not the image still exists.
 ///
@@ -778,7 +883,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(super::super::image::IMAGES_DIR)).unwrap();
 
-        let choices = boot_choices(&dir);
+        let choices = boot_choices_by(&dir, |_| true);
         assert_eq!(choices.len(), 1, "an empty folder still offers the emulator");
         assert_eq!(choices[0].0, BOOT_EMULATOR);
         assert!(choices[0].0.is_empty(), "the emulator is the empty setting");
@@ -789,7 +894,7 @@ mod tests {
         std::fs::write(images.join("games.dsk"), [0u8; 8]).unwrap();
         std::fs::write(images.join("readme.txt"), b"not an image").unwrap();
 
-        let choices = boot_choices(&dir);
+        let choices = boot_choices_by(&dir, |_| true);
         let values: Vec<&str> = choices.iter().map(|(v, _)| v.as_str()).collect();
         assert_eq!(
             values,
@@ -797,6 +902,32 @@ mod tests {
             "the emulator first, then the disks, sorted — and no readme"
         );
         assert!(choices[1].1.starts_with("Boot "), "{}", choices[1].1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A disk that cannot boot is not offered as something to boot.**
+    ///
+    /// The emulator survives the filter unconditionally — it is not an image and
+    /// has no file to ask about — which is the part that would break silently if
+    /// the filter were ever moved up a line.
+    #[test]
+    fn test_a_disk_that_cannot_boot_is_not_offered() {
+        let dir = std::env::temp_dir().join("egw_boot_choices_filter_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let images = dir.join(super::super::image::IMAGES_DIR);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("altair8_system.dsk"), [0u8; 8]).unwrap();
+        std::fs::write(images.join("altair8_data.dsk"), [0u8; 8]).unwrap();
+
+        let choices = boot_choices_by(&dir, |p| {
+            !p.file_name().unwrap().to_string_lossy().contains("data")
+        });
+        let values: Vec<&str> = choices.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["", "altair8_system.dsk"],
+            "the data disk is gone and the emulator is still first"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1173,5 +1304,83 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the loader is read with the disk's own 2:1 interleave"
         );
+    }
+
+    /// **What the boot lists offer is exactly what boots.**
+    ///
+    /// The live gate for the filter, and the only one that can be: the question
+    /// is about real disks, and the whole defect it closes was a *plausible*
+    /// filter — a size test — that agreed with reality on every disk anyone had
+    /// tried and disagreed on the four nobody had.
+    ///
+    /// It checks both directions against the same folder, because one direction
+    /// alone is not a measurement: a filter that rejects everything passes
+    /// "nothing offered fails to boot", and the one this replaces passed
+    /// "everything that boots is offered". So every disk is cold-started, and
+    /// the verdict must match the offer, name by name.
+    ///
+    /// Ignored — set `CPM_BOOT_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_the_boot_list_offers_exactly_the_disks_that_boot() {
+        let Ok(src) = std::env::var("CPM_BOOT_DIR") else {
+            eprintln!("set CPM_BOOT_DIR to run this");
+            return;
+        };
+        // Never point a test at the originals: a boot writes nothing, but the
+        // list is built from a CPM/images folder and building one here would
+        // otherwise mean creating it inside somebody's collection.
+        let base = std::env::temp_dir().join(format!("egbootlist{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let images = super::super::image::images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&src)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".dsk"))
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "no .dsk files in {src}");
+        // Hard-linked, not symlinked: `available_images` asks `DirEntry::file_type`,
+        // which does not follow links, so a symlinked image is invisible to the
+        // images folder and every disk here would be "withheld" for the wrong
+        // reason.  The first draft of this test did exactly that, and the
+        // both-directions assert below is what caught it.
+        for n in &names {
+            let (from, to) = (std::path::Path::new(&src).join(n), images.join(n));
+            if std::fs::hard_link(&from, &to).is_err() {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+
+        let offered: Vec<String> =
+            boot_choices(&base).into_iter().map(|(v, _)| v).filter(|v| !v.is_empty()).collect();
+
+        let cfg = crate::config::get_config();
+        let (machine, cpu) = (cfg.cpm_boot_machine.clone(), cfg.cpm_cpu.clone());
+        drop(cfg);
+        let mut wrong = Vec::new();
+        for n in &names {
+            let bytes = std::fs::read(images.join(n)).unwrap();
+            let boots = match super::super::boot_machine::BootMachine::would_boot(
+                bytes, &machine, &cpu,
+            ) {
+                Ok(()) | Err(BootError::NoBootstrap) | Err(BootError::NoDisk(_)) => true,
+                Err(_) => false,
+            };
+            let listed = offered.iter().any(|o| o == n);
+            if boots != listed {
+                wrong.push(format!(
+                    "{n}: cold start says {}, the list says {}",
+                    if boots { "boots" } else { "cannot boot" },
+                    if listed { "offered" } else { "not offered" }
+                ));
+            }
+            println!("  {:<14} {}", n, if listed { "offered" } else { "withheld" });
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert!(!offered.is_empty(), "every disk was withheld — the filter cannot be right");
     }
 }

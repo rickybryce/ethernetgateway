@@ -672,6 +672,44 @@ impl BootMachine {
         Ok(())
     }
 
+    /// **Would this image boot, if it were selected?**
+    ///
+    /// The question the two boot lists need answered before they offer a disk,
+    /// and the only honest way to answer it is to *do* the cold start: build the
+    /// machine the operator configured, insert the image read-only, and run the
+    /// bootstrap. Nothing here is a second opinion about bootability — it is the
+    /// same sequence [`crate::telnet`]'s boot session runs, so it cannot reach a
+    /// different verdict than the boot the operator is about to attempt.
+    ///
+    /// A cheaper rule was available and is deliberately not used: the picker
+    /// filtered on [`BootMachine::medium_for`], which asks only whether some
+    /// board could *carry* a disk that size. Every data disk in the Altair
+    /// collection passes that — `DISK0B` is a normal 337,568-byte 8" image whose
+    /// first sector holds a volume label and 112 zero bytes — so all four of them
+    /// were offered and all four failed when chosen. A size is not a boot
+    /// program.
+    ///
+    /// **This stops at the entry point and runs no guest code.** Whether the
+    /// operating system then reaches a prompt is not decidable here at any price
+    /// an interactive list can pay, so this is bounded honestly: it removes the
+    /// disks that *cannot* boot, and does not promise that the rest will get
+    /// somewhere useful.
+    pub fn would_boot(
+        bytes: Vec<u8>,
+        machine_setting: &str,
+        cpu_setting: &str,
+    ) -> Result<(), BootError> {
+        let (machine_key, _note) = super::detect::machine_for(machine_setting, &bytes);
+        let mut m = BootMachine::new();
+        m.set_machine(&machine_key);
+        // Read-only, always: this is a question, and a question must not be able
+        // to write to the operator's disk.  Nothing here reaches `take_dirty`
+        // either, so there is no path from asking to a write-back.
+        m.insert(0, bytes, true).map_err(BootError::Unreadable)?;
+        let mut cpu = BootMachine::new_cpu_for(cpu_setting);
+        m.boot(&mut cpu, 0)
+    }
+
     /// The cold start proper: whatever this drive's controller says its PROM
     /// would do, done.
     fn load_boot_program(&mut self, cpu: &mut Cpu, drive: u8) -> Result<(), BootError> {
