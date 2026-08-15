@@ -300,6 +300,14 @@ impl TelnetSession {
                 Some(s) if s == "n" => self.cpmmount_new_blank().await?,
                 Some(s) if s == "d" => self.cpmmount_download().await?,
                 Some(s) if s == "u" && any => self.cpmmount_pick_unmount().await?,
+                // Q, the key this screen has always *displayed*.  It fell into
+                // the "anything else, ignore it" arm below and redrew the menu,
+                // so the one documented way out did nothing and only ESC or a
+                // bare Enter left.  Every sibling screen spells `q` out; this
+                // one relied on the catch-all, and the catch-all does not catch
+                // it.  `test_cpm_disk_images_keys_are_displayed_and_handled`
+                // now holds the whole row.
+                Some(s) if s == "q" => return Ok(()),
                 Some(s) if !s.is_empty() => {}
                 _ => return Ok(()),
             }

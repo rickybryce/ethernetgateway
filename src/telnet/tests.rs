@@ -2563,6 +2563,54 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     }
 }
 
+/// **Every key the CP/M Disk Images screen displays must be one it handles.**
+///
+/// `Q` was displayed by this screen from the day it shipped and never handled:
+/// it fell into the `Some(s) if !s.is_empty() => {}` catch-all, which redraws
+/// the menu, so the one documented way out did nothing. Only ESC or a bare
+/// Enter left — neither of which the screen mentions.
+///
+/// That is the failure mode a catch-all invites: it makes an unhandled key
+/// indistinguishable from a key that is meant to do nothing, so the screen
+/// cannot report the difference and neither can a reader. The sibling boot
+/// screen is guarded this way already; this one was not, which is how the drift
+/// survived.
+///
+/// `U` is deliberately excluded from the handled check's strictness in one
+/// respect — it is displayed only when something is mounted — but it is still
+/// required to be handled, since a key that appears conditionally must work
+/// whenever it appears.
+#[test]
+fn test_cpm_disk_images_keys_are_displayed_and_handled() {
+    let src = include_str!("cpm_mount_ui.rs");
+    let start = src
+        .find("pub(in crate::telnet) async fn cpm_mount_wizard")
+        .expect("the wizard fn");
+    let end = src[start..].find("\n    /// Make a new, empty").expect("the next fn") + start;
+    let body = &src[start..end];
+
+    for key in ["M", "B", "N", "D", "U"] {
+        assert!(
+            body.contains(&format!("self.cyan(\"{key}\")")),
+            "{key} must be a displayed menu item"
+        );
+        assert!(
+            body.contains(&format!("s == \"{}\"", key.to_ascii_lowercase())),
+            "{key} is displayed but never handled"
+        );
+    }
+    // Q is displayed through `action_prompt` rather than `cyan`, and must be
+    // handled explicitly rather than left to the catch-all.
+    assert!(
+        body.contains("self.action_prompt(\"Q\", \"Back\")"),
+        "the screen must still offer Q"
+    );
+    assert!(
+        body.contains("s == \"q\" => return Ok(())"),
+        "Q is displayed but not handled — the catch-all would swallow it and redraw"
+    );
+}
+
 /// **The CP/M boot screen is now FULL, counted from the screen itself.**
 ///
 /// Adding the CPU took it to exactly 22 rows, the whole PETSCII budget, so the

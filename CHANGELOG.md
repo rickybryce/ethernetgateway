@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Q` did not leave the CP/M Disk Images screen.** It was displayed as
+  `Q=Back` from the day the screen shipped and never handled: it fell into the
+  "anything else, ignore it" arm, which redraws the menu, so the one documented
+  way out did nothing and only ESC or a bare Enter left — neither of which the
+  screen mentions. Handled now, and a test holds every key the screen displays
+  against the keys it handles, the same guard the boot screen already had.
+
 - **The telnet boot picker listed ten disk images and stopped.** No page
   indicator, no Next, and nothing saying more existed — so an eleventh bootable
   image could not be reached from the telnet screen, and silently: the disk
