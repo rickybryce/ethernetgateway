@@ -641,6 +641,8 @@
                         <ul>
                             <li>Telnet and encrypted <strong>SSH</strong> access, plus SSH/telnet proxying to remote servers</li>
                             <li>Two independent serial ports &mdash; each a Hayes AT modem, a telnet-serial console bridge, <em>or</em> an always-on Kermit server</li>
+                            <li>Hayes-compatible modem emulator with <code>ATDT</code> TCP dial-out and a phone book</li>
+                            <li><strong>Peer-to-peer</strong> &mdash; dial another serial port directly and pipe two devices end to end, like calling a friend's modem</li>
                             <li>Auto-adapts to <strong>PETSCII</strong> (Commodore 64), ANSI, and ASCII terminals</li>
                             <li>Built-in text-mode web browser, AI chat, and weather</li>
                         </ul>
@@ -650,10 +652,9 @@
                         <ul>
                             <li>XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter C1</li>
                             <li><strong>Gateway Shell</strong> &mdash; a CP/M-inspired <code>A&gt;</code> prompt (DIR, TYPE, COPY, MOVE, ERA, MKDIR&hellip;) that manages the transfer directory as drive A:, over telnet or SSH</li>
-                            <li><strong>CP/M emulator</strong> &mdash; runs real CP/M&nbsp;2.2 <code>.COM</code> software (PIP, STAT, ED, ASM, DDT, WordStar&hellip;) on an emulated Z80 &mdash; or an 8080, <code>cpm_cpu</code> &mdash; over telnet or SSH. On by default and bounded three ways: every file call is jailed under the transfer directory, a runaway is stopped by <code>cpm_emu_max_minstr</code>, and a double-<code>ESC</code> always returns to <code>A&gt;</code>. Set <code>cpm_emu_enabled = false</code> to shut the door entirely, or <code>cpm_emu_uart = off</code> to keep it while denying guest code any network access. The bundled <strong>EGT8080</strong> terminal is placed on drive A: and in the transfer directory for you &mdash; built to the 8080 instruction set, so it runs on either processor &mdash; with <strong>EGT80</strong>, the Z80 build, beside it for the Z180 ASCI ports an SC126 uses as its console. Any drive can instead mount a <strong>CP/M disk image</strong> (<code>.dsk</code>) &mdash; Altair 88-HDSK, or the 8&Prime; single-density format used by Tarbell, Cromemco and the IMSAI/z80pack library &mdash; from the mount screen in any of the three interfaces</li>
-                            <li><strong>CP/M printer</strong> &mdash; capture what CP/M software sends to <code>LST:</code> and collect it as an <strong>OpenDocument</strong> or text file from a <code>printer</code> folder in the transfer directory. Serves the emulator (BDOS&nbsp;5 and the BIOS <code>LIST</code> vector, so WordStar, <code>LPRINT</code> and <code>PIP LST:=</code> all arrive) and a booted disk (which drives a real printer board, <code>cpm_printer_port</code>). Captures to a text file by default &mdash; nothing is written until a guest actually prints, and <code>cpm_printer = off</code> sends the output to your terminal instead, where it cannot be recovered</li>
-                            <li><strong>Peer-to-peer file transfers</strong> &mdash; dial another serial port directly and pipe two devices end to end, like calling a friend's modem</li>
-                            <li>Hayes-compatible modem emulator with ATDT TCP dial-out and a phone book</li>
+                            <li><strong>CP/M emulator</strong> &mdash; runs real CP/M&nbsp;2.2 <code>.COM</code> software (PIP, STAT, ED, ASM, DDT, WordStar&hellip;) on an emulated Z80 or 8080, with our own <strong>EGT8080</strong> and <strong>EGT80</strong> terminals included. On by default and bounded three ways &mdash; see the <a href="cpmreference.html">CP/M Reference</a></li>
+                            <li><strong>CP/M disk images</strong> &mdash; mount a <code>.dsk</code> on any drive, or <strong>boot</strong> one and let its own operating system take the whole machine (CP/M&nbsp;3, Altair DOS, Disk Extended BASIC)</li>
+                            <li><strong>CP/M printer</strong> &mdash; capture what CP/M software sends to <code>LST:</code> as an <strong>OpenDocument</strong> or text file, from either the emulator or a booted disk</li>
                             <li>Binary-transparent bridging for clean, reliable transfers</li>
                         </ul>
                     </div>
@@ -663,6 +664,8 @@
                             <li><strong>Master/Slave mode</strong> &mdash; cascade gateway servers: a slave extends its serial ports to a master over SSH, so files land centrally</li>
                             <li>Configure from the terminal, the web UI, or a desktop GUI console with live logs</li>
                             <li>Optional authentication with per-IP lockout; Ed25519 SSH host key</li>
+                            <li><strong>Port test</strong> &mdash; connects to each bound listener and marks any that something local is blocking</li>
+                            <li>Optional log file with size-based rotation, so a long-running gateway cannot fill a disk</li>
                             <li>Runs on hardware from the Commodore 64 and CP/M to modern Linux, macOS, and Windows</li>
                         </ul>
                     </div>
