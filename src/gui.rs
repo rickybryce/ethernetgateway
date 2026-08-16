@@ -2917,6 +2917,27 @@ impl App {
     /// path in `xmodem.rs`; ZMODEM has its own independent timeouts
     /// defined in `config.rs`.
     fn draw_file_transfer_advanced(&mut self, ui: &mut egui::Ui) {
+        // First, because it is about what is *in* the transfer directory rather
+        // than about a protocol, and because it is the one control here an
+        // operator is likely to be looking for on purpose.
+        ui.label(egui::RichText::new("Bundled CP/M Terminals").strong().color(AMBER));
+        ui.checkbox(
+            &mut self.cfg.place_bundled_terminals,
+            "Write EGT8080.COM and EGT80.COM when they are missing",
+        )
+        .on_hover_text(
+            "EGT8080.COM and EGT80.COM are this gateway's own CP/M terminal, in \
+             period assembly.  Each is written into the transfer directory -- and \
+             onto CP/M drive A: -- when it is missing, so you can send one to real \
+             hardware without starting the emulator.  A file already there is NEVER \
+             overwritten, because each saves its settings inside its own .COM; this \
+             only decides whether a MISSING one is written back.  Untick it if you \
+             keep your own build, or your own EGT80.COM from before 0.9.2, and would \
+             rather a file you deleted stayed deleted.",
+        );
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
         ui.label(egui::RichText::new("XMODEM / XMODEM-1K / YMODEM").strong().color(AMBER));
         ui.label(
             egui::RichText::new(

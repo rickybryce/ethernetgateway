@@ -1596,10 +1596,22 @@ altairhd_cobol.dsk</code></pre>
                 </p>
 
                 <p>
-                    It ships <em>inside</em> the gateway binary and is placed on CP/M drive A: the first time the
-                    drive folders are created, then <strong>never overwritten</strong> &mdash; it saves its settings
-                    inside its own <code>.COM</code>, so refreshing it would discard your configuration. Deleting
-                    the file restores the shipped copy on the next launch.
+                    It ships <em>inside</em> the gateway binary and is written out whenever it is
+                    <em>missing</em> &mdash; at every start-up, and again when a session enters the emulator, so
+                    a folder deleted while the gateway is running is repaired without a restart. It is then
+                    <strong>never overwritten</strong> &mdash; it saves its settings inside its own
+                    <code>.COM</code>, so refreshing it would discard your configuration. Deleting the file
+                    restores the shipped copy on the next launch, which is the documented way back to a known
+                    state.
+                </p>
+                <p class="note">
+                    <strong>This used to happen only once somebody entered the emulator.</strong> Erasing the
+                    transfer directory and restarting therefore recreated the sixteen drive folders with no
+                    terminal in any of them &mdash; and the loose copies in the transfer directory, whose whole
+                    purpose is to reach a terminal <em>without</em> starting the emulator, appeared only after
+                    you had started the emulator. Fixed in 0.9.3. Set
+                    <code>place_bundled_terminals = false</code> if you keep your own build and would rather a
+                    file you deleted stayed deleted.
                 </p>
 
                 <h3 style="color: var(--cyan); margin: 22px 0 10px;">Two builds, and which one to run</h3>
@@ -1620,7 +1632,9 @@ altairhd_cobol.dsk</code></pre>
                     care in EGT8080 could serve a Z180 console. That is the whole reason there are two.
                 </p>
                 <p>
-                    Both are placed on drive A: and in the transfer directory. The
+                    Both are placed on drive A: <em>and</em> in the transfer directory &mdash; four files, and
+                    the reason the second pair exists is so the file-transfer menus can send one to real
+                    hardware without starting the emulator. The
                     <strong>port menu</strong> is the difference: EGT8080 offers the Z80 SIO/2, the 6850 ACIA,
                     the Altair 88-SIO, RomWBW HBIOS and CP/M <code>AUX:</code>; EGT80 offers those and the
                     <strong>Z180 ASCI</strong>. The 6850 ACIA is in <em>both</em> &mdash; if your board has one

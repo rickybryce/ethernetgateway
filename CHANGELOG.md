@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.3] - Unreleased
 
+### Fixed
+
+- **The bundled CP/M terminals are placed at start-up, not only when someone
+  enters the emulator.** Erasing the transfer directory and restarting
+  recreated the sixteen drive folders with no `EGT8080.COM` or `EGT80.COM` in
+  any of them, and none in the transfer directory either. The placement was
+  reachable only from the CP/M session path, so the documented behaviour —
+  placed when the drive folders are created — was not what happened. The loose
+  transfer-directory copies made it plainest: they exist so the file-transfer
+  menus can send a terminal to real hardware *without* starting the emulator,
+  and they appeared only once you had started the emulator. All four files (two
+  builds × drive A: and the transfer directory) are now written whenever one is
+  missing, and a file already present is still never overwritten.
+
+### Added
+
+- **New `place_bundled_terminals`** — on by default, on all three interfaces
+  (telnet *File Transfer* screen key **T**, the web *File Transfer — More*
+  popup, and the desktop *File Transfer — More* popup). It decides whether a
+  *missing* `EGT8080.COM` / `EGT80.COM` is written back; it never removes one
+  and never overwrites one, because each terminal saves its settings inside its
+  own `.COM`. Turn it off if you keep your own build, or your own `EGT80.COM`
+  from before 0.9.2, and would rather a file you deleted stayed deleted.
+
 ### Changed
 
 - **`cpm_boot_writable` now defaults to `true`** — a booted disk may write to

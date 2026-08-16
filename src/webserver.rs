@@ -1227,6 +1227,7 @@ fn collect_form_updates(
         "cpm_emu_enabled",
         "cpm_screen_input",
         "cpm_boot_writable",
+        "place_bundled_terminals",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
         "kermit_attribute_packets", "kermit_repeat_compression",
         "kermit_resume_partial", "kermit_locking_shifts",
@@ -3293,6 +3294,14 @@ fn render_more_popups(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-xfer\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">File Transfer \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-xfer\">\u{00d7}</button></div>\
+         <h3>Bundled CP/M Terminals</h3>\
+         <div class=\"row\">{terms}</div>\
+         <div class=\"row\"><span class=\"hint\">EGT8080.COM and EGT80.COM are \
+         this gateway's own CP/M terminal, written into the transfer directory \
+         (and onto CP/M drive A:) when missing, so you can send one to real \
+         hardware without starting the emulator. A file already there is never \
+         overwritten &mdash; it holds the settings you saved into it &mdash; so \
+         this only decides whether a missing one is written back.</span></div>\
          <h3>XMODEM / XMODEM-1K / YMODEM</h3>\
          <div class=\"row\">{xint}</div>\
          <h3>ZMODEM</h3>\
@@ -3323,6 +3332,11 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
+        terms = checkbox(
+            "place_bundled_terminals",
+            "Write EGT8080.COM and EGT80.COM when they are missing",
+            cfg.place_bundled_terminals,
+        ),
         xint = numfield("xmodem_negotiation_retry_interval", "Retry interval (s)", cfg.xmodem_negotiation_retry_interval),
         zneg = numfield("zmodem_negotiation_timeout", "Neg (s)", cfg.zmodem_negotiation_timeout),
         zfrm = numfield("zmodem_frame_timeout", "Frame (s)", cfg.zmodem_frame_timeout),
@@ -5735,6 +5749,40 @@ mod tests {
         assert!(
             !with_password.contains("class=\"pubkey\""),
             "password auth does not use this key, so showing it invites a pointless paste"
+        );
+    }
+
+    /// `place_bundled_terminals` reaches the web UI, and a save can store it.
+    ///
+    /// The allowlist half is the one that bites: a bool absent from
+    /// `bool_keys` is silently dropped on save rather than rejected, so the
+    /// box would tick and untick and never change anything.
+    #[test]
+    fn test_place_bundled_terminals_is_on_the_page_and_savable() {
+        let html = render_main_page(&Config::default(), None, false);
+        assert!(html.contains("name=\"place_bundled_terminals\""), "not on the page");
+        assert!(html.contains("<h3>Bundled CP/M Terminals</h3>"), "no section heading");
+        assert!(html.contains("never overwritten"), "the page must say it does not clobber");
+
+        // A save carries it both ways.  An unchecked checkbox submits nothing
+        // at all, so the "off" direction is the one a missing allowlist entry
+        // breaks silently: the key never appears in the updates and the stored
+        // value simply stays as it was.
+        let old = Config::default();
+        let lookup = |ups: &Vec<(String, String)>, k: &str| {
+            ups.iter().find(|(uk, _)| uk == k).map(|(_, v)| v.clone())
+        };
+
+        let mut form = empty_form();
+        form.insert("place_bundled_terminals".into(), "true".into());
+        let (ticked, _) = collect_form_updates(&form, &old);
+        assert_eq!(lookup(&ticked, "place_bundled_terminals"), Some("true".into()));
+
+        let (unticked, _) = collect_form_updates(&empty_form(), &old);
+        assert_eq!(
+            lookup(&unticked, "place_bundled_terminals"),
+            Some("false".into()),
+            "an unticked box must save as false, not vanish from the update list",
         );
     }
 

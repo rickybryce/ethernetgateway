@@ -130,6 +130,25 @@ const DEFAULT_USERNAME: &str = "admin";
 /// duplicated string literal that could silently drift from the real default.
 pub(crate) const DEFAULT_PASSWORD: &str = "changeme";
 const DEFAULT_TRANSFER_DIR: &str = "transfer";
+/// Place `EGT8080.COM` and `EGT80.COM` when they are missing.
+///
+/// **On, because the file being there is the point.** They are our own CP/M
+/// terminal in period assembly, compiled into the binary, and they go two
+/// places: CP/M drive A:, where the emulator runs one, and loose in the
+/// transfer directory, where the file-transfer menus can send one to real
+/// hardware without starting the emulator at all.  On a fresh install nothing
+/// else puts them there.
+///
+/// **This is a placement switch, not a delete switch.** Turning it off stops
+/// the gateway *writing* a missing file; it never removes one already there,
+/// and it cannot: the copy on A: holds the operator's own settings inside its
+/// `.COM`.  It exists for the operator who keeps their own build, or their own
+/// `EGT80.COM` from before 0.9.2, and would rather a deleted file stayed
+/// deleted than quietly reappear on the next restart.
+///
+/// Leaving it on costs four `exists()` checks per start-up and nothing else --
+/// a file already in place is never rewritten, whatever this says.
+const DEFAULT_PLACE_BUNDLED_TERMINALS: bool = true;
 /// GUI display scale.  `"auto"` (or empty) lets egui use the monitor's own
 /// scale factor; a number (e.g. `1.0`, `1.25`) pins the pixels-per-point
 /// absolutely so the console renders the same size on any display.
@@ -712,6 +731,12 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub transfer_dir: String,
+    /// Write the bundled CP/M terminals when they are missing?
+    ///
+    /// On by default.  Never overwrites a file that is already there, so this
+    /// only decides whether a *missing* one is restored.  See
+    /// [`DEFAULT_PLACE_BUNDLED_TERMINALS`].
+    pub place_bundled_terminals: bool,
     /// Last GUI window geometry as `x,y,width,height` (outer position + inner
     /// size, in logical points).  Auto-managed by the desktop GUI to reopen the
     /// window where the operator left it; empty = unset (default size + window-
@@ -1080,6 +1105,7 @@ impl Default for Config {
             username: DEFAULT_USERNAME.into(),
             password: DEFAULT_PASSWORD.into(),
             transfer_dir: DEFAULT_TRANSFER_DIR.into(),
+            place_bundled_terminals: DEFAULT_PLACE_BUNDLED_TERMINALS,
             gui_window_geometry: String::new(),
             gui_zoom: DEFAULT_GUI_ZOOM.into(),
             max_sessions: DEFAULT_MAX_SESSIONS,
@@ -1497,6 +1523,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .filter(|v| !v.is_empty())
             .cloned()
             .unwrap_or_else(|| DEFAULT_TRANSFER_DIR.into()),
+        place_bundled_terminals: map
+            .get("place_bundled_terminals")
+            .map(|v| v == "true")
+            .unwrap_or(DEFAULT_PLACE_BUNDLED_TERMINALS),
         gui_window_geometry: map
             .get("gui_window_geometry")
             .map(|v| v.trim().to_string())
@@ -2269,6 +2299,22 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("# Directory for file transfers (relative to working directory)\n");
     write_kv_str(&mut content, "transfer_dir", &cfg.transfer_dir);
+    content.push_str("\
+# place_bundled_terminals: write EGT8080.COM and EGT80.COM when they are
+#   missing?  ON by default.  They are this gateway's own CP/M terminal in
+#   period assembly, compiled into the binary, and each is placed in TWO
+#   places: CP/M drive A:, where the emulator runs it, and loose in the
+#   transfer directory, where the file-transfer menus can send it to real
+#   hardware without starting the emulator at all.  Nothing else puts them
+#   there on a fresh install.
+#   A file already present is NEVER overwritten whatever this says -- each
+#   terminal saves its settings inside its own .COM, so refreshing a copy
+#   would discard your configuration.  So this only decides whether a
+#   MISSING one is written: turn it off if you keep your own build, or your
+#   own EGT80.COM from before 0.9.2, and would rather a file you deleted
+#   stayed deleted instead of reappearing on the next restart.
+");
+    write_kv(&mut content, "place_bundled_terminals", cfg.place_bundled_terminals);
     write_kv_str(&mut content, "gui_window_geometry", &cfg.gui_window_geometry);
     content.push('\n');
 
@@ -3077,6 +3123,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "username" => cfg.username = value.to_string(),
         "password" => cfg.password = value.to_string(),
         "transfer_dir" => cfg.transfer_dir = value.to_string(),
+        "place_bundled_terminals" => {
+            cfg.place_bundled_terminals = value.eq_ignore_ascii_case("true")
+        }
         "gui_window_geometry" => cfg.gui_window_geometry = value.trim().to_string(),
         "gui_zoom" => cfg.gui_zoom = value.trim().to_string(),
         "max_sessions" => {
@@ -4194,8 +4243,11 @@ mod tests {
         let path = dir.join("roundtrip.conf");
 
         let original = Config {
-            cpm_mounts: "A=altair8_games.dsk,C=ibm3740_tools.dsk".to_string(),
-            cpm_boot_image: "altair8_cpm.dsk".to_string(),
+            // Not the default, so the roundtrip proves the key is written and
+            // read back rather than defaulting twice at both ends.
+            place_bundled_terminals: false,
+            cpm_mounts: "A=DISK01.DSK,C=CDISK02.DSK".to_string(),
+            cpm_boot_image: "HDSK04.DSK".to_string(),
             // Deliberately not the default, so the roundtrip proves the key is
             // written and read back rather than merely defaulting twice.  It
             // was `true` while the default was `false`; both have to move
@@ -5385,8 +5437,8 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(cfg.cpm_boot_image, "", "the emulator by default");
 
-        apply_config_key(&mut cfg, "cpm_boot_image", "altair8_cpm.dsk");
-        assert_eq!(cfg.cpm_boot_image, "altair8_cpm.dsk");
+        apply_config_key(&mut cfg, "cpm_boot_image", "HDSK04.DSK");
+        assert_eq!(cfg.cpm_boot_image, "HDSK04.DSK");
 
         // Empty is always allowed — it means "run the emulator".
         apply_config_key(&mut cfg, "cpm_boot_image", "");

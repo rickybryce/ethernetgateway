@@ -3423,6 +3423,15 @@ impl TelnetSession {
                 self.cyan("P")
             ))
             .await?;
+            // State and action on one row, the way the CP/M boot screen shows
+            // its write toggle: this screen has room, but a separate status
+            // line for a boolean would spend two of the 22 to say one thing.
+            self.send_line(&format!(
+                "  {}  Bundled CP/M terminals: {}",
+                self.cyan("T"),
+                if cfg.place_bundled_terminals { self.green("ON") } else { self.dim("off") }
+            ))
+            .await?;
             self.send_line(&format!(
                 "  {}  Restart server",
                 self.cyan("R")
@@ -3464,6 +3473,12 @@ impl TelnetSession {
                 "p" => {
                     self.punter_settings().await?;
                 }
+                "t" => {
+                    // Persisted immediately, like the other one-key toggles on
+                    // the config screens: there is no Save on this menu.
+                    let v = (!cfg.place_bundled_terminals).to_string();
+                    config::update_config_value("place_bundled_terminals", &v);
+                }
                 "r" => {
                     self.config_restart_server().await?;
                 }
@@ -3472,7 +3487,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press D, X, Y, Z, K, P, R, H, or Q.").await?;
+                    self.show_error("Press D, X, Y, Z, K, P, T, R, H, or Q.").await?;
                 }
             }
         }
@@ -3498,6 +3513,15 @@ impl TelnetSession {
                 "  Z  ZMODEM settings",
                 "  K  KERMIT settings",
                 "  P  PUNTER settings",
+                "  T  Write EGT8080.COM and",
+                "     EGT80.COM here (and on",
+                "     CP/M drive A:) when they",
+                "     are missing.  Our own CP/M",
+                "     terminal, so you can send",
+                "     one to real hardware.",
+                "     A file already there is",
+                "     never overwritten - it",
+                "     holds your settings.",
                 "  R  Restart the server",
                 "",
                 "  XMODEM, XMODEM-1K, and YMODEM",
@@ -3516,6 +3540,14 @@ impl TelnetSession {
                 "  Z  ZMODEM settings",
                 "  K  KERMIT settings",
                 "  P  PUNTER settings",
+                "  T  Write EGT8080.COM and EGT80.COM into",
+                "     the transfer directory (and onto CP/M",
+                "     drive A:) when they are missing. They",
+                "     are our own CP/M terminal, so you can",
+                "     send one to real hardware without",
+                "     starting the emulator. A file already",
+                "     there is NEVER overwritten: it holds",
+                "     the settings you saved into it.",
                 "  R  Restart the server",
                 "",
                 "  XMODEM, XMODEM-1K, and YMODEM share",

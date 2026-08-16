@@ -179,7 +179,7 @@ fn main() {
             // exist precisely so you can send a terminal to real hardware
             // *without* starting the emulator, so requiring a session to create
             // them defeated the feature.  Never overwrites.
-            telnet::place_bundled_terminals(&cfg.transfer_dir);
+            telnet::place_bundled_terminals(&cfg.transfer_dir, cfg.place_bundled_terminals);
             // And bring `cpm_mounts` up, here, at startup.
             //
             // This used to happen only when somebody first entered the

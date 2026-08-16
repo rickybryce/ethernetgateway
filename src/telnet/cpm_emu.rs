@@ -338,7 +338,15 @@ const BUNDLED_TERMINALS: &[(&str, &[u8])] =
 /// the drive folders with no terminal in any of them, and the loose copy whose
 /// whole purpose is "reach it without starting the emulator" required starting
 /// the emulator.  It never touched `self`.
-pub(crate) fn place_bundled_terminals(transfer_dir: &str) {
+/// `enabled` is `place_bundled_terminals` from the config.  It is a parameter
+/// rather than a `get_config()` read in here so the behaviour stays testable
+/// without a global, and so both callers are visibly passing the same key --
+/// the alternative was a gate at each call site, which is one rule written in
+/// two places.
+pub(crate) fn place_bundled_terminals(transfer_dir: &str, enabled: bool) {
+    if !enabled {
+        return;
+    }
     for (name, bytes) in BUNDLED_TERMINALS {
         let mut drive_a = PathBuf::from(transfer_dir);
         drive_a.push("CPM");
@@ -763,7 +771,8 @@ impl TelnetSession {
         // next session rather than waiting for a restart -- and it is cheap:
         // four `exists()` checks when everything is already in place.
         let td = cfg.transfer_dir.clone();
-        tokio::task::spawn_blocking(move || place_bundled_terminals(&td)).await.ok();
+        let on = cfg.place_bundled_terminals;
+        tokio::task::spawn_blocking(move || place_bundled_terminals(&td, on)).await.ok();
         // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
         // holding the requested image is left alone, so a second session
         // entering the emulator does not reopen a disk the first one is using.
@@ -2980,7 +2989,7 @@ mod egt80_tests {
         let drive_a = base.join("CPM").join("A");
         std::fs::create_dir_all(&drive_a).expect("temp drive A:");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"));
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true);
 
         // Four files: two builds x two destinations.
         for (name, bytes) in BUNDLED_TERMINALS {
@@ -2997,7 +3006,7 @@ mod egt80_tests {
         std::fs::write(&configured, b"not the shipped build").expect("write");
         std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"));
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true);
 
         assert_eq!(
             std::fs::read(&configured).expect("still there"),
@@ -3017,6 +3026,20 @@ mod egt80_tests {
             .filter(|n| n.contains(".t"))
             .collect();
         assert!(litter.is_empty(), "left temporaries behind: {litter:?}");
+
+        // Off: a missing file stays missing.  The switch decides whether a
+        // *missing* terminal is written; it never removes one, which is why the
+        // configured copy above is still expected to be sitting there.
+        std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), false);
+        assert!(
+            !base.join(EGT8080_NAME).exists(),
+            "place_bundled_terminals = false still wrote a missing terminal",
+        );
+        assert!(
+            drive_a.join(EGT80_NAME).exists(),
+            "turning the switch off must not remove anything",
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

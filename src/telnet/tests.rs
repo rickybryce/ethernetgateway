@@ -3417,8 +3417,45 @@ fn test_other_help_fits_one_page() {
 /// File Transfer settings submenu row count:
 /// header(3) + blank + 1 value + blank + 5 items + blank + Q/H + prompt = 14
 #[test]
+fn test_file_transfer_help_documents_the_terminal_key() {
+    // Both widths, because the PETSCII variant is a separate hand-written
+    // array and a key added to one and not the other is undiscoverable on
+    // exactly the terminals this gateway exists for.
+    for petscii in [true, false] {
+        let lines = TelnetSession::file_transfer_help_lines(petscii);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("  T  "),
+            "the T key is on the screen but not in the {} help",
+            if petscii { "PETSCII" } else { "wide" },
+        );
+        assert!(
+            joined.contains("EGT8080.COM"),
+            "the help should name the files it writes ({} variant)",
+            if petscii { "PETSCII" } else { "wide" },
+        );
+        // The property an operator most needs to trust before turning it on.
+        // Case-insensitive on purpose: the wide variant shouts NEVER and the
+        // PETSCII one, tighter on width, does not — and which one it is has no
+        // bearing on whether the promise is documented.
+        assert!(
+            joined.to_lowercase().contains("never overwritten"),
+            "the {} help must say an existing file is not overwritten",
+            if petscii { "PETSCII" } else { "wide" },
+        );
+    }
+}
+
+#[test]
 fn test_file_transfer_settings_menu_row_count() {
-    let rows = 3 + 1 + 1 + 1 + 5 + 1 + 1 + 1; // 14
+    // header(3) + blank + "Transfer dir:" + blank + eight menu rows
+    // (D X Y Z K P T R) + blank + the Q/H row, then the prompt.
+    //
+    // The eight used to be written `5` here while the screen drew seven, so
+    // this sum said 14 for a 16-row screen.  It never went red because it only
+    // asserts a ceiling, and the ceiling was far away — the drift is the reason
+    // the count is spelled out per group now rather than as bare numbers.
+    let rows = 3 + 1 + 1 + 1 + 8 + 1 + 1 + 1; // 17 incl. the prompt line
     assert!(rows <= 22, "file transfer settings menu is {} rows, exceeds 22", rows);
 }
 
