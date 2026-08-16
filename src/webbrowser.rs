@@ -915,7 +915,11 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
             // then per-field lookup is O(1) — see get_field_label (F1).
             let mut labels = std::collections::HashMap::new();
             collect_field_labels(node, &mut labels);
-            extract_form_fields(node, &mut fields, &mut submit_label, &labels);
+            // Per-form, and reset for each: "have we already taken this form's
+            // submit button?"  Scoped here rather than inline so the recursion
+            // below plainly shares one flag across the whole form.
+            let mut submit_taken = false;
+            extract_form_fields(node, &mut fields, &mut submit_label, &mut submit_taken, &labels);
 
             let label = submit_label.unwrap_or_else(|| {
                 format!("Form {}", forms.len() + 1)
@@ -968,7 +972,13 @@ fn collect_field_labels(node: &Handle, labels: &mut std::collections::HashMap<St
     }
 }
 
-fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label: &mut Option<String>, labels: &std::collections::HashMap<String, String>) {
+fn extract_form_fields(
+    node: &Handle,
+    fields: &mut Vec<FormField>,
+    submit_label: &mut Option<String>,
+    submit_taken: &mut bool,
+    labels: &std::collections::HashMap<String, String>,
+) {
     if let Element { ref name, .. } = node.data {
         let tag = name.local.as_ref();
         match tag {
@@ -989,7 +999,27 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
                         if submit_label.is_none() && !value.is_empty() {
                             *submit_label = Some(value.clone());
                         }
-                        if !field_name.is_empty() {
+                        // ONLY THE FIRST named submit button is sent.
+                        //
+                        // A submit button is a "successful control" only when
+                        // it is the one that submitted the form -- a browser
+                        // sends the button you pressed, never all of them.
+                        // This sent every named one, and that is not a
+                        // theoretical difference: Google's home page carries
+                        // `btnG` (Search) AND `btnI` (I'm Feeling Lucky), so
+                        // searching from it sent both, and `btnI` means "skip
+                        // the results and jump to the first hit".  The reply
+                        // was a 302 to google.com/url?q=..., whose interstitial
+                        // is where the search appeared to get stuck.
+                        //
+                        // First, because that is the form's DEFAULT button --
+                        // the one a browser activates when you press Enter in a
+                        // text field, which is what submitting from our form UI
+                        // means.  It is also the same one `submit_label`
+                        // already names, so the button shown and the button
+                        // sent agree.
+                        if !field_name.is_empty() && !*submit_taken {
+                            *submit_taken = true;
                             fields.push(FormField::Hidden { name: field_name, value });
                         }
                     }
@@ -1055,7 +1085,7 @@ fn extract_form_fields(node: &Handle, fields: &mut Vec<FormField>, submit_label:
             && name.local.as_ref() == "form" {
                 continue;
             }
-        extract_form_fields(child, fields, submit_label, labels);
+        extract_form_fields(child, fields, submit_label, submit_taken, labels);
     }
 }
 
@@ -1477,6 +1507,58 @@ mod tests {
     /// These five are exactly what a live capture of `telnetbible.com` page 3
     /// contained — 284 of the first alone — and each is three bytes of UTF-8
     /// that a 7-bit console draws as three unrenderable characters.
+    /// A form sends the button you pressed, not every button on it.
+    ///
+    /// This is the shape of Google's home page, and it was a real defect:
+    /// `btnG` (Search) and `btnI` (I'm Feeling Lucky) are both named submit
+    /// buttons, we sent both, and `btnI` means "skip the results, jump to the
+    /// first hit".  Google answered 302 to its `/url?q=...` interstitial, which
+    /// is where a search appeared to get stuck.  Measured: with `btnI` the
+    /// reply is 302, without it 200.
+    ///
+    /// The first one is kept because that is the form's DEFAULT button -- what
+    /// a browser activates on Enter in a text field -- and it is the same one
+    /// `submit_label` names, so the button shown and the button sent agree.
+    #[test]
+    fn test_form_submits_only_the_first_submit_button() {
+        let html = br#"<html><body><form action="/search">
+            <input type="hidden" name="hl" value="en">
+            <input name="q" value="">
+            <input type="submit" name="btnG" value="Google Search">
+            <input type="submit" name="btnI" value="I&#39;m Feeling Lucky">
+        </form></body></html>"#;
+        let page = render_html_body(html, "https://example.com/".to_string(), 80)
+            .expect("renders");
+        let form = page.forms.first().expect("one form");
+
+        let names: Vec<&str> = form
+            .fields
+            .iter()
+            .map(|f| match f {
+                FormField::Text { name, .. }
+                | FormField::Hidden { name, .. }
+                | FormField::TextArea { name, .. }
+                | FormField::Select { name, .. }
+                | FormField::Checkbox { name, .. }
+                | FormField::Radio { name, .. } => name.as_str(),
+            })
+            .collect();
+
+        assert!(names.contains(&"hl"), "ordinary hidden fields must survive: {names:?}");
+        assert!(names.contains(&"q"), "the text field must survive: {names:?}");
+        assert!(
+            names.contains(&"btnG"),
+            "the form's default (first) submit button must be sent: {names:?}",
+        );
+        assert!(
+            !names.contains(&"btnI"),
+            "a second submit button must NOT be sent -- sending btnI is what turned \
+             a search into an I'm Feeling Lucky redirect: {names:?}",
+        );
+        // And the button named on screen is the one actually sent.
+        assert_eq!(form.label, "Google Search", "label should name the sent button");
+    }
+
     #[test]
     fn test_box_drawing_folds_to_ascii() {
         assert_eq!(fold_terminal_safe("─│┼┴┬"), "-|+++");
