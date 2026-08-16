@@ -328,6 +328,31 @@ pub(in crate::telnet) fn keytrace_on() -> bool {
     })
 }
 
+/// A run of bytes, compactly, for the outbound half of the key trace.
+///
+/// Printable bytes stay as themselves so a result code reads as `OK` rather
+/// than as six hex pairs; control bytes become their names, which is the
+/// whole point when the question is "did a CR LF come back".  Truncated at
+/// `max` because a screen paint is one write of several hundred bytes and the
+/// interesting part is always the front.
+pub(in crate::telnet) fn render_bytes(bytes: &[u8], max: usize) -> String {
+    let mut out = String::new();
+    for &b in bytes.iter().take(max) {
+        match b {
+            0x20..=0x7E => out.push(b as char),
+            _ => {
+                out.push('<');
+                out.push_str(&keyname(b));
+                out.push('>');
+            }
+        }
+    }
+    if bytes.len() > max {
+        out.push_str(&format!("… (+{} more)", bytes.len() - max));
+    }
+    out
+}
+
 /// A byte as a human reads it on a key-trace line.
 ///
 /// Control codes are the whole point here, so they get names rather than the
@@ -3267,8 +3292,8 @@ mod egt80_tests {
         // there were two, which is exactly the mistake that would otherwise
         // pin each binary against the other one's hash and pass.
         const PINNED: &[(&str, &str)] = &[
-            ("EGT8080.COM", "331ff21b51aa1a2641324967b8a21ec7f5b949694ec1ca308a800ead420f9874"),
-            ("EGT80.COM", "404b9e6def2d6e26e8434186e0e9eaf69f13c20e08fbe36dffa7d99335fad58e"),
+            ("EGT8080.COM", "61563d7fc5c55b6c65a14cf29e61b6acef2f42aee4f898fb59f3fbdda8417cbd"),
+            ("EGT80.COM", "2e4031519467b5b761bca9eddedd732b046a49f694c2acf00916e6926e8ace5b"),
         ];
 
         for ((name, bytes), (pin_name, pinned)) in BUNDLED_TERMINALS.iter().zip(PINNED) {

@@ -126,6 +126,34 @@ XNOISE  EQU     255             ; junk bytes tolerated before a transfer
 XSHORT  EQU     1               ; inter-byte wait, in XGETB passes
 XLONG   EQU     6               ; wait for a block / handshake
 
+; The two halves of the Hayes escape guard in XHUP, in XGETB passes.
+;
+; THE REQUIREMENT IS A WALL-CLOCK SECOND, AND THESE ARE A POLL COUNT.  A
+; modem accepts '+++' only with a full second of silence before it AND a
+; full second after it, and a byte inside either window aborts the escape -
+; the far end then receives '+++ATH' as text and the call stays up.  A pass
+; is 65536 polls, so how many seconds it buys depends on the clock and on
+; which port driver is selected.  Both must therefore clear one second on
+; the FASTEST machine this runs on, not on a typical one.
+;
+; They differ because their costs differ, which is the point:
+;
+;   HUPLEAD is paid in FULL every time.  Nothing arrives during it - that
+;   is what it is waiting to be true - so every pass is real delay.  Keep
+;   it as small as the requirement allows.
+;
+;   HUPTAIL is FREE in the normal case.  XGETB returns the moment a byte
+;   is waiting, and the far end answers the escape with OK, so the wait
+;   ends on that byte rather than on the timeout.  Being generous here
+;   costs nothing and protects the escape on a fast machine.
+;
+; These were 4 and 1 - the expensive one generous, the free one stingy,
+; which is backwards.  Hanging up an SC126 took FOURTEEN SECONDS, nearly
+; all of it HUPLEAD, while HUPTAIL was one pass against a one-second guard
+; it had no margin over.
+HUPLEAD EQU     2               ; silence before '+++' (always paid)
+HUPTAIL EQU     4               ; silence after '+++' (ends on the OK)
+
 ;-----------------------------------------------------------------------
 ; Port kinds.  Only SIO is implemented in phase 1; the rest are listed
 ; here because the settings block records the kind numerically and the
@@ -1989,11 +2017,29 @@ XGETB2: CALL    PIN
 ; Hence: settle, '+++', settle, ATH.
 ;
 ; The settle is a drain, not a busy-wait, so it doubles as tidying up
-; whatever the far end was still saying.  It runs four timeout passes
-; rather than one because the one-second guard has to be cleared on a fast
-; machine too: a poll loop that takes a second on a 4 MHz Z80 takes a
-; fifth of that on an 18 MHz Z180, and an escape sent too early is not an
-; escape - it is three plus signs typed at the far end.
+; whatever the far end was still saying.
+;
+; THE TWO WAITS ARE NOT THE SAME SIZE, AND THAT IS DELIBERATE.
+;
+; See HUPLEAD / HUPTAIL for the reasoning: the requirement is a wall-clock
+; second on each side of the '+++', these are poll counts, and the two have
+; opposite costs.  The leading wait is paid in full every time; the trailing
+; one ends on the OK the far end sends, so it is free.
+;
+; They used to be 4 and 1 - generous where it costs, stingy where it does
+; not.  Hanging up an SC126 took FOURTEEN SECONDS, nearly all of it the
+; leading guard: XGETB returns the moment a byte is waiting, so swallowing
+; the OK and the NO CARRIER costs milliseconds, while the leading guard has
+; to reach real silence and always pays its timeout in full.
+;
+; A pass is 65536 polls of PST, which is not a register read - it pushes
+; BC/DE/HL, calls through the port vector, pops them back, then reads the
+; status and tests the framing bits, around 220 T-states.  The old note
+; here claimed a pass was a second at 4 MHz and a fifth of that at 18 MHz;
+; the ratio was right and the absolute figure was far out.
+;
+; An escape sent too early is not an escape - it is three plus signs typed
+; at the far end - so this must not go to zero.  One pass is the floor.
 ;
 ; If there is no modem on the port at all - a null-modem cable to another
 ; machine - the far end receives these characters as text.  That is the
@@ -2006,16 +2052,16 @@ XHUP:   LD      A,(PKIND)
         RET     Z               ; no port selected: nothing to hang up
         LD      HL,MHUP
         CALL    PSTR
-        LD      A,4             ; the guard proper: long enough to clear one
-        CALL    XHGRD           ; second even on a fast machine
+        LD      A,HUPLEAD       ; silence BEFORE the escape - always paid in
+        CALL    XHGRD           ; full, so it is the one kept small
         LD      A,'+'
         CALL    PSEND
         LD      A,'+'
         CALL    PSEND
         LD      A,'+'
         CALL    PSEND
-        LD      A,1             ; just swallow the OK - the guard is already met
-        CALL    XHGRD
+        LD      A,HUPTAIL       ; silence AFTER it - free, because XGETB
+        CALL    XHGRD           ; returns the moment the OK lands
         LD      A,'A'
         CALL    PSEND
         LD      A,'T'

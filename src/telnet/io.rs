@@ -124,6 +124,14 @@ impl TelnetSession {
     /// Serial and SSH sessions don't speak the IAC protocol, so bytes
     /// pass through unchanged there.
     pub(in crate::telnet) async fn send_raw(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        // Outbound half of the key trace.  One bounded line per *write*, not
+        // per byte: a screen paint is one write of a few hundred bytes, and a
+        // byte-per-line trace of that is unreadable and would evict everything
+        // around it.  Answers "what did the gateway say, and when did it stop
+        // saying it" -- which is the question a hangup raises.
+        if super::cpm_emu::keytrace_on() {
+            glog!("cpmkey TX {} bytes: {}", bytes.len(), super::cpm_emu::render_bytes(bytes, 48));
+        }
         let needs_escape = !self.is_serial && !self.is_ssh;
         if !needs_escape || !bytes.contains(&IAC) {
             return self.writer.lock().await.write_all(bytes).await;
