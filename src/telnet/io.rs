@@ -195,7 +195,13 @@ impl TelnetSession {
                 Ok(Some(b)) => {
                     glog!("cpmkey WIRE {} (0x{:02X})", super::cpm_emu::keyname(*b), b)
                 }
-                Ok(None) => glog!("cpmkey WIRE <disconnect>"),
+                // `Ok(None)` is deliberately NOT logged.  An enabled serial
+                // port with no call in progress polls a closed read constantly
+                // -- measured at ~35 lines a minute on the live Pi, which is
+                // pure noise in an operator's log and would eventually evict
+                // the keystrokes this exists to capture.  A real disconnect is
+                // already reported by the session layer.
+                Ok(None) => {}
                 Err(e) => glog!("cpmkey WIRE <error: {}>", e.kind()),
             }
         }
