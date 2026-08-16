@@ -171,15 +171,6 @@ fn main() {
                 // and a gateway must still come up for its other services.
                 glog!("Warning: could not create the CP/M folders: {}", e);
             }
-            // And the bundled terminals, for the same reason the folders are
-            // laid out here rather than on someone's first session: erasing the
-            // transfer directory and restarting used to recreate the drive
-            // folders with no terminal in any of them, because the only caller
-            // was the CP/M session path.  The loose transfer-directory copies
-            // exist precisely so you can send a terminal to real hardware
-            // *without* starting the emulator, so requiring a session to create
-            // them defeated the feature.  Never overwrites.
-            telnet::place_bundled_terminals(&cfg.transfer_dir, cfg.place_bundled_terminals);
             // And bring `cpm_mounts` up, here, at startup.
             //
             // This used to happen only when somebody first entered the
@@ -197,6 +188,30 @@ fn main() {
             let base = cpm::layout::cpm_dir(&cfg.transfer_dir);
             cpm::image::apply_config_mounts(&base, &cfg.cpm_mounts);
         }
+
+        // The bundled terminals, for the same reason the folders are laid out
+        // at start-up rather than on someone's first session: erasing the
+        // transfer directory and restarting used to recreate the drive folders
+        // with no terminal in any of them, because the only caller was the CP/M
+        // session path.
+        //
+        // Deliberately OUTSIDE the `cpm_emu_enabled` block above.  The loose
+        // transfer-directory copy exists precisely so the file-transfer menus
+        // can send a terminal to real hardware *without* the emulator, and
+        // `place_bundled_terminals` is the key that says whether to write it --
+        // so an operator who shut the emulator door and left that key on used to
+        // get no copy anywhere, including the one whose whole point is to work
+        // without the emulator.  It sat inside that block only because the call
+        // was added next to `ensure_cpm_tree`, which does need the gate.
+        //
+        // Drive A: still does: its folder is only laid out when the emulator is
+        // on, so the emulator's own setting is passed in rather than assumed.
+        // Never overwrites, whichever destination.
+        telnet::place_bundled_terminals(
+            &cfg.transfer_dir,
+            cfg.place_bundled_terminals,
+            cfg.cpm_emu_enabled,
+        );
 
         // Start tokio runtime on a worker thread so the main thread is free for the GUI.
         let shutdown_rt = shutdown.clone();

@@ -615,6 +615,18 @@ mod generate {
     ///
     /// Ignored: it needs the disks. Set `REPODISKS_HOME` to the folder holding
     /// them (default `$HOME`), and `REPODISKS_OUT` to write somewhere else.
+    ///
+    /// Two-step opt-in, mirroring `record_punter_fixture`: `#[ignore]` keeps it
+    /// off the default pass, and `REPODISKS_RECORD=1` keeps it off bulk
+    /// `--ignored` runs.  That second step is not belt-and-braces --
+    /// `tools/cpm-live-gates` *is* such a run and is handed **one** collection's
+    /// folder, so this test rewrote the committed catalogue down to whichever
+    /// collection happened to be on disk.  It cost 331 lines (the whole
+    /// Altair-Duino listing) on 2026-08-16; `git status` caught it, and a run
+    /// followed by an unexamined `git add -A` would not have.
+    ///
+    ///     REPODISKS_RECORD=1 REPODISKS_HOME=~/disks \
+    ///       cargo test --release record_repodisks -- --ignored --nocapture
     #[test]
     #[ignore]
     fn record_repodisks() {
@@ -623,6 +635,10 @@ mod generate {
             .expect("a home folder");
         let out = std::env::var("REPODISKS_OUT")
             .unwrap_or_else(|_| "src/cpm/repodisks.txt".into());
+        if std::env::var("REPODISKS_RECORD").ok().as_deref() != Some("1") {
+            eprintln!("REPODISKS_RECORD=1 not set; skipping (this test REWRITES {out})");
+            return;
+        }
 
         let mut s = String::new();
         s.push_str(REPODISKS_HEADER);
@@ -684,6 +700,29 @@ mod generate {
             }
         }
         assert!(found > 0, "no disks found under {home} — set REPODISKS_HOME");
+
+        // A collection already in the catalogue must still be in it.  The loop
+        // above *skips* a collection whose folder is absent, so regenerating
+        // with only some of them on disk silently drops the rest -- which is a
+        // truncation, not a regeneration, and the file is compiled in with
+        // `include_str!`, so it ships.  `found > 0` above does not catch this:
+        // one collection is enough to satisfy it.
+        if let Ok(old) = std::fs::read_to_string(&out) {
+            let lost: Vec<&str> = REPOS
+                .iter()
+                .map(|(name, ..)| *name)
+                .filter(|name| {
+                    let heading = format!(">>>>> {name}");
+                    old.contains(&heading) && !s.contains(&heading)
+                })
+                .collect();
+            assert!(
+                lost.is_empty(),
+                "refusing to rewrite {out}: it already lists {lost:?}, and this run \
+                 found no disks for them under {home}.  Point REPODISKS_HOME at a \
+                 folder holding every collection, or the catalogue loses them.",
+            );
+        }
         std::fs::write(&out, &s).expect("write");
         eprintln!("wrote {out}: {found} disks, {} bytes", s.len());
     }

@@ -410,15 +410,22 @@ pub(in crate::telnet) fn keyname(b: u8) -> String {
 /// without a global, and so both callers are visibly passing the same key --
 /// the alternative was a gate at each call site, which is one rule written in
 /// two places.
-pub(crate) fn place_bundled_terminals(transfer_dir: &str, enabled: bool) {
+/// `cpm_drives` is `cpm_emu_enabled`: CP/M drive A: is only laid out when the
+/// emulator is on, so its copy is placed only then.  The transfer-directory
+/// copy does not depend on it -- that copy exists so the file-transfer menus
+/// can reach a terminal *without* the emulator, which is exactly the case an
+/// operator who set `cpm_emu_enabled = false` is in.
+pub(crate) fn place_bundled_terminals(transfer_dir: &str, enabled: bool, cpm_drives: bool) {
     if !enabled {
         return;
     }
     for (name, bytes) in BUNDLED_TERMINALS {
-        let mut drive_a = PathBuf::from(transfer_dir);
-        drive_a.push("CPM");
-        drive_a.push("A");
-        place_one_terminal(&drive_a, "drive A:", name, bytes);
+        if cpm_drives {
+            let mut drive_a = PathBuf::from(transfer_dir);
+            drive_a.push("CPM");
+            drive_a.push("A");
+            place_one_terminal(&drive_a, "drive A:", name, bytes);
+        }
         place_one_terminal(
             std::path::Path::new(transfer_dir),
             "the transfer directory",
@@ -839,7 +846,11 @@ impl TelnetSession {
         // four `exists()` checks when everything is already in place.
         let td = cfg.transfer_dir.clone();
         let on = cfg.place_bundled_terminals;
-        tokio::task::spawn_blocking(move || place_bundled_terminals(&td, on)).await.ok();
+        // Drive A: included unconditionally here: reaching this code *is* the
+        // emulator running, so its folders are laid out.
+        tokio::task::spawn_blocking(move || place_bundled_terminals(&td, on, true))
+            .await
+            .ok();
         // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
         // holding the requested image is left alone, so a second session
         // entering the emulator does not reopen a disk the first one is using.
@@ -3294,7 +3305,7 @@ mod egt80_tests {
         let drive_a = base.join("CPM").join("A");
         std::fs::create_dir_all(&drive_a).expect("temp drive A:");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, true);
 
         // Four files: two builds x two destinations.
         for (name, bytes) in BUNDLED_TERMINALS {
@@ -3311,7 +3322,7 @@ mod egt80_tests {
         std::fs::write(&configured, b"not the shipped build").expect("write");
         std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, true);
 
         assert_eq!(
             std::fs::read(&configured).expect("still there"),
@@ -3336,7 +3347,7 @@ mod egt80_tests {
         // *missing* terminal is written; it never removes one, which is why the
         // configured copy above is still expected to be sitting there.
         std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), false);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), false, true);
         assert!(
             !base.join(EGT8080_NAME).exists(),
             "place_bundled_terminals = false still wrote a missing terminal",
@@ -3347,6 +3358,102 @@ mod egt80_tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Shutting the emulator door must not take the loose copy with it.**
+    ///
+    /// The transfer-directory copy is the one whose whole purpose is to reach a
+    /// terminal *without* the emulator -- the file-transfer menus send it to
+    /// real hardware, and `cpm_emu_enabled = false` is the documented way to
+    /// turn guest code off.  The start-up call used to sit inside `main.rs`'s
+    /// `if cfg.cpm_emu_enabled` block, next to `ensure_cpm_tree` which does
+    /// need it, so that operator got no terminal anywhere.
+    ///
+    /// Drive A: is the opposite case and is checked here too: its folder is
+    /// only laid out when the emulator is on, so writing there would either
+    /// fail or create a CP/M tree for a disabled emulator.
+    #[test]
+    fn test_the_loose_copy_does_not_depend_on_the_emulator() {
+        let base = std::env::temp_dir().join(format!("egw_place_nocpm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let drive_a = base.join("CPM").join("A");
+        // The folder is created even though the emulator is off, so that a
+        // write there would SUCCEED.  Leaving it out makes this test unable to
+        // fail: `place_one_terminal` does not create directories, so with no
+        // `CPM/A` the drive copy is skipped by accident whatever the flag says,
+        // and the test passes against the very bug it is here to catch.
+        std::fs::create_dir_all(&drive_a).expect("temp drive A:");
+
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, false);
+
+        for (name, bytes) in BUNDLED_TERMINALS {
+            let p = base.join(name);
+            let got = std::fs::read(&p)
+                .unwrap_or_else(|e| panic!("{p:?} missing with the emulator off: {e}"));
+            assert_eq!(&got, bytes, "{p:?} is not the shipped build");
+            assert!(
+                !drive_a.join(name).exists(),
+                "{name} was written to drive A: for an emulator that is switched off",
+            );
+        }
+        // And no half-written temporaries from the drive A: attempt.
+        let litter: Vec<_> = std::fs::read_dir(&base)
+            .expect("readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".t"))
+            .collect();
+        assert!(litter.is_empty(), "left temporaries behind: {litter:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The start-up call must not sit inside the emulator's own block.**
+    ///
+    /// The test above pins what the function does when told to skip drive A:,
+    /// but the defect was a level up and no behavioural test could see it: the
+    /// call was *inside* `if cfg.cpm_emu_enabled { ... }` in `main.rs`, so with
+    /// the emulator off it never ran and the flag never got the chance to
+    /// matter.  Someone re-wrapping it -- which is how it got there, by being
+    /// added next to `ensure_cpm_tree` -- would restore the bug with every
+    /// other test still green.  So the shape of the call site is checked here.
+    ///
+    /// Brace counting rather than line matching, so re-indenting or moving the
+    /// call within the file does not make this fail for the wrong reason.
+    #[test]
+    fn test_startup_places_terminals_outside_the_emulator_block() {
+        let src = include_str!("../main.rs");
+        let gate = src
+            .find("if cfg.cpm_emu_enabled {")
+            .expect("main.rs still gates the CP/M layout on cpm_emu_enabled");
+        let bytes = src.as_bytes();
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, b) in bytes.iter().enumerate().skip(gate) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("the emulator block closes");
+        let call = src
+            .find("place_bundled_terminals(")
+            .expect("start-up still places the bundled terminals");
+        assert!(
+            call > end,
+            "main.rs places the bundled terminals inside `if cfg.cpm_emu_enabled`.\n\
+             The loose transfer-directory copy exists so the file-transfer menus can\n\
+             reach a terminal WITHOUT the emulator, so an operator who switched the\n\
+             emulator off gets no terminal anywhere.  Call it outside the block and\n\
+             pass `cfg.cpm_emu_enabled` as the drive A: argument instead.",
+        );
     }
 
     #[test]
