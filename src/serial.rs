@@ -5308,6 +5308,16 @@ where
     state.plus_count = 0;
     state.last_data_time = Instant::now();
 
+    // Byte trace of the **wire** side, read once per call rather than per byte.
+    //
+    // `cpmkey WIRE` is logged where the *session* reads, which is two buffers
+    // further on -- the pump's read, the duplex, then the session.  So a
+    // keystroke that never produces a WIRE line could be stuck in any of them,
+    // and a whole investigation was spent attributing that to the wrong one.
+    // This line says whether the byte reached the gateway at all, which is the
+    // question the other trace cannot answer.
+    let trace = crate::config::get_gateway_debug();
+
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
         if state.shutdown.load(Ordering::SeqCst)
@@ -5320,6 +5330,9 @@ where
         match state.port.read(&mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
+                if trace {
+                    glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if !forward.is_empty() {
@@ -5551,6 +5564,31 @@ impl PetsciiPunctState {
     }
 }
 
+/// A run of bytes off the wire, compactly, for the pump's byte trace.
+///
+/// Control bytes are named rather than shown, because the whole point of the
+/// trace is to answer "did the CTRL-C arrive", and a `^C` is invisible in a
+/// terminal-shaped dump. Truncated because a screen paint is hundreds of bytes
+/// and the interesting part is always the front.
+fn wire_preview(bytes: &[u8]) -> String {
+    const MAX: usize = 32;
+    let mut out = String::new();
+    for &b in bytes.iter().take(MAX) {
+        match b {
+            0x0D => out.push_str("<CR>"),
+            0x0A => out.push_str("<LF>"),
+            0x1B => out.push_str("<ESC>"),
+            0x00..=0x1F => out.push_str(&format!("^{}", (b + 0x40) as char)),
+            0x20..=0x7E => out.push(b as char),
+            _ => out.push_str(&format!("<{:02X}>", b)),
+        }
+    }
+    if bytes.len() > MAX {
+        out.push_str(&format!(" … (+{} more)", bytes.len() - MAX));
+    }
+    out
+}
+
 /// Online mode for direct TCP connections (ATDT host:port).
 /// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
 fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> OnlineExit {
@@ -5559,6 +5597,10 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
+
+    // The wire-side byte trace -- see `online_mode_duplex` for why the
+    // session's own `cpmkey WIRE` cannot answer the same question.
+    let trace = crate::config::get_gateway_debug();
 
     // ANSI ESC-stripper state for the inbound (TCP→serial) direction.
     // Only consulted when AT+PETSCII=1 is active, but its state has to live
@@ -5582,6 +5624,9 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
         match state.port.read(&mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
+                if trace {
+                    glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if state.petscii_translate {

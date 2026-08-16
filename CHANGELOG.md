@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The modem pump now traces what it reads off the wire** (under
+  `gateway_debug`), one line per read. The existing `cpmkey WIRE` trace is
+  logged where the *session* reads, which is two buffers further on — the
+  pump's read, then the duplex, then the session — so a keystroke that produces
+  no WIRE line could be held in any of the three. That ambiguity sent an
+  investigation to the wrong layer; this line answers the one question the
+  other cannot, which is whether the byte reached the gateway at all.
+
 - **A single ESC now reaches the remote through all three gateways.** Reported
   from an SC126: `ATDT telnetbible.com:6400` straight from the modem passes ESC
   through fine, but the same host reached through the telnet gateway never saw
