@@ -129,7 +129,7 @@ impl TelnetSession {
         // byte-per-line trace of that is unreadable and would evict everything
         // around it.  Answers "what did the gateway say, and when did it stop
         // saying it" -- which is the question a hangup raises.
-        if super::cpm_emu::keytrace_on() {
+        if self.trace_bytes {
             glog!("cpmkey TX {} bytes: {}", bytes.len(), super::cpm_emu::render_bytes(bytes, 48));
         }
         let needs_escape = !self.is_serial && !self.is_ssh;
@@ -198,7 +198,7 @@ impl TelnetSession {
     /// Costs one `bool` load per byte when disarmed.
     pub(in crate::telnet) async fn session_read_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
         let r = self.session_read_byte_inner().await;
-        if super::cpm_emu::keytrace_on() {
+        if self.trace_bytes {
             match &r {
                 Ok(Some(b)) => {
                     glog!("cpmkey WIRE {} (0x{:02X})", super::cpm_emu::keyname(*b), b)

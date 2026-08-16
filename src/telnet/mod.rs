@@ -847,6 +847,21 @@ pub(crate) struct TelnetSession {
     // negotiate; callers fall back to TerminalType-driven defaults.
     window_width: Option<u16>,
     window_height: Option<u16>,
+    /// Is the byte trace armed for this session?
+    ///
+    /// **Read once here, not per byte.**  It follows `gateway_debug`, whose
+    /// accessor takes a global mutex -- fine at the rate the gateway proxy and
+    /// the modem consult it, and badly wrong on `session_read_byte`, which the
+    /// CP/M out-of-band drain polls once per CPU batch.  A batch ends at every
+    /// BDOS/BIOS trap, and this project has measured 6.4M of those a second,
+    /// so reading the flag per byte put millions of global mutex acquisitions
+    /// a second on the emulator's hottest path -- the same shape as the 1.1 ms
+    /// timer that once capped output at 840 char/s.
+    ///
+    /// Caching it per session is also what the key already promises: its
+    /// documentation says "read fresh by each session", so a per-byte read was
+    /// over-delivering on a contract nobody asked for.
+    trace_bytes: bool,
 }
 
 impl TelnetSession {
@@ -917,6 +932,7 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            trace_bytes: cpm_emu::keytrace_on(),
         }
     }
 
@@ -976,6 +992,7 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            trace_bytes: cpm_emu::keytrace_on(),
         }
     }
 
@@ -1051,6 +1068,7 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            trace_bytes: cpm_emu::keytrace_on(),
         }
     }
 
@@ -1696,6 +1714,7 @@ pub fn start_server(
                                     telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
+                                    trace_bytes: cpm_emu::keytrace_on(),
                                 };
                                 if let Err(e) = session.run().await {
                                     if !is_normal_disconnect(&e) {

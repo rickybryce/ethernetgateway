@@ -2181,7 +2181,7 @@ impl TelnetSession {
         // break-out pair, so don't retrack here (leave `last_esc` to the drain
         // / wire path) — just translate.
         if let Some(code) = Self::cpmemu_pending_key(pending, is_petscii) {
-            if keytrace_on() {
+            if self.trace_bytes {
                 glog!(
                     "cpmkey CONIN from-buffer {} (0x{:02X}) last_esc={} pending_left={}",
                     keyname(code),
@@ -2203,7 +2203,7 @@ impl TelnetSession {
                 Err(e) => return Err(e),
             };
 
-            if keytrace_on() {
+            if self.trace_bytes {
                 glog!(
                     "cpmkey CONIN wire {} (0x{:02X}) last_esc={} petscii={}",
                     keyname(b),
@@ -2217,7 +2217,7 @@ impl TelnetSession {
             if is_esc_key(b, is_petscii) {
                 if *last_esc {
                     *last_esc = false;
-                    if keytrace_on() {
+                    if self.trace_bytes {
                         glog!("cpmkey CONIN second ESC -> BREAKOUT");
                     }
                     return Ok(ConIn::BreakOut);
@@ -2225,7 +2225,7 @@ impl TelnetSession {
                 // Peek for a fast CSI arrow (ANSI terminals only).
                 if !is_petscii {
                     let peek = self.cpmemu_peek_arrow().await?;
-                    if keytrace_on() {
+                    if self.trace_bytes {
                         glog!(
                             "cpmkey CONIN ESC peek -> {}",
                             match peek {
@@ -2244,12 +2244,12 @@ impl TelnetSession {
                 }
                 // Lone ESC: deliver it; a following ESC becomes the break-out.
                 *last_esc = true;
-                if keytrace_on() {
+                if self.trace_bytes {
                     glog!("cpmkey CONIN first ESC delivered to guest, last_esc:=true");
                 }
                 return Ok(ConIn::Byte(0x1B));
             }
-            if keytrace_on() && *last_esc {
+            if self.trace_bytes && *last_esc {
                 glog!("cpmkey CONIN non-ESC after ESC -> last_esc cleared (pair broken)");
             }
             *last_esc = false;
@@ -2346,7 +2346,7 @@ impl TelnetSession {
                 Ok(Some(b)) => {
                     // Escape tracking uses the SAME `last_esc` as cpmemu_conin,
                     // so a double-`ESC` split across the two still pairs.
-                    if keytrace_on() {
+                    if self.trace_bytes {
                         glog!(
                             "cpmkey DRAIN wire {} (0x{:02X}) last_esc={} pending={}",
                             keyname(b),
@@ -2358,14 +2358,14 @@ impl TelnetSession {
                     if is_esc_key(b, is_petscii) {
                         if *last_esc {
                             *last_esc = false;
-                            if keytrace_on() {
+                            if self.trace_bytes {
                                 glog!("cpmkey DRAIN second ESC -> BREAKOUT");
                             }
                             return Ok(OobDrain::BreakOut);
                         }
                         *last_esc = true;
                     } else {
-                        if keytrace_on() && *last_esc {
+                        if self.trace_bytes && *last_esc {
                             glog!("cpmkey DRAIN non-ESC after ESC -> last_esc cleared (pair broken)");
                         }
                         *last_esc = false;
