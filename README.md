@@ -76,8 +76,11 @@ options, and the full AT command set.
   transfer directory — or as mounted **`.dsk` disk images** (Altair 88-HDSK,
   and the 8" single-density format used by Tarbell, Cromemco and
   IMSAI/z80pack). Ships **EGT8080**, this project's own CP/M terminal in period
-  assembly — built to the 8080 instruction set, so one binary runs on either
-  processor — and a virtual modem so guest software can dial out. On by default
+  assembly — built to the 8080 instruction set, so it runs on either processor —
+  and **EGT80**, the Z80 build of it, which adds the Z180 ASCI ports an SC126
+  uses as its console and which no 8080 binary can reach. Both are placed on
+  drive A: and in the transfer directory. Also a virtual modem so guest software
+  can dial out. On by default
   and bounded three ways: every file call jailed under `transfer_dir/CPM`, a
   runaway stopped by an instruction ceiling, and a double-`ESC` always returning
   to `A>`. `cpm_emu_enabled = false` shuts it off; `cpm_emu_uart = off` keeps it
@@ -216,8 +219,8 @@ software. The user is solely responsible for securing their own network,
 credentials, and data. Telnet is an inherently insecure protocol — do not use
 this software on untrusted networks.
 
-Portions of this project were developed with the assistance of AI tools
-including Claude Code.
+Portions of this project were developed with the assistance of AI tools,
+principally Claude Code (Anthropic) with ChatGPT (OpenAI) alongside it.
 
 ## License
 

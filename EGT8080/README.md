@@ -12,17 +12,35 @@ the pairing wrong and the program is simply silent.
 EGT8080 asks instead. One `.COM` presents a menu, you pick the port, and it
 remembers. It runs on CP/M 2.2 and CP/M 3.
 
-It ships as **one binary that runs on either processor**:
+It ships as **two binaries from one source**:
 
 | File | Runs on | Notes |
 |---|---|---|
-| `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. |
-| RETIRED in 0.9.2: `EGT80.COM` | The Z80 only | The original, and the ancestor of this source. Smaller, and it used the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it. |
+| `EGT8080.COM` | **Both** — `cpm_cpu = z80` *and* `= 8080` | Built to the 8080's instruction set, which is a strict subset of the Z80's. The one to reach for. **Derived** from `EGT80.Z80` by `tools/port8080.py`. |
+| `EGT80.COM` | The Z80 (and Z180) only | The source build. Smaller, and it uses the Z80's relative jumps and `IN A,(C)`. On an 8080 it takes CP/M down with it — but it is the only one that can drive the **Z180 ASCI** ports. |
 
-The retired build is listed because an operator who upgraded still has it on
-drive A: — placement never overwrites — and it still holds *its* settings. The
-two must never share a filename, which is what
-`test_the_shipped_terminal_carries_its_own_name` holds.
+**Why two, when one runs everywhere.** 0.9.2's cycle retired the Z80 build on
+exactly that reasoning, and it was right about every machine except one: a Z180
+board — an SC126, and many a RomWBW machine — has no external UART for its
+console at all. Its serial channels are *inside* the processor, reached with
+`IN0`/`OUT0` and found with `MLT BC`. All three are ED-prefixed instructions,
+and on a true 8080 an `ED` byte is an undocumented `CALL`: the probe would not
+fail, it would jump into the weeds. So those bytes cannot exist in a binary that
+must also run on an 8080, and no care taken in `EGT8080.COM` could ever serve a
+Z180 console. Hence the pair, and hence which one leads: EGT8080 everywhere,
+EGT80 when the console is an ASCI port.
+
+On EGT8080 the ASCI entry stays **on the port menu** and is refused when chosen
+("This processor is not a Z180, so it has no ASCI ports"), which is what
+`ISZ180` always answering "not a Z180" buys. Listing and refusing beats hiding:
+the operator of a Z180 board learns the family exists and that this is the wrong
+build, rather than meeting a menu that is silently one item shorter.
+
+The two must never share a filename or a settings slot — each saves its
+configuration inside its own `.COM`, and an operator who upgraded from before
+0.9.2 already has an `EGT80.COM` of their own with their ports in it, which
+placement will not overwrite. `test_each_shipped_terminal_carries_its_own_name`
+holds the FCB names apart in both directions.
 
 **Status: complete (v0.7)** — a working terminal with all five port families,
 settings that survive a restart, and XMODEM file transfer in both directions.
@@ -76,9 +94,16 @@ successful `CONNECT` tests the port, the modem and the terminal in one go.
 ## Building
 
 ```sh
-make            # assemble EGT8080.COM with SLR Z80ASM
-make check      # prove the source also assembles with M80 and ZMAC
+make            # assemble BOTH EGT80.COM and EGT8080.COM with SLR Z80ASM
+make port       # re-derive EGT8080.Z80 from EGT80.Z80 after editing the source
+make check      # prove BOTH sources also assemble with M80 and ZMAC
 ```
+
+**Edit `EGT80.Z80`, then `make port`, then `make`.** `EGT8080.Z80` is a generated
+file: editing it directly means the next `make port` throws the edit away, which
+is why `port` is deliberately *not* a prerequisite of the build — regenerating on
+every build would discard such an edit silently instead of leaving it to be
+noticed and moved into `tools/port8080.py`.
 
 The build runs the **real period assembler**, SLR `Z80ASM.COM`, under
 [`zxcc`](http://www.seasip.info/Unix/Zxcc/) — the CP/M-on-Unix runner RomWBW
@@ -89,8 +114,8 @@ target machine. If `make` passes here, the source assembles on real CP/M.
 Both the assemblers and `zxcc` come from a RomWBW distribution, which is expected
 at `~/RomWBW`; override with `make CPMBIN=... ZXCCSRC=...` if yours lives
 elsewhere. `zxcc` is compiled on first build into `tools/` (gitignored, third-
-party). `EGT8080.COM` **is** committed, so you can copy it to a CP/M drive without
-owning any of this.
+party). Both `.COM` files **are** committed, so you can copy either to a CP/M
+drive without owning any of this.
 
 `make check` is a real gate, not decoration: each assembler must both report a
 clean assembly *and* produce output. Both conditions are needed — M80 reads an
@@ -137,28 +162,28 @@ unless someone edits the hash in the same commit — which puts it in front of a
 reviewer. **So after any legitimate rebuild:**
 
 ```sh
-make && make check          # the real gate — three assemblers
-sha256sum EGT8080.COM       # paste into PINNED in that test
+make && make check                     # the real gate — three assemblers, both sources
+sha256sum EGT8080.COM EGT80.COM        # paste into PINNED in that test
 ```
 
 The hash pins the artifact, not its correspondence to the source; only
 `make` proves that, so run it before a release cut.
 
-## Why it is written to the 8080's instruction set
+## Why one of them is written to the 8080's instruction set
 
-There is one terminal and it is 8080 code, because the 8080's instructions are a
-strict subset of the Z80's: one binary then runs whichever processor `cpm_cpu`
-selects. A separate Z80 build existed until 0.9.2 — smaller, using relative
-jumps and `IN A,(C)` — and was generated from this file's ancestor by a porter
-script. It went because it crashed the moment an operator chose the 8080, so
-shipping both put a wrong answer on drive A: beside the right one. This file is
-the source now, edited directly; the porter and the Z80 binary are gone.
+`EGT8080.COM` is 8080 code because the 8080's instructions are a strict subset of
+the Z80's: that one binary then runs whichever processor `cpm_cpu` selects, and
+on real 8080 iron as well. `EGT80.Z80` is the source and `tools/port8080.py`
+derives the 8080 file from it, so a change is made once and both builds get it.
 
-The one capability that went with it is the Z180 ASCI ports. Detecting a Z180
-needs `MLT BC` (`DB 0EDH,4CH`), and on a true 8080 an `ED` byte is an
-undocumented `CALL` — the probe would not fail, it would jump into the weeds —
-so those bytes cannot be in an 8080 binary at all. Restoring them needs an
-8080/Z80 flag test that uses no `ED` byte, ahead of any Z180 probe.
+The 8080 build's one lost capability is the **Z180 ASCI** family, and it is lost
+for good rather than for want of trying: `MLT BC` (`DB 0EDH,4CH`) is how a Z180
+is detected, and `IN0`/`OUT0` (`ED 38`/`ED 39`) is how its registers are read, so
+the family is ED-prefixed instructions from end to end. On a true 8080 an `ED`
+byte is an undocumented `CALL`. A flag test distinguishing 8080 from Z80 could
+guard the probe, but the driver would still have to *contain* the bytes, and a
+build that must run on an 8080 cannot carry them at all. That is why the answer
+was a second binary rather than a cleverer single one.
 
 The source stays in Zilog mnemonics and is assembled by the same SLR `Z80ASM`,
 because what has to be inside the 8080's set is the *opcodes emitted*, not the
@@ -205,7 +230,7 @@ Planned drivers:
 | 6850 ACIA | 88-2SIO 0x10 / 0x12, or any address | yes — `altair_2sio1` |
 | RomWBW HBIOS | unit 0–3, via `RST 8` | yes — `hbios_1` |
 | Altair 88-SIO | 0x00/0x01, or any address | yes — `altair_sio` |
-| Z180 ASCI | channel 0/1, internal I/O base (asked of the firmware) | **not here** — needs real iron |
+| Z180 ASCI | channel 0/1, internal I/O base (asked of the firmware) | **EGT80 only**; **not here** — needs real iron |
 | CP/M BDOS AUX | no parameters (funcs 3/4) | yes — `aux` |
 
 **The menu names machines, not chips.** Choosing a port used to mean choosing a

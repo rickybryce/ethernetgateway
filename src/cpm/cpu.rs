@@ -20,13 +20,15 @@
 //! were very commonly fitted with Z80 upgrade boards.
 //!
 //! **This setting used to cost the terminal**, and that is worth recording
-//! because it was the deciding argument for the default and is no longer
-//! true. The bundled terminal was Z80 code (`EGT80.COM`, retired in 0.9.2);
-//! placed on drive A: on first launch, it executed a Z80-only opcode as
-//! something else on an 8080 and took CP/M down with it. `EGT8080.COM` is the
-//! same terminal built to the 8080's instruction set — 8080 opcodes being a
-//! strict subset, it runs on *either* setting — and it is the only one
-//! shipped now. Choosing the 8080 now
+//! because it was the deciding argument for the default. The bundled terminal
+//! was Z80 code (`EGT80.COM`); placed on drive A: on first launch, it executed
+//! a Z80-only opcode as something else on an 8080 and took CP/M down with it.
+//! `EGT8080.COM` is the same terminal built to the 8080's instruction set —
+//! 8080 opcodes being a strict subset, it runs on *either* setting — and it is
+//! the one the sign-on names when the 8080 is chosen. Both ship: EGT80 is back
+//! for the Z180 ASCI ports, whose instructions cannot appear in an 8080 binary
+//! at all, so under this setting drive A: again holds one terminal that runs
+//! and one that does not. Choosing the 8080 now
 //! costs the `hbios_*` modem profiles' usual clientele (RomWBW software is
 //! Z80/Z180 code, though our HBIOS itself answers an 8080 perfectly well) and
 //! nothing else we ship.

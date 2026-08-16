@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Both CP/M terminals ship, and both are placed for you.** `EGT8080.COM` —
+  written to the 8080's instruction set, which the Z80's is a strict superset
+  of, so it runs on any machine here and under either `cpm_cpu` — is the one to
+  reach for. `EGT80.COM`, the Z80 build, goes beside it because it carries a
+  family of ports the other cannot have at all: a **Z180** board such as an
+  SC126 drives its console from the ASCI channels *inside* the processor,
+  reached with `IN0`/`OUT0` and found with `MLT BC`. All three are ED-prefixed
+  instructions, and on a true 8080 an `ED` byte is an undocumented `CALL` — such
+  a probe would not fail, it would jump into the weeds — so those bytes cannot
+  exist in a binary that must also run on an 8080. No amount of care in EGT8080
+  could serve a Z180 console; the answer had to be a second binary.
+
+  This cycle briefly went the other way, on the reasoning that one binary
+  running everywhere beats two that need choosing between. That was right about
+  every machine except the Z180, which is the one an SC126 owner has, and it was
+  put back before the release. One source either way: `EGT80.Z80` is what gets
+  edited and `tools/port8080.py` derives the 8080 file from it, so a change is
+  made once and both assemblers' gates run on both.
+
+  Both are now placed **in the transfer directory** as well as on CP/M drive A:.
+  Drive A: lives inside `CPM/`, which the file-transfer menus do not list, so
+  previously the only way to get the terminal onto a real CP/M machine was to
+  start the emulator and send it from inside — backwards, since the reason to
+  want the file is usually that the far end has no terminal yet. Neither copy is
+  ever overwritten: each saves its settings inside its own `.COM`, and an
+  operator upgrading keeps their own configured copy.
+
 - **A port test, on all three interfaces.** *Test ports* on the desktop's
   Server *More…* window and on the web page, `F` on the telnet CONFIGURATION
   menu: it connects to every listener that really bound, at this machine's own

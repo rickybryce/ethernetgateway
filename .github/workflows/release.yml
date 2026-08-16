@@ -80,13 +80,20 @@ jobs:
           # send to a real CP/M machine over XMODEM, and that should not
           # require starting the emulator to get at.
           #
-          # One file now.  There were two until 0.9.2 and this step is where
-          # that cost something twice: v0.9.0 shipped only the Z80 build --
-          # the terminal the manual tells you *not* to start with -- because a
-          # version-bump checklist cannot catch a file that should have been
-          # ADDED.  EGT8080 is built to the 8080's instruction set, so it runs
-          # whichever processor `cpm_cpu` selects.
+          # BOTH builds, and this step is where getting that wrong has cost
+          # something twice: v0.9.0 shipped only the Z80 build -- the terminal
+          # the manual tells you *not* to start with -- because a version-bump
+          # checklist cannot catch a file that should have been ADDED.
+          #
+          # EGT8080 is built to the 8080's instruction set, so it runs
+          # whichever processor `cpm_cpu` selects and is the one to reach for.
+          # EGT80 is the Z80 build, and it is not a spare: the Z180 ASCI ports
+          # -- the console of an SC126 and of many a RomWBW board -- are
+          # reached with ED-prefixed instructions that cannot appear in a
+          # binary which must also run on a true 8080.  Ship one and a whole
+          # class of machine has no terminal.
           cp EGT8080/EGT8080.COM "dist/${NAME}/" 2>/dev/null || true
+          cp EGT8080/EGT80.COM   "dist/${NAME}/" 2>/dev/null || true
           tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
           echo "ARTIFACT=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
 
@@ -99,8 +106,12 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\ethernetgateway.exe" "dist\$name\"
           if (Test-Path "README.md") { Copy-Item "README.md" "dist\$name\" }
           if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist\$name\" }
-          # See the tar.gz step: shipped loose as well as compiled in.
+          # See the tar.gz step: both builds, shipped loose as well as
+          # compiled in.  A file added to one branch of this step and not the
+          # other is worse than one added to neither -- it ships on some
+          # platforms only, which is a bug report nobody can reproduce.
           if (Test-Path "EGT8080\EGT8080.COM") { Copy-Item "EGT8080\EGT8080.COM" "dist\$name\" }
+          if (Test-Path "EGT8080\EGT80.COM")   { Copy-Item "EGT8080\EGT80.COM"   "dist\$name\" }
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
 

@@ -190,37 +190,64 @@ pub(in crate::telnet) const CPM_BANNER: &str = "CP/M 2.2 (iz80).  Type HELP.";
 /// screen is about 15 rows against a budget of 22, so the unusual case can
 /// simply have a row (the boot screen, which is full, could not).
 ///
-/// **It has been a warning and a chooser, and is now just a signpost.** It
-/// began as "EGT80 needs Z80" when the only bundled terminal was Z80 code that
-/// would crash the machine the operator had just selected; it then named which
-/// of two files to type. One terminal ships now and it runs on either
-/// processor, so the row survives for a smaller reason: an operator who
-/// upgraded still has the old `EGT80.COM` sitting on drive A: — placement
-/// never overwrites — and under this setting typing it still takes CP/M down.
+/// **It has been a warning, a chooser, a signpost, and is a chooser again.**
+/// It began as "EGT80 needs Z80" when the only bundled terminal was Z80 code
+/// that would crash the machine the operator had just selected; it then named
+/// which of two files to type; for 0.9.2 it was a bare signpost, because one
+/// terminal shipped and it ran on either processor. Two ship again — EGT80
+/// carries the Z180 ASCI ports that cannot exist in an 8080 binary — so this
+/// row is once more the line that says which of the two on drive A: is safe to
+/// type under the setting in force. Under the 8080, EGT80 stops at its first
+/// Z80-only opcode, and so does the copy an operator who upgraded from before
+/// 0.9.2 already had there.
 pub(in crate::telnet) const CPM_NOTE_8080: &str = "8080 selected.  Run EGT8080.";
 
 /// EGT8080, the gateway's own CP/M terminal, carried inside the binary and
-/// placed on drive A: when the drive folders are created (see
-/// [`TelnetSession::cpmemu_place_egt80`]).  `include_bytes!` means a release
-/// ships one file and the terminal is simply *there* when someone first opens
-/// the emulator, rather than being something to find and upload.
+/// placed on drive A: and in the transfer directory when the drive folders are
+/// created (see [`TelnetSession::cpmemu_place_egt80`]).  `include_bytes!` means
+/// a release ships one file and the terminal is simply *there* when someone
+/// first opens the emulator, rather than being something to find and upload.
 ///
-/// **One terminal, and it is the 8080 build.** 8080 opcodes are a strict subset
-/// of the Z80's, so this runs under *either* `cpm_cpu` setting. The Z80 build,
-/// `EGT80.COM`, did not: an operator who chose it and later selected the 8080
-/// got the one command on drive A: that crashes their machine. Shipping both
-/// meant shipping a wrong answer next to the right one, and the packaging had
-/// already proved that surface costs something — v0.9.0 shipped `EGT80.COM`
-/// and *not* this file, which a version-bump checklist cannot catch, because
-/// the fault is a file that should have been added.
+/// **The build that runs anywhere.** 8080 opcodes are a strict subset of the
+/// Z80's, so this one runs under *either* `cpm_cpu` setting and on any machine
+/// the emulator imitates.  It is first in [`BUNDLED_TERMINALS`] for that
+/// reason: a reader who takes the first name they see has to be right on both
+/// settings.
 ///
-/// Retired in 0.9.2, along with the Z80 source it was generated from and the
-/// porter that generated it. `EGT8080/EGT8080.Z80` is now the source, edited
-/// directly, and `EGT8080/tools/check8080.py` is what keeps it to the 8080
-/// instruction set — it decodes the assembled binary rather than reading
-/// mnemonics, because a census by mnemonic is how sixteen `IN A,(C)` were
-/// missed once.
+/// It is not the only one, and 0.9.2 briefly made it so.  See [`EGT80_COM`] for
+/// the machine that cannot be served from here.
 const EGT8080_COM: &[u8] = include_bytes!("../../EGT8080/EGT8080.COM");
+
+/// EGT80, the Z80 build of the same program, placed beside EGT8080.
+///
+/// **It exists for one family of ports, and no care in the 8080 build could
+/// provide them.** A Z180 board — an SC126, or any RomWBW machine of that
+/// shape — drives its console from the ASCI channels *inside* the processor.
+/// Reaching them needs `IN0`/`OUT0`, and knowing a Z180 is there at all needs
+/// `MLT BC`; all three are ED-prefixed instructions, and on a true 8080 an ED
+/// byte is an undocumented CALL, so such a probe does not fail — it jumps into
+/// the weeds.  The bytes therefore cannot be in a binary that must also run on
+/// an 8080, which is why EGT8080 offers four port families and this one offers
+/// five.
+///
+/// 0.9.2 retired this build on the reasoning that one binary running everywhere
+/// beats two that need choosing between.  That was right about every machine
+/// except the Z180, and the Z180 is the one an SC126 owner has: EGT8080 reaches
+/// their board only through RomWBW's HBIOS, and a machine whose console is an
+/// ASCI port and whose firmware is not RomWBW had nothing left at all.
+///
+/// **The cost is real and is why EGT8080 leads.** This is Z80 code: run it with
+/// `cpm_cpu = 8080` and the machine stops at the first Z80-only opcode.  Hence
+/// [`CPM_NOTE_8080`], printed on the sign-on when that setting is in force,
+/// names EGT8080 and only EGT8080.
+///
+/// The two must never share a filename or a settings slot — each saves its
+/// configuration inside its own `.COM`, and an operator who upgraded from
+/// before 0.9.2 already has an `EGT80.COM` of their own with their ports in it.
+/// Placement never overwrites, so theirs wins, which is the right answer: it is
+/// the same program and it holds their settings.
+const EGT80_COM: &[u8] = include_bytes!("../../EGT8080/EGT80.COM");
+
 
 /// How many sessions are inside the CP/M emulator right now.
 ///
@@ -257,13 +284,27 @@ impl Drop for CpmSessionCount {
 /// is compiled into it) — renaming the file costs the user that feature.
 const EGT8080_NAME: &str = "EGT8080.COM";
 
-/// The terminals shipped inside the binary and placed on drive A:.
+/// Filename EGT80 is placed under, on the same terms.
+///
+/// Eight characters is all an FCB holds, so these two names are as close as
+/// two builds can be while remaining distinct owners of their own settings —
+/// and distinct they must be, because `EGT8080` *contains* `EGT80` and a
+/// substring check on either would pass on the other.
+const EGT80_NAME: &str = "EGT80.COM";
+
+/// The terminals shipped inside the binary, placed on drive A: and in the
+/// transfer directory.
 ///
 /// A table rather than a call, so the rules that matter — never overwrite,
 /// write-and-rename, a failure is logged and not fatal — are stated once. A
-/// second build is one row, which is how the 8080 one arrived and how the Z80
-/// one left.
-const BUNDLED_TERMINALS: &[(&str, &[u8])] = &[(EGT8080_NAME, EGT8080_COM)];
+/// build is one row, which is how the 8080 one arrived, how the Z80 one left
+/// in 0.9.2, and how it came back when an SC126's Z180 console proved that one
+/// binary could not serve every machine after all.
+///
+/// **EGT8080 is first and that is load-bearing** — see
+/// [`test_the_terminal_that_runs_on_both_comes_first`].
+const BUNDLED_TERMINALS: &[(&str, &[u8])] =
+    &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
 
 /// Outcome of a single console-input read while a program runs.
 enum ConIn {
@@ -2822,7 +2863,7 @@ mod repl_tests {
 
 #[cfg(test)]
 mod egt80_tests {
-    use super::{BUNDLED_TERMINALS, EGT8080_COM, EGT8080_NAME};
+    use super::{BUNDLED_TERMINALS, EGT80_COM, EGT80_NAME, EGT8080_COM, EGT8080_NAME};
 
     /// The committed `.COM`s are build artifacts of `EGT8080/*.Z80`, and CI
     /// cannot rebuild them: that needs SLR's `Z80ASM.COM` and `zxcc`, neither
@@ -2841,7 +2882,12 @@ mod egt80_tests {
     /// cannot arrive with no cover at all.
     #[test]
     fn test_bundled_terminals_look_like_com_files() {
-        assert_eq!(BUNDLED_TERMINALS.len(), 1, "one terminal: the 8080 build, which runs on both");
+        assert_eq!(
+            BUNDLED_TERMINALS.len(),
+            2,
+            "two builds: the 8080 one that runs everywhere, and the Z80 one that \
+             carries the Z180 ASCI ports an 8080 binary cannot hold"
+        );
         for (name, bytes) in BUNDLED_TERMINALS {
             assert!(!bytes.is_empty(), "{name} is empty — was it built?");
             assert_eq!(
@@ -2855,6 +2901,7 @@ mod egt80_tests {
             assert_eq!(bytes[0], 0xC3, "{name} should start with a JP instruction");
         }
         assert_eq!(EGT8080_NAME, "EGT8080.COM");
+        assert_eq!(EGT80_NAME, "EGT80.COM");
         // Both are 8.3 names CP/M can open, which is not automatic: EGT8080
         // is exactly the eight characters the FCB has room for.
         for (name, _) in BUNDLED_TERMINALS {
@@ -2864,19 +2911,21 @@ mod egt80_tests {
         }
     }
 
-    /// **Every terminal name the emulator prints is the one that runs on both.**
+    /// **The 8080 sign-on names only the build that runs on an 8080.**
     ///
-    /// The help text and the banner note are static literals — nothing builds
+    /// The banner note and the help text are static literals — nothing builds
     /// them from [`BUNDLED_TERMINALS`], so nothing but this stops them naming
-    /// `EGT80` — the Z80 build, retired in 0.9.2. It is not on drive A: any
-    /// more, and under `cpm_cpu = 8080` it was the one command that took CP/M
-    /// down, named on the screen somebody opened *because* they did not know
-    /// what to type.
+    /// `EGT80` on the one screen where that name is actively harmful. EGT80 is
+    /// Z80 code: under `cpm_cpu = 8080` it stops at its first Z80-only opcode,
+    /// and this is the screen somebody reads *because* they do not know what to
+    /// type. It ships again for the Z180 ASCI ports, and drive A: holds it —
+    /// but the 8080 note must point at the other one.
     ///
-    /// A whole-word check, because `EGT8080` contains `EGT80`: a substring
-    /// test would pass on either name and prove nothing.
+    /// A whole-word check, because `EGT8080` contains `EGT80`: a substring test
+    /// would pass on either name and prove nothing. That is not hypothetical —
+    /// it is why this test exists in this form.
     #[test]
-    fn test_the_emulator_never_names_the_retired_build() {
+    fn test_the_8080_note_never_names_the_z80_build() {
         use super::{TelnetSession, CPM_NOTE_8080};
 
         let mut lines: Vec<&str> = vec![CPM_NOTE_8080];
@@ -2887,8 +2936,8 @@ mod egt80_tests {
             for word in line.split(|c: char| !c.is_ascii_alphanumeric()) {
                 assert_ne!(
                     word, "EGT80",
-                    "this line names the retired Z80 build, which is not on drive A: \
-                     and crashes an 8080: {line:?}"
+                    "this line names the Z80 build, which stops at its first \
+                     Z80-only opcode under cpm_cpu = 8080: {line:?}"
                 );
             }
         }
@@ -2927,38 +2976,84 @@ mod egt80_tests {
         }
     }
 
-    /// **The shipped terminal must not be the retired Z80 build under another
-    /// name.**
+    /// **Each build carries its own name, and not the other's.**
     ///
-    /// **It carries its own name**, which is not a formality: that string is
-    /// the FCB EGT8080 opens to save its settings, so a wrong one writes the
-    /// operator's configuration into a file that is not this program.
-    ///
-    /// It also has to *not* carry `EGT80   COM`. That build was retired in
-    /// 0.9.2 and an upgrader keeps their old `EGT80.COM` on drive A: —
-    /// placement never overwrites — so the two must stay distinct owners of
-    /// their own settings rather than this one silently saving into that.
+    /// That string is the FCB the program opens to save its settings, so a
+    /// wrong one writes the operator's configuration into a file that is not
+    /// this program — and with two builds on one drive, the file it would land
+    /// in is the *other terminal*.
     ///
     /// **Both literals are FCB fields, not display names**: 8 characters of
     /// name padded with spaces, then 3 of extension, 11 bytes with no dot.
-    /// Spelling them out matters — the 0.9.2 rename rewrote `EGT80   COM`
-    /// into `EGT8080   COM`, which is thirteen bytes and therefore cannot
-    /// occur in any FCB, so this guard passed while proving nothing.  A
-    /// literal that is a *layout* is not a name to be search-and-replaced.
+    /// Spelling them out matters — the 0.9.2 rename rewrote `EGT80   COM` into
+    /// `EGT8080   COM`, which is thirteen bytes and therefore cannot occur in
+    /// any FCB, so this guard passed while proving nothing. A literal that is a
+    /// *layout* is not a name to be search-and-replaced.
     #[test]
-    fn test_the_shipped_terminal_carries_its_own_name() {
-        let fcb_name = |bytes: &[u8], want: &[u8]| {
-            bytes.windows(want.len()).any(|w| w == want)
-        };
+    fn test_each_shipped_terminal_carries_its_own_name() {
+        let fcb_name = |bytes: &[u8], want: &[u8]| bytes.windows(want.len()).any(|w| w == want);
         assert!(
             fcb_name(EGT8080_COM, b"EGT8080 COM"),
             "EGT8080.COM does not carry its own name — it would save its \
              settings somewhere else"
         );
         assert!(
-            !fcb_name(EGT8080_COM, b"EGT80   COM"),
-            "EGT8080.COM carries the retired Z80 build's filename"
+            fcb_name(EGT80_COM, b"EGT80   COM"),
+            "EGT80.COM does not carry its own name — it would save its \
+             settings somewhere else"
         );
+        // Neither may carry the other's, which is the failure that would put
+        // one terminal's settings inside the other's file.  `EGT8080 COM` is
+        // its own 11 bytes and cannot be mistaken for `EGT80   COM`, so this
+        // is a genuine pair of checks rather than one restated.
+        assert!(
+            !fcb_name(EGT8080_COM, b"EGT80   COM"),
+            "EGT8080.COM carries the Z80 build's filename"
+        );
+        assert!(
+            !fcb_name(EGT80_COM, b"EGT8080 COM"),
+            "EGT80.COM carries the 8080 build's filename"
+        );
+    }
+
+    /// **Only the Z80 build carries the Z180 probe, and that is the byte that
+    /// matters.**
+    ///
+    /// `MLT BC` — `ED 4C` — is what asks the processor whether it is a Z180,
+    /// and it is the one ED-prefixed pair in this program that would *execute*
+    /// on a machine that might be a true 8080, where an `ED` byte is an
+    /// undocumented `CALL`: it would not fail, it would jump into the weeds.
+    /// The porter replaces that probe with `SCF` in the 8080 build, so the
+    /// question is answered "no" without being asked and the ASCI driver below
+    /// it is unreachable.
+    ///
+    /// **Measured, not reasoned, because reasoning got it wrong once.** The
+    /// 8080 image still contains eleven `ED 38`/`ED 39` bytes — the driver's
+    /// `IN0`/`OUT0`, laid down as `DB`, which `check8080.py` skips because they
+    /// are directives rather than instructions. A comment claiming "no ED byte
+    /// anywhere" survived in the source for a while on the strength of that
+    /// checker passing. Unreachable is the true and sufficient property; the
+    /// absence of `ED 4C` is what enforces it, so that is what this pins.
+    #[test]
+    fn test_only_the_z80_build_carries_the_z180_probe() {
+        const MLT_BC: &[u8] = &[0xED, 0x4C];
+        let has = |b: &[u8]| b.windows(2).any(|w| w == MLT_BC);
+        assert!(
+            has(EGT80_COM),
+            "EGT80.COM has lost its Z180 probe — it is the build that exists to \
+             find one, and without MLT BC the ASCI family can never be selected"
+        );
+        assert!(
+            !has(EGT8080_COM),
+            "EGT8080.COM carries MLT BC. On a true 8080 that ED byte is an \
+             undocumented CALL into the middle of the program"
+        );
+        // And the driver bytes really are still there in both, so the claim
+        // above is about reachability rather than about their absence.  A test
+        // that quietly stopped being true because someone excised the driver
+        // should say so rather than pass on a changed premise.
+        let in0 = |b: &[u8]| b.windows(2).filter(|w| w == &[0xED, 0x38]).count();
+        assert!(in0(EGT80_COM) > 0 && in0(EGT8080_COM) > 0, "the ASCI driver moved");
     }
 
     /// The one check that closes the "code change without a version bump" gap
@@ -2987,6 +3082,7 @@ mod egt80_tests {
         // pin each binary against the other one's hash and pass.
         const PINNED: &[(&str, &str)] = &[
             ("EGT8080.COM", "331ff21b51aa1a2641324967b8a21ec7f5b949694ec1ca308a800ead420f9874"),
+            ("EGT80.COM", "404b9e6def2d6e26e8434186e0e9eaf69f13c20e08fbe36dffa7d99335fad58e"),
         ];
 
         for ((name, bytes), (pin_name, pinned)) in BUNDLED_TERMINALS.iter().zip(PINNED) {
@@ -3031,6 +3127,13 @@ mod egt80_tests {
     #[test]
     fn test_egt80_screens_fit_a_24_by_80_terminal() {
         check_screens_fit("EGT8080.Z80", include_str!("../../EGT8080/EGT8080.Z80"));
+        // Both sources, not just the derived one.  EGT80.Z80 is where a screen
+        // is actually edited, and the porter rewrites instructions rather than
+        // text -- so a line that overruns is introduced here and inherited
+        // there, and checking only the generated file would report the fault
+        // against a file nobody typed it into.  It is also not the same set of
+        // screens: the Z180 ASCI menus exist only in this one.
+        check_screens_fit("EGT80.Z80", include_str!("../../EGT8080/EGT80.Z80"));
     }
 
     /// One source's screens, for [`test_egt80_screens_fit_a_24_by_80_terminal`].
@@ -3152,12 +3255,15 @@ mod egt80_tests {
         // install where the bundled terminal cannot reach the modem, which is
         // exactly the confusion this pairing exists to prevent.
         //
-        // One source now: the Z80 build and the porter that derived this one
-        // from it were retired in 0.9.2.  The loop stays because a second
-        // build is one row, which is how the last one arrived and left.
-        {
-            let (src_name, src) =
-                ("EGT8080.Z80", include_str!("../../EGT8080/EGT8080.Z80"));
+        // Both sources.  The defaults are DB values, and the porter rewrites
+        // instructions rather than data, so the two blocks can only agree by
+        // having been edited together -- and the pairing this test defends is
+        // "the bundled terminal reaches the modem on a fresh install", which
+        // is a promise about whichever of the two the operator typed.
+        for (src_name, src) in [
+            ("EGT8080.Z80", include_str!("../../EGT8080/EGT8080.Z80")),
+            ("EGT80.Z80", include_str!("../../EGT8080/EGT80.Z80")),
+        ] {
         let field = |name: &str| -> String {
             src.lines()
                 .find(|l| l.trim_start().starts_with(&format!("{name}:")))
@@ -3169,7 +3275,7 @@ mod egt80_tests {
         };
 
         // EGT8080's port kind default must be the SIO family (PKSIO = 1).
-        assert_eq!(field("PKIND"), "PKSIO", "EGT8080 should default to the SIO family");
+        assert_eq!(field("PKIND"), "PKSIO", "{src_name} should default to the SIO family");
 
         // ...and its base address must be the status port DEFAULT_UART resolves
         // to.  EGT8080 writes it as a Z80 hex literal, e.g. 82H.
@@ -3179,7 +3285,7 @@ mod egt80_tests {
         match crate::cpm::resolve_access(crate::cpm::uart::DEFAULT_UART) {
             crate::cpm::ModemAccess::Ports(p) => assert_eq!(
                 p.status_port, base,
-                "EGT8080 defaults to port {base:#04x} but the gateway's default \
+                "{src_name} defaults to port {base:#04x} but the gateway's default \
                  profile ({}) answers at {:#04x}",
                 crate::cpm::uart::DEFAULT_UART, p.status_port
             ),
@@ -3209,8 +3315,15 @@ mod egt80_tests {
     /// this checks the table against.
     #[test]
     fn test_egt80_fallback_defaults_match_the_shipped_block() {
-        let src = include_str!("../../EGT8080/EGT8080.Z80");
-        check_fallback_defaults(&src.replace("\r\n", "\n"));
+        for src in [
+            include_str!("../../EGT8080/EGT8080.Z80"),
+            // Both sources: the porter rewrites instructions, not data, so a
+            // default edited in one block and not the other survives the
+            // derivation intact and ships in both binaries.
+            include_str!("../../EGT8080/EGT80.Z80"),
+        ] {
+            check_fallback_defaults(&src.replace("\r\n", "\n"));
+        }
     }
 
     /// One source's two default blocks, compared field by field.
@@ -3293,23 +3406,38 @@ mod egt80_tests {
         // Catches the realistic mistake: bumping the version in a .Z80 and
         // committing without rebuilding the .COM.
         //
-        // `include_str!` needs a literal path, so this is written out here
+        // `include_str!` needs a literal path, so the pairs are written out
         // rather than looped over `BUNDLED_TERMINALS`.
-        {
-            let (name, src, bytes) =
-                (EGT8080_NAME, include_str!("../../EGT8080/EGT8080.Z80"), EGT8080_COM);
+        let mver = |name: &str, src: &str| -> String {
             let line = src
                 .lines()
                 .find(|l| l.trim_start().starts_with("MVER:"))
                 .unwrap_or_else(|| panic!("{name}'s source should declare MVER"));
-            let quoted: Vec<&str> = line.split('\'').collect();
-            let version =
-                quoted.get(1).expect("MVER should contain a quoted version string");
+            line.split('\'').nth(1).expect("MVER should contain a quoted version string").to_string()
+        };
+
+        let pairs: [(&str, &str, &[u8]); 2] = [
+            (EGT8080_NAME, include_str!("../../EGT8080/EGT8080.Z80"), EGT8080_COM),
+            (EGT80_NAME, include_str!("../../EGT8080/EGT80.Z80"), EGT80_COM),
+        ];
+        let mut versions = Vec::new();
+        for (name, src, bytes) in pairs {
+            let version = mver(name, src);
             assert!(
                 bytes.windows(version.len()).any(|w| w == version.as_bytes()),
                 "the built {name} does not contain its source's version string \
                  ({version:?}) — rebuild it with `make -C EGT8080`"
             );
+            versions.push(version);
         }
+        // The two version lines must differ, and they do by naming their
+        // processor.  Without this the check could be satisfied by pinning
+        // both binaries against one source's string — which is exactly what a
+        // copy-paste of the block above would do, and it would pass while
+        // proving nothing about the second build.
+        assert_ne!(
+            versions[0], versions[1],
+            "each build's version line should name its own processor"
+        );
     }
 }

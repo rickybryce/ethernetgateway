@@ -4,47 +4,7 @@
 ; life.
 ;                                              - John 3:16, KJV
 ;=======================================================================
-; EGT8080 - "Ethernet Gateway Terminal", 8080 build
-;
-; DERIVED FILE - DO NOT EDIT.  Generated from EGT80.Z80 by
-; tools/port8080.py; run `make port` after editing EGT80.Z80.  Editing
-; this file directly means the next `make port` throws the edit away.
-;
-; The same program as EGT80, built for a machine with no Z80 in it - an
-; Altair, an IMSAI, or the gateway's own emulator with cpm_cpu = 8080.
-; 8080 opcodes are a strict subset of the Z80's, so this build runs on
-; BOTH settings and is the one placed on drive A: by default; EGT80.COM
-; stays for the Z80 -- and it is not a courtesy copy.  A Z180 board such
-; as the SC126 drives its console from the ASCI channels inside the
-; processor, reached with IN0/OUT0 and found with MLT BC.  Those are all
-; ED-prefixed instructions, and an ED byte on a true 8080 is an
-; undocumented CALL - so the family cannot be USED here.  The machines
-; this build exists for and the machines that need the ASCI are disjoint;
-; that is why there are two.
-;
-; Note what that does and does not mean, because it is measurable and was
-; once written down wrong.  The ASCI driver's IN0/OUT0 bytes are still in
-; this file, laid down as DB, and 11 of them are in the assembled .COM.
-; They are unreachable: ISZ180 below always answers "not a Z180", every
-; caller branches away, and the one byte pair that would have EXECUTED -
-; MLT BC, ED 4C - is gone.  Reachability is the property that matters;
-; "no ED byte anywhere in the image" is a stronger claim than this build
-; makes, and counting the bytes is how you find that out.
-;
-; What differs from EGT80.Z80, and nothing else does: JR became JP, two
-; BIT 7,A became OR A + JP M, the one LDIR became a copy loop, and the
-; Z180 probe answers "no" without asking.  That probe is MLT BC, an
-; ED-prefixed instruction, and on a true 8080 an ED byte is an
-; undocumented CALL - it would not fail, it would jump into the weeds.
-;
-; The Z180 ASCI family is still ON the port menu here and is refused when
-; chosen ("This processor is not a Z180, so it has no ASCI ports"), which
-; is what ISZ180 always answering "not a Z180" buys.  Listing it and
-; refusing beats hiding it: the operator of a Z180 board learns the family
-; exists and that this is the wrong build for it, rather than finding a
-; menu that is silently one item shorter.  Use EGT80.COM there.
-;
-; The reasoning for each is in tools/port8080.py.
+; EGT80 - "Ethernet Gateway Terminal"
 ;
 ; A CP/M terminal program for the Ethernet Gateway, written for real Z80
 ; hardware as much as the gateway's own CP/M emulator.  Unlike the period
@@ -279,7 +239,7 @@ CONSET: LD      C,BVERS
         CALL    BDOS
         LD      (CPMVER),A
         CP      30H             ; CP/M 3.0 or later?
-        JP      NC,CON3
+        JR      NC,CON3
         LD      HL,(BIOSPT)     ; BIOS WBOOT entry
         INC     HL
         INC     HL
@@ -318,7 +278,7 @@ B6IN:   LD      C,BCONIO
         LD      E,DCIRD
         CALL    BDOS
         OR      A
-        JP      Z,B6IN          ; no key yet: ask again
+        JR      Z,B6IN          ; no key yet: ask again
         RET
 ; B6OUT - console output on CP/M 3.
 ;
@@ -333,7 +293,7 @@ B6IN:   LD      C,BCONIO
 ; everything - but FDh..FFh are not tabs, so nothing is lost.
 B6OUT:  LD      A,C
         CP      0FDH
-        JP      NC,B6OUT1
+        JR      NC,B6OUT1
         LD      E,A
         LD      C,BCONIO
         JP      BDOS
@@ -407,7 +367,7 @@ PSTR:   LD      A,(HL)
         RET     Z
         CALL    COUT
         INC     HL
-        JP      PSTR
+        JR      PSTR
 
 ;=======================================================================
 ; PHEX - print A as two hex digits.  Used for port addresses, which the
@@ -455,7 +415,7 @@ CCOL:   PUSH    AF
         LD      E,A
         LD      A,(FLTMOD)
         OR      A
-        JP      NZ,CCOL1        ; ASCII mode: no colour at all
+        JR      NZ,CCOL1        ; ASCII mode: no colour at all
         LD      A,E
         ADD     A,A             ; two bytes per pointer
         LD      E,A
@@ -498,30 +458,30 @@ PSTRK1: LD      A,(HL)
         RET     Z
         INC     HL
         CP      CR
-        JP      Z,PSTRKN
+        JR      Z,PSTRKN
         CP      LF
-        JP      Z,PSTRKN
+        JR      Z,PSTRKN
         LD      B,A             ; hold the character
         LD      A,C
         CP      2
-        JP      Z,PSTRKK        ; two leading spaces seen already
+        JR      Z,PSTRKK        ; two leading spaces seen already
         LD      A,B
         CP      ' '
-        JP      NZ,PSTRK3
+        JR      NZ,PSTRK3
         INC     C               ; another leading space
         LD      A,B
         CALL    COUT
-        JP      PSTRK1
+        JR      PSTRK1
 PSTRK3: LD      C,3
         LD      A,B
         CALL    COUT
-        JP      PSTRK1
+        JR      PSTRK1
 PSTRKK: LD      A,B
         CP      ' '
-        JP      Z,PSTRK3        ; a third space: a continuation line
+        JR      Z,PSTRK3        ; a third space: a continuation line
         LD      A,(HL)          ; a key is followed by a space
         CP      ' '
-        JP      NZ,PSTRK3
+        JR      NZ,PSTRK3
         LD      A,CLKEY
         CALL    CCOL
         LD      A,B
@@ -529,10 +489,10 @@ PSTRKK: LD      A,B
         LD      A,CLRST
         CALL    CCOL
         LD      C,3
-        JP      PSTRK1
+        JR      PSTRK1
 PSTRKN: LD      C,0
         CALL    COUT            ; A still holds the CR or LF
-        JP      PSTRK1
+        JR      PSTRK1
 
 ;=======================================================================
 ; UPCASE - fold the character in A to upper case, so menus accept either.
@@ -565,17 +525,17 @@ PORTST: CALL    PORTS1
                                 ; setting and not a one-off command
 PORTS1: LD      A,(PKIND)
         CP      PKSIO
-        JP      Z,PSSIO
+        JR      Z,PSSIO
         CP      PKACIA
-        JP      Z,PSACI
+        JR      Z,PSACI
         CP      PKHBIO
-        JP      Z,PSHB
+        JR      Z,PSHB
         CP      PKASCI
-        JP      Z,PSASC
+        JR      Z,PSASC
         CP      PKAUX
-        JP      Z,PSAUX
+        JR      Z,PSAUX
         CP      PKS88
-        JP      Z,PSS88
+        JR      Z,PSS88
         LD      HL,PNULL        ; nothing selected: safe stubs
         LD      DE,PNULL
         JP      PSSET4
@@ -628,12 +588,10 @@ PSAUX:  XOR     A
 ; being a copy-and-paste hazard.
 ;-----------------------------------------------------------------------
 PSSET2: LD      (VPST+1),HL
-        EX      DE,HL           ; the 8080 has no LD (nn),DE, so XCHG and
-        LD      (VPIN+1),HL     ; store HL.  HL and DE are dead on return -
-        RET                     ; every caller reloads both pairs.
+        LD      (VPIN+1),DE
+        RET
 PSSETO: LD      (VPOST+1),HL
-        EX      DE,HL
-        LD      (VPOUT+1),HL
+        LD      (VPOUT+1),DE
         RET
 PSSET4: LD      (VPST+1),HL     ; all four at once, for the null stubs
         LD      (VPIN+1),HL
@@ -658,26 +616,30 @@ PNULL:  XOR     A
 ; address bus and stray high bits confuse partially-decoded boards.
 ;-----------------------------------------------------------------------
 SIOST:  LD      A,(PBASE)
-        LD      (IOP1+1),A     ; no IN A,(C) on an 8080: the port
-IOP1:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     01H
         RET
 SIOIN:  LD      A,(PBASE)
         INC     A
-        LD      (IOP2+1),A     ; no IN A,(C) on an 8080: the port
-IOP2:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         RET
 SIOOST: LD      A,(PBASE)
-        LD      (IOP3+1),A     ; no IN A,(C) on an 8080: the port
-IOP3:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     04H
         RET
 SIOOUT: LD      E,A             ; hold the byte; A is needed for the port
         LD      A,(PBASE)
         INC     A
-        LD      (IOP4+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      C,A
+        LD      B,0
         LD      A,E
-IOP4:   OUT     (0),A
+        OUT     (C),A
         RET
 
 ;-----------------------------------------------------------------------
@@ -687,26 +649,30 @@ IOP4:   OUT     (0),A
 ; empty.
 ;-----------------------------------------------------------------------
 ACIST:  LD      A,(PBASE)
-        LD      (IOP5+1),A     ; no IN A,(C) on an 8080: the port
-IOP5:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     01H
         RET
 ACIIN:  LD      A,(PBASE)
         INC     A
-        LD      (IOP6+1),A     ; no IN A,(C) on an 8080: the port
-IOP6:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         RET
 ACIOST: LD      A,(PBASE)
-        LD      (IOP7+1),A     ; no IN A,(C) on an 8080: the port
-IOP7:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     02H
         RET
-ACIOUT: LD      E,A             ; hold the byte; A is needed for the port
+ACIOUT: LD      E,A
         LD      A,(PBASE)
         INC     A
-        LD      (IOP8+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      C,A
+        LD      B,0
         LD      A,E
-IOP8:   OUT     (0),A
+        OUT     (C),A
         RET
 
 ;-----------------------------------------------------------------------
@@ -725,28 +691,32 @@ IOP8:   OUT     (0),A
 ; There is nothing to initialise: the 88-SIO has no control register.
 ;-----------------------------------------------------------------------
 S8ST:   LD      A,(PBASE)
-        LD      (IOP9+1),A     ; no IN A,(C) on an 8080: the port
-IOP9:   IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     01H             ; 0 = a character is waiting
         XOR     01H             ; ...so invert: non-zero = ready
         RET
 S8IN:   LD      A,(PBASE)
         INC     A
-        LD      (IOP10+1),A     ; no IN A,(C) on an 8080: the port
-IOP10:  IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         RET
 S8OST:  LD      A,(PBASE)
-        LD      (IOP11+1),A     ; no IN A,(C) on an 8080: the port
-IOP11:  IN      A,(0)           ; is patched into the operand above
+        LD      C,A
+        LD      B,0
+        IN      A,(C)
         AND     80H             ; 0 = the transmitter is free
         XOR     80H
         RET
-S8OUT:  LD      E,A             ; hold the byte; A is needed for the port
+S8OUT:  LD      E,A
         LD      A,(PBASE)
         INC     A
-        LD      (IOP12+1),A     ; no OUT (C),A on an 8080: patch it
+        LD      C,A
+        LD      B,0
         LD      A,E
-IOP12:  OUT     (0),A
+        OUT     (C),A
         RET
 
 ;-----------------------------------------------------------------------
@@ -757,12 +727,12 @@ IOP12:  OUT     (0),A
 ; different family never writes to a chip the user did not pick.
 ;-----------------------------------------------------------------------
 ACINIT: LD      A,(PBASE)
-        LD      (IOP13+1),A     ; one port, two writes: both operands are
-        LD      (IOP14+1),A     ; patched before either instruction runs
+        LD      C,A
+        LD      B,0
         LD      A,03H           ; master reset
-IOP13:  OUT     (0),A
+        OUT     (C),A
         LD      A,15H           ; 8N1, /16 clock, receive interrupt off
-IOP14:  OUT     (0),A
+        OUT     (C),A
         RET
 
 ;-----------------------------------------------------------------------
@@ -780,10 +750,10 @@ HBST:   LD      B,02H           ; serial input status
         LD      A,(PBASE)
         LD      C,A
         RST     8
-        OR      A               ; see HBERR below: negative is an error, not
-        JP      M,HBNONE        ; a count, and must not read as "data ready".
-        RET                     ; OR A sets S from bit 7, so no BIT is needed
-                                ; and A comes back untouched, as this returns
+        BIT     7,A             ; see HBERR below: negative is an error, not
+        JR      NZ,HBNONE       ; a count, and must not read as "data ready"
+        OR      A
+        RET
 HBNONE: XOR     A               ; report "nothing to read"
         RET
 HBIN:   LD      B,00H           ; serial input (waits for a character)
@@ -796,8 +766,9 @@ HBOST:  LD      B,03H           ; serial output status
         LD      A,(PBASE)
         LD      C,A
         RST     8
-        OR      A               ; bit 7 = error, not room.  S flag, as HBST
-        JP      M,HBFULL
+        BIT     7,A
+        JR      NZ,HBFULL
+        OR      A
         RET
 HBFULL: XOR     A               ; report "no room": PSEND then bounds out and
         RET                     ; the user gets the dead-port diagnosis
@@ -836,12 +807,12 @@ HBOUT:  LD      E,A             ; the byte goes out in E
 ;-----------------------------------------------------------------------
 HBCNT:  LD      A,(0008H)
         CP      0C3H            ; no RST 8 vector: not a RomWBW machine
-        JP      NZ,HBCNTN
+        JR      NZ,HBCNTN
         LD      B,0F8H
         LD      C,00H
         RST     8
         OR      A
-        JP      NZ,HBCNTN
+        JR      NZ,HBCNTN
         LD      A,E             ; LD leaves the flags alone, so the carry
         RET                     ; stays clear from the OR above
 HBCNTN: XOR     A
@@ -864,13 +835,13 @@ HBCNTN: XOR     A
 HBDEV:  LD      (HBUNIT),A
         LD      A,(0008H)
         CP      0C3H
-        JP      NZ,HBDEVN
+        JR      NZ,HBDEVN
         LD      A,(HBUNIT)
         LD      C,A
         LD      B,06H
         RST     8
         OR      A
-        JP      NZ,HBDEVN
+        JR      NZ,HBDEVN
         LD      A,D
         LD      (HBTYPE),A
         LD      A,E
@@ -890,7 +861,7 @@ HBDEVN: SCF
 ;-----------------------------------------------------------------------
 SHTYPE: LD      A,(HBTYPE)
         CP      HBTMAX
-        JP      NC,SHTYPU
+        JR      NC,SHTYPU
         LD      E,A             ; five bytes per name: A*4 + A
         ADD     A,A
         ADD     A,A
@@ -904,7 +875,7 @@ SHTYP1: LD      A,(HL)
         CALL    COUT
         INC     HL
         DEC     B
-        JP      NZ,SHTYP1
+        JR      NZ,SHTYP1
         RET
 SHTYPU: LD      A,'?'
         CALL    COUT
@@ -946,7 +917,7 @@ ASCST:  DB      0EDH,38H
 ASCS1:  DB      00H             ; IN0 A,(STATn)  - operand patched
         LD      E,A
         AND     70H             ; OVRN, PE or FE latched?
-        JP      NZ,ASCERR
+        JR      NZ,ASCERR
         LD      A,E
         AND     80H             ; RDRF
         RET
@@ -974,7 +945,7 @@ ASCT1:  DB      00H             ; OUT0 (TDRn),A
 ;-----------------------------------------------------------------------
 ASCERR: LD      A,E
         AND     80H             ; did a byte arrive with the error?
-        JP      Z,ASCER1
+        JR      Z,ASCER1
         DB      0EDH,38H
 ASCR2:  DB      00H             ; IN0 A,(RDRn) - discard the suspect byte
 ASCER1: DB      0EDH,38H
@@ -1031,16 +1002,18 @@ ASCPAT: LD      A,(PCHAN)
 ; BC comes back untouched.  2 x 2 = 4 separates the two with no side
 ; effects on either.
 ;-----------------------------------------------------------------------
-ISZ180: SCF                     ; an 8080 is never a Z180, and this must
-        RET                     ; not even ASK.  The Z80 build probes with
-                                ; MLT BC, laid down as DB 0EDH,4CH because
-                                ; no Z80 assembler encodes it - and on an
-                                ; 8080 that ED byte is an UNDOCUMENTED CALL,
-                                ; so the probe would not fail, it would jump
-                                ; into the weeds.  The bytes are gone rather
-                                ; than left unreachable.  Carry set is "not
-                                ; a Z180", which all three callers already
-                                ; know how to handle.
+ISZ180: LD      BC,0202H
+        DB      0EDH,4CH        ; MLT BC on a Z180; no-op on a Z80
+        LD      A,B
+        OR      A
+        JR      NZ,ISZNOT       ; B still 2: not a Z180
+        LD      A,C
+        CP      04H             ; 2 x 2
+        JR      NZ,ISZNOT
+        XOR     A               ; carry clear: this is a Z180
+        RET
+ISZNOT: SCF
+        RET
 
 ;-----------------------------------------------------------------------
 ; CP/M AUX device driver (BDOS functions 3 and 4).
@@ -1071,7 +1044,7 @@ AUXST:  LD      A,(AUXFLG)      ; already holding one?
         POP     DE
         POP     BC
         CP      1AH             ; ^Z = nothing waiting
-        JP      Z,AUXST0
+        JR      Z,AUXST0
         LD      (AUXHLD),A
         LD      A,1
         LD      (AUXFLG),A
@@ -1183,15 +1156,15 @@ PSNDO:  LD      BC,0            ; 65536 polls per pass
 PSEND1: PUSH    BC
         CALL    POST
         POP     BC
-        JP      NZ,PSEND2
+        JR      NZ,PSEND2
         DEC     BC
         LD      A,B
         OR      C
-        JP      NZ,PSEND1
+        JR      NZ,PSEND1
         LD      A,(PTRIES)
         DEC     A
         LD      (PTRIES),A
-        JP      NZ,PSNDO
+        JR      NZ,PSNDO
         POP     BC
         LD      A,1
         LD      (PDEAD),A       ; transmitter never came free
@@ -1208,39 +1181,39 @@ MAINLP: CALL    SCMENU
         CALL    CIN
         CALL    UPCASE
         CP      'T'
-        JP      Z,DOTERM
+        JR      Z,DOTERM
         CP      'S'
-        JP      Z,DOSETT
+        JR      Z,DOSETT
         CP      'U'
-        JP      Z,DOSEND
+        JR      Z,DOSEND
         CP      'D'
-        JP      Z,DORECV
+        JR      Z,DORECV
         CP      'H'
-        JP      Z,DOHELP
+        JR      Z,DOHELP
         CP      'V'
-        JP      Z,DOSAVE
+        JR      Z,DOSAVE
         CP      'X'
-        JP      Z,DOEXIT
+        JR      Z,DOEXIT
         LD      A,BEL           ; unknown key: a beep, no scolding
         CALL    COUT
-        JP      MAINLP
+        JR      MAINLP
 DOTERM: CALL    TERM
-        JP      MAINLP
+        JR      MAINLP
 DOSETT: CALL    SCSETT
-        JP      MAINLP
+        JR      MAINLP
 DOHELP: CALL    SCHELP
-        JP      MAINLP
+        JR      MAINLP
 DOSAVE: CALL    SAVCFG
         CALL    TWAIT           ; the menu redraw clears the screen, and
-        JP      MAINLP          ; whether it saved is worth reading
+        JR      MAINLP          ; whether it saved is worth reading
 DOSEND: CALL    XSEND
         CALL    XSETL           ; leave nothing in flight for the next session
         CALL    TWAIT
-        JP      MAINLP
+        JR      MAINLP
 DORECV: CALL    XRECV
         CALL    XSETL
         CALL    TWAIT
-        JP      MAINLP
+        JR      MAINLP
 DOEXIT: CALL    CRLF
         CALL    XHUP            ; don't leave a call up behind us
         LD      HL,MBYE
@@ -1258,7 +1231,7 @@ DOEXIT: CALL    CRLF
 ;=======================================================================
 TERM:   LD      A,(PKIND)
         OR      A
-        JP      NZ,TERM1
+        JR      NZ,TERM1
         LD      HL,MNOPRT       ; refuse rather than read a dead port
         CALL    PSTR
         JP      TCWAIT          ; ...and they may already be typing
@@ -1277,19 +1250,19 @@ TERM1:  CALL    SCTTL           ; the banner heads every session, so it is
         LD      (ESTATE),A      ; on either stream
         LD      (PDEAD),A       ; and no diagnosis pending
 TLOOP:  CALL    PST             ; anything from the port?
-        JP      Z,TL1
+        JR      Z,TL1
         CALL    PIN
         CALL    FILT            ; filter, then to the console
 TL1:    CALL    CST             ; anything from the keyboard?
-        JP      Z,TLOOP
+        JR      Z,TLOOP
         CALL    CIN
         LD      HL,ESCCH
         CP      (HL)            ; the escape key?
-        JP      Z,TESC
+        JR      Z,TESC
         CALL    TSEND
         LD      A,(PDEAD)
         OR      A
-        JP      NZ,TDEAD
+        JR      NZ,TDEAD
         JP      TLOOP
 
 ;-----------------------------------------------------------------------
@@ -1311,7 +1284,7 @@ TDEAD:  CALL    CRLF
 TSEND:  LD      (TYPECH),A
         LD      A,(ECHOFL)
         OR      A
-        JP      Z,TSEND1
+        JR      Z,TSEND1
         LD      A,(TYPECH)
         CALL    FILTE           ; echo through its own filter state
 TSEND1: LD      A,(TYPECH)
@@ -1324,7 +1297,7 @@ TSEND1: LD      A,(TYPECH)
         RET     Z
         LD      A,(ECHOFL)      ; if the echo is ours, echo the LF too -
         OR      A               ; otherwise the local screen keeps
-        JP      Z,TSEND2        ; overwriting the same line
+        JR      Z,TSEND2        ; overwriting the same line
         LD      A,LF
         CALL    FILTE
 TSEND2: LD      A,LF
@@ -1356,15 +1329,15 @@ TESC:   CALL    CRLF
         CALL    UPCASE
         LD      HL,ESCCH        ; escape twice: send it literally
         CP      (HL)
-        JP      Z,TESCLI
+        JR      Z,TESCLI
         CP      'E'
-        JP      Z,TESCEX
+        JR      Z,TESCEX
         CP      'H'
-        JP      Z,TESCHL
+        JR      Z,TESCHL
         CP      'U'
-        JP      Z,TESCU
+        JR      Z,TESCU
         CP      'D'
-        JP      Z,TESCD
+        JR      Z,TESCD
         CALL    CRLF            ; anything else: back to the session
         JP      TLOOP
 TESCLI: LD      A,(ESCCH)
@@ -1425,7 +1398,7 @@ TCWAIT: LD      HL,MCTRLC
         CALL    PSTR
 TCWAI1: CALL    CIN
         CP      03H             ; ^C
-        JP      NZ,TCWAI1       ; anything else: swallow it
+        JR      NZ,TCWAI1       ; anything else: swallow it
         CALL    CRLF
         RET
 
@@ -1466,37 +1439,37 @@ TWAIT:  LD      HL,MKEY
 ; new setting until that sequence happened to finish.
 ;=======================================================================
 FILT:   LD      HL,FSTATE       ; inbound stream's own state
-        JP      FILT0
+        JR      FILT0
 FILTE:  LD      HL,ESTATE       ; echo stream's own state
 FILT0:  LD      E,A             ; hold the byte
         LD      A,(FLTMOD)
         OR      A
-        JP      NZ,FASCII
+        JR      NZ,FASCII
         LD      (HL),0          ; ANSI: no sequence state to carry
         LD      A,E
         JP      COUT            ; straight through
 FASCII: LD      A,(HL)          ; ASCII: mid-sequence?
         OR      A
-        JP      NZ,FILT2
+        JR      NZ,FILT2
         LD      A,E
         AND     7FH             ; strip the high bit
         LD      E,A
         CP      ESC
-        JP      Z,FSESC
+        JR      Z,FSESC
         CP      DEL
         RET     Z               ; DEL prints as litter: drop it
         CP      20H
-        JP      NC,FPRIN        ; printable
+        JR      NC,FPRIN        ; printable
         CP      CR
-        JP      Z,FPRIN
+        JR      Z,FPRIN
         CP      LF
-        JP      Z,FPRIN
+        JR      Z,FPRIN
         CP      TAB
-        JP      Z,FPRIN
+        JR      Z,FPRIN
         CP      BS
-        JP      Z,FPRIN
+        JR      Z,FPRIN
         CP      BEL
-        JP      Z,FPRIN
+        JR      Z,FPRIN
         RET                     ; other control code: drop it
 FPRIN:  JP      COUT
 FSESC:  LD      (HL),1
@@ -1508,11 +1481,11 @@ FSESC:  LD      (HL),1
 ; and the ESC are both gone.
 ;-----------------------------------------------------------------------
 FILT2:  DEC     A
-        JP      NZ,FCSI         ; state 2: already inside a CSI
+        JR      NZ,FCSI         ; state 2: already inside a CSI
         LD      A,E
         AND     7FH
         CP      '['
-        JP      Z,FCSIST
+        JR      Z,FCSIST
         LD      (HL),0          ; two-character escape: done
         RET
 FCSIST: LD      (HL),2
@@ -1566,7 +1539,7 @@ XSEND:  CALL    XREADY          ; is a port selected at all?
         LD      C,BOPEN
         CALL    BDOS
         INC     A
-        JP      NZ,XSEND1
+        JR      NZ,XSEND1
         LD      HL,MXNOFIL
         CALL    PSTR
         RET
@@ -1586,16 +1559,16 @@ XSEND2: CALL    XCHKAB          ; waiting for the far end is the likeliest
         LD      A,XLONG         ; wait for the receiver to ask
         LD      (XTMO),A
         CALL    XGETB
-        JP      NC,XSEND3
+        JR      NC,XSEND3
         LD      A,(XCNT)        ; nothing yet: keep waiting a while
         DEC     A
         LD      (XCNT),A
-        JP      NZ,XSEND2
+        JR      NZ,XSEND2
         JP      XFAIL
 XSEND3: CP      CRCC
-        JP      Z,XSENDC
+        JR      Z,XSENDC
         CP      NAK
-        JP      Z,XSENDK
+        JR      Z,XSENDK
         CP      CAN
         JP      Z,XABORT
         ; Noise.  Not an error: the far end usually prints something like
@@ -1607,10 +1580,10 @@ XSEND3: CP      CRCC
         LD      A,(XNCNT)
         DEC     A
         LD      (XNCNT),A
-        JP      NZ,XSEND2
+        JR      NZ,XSEND2
         JP      XFAIL
 XSENDC: LD      A,1             ; CRC mode
-        JP      XSEND4
+        JR      XSEND4
 XSENDK: XOR     A               ; checksum mode
 XSEND4: LD      (XCRCM),A
         CALL    XPURGE          ; drop the far end's "start now" banner: from
@@ -1630,7 +1603,7 @@ XSLOOP: CALL    XCHKAB          ; a keypress can stop this
         LD      C,BREADS
         CALL    BDOS
         OR      A
-        JP      NZ,XSDONE       ; no more records: end of file
+        JR      NZ,XSDONE       ; no more records: end of file
         LD      A,XRETRY
         LD      (XCNT),A
         LD      A,XNOISE        ; ...and a fresh junk budget, which the
@@ -1644,30 +1617,30 @@ XSBLK:  CALL    XBLKSN          ; put the block on the wire
 XSWAIT: LD      A,XLONG
         LD      (XTMO),A
         CALL    XGETB
-        JP      C,XSBAD         ; silence: send the block again
+        JR      C,XSBAD         ; silence: send the block again
         CP      ACK
-        JP      Z,XSNEXT
+        JR      Z,XSNEXT
         CP      CAN
         JP      Z,XABORT
         CP      NAK
-        JP      Z,XSBAD         ; asked for it again
+        JR      Z,XSBAD         ; asked for it again
         LD      A,(XNCNT)       ; anything else is noise: keep waiting for a
         DEC     A               ; real answer instead of resending on it
         LD      (XNCNT),A
-        JP      NZ,XSWAIT
+        JR      NZ,XSWAIT
         JP      XFAIL
 XSBAD:  LD      A,'?'           ; resend this block
         CALL    COUT
         LD      A,(XCNT)
         DEC     A
         LD      (XCNT),A
-        JP      NZ,XSBLK
+        JR      NZ,XSBLK
         JP      XFAIL
 XSNEXT: LD      A,'.'
         CALL    COUT
         LD      HL,XBLK
         INC     (HL)            ; block numbers wrap at 256, as they must
-        JP      XSLOOP
+        JR      XSLOOP
 
 ;--- end of file: EOT until acknowledged, then tidy up ---
 XSDONE: LD      A,XRETRY
@@ -1677,13 +1650,13 @@ XSEOT:  LD      A,EOT
         LD      A,XLONG
         LD      (XTMO),A
         CALL    XGETB
-        JP      C,XSEOT1
+        JR      C,XSEOT1
         CP      ACK
-        JP      Z,XSOK
+        JR      Z,XSOK
 XSEOT1: LD      A,(XCNT)
         DEC     A
         LD      (XCNT),A
-        JP      NZ,XSEOT
+        JR      NZ,XSEOT
         JP      XFAIL
 XSOK:   LD      DE,XFCB
         LD      C,BCLOSE
@@ -1716,10 +1689,10 @@ XBLKS1: LD      A,(HL)
         CALL    XACCUM          ; fold the byte into both checks
         INC     HL
         DEC     B
-        JP      NZ,XBLKS1
+        JR      NZ,XBLKS1
         LD      A,(XCRCM)
         OR      A
-        JP      Z,XBLKS2
+        JR      Z,XBLKS2
         LD      HL,(XCRC)       ; CRC-16, high byte first
         LD      A,H
         CALL    PSEND
@@ -1746,13 +1719,13 @@ XRECV:  CALL    XREADY
         LD      C,BSEARF
         CALL    BDOS
         INC     A
-        JP      Z,XRECV1
+        JR      Z,XRECV1
         LD      HL,MXEXIST
         CALL    PSTR
         CALL    CIN
         CALL    UPCASE
         CP      'Y'
-        JP      Z,XRECVD
+        JR      Z,XRECVD
         CALL    CRLF
         LD      HL,MXKEEP
         CALL    PSTR
@@ -1764,7 +1737,7 @@ XRECV1: LD      DE,XFCB
         LD      C,BMAKE
         CALL    BDOS
         INC     A
-        JP      NZ,XRECV2
+        JR      NZ,XRECV2
         LD      HL,MXNOMK       ; directory full, or a bad name
         CALL    PSTR
         RET
@@ -1786,7 +1759,7 @@ XRECV2: LD      A,1
 XRLOOP: LD      A,(XCRCM)
         OR      A
         LD      A,CRCC
-        JP      NZ,XRL1
+        JR      NZ,XRL1
         LD      A,NAK
 XRL1:   CALL    PSEND
 XRWAIT: CALL    XCHKAB
@@ -1794,18 +1767,18 @@ XRWAIT: CALL    XCHKAB
         LD      A,XLONG
         LD      (XTMO),A
         CALL    XGETB
-        JP      NC,XRGOT
+        JR      NC,XRGOT
         LD      A,(XCNT)        ; silence: ask again, and after half the
         DEC     A               ; attempts stop asking for CRC mode
         LD      (XCNT),A
         JP      Z,XFAIL
         CP      XRETRY
-        JP      NZ,XRLOOP
+        JR      NZ,XRLOOP
         XOR     A
         LD      (XCRCM),A       ; fall back to checksum
-        JP      XRLOOP
+        JR      XRLOOP
 XRGOT:  CP      SOH
-        JP      Z,XRBLK
+        JR      Z,XRBLK
         CP      EOT
         JP      Z,XRDONE
         CP      CAN
@@ -1835,37 +1808,37 @@ XRBLK:  LD      A,XSHORT        ; the rest of a block must arrive promptly
         LD      HL,XBUF
         LD      B,128
 XRB1:   CALL    XGETB
-        JP      C,XRBAD
+        JR      C,XRBAD
         LD      (HL),A
         CALL    XACCUM
         INC     HL
         DEC     B
-        JP      NZ,XRB1
+        JR      NZ,XRB1
         LD      A,(XCRCM)
         OR      A
-        JP      Z,XRB2
+        JR      Z,XRB2
         CALL    XGETB           ; CRC-16: two bytes, high first
-        JP      C,XRBAD
+        JR      C,XRBAD
         LD      HL,(XCRC)
         CP      H
-        JP      NZ,XRBAD
+        JR      NZ,XRBAD
         CALL    XGETB
-        JP      C,XRBAD
+        JR      C,XRBAD
         LD      HL,(XCRC)
         CP      L
-        JP      NZ,XRBAD
-        JP      XRGOOD
+        JR      NZ,XRBAD
+        JR      XRGOOD
 XRB2:   CALL    XGETB
-        JP      C,XRBAD
+        JR      C,XRBAD
         LD      HL,XSUM
         CP      (HL)
-        JP      NZ,XRBAD
+        JR      NZ,XRBAD
 
 ;--- the block is sound: is it the one we expect? ---
 XRGOOD: LD      HL,XBLK
         LD      A,(XGOTBL)
         CP      (HL)
-        JP      Z,XRSAVE
+        JR      Z,XRSAVE
         ; Not the expected block.  If it is the PREVIOUS one, the sender
         ; never saw our ACK and has resent it: acknowledge again and do
         ; NOT write it a second time.  Anything else means the two ends
@@ -1880,7 +1853,7 @@ XRGOOD: LD      HL,XBLK
         DEC     A               ; the block before the one we want
         LD      HL,XGOTBL
         CP      (HL)
-        JP      NZ,XRBAD        ; a different block entirely: out of step
+        JR      NZ,XRBAD        ; a different block entirely: out of step
         LD      A,ACK
         CALL    PSEND
         JP      XRRSET
@@ -1891,7 +1864,7 @@ XRSAVE: LD      DE,XBUF
         LD      C,BWRITS
         CALL    BDOS
         OR      A
-        JP      NZ,XRDISK       ; disk full: stop rather than lose data
+        JR      NZ,XRDISK       ; disk full: stop rather than lose data
         LD      A,ACK
         CALL    PSEND
         LD      A,'.'
@@ -1957,7 +1930,7 @@ XACCUM: PUSH    BC              ; the block loops count 128 bytes in B and
         LD      H,A
         LD      B,8
 XACC1:  ADD     HL,HL
-        JP      NC,XACC2
+        JR      NC,XACC2
         LD      A,H
         XOR     10H
         LD      H,A
@@ -1965,7 +1938,7 @@ XACC1:  ADD     HL,HL
         XOR     21H
         LD      L,A
 XACC2:  DEC     B
-        JP      NZ,XACC1
+        JR      NZ,XACC1
         LD      (XCRC),HL
         POP     HL
         POP     BC
@@ -1989,15 +1962,15 @@ XGETB0: LD      BC,0
 XGETB1: PUSH    BC
         CALL    PST
         POP     BC
-        JP      NZ,XGETB2
+        JR      NZ,XGETB2
         DEC     BC
         LD      A,B
         OR      C
-        JP      NZ,XGETB1
+        JR      NZ,XGETB1
         LD      A,(XTMOC)
         DEC     A
         LD      (XTMOC),A
-        JP      NZ,XGETB0
+        JR      NZ,XGETB0
         POP     BC
         SCF                     ; nothing arrived
         RET
@@ -2075,7 +2048,7 @@ XHGRD1: CALL    XCHKAB          ; ^C, ESC or the menu key abandons the wait
         LD      A,(XHCNT)       ; something came - drain again, but a bounded
         DEC     A               ; number of times.  This used to loop until
         LD      (XHCNT),A       ; the line fell quiet, which is a promise the
-        JP      NZ,XHGRD1       ; far end need not keep: a talkative peer hung
+        JR      NZ,XHGRD1       ; far end need not keep: a talkative peer hung
         RET                     ; the exit and the machine had to be reset.
 
 ;-----------------------------------------------------------------------
@@ -2109,7 +2082,7 @@ XSETL:  CALL    XPURGE
 XPURGE: LD      A,XSHORT
         LD      (XTMO),A
         CALL    XGETB
-        JP      NC,XPURGE
+        JR      NC,XPURGE
         RET
 
 ;-----------------------------------------------------------------------
@@ -2118,7 +2091,7 @@ XPURGE: LD      A,XSHORT
 ;-----------------------------------------------------------------------
 XREADY: LD      A,(PKIND)
         OR      A
-        JP      Z,XRDY1
+        JR      Z,XRDY1
         XOR     A               ; a fresh diagnosis for this transfer: the
         LD      (PDEAD),A       ; flag may be left over from a past session
         RET                     ; carry clear: good to go
@@ -2170,7 +2143,7 @@ XFAIL:  CALL    XCANC
         CALL    CRLF
         LD      A,(PDEAD)       ; did the PORT stop taking characters?
         OR      A
-        JP      NZ,XFAILP
+        JR      NZ,XFAILP
         LD      HL,MXFAIL
         CALL    PSTR
         JP      XSCRAP
@@ -2197,12 +2170,12 @@ XCHKAB: CALL    CST
         RET     Z               ; nothing typed: carry clear
         CALL    CIN
         CP      03H             ; ^C - what a user reaches for to back out
-        JP      Z,XCHKA1
+        JR      Z,XCHKA1
         CP      ESC
-        JP      Z,XCHKA1
+        JR      Z,XCHKA1
         LD      HL,ESCCH
         CP      (HL)
-        JP      Z,XCHKA1
+        JR      Z,XCHKA1
         XOR     A               ; some other key: ignore it
         RET
 XCHKA1: SCF
@@ -2259,7 +2232,7 @@ XFNCC:  LD      A,(HL)
         JP      Z,XFNBAD
         INC     HL
         DEC     B
-        JP      NZ,XFNCC
+        JR      NZ,XFNCC
         LD      A,(XLINE+1)     ; rewind for the parse proper
         LD      B,A
         LD      HL,XLINE+2
@@ -2271,7 +2244,7 @@ XFNCC:  LD      A,(HL)
 XFN1:   LD      (DE),A
         INC     DE
         DEC     C
-        JP      NZ,XFN1
+        JR      NZ,XFN1
         XOR     A
         LD      (XFCB+12),A
         LD      (XFCB+13),A
@@ -2281,10 +2254,10 @@ XFN1:   LD      (DE),A
         ; a drive letter?
         LD      A,B
         CP      2
-        JP      C,XFN2
+        JR      C,XFN2
         LD      A,(XLINE+3)
         CP      ':'
-        JP      NZ,XFN2
+        JR      NZ,XFN2
         LD      A,(XLINE+2)
         CALL    UPCASE
         SUB     'A'-1           ; FCB drive is 1-based (1 = A:)
@@ -2298,10 +2271,10 @@ XFN2:   LD      DE,XFCB+1
         LD      C,8
 XFN3:   LD      A,B
         OR      A
-        JP      Z,XFNOK
+        JR      Z,XFNOK
         LD      A,(HL)
         CP      '.'
-        JP      Z,XFN4
+        JR      Z,XFN4
         CALL    XWILD           ; one file, named exactly
         JP      C,XFNBAD
         CALL    UPCASE
@@ -2310,28 +2283,28 @@ XFN3:   LD      A,B
         INC     HL
         DEC     B
         DEC     C
-        JP      NZ,XFN3
+        JR      NZ,XFN3
 XFN3A:  LD      A,B             ; name full: skip to the dot
         OR      A
-        JP      Z,XFNOK
+        JR      Z,XFNOK
         LD      A,(HL)
         INC     HL
         DEC     B
         CP      '.'
-        JP      NZ,XFN3A
+        JR      NZ,XFN3A
 XFN4:   LD      A,B             ; nothing typed past the name?  Then the
         OR      A               ; type is empty and there is no dot to step
-        JP      Z,XFNOK         ; over - see below
+        JR      Z,XFNOK         ; over - see below
         LD      A,(HL)          ; step over the dot itself
         CP      '.'
-        JP      NZ,XFN5
+        JR      NZ,XFN5
         INC     HL
         DEC     B
 XFN5:   LD      DE,XFCB+9
         LD      C,3
 XFN6:   LD      A,B
         OR      A
-        JP      Z,XFNOK
+        JR      Z,XFNOK
         LD      A,(HL)
         CALL    XWILD
         JP      C,XFNBAD
@@ -2341,10 +2314,10 @@ XFN6:   LD      A,B
         INC     HL
         DEC     B
         DEC     C
-        JP      NZ,XFN6
+        JR      NZ,XFN6
 XFNOK:  LD      A,(XFCB+1)      ; a name of nothing but spaces is no name
         CP      ' '
-        JP      Z,XFNBAD
+        JR      Z,XFNBAD
         XOR     A               ; carry clear: the FCB is ready
         RET
 XFNBAD: CALL    CRLF
@@ -2362,9 +2335,9 @@ XFNBAD: CALL    CRLF
 ; receive.  Refusing them is kinder than either.
 ;-----------------------------------------------------------------------
 XWILD:  CP      '*'
-        JP      Z,XWILD1
+        JR      Z,XWILD1
         CP      '?'
-        JP      Z,XWILD1
+        JR      Z,XWILD1
         RET                     ; carry clear from CP with no match
 XWILD1: SCF
         RET
@@ -2405,7 +2378,7 @@ SAVCFG: LD      DE,CFGFCB
         LD      C,BOPEN
         CALL    BDOS
         INC     A               ; 0FFH = not found
-        JP      Z,SAVERR
+        JR      Z,SAVERR
         LD      A,CFGREC        ; which record the block sits in
         LD      (CFGFCB+33),A   ; random-record number, low byte
         XOR     A
@@ -2418,7 +2391,7 @@ SAVCFG: LD      DE,CFGFCB
         LD      C,BWRRAN
         CALL    BDOS
         OR      A
-        JP      NZ,SAVERR
+        JR      NZ,SAVERR
         LD      DE,CFGFCB
         LD      C,BCLOSE
         CALL    BDOS
@@ -2457,66 +2430,59 @@ CFGCHK: LD      HL,CFGSIG
         LD      B,8
 CFGCH1: LD      A,(DE)
         CP      (HL)
-        JP      NZ,CFGBAD
+        JR      NZ,CFGBAD
         INC     HL
         INC     DE
         DEC     B
-        JP      NZ,CFGCH1
+        JR      NZ,CFGCH1
         LD      A,(PKIND)       ; a kind we actually have a driver for
         CP      PKS88+1
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(FLTMOD)      ; the flags are booleans
         CP      2
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(ECHOFL)
         CP      2
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(CRLFFL)
         CP      2
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(PABASE)      ; an ASCI base whose registers would run off
         CP      0F0H            ; the end of the I/O space is not usable
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(CLSMOD)      ; one of the three clear-screen dialects
         CP      3
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LBAUD)       ; the line settings, each within its table
         CP      RATEN
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LBITS)
         CP      7
-        JP      C,CFGBAD
+        JR      C,CFGBAD
         CP      9
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LPAR)
         CP      3
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LSTOP)
         OR      A
-        JP      Z,CFGBAD
+        JR      Z,CFGBAD
         CP      3
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LADIV)
         CP      3
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(LSAPP)
         CP      2
-        JP      NC,CFGBAD
+        JR      NC,CFGBAD
         LD      A,(ESCCH)       ; a menu key that is not a usable control key
         CALL    ESCOK           ; would trap that key for ever - and a letter
-        JP      C,CFGBAD        ; would swallow ordinary typing
+        JR      C,CFGBAD        ; would swallow ordinary typing
         RET
 CFGBAD: LD      HL,DEFBLK       ; one table, copied over the whole block
         LD      DE,PKIND
         LD      BC,DEFLEN
-CFGCPY: LD      A,(HL)          ; LDIR by hand: the 8080 has no block move,
-        LD      (DE),A          ; and DEC BC sets no flags, so the count is
-        INC     HL              ; tested with LD A,B / OR C
-        INC     DE
-        DEC     BC
-        LD      A,B
-        OR      C
-        JP      NZ,CFGCPY
+        LDIR
         CALL    CRLF
         LD      HL,MCFGBAD
         CALL    PSTR
@@ -2567,19 +2533,19 @@ DEFLEN  EQU     $-DEFBLK
 ; the arrow-key sequences, so it would fire on a cursor key.
 ;-----------------------------------------------------------------------
 ESCOK:  OR      A
-        JP      Z,ESCNO         ; NUL is not a key anyone can press
+        JR      Z,ESCNO         ; NUL is not a key anyone can press
         CP      20H
-        JP      NC,ESCNO        ; not a control key at all
+        JR      NC,ESCNO        ; not a control key at all
         CP      03H
-        JP      Z,ESCNO
+        JR      Z,ESCNO
         CP      TAB
-        JP      Z,ESCNO
+        JR      Z,ESCNO
         CP      LF
-        JP      Z,ESCNO
+        JR      Z,ESCNO
         CP      CR
-        JP      Z,ESCNO
+        JR      Z,ESCNO
         CP      ESC
-        JP      Z,ESCNO
+        JR      Z,ESCNO
         OR      A               ; A is known non-zero, so this only clears
         RET                     ; carry - which a CP does NOT do: every CP
                                 ; above a control code leaves it set
@@ -2604,7 +2570,7 @@ ESCNO:  SCF
 ;-----------------------------------------------------------------------
 CLS:    LD      A,(CLSMOD)
         OR      A
-        JP      NZ,CLSANS
+        JR      NZ,CLSANS
         LD      A,1AH           ; ADM-3A: clear screen and home the cursor
         JP      COUT
 CLSANS: DEC     A
@@ -2685,17 +2651,17 @@ SCMENU: CALL    SCTTL           ; cleared screen + banner, every time round
 ;-----------------------------------------------------------------------
 SHPORT: LD      A,(PKIND)
         CP      PKSIO
-        JP      Z,SHPSIO
+        JR      Z,SHPSIO
         CP      PKACIA
-        JP      Z,SHPACI
+        JR      Z,SHPACI
         CP      PKHBIO
-        JP      Z,SHPHB
+        JR      Z,SHPHB
         CP      PKASCI
-        JP      Z,SHPASC
+        JR      Z,SHPASC
         CP      PKAUX
-        JP      Z,SHPAUX
+        JR      Z,SHPAUX
         CP      PKS88
-        JP      Z,SHPS88
+        JR      Z,SHPS88
         LD      HL,MPNONE
         CALL    PSTR
         JP      CRLF
@@ -2748,17 +2714,17 @@ SHPADR: LD      A,(PBASE)
 SHMODE: LD      A,(FLTMOD)
         OR      A
         LD      HL,MMANSI
-        JP      Z,SHMOD1
+        JR      Z,SHMOD1
         LD      HL,MMASC
 SHMOD1: CALL    PSTR
         LD      A,(ECHOFL)
         OR      A
-        JP      Z,SHMOD2
+        JR      Z,SHMOD2
         LD      HL,MMECHO
         CALL    PSTR
 SHMOD2: LD      A,(CRLFFL)
         OR      A
-        JP      Z,SHMOD3
+        JR      Z,SHMOD3
         LD      HL,MMCRLF
         CALL    PSTR
 SHMOD3: JP      CRLF
@@ -2796,10 +2762,10 @@ SCPORT: CALL    CLS
         LD      A,(0008H)       ; two facts are knowable: is there firmware
         CP      0C3H            ; to ask, and is this a Z180?  Say which key
         LD      HL,MHINT1       ; follows from them, so nobody has to know a
-        JP      Z,SCPORH        ; chip name to get started
+        JR      Z,SCPORH        ; chip name to get started
         CALL    ISZ180
         LD      HL,MHINT2
-        JP      NC,SCPORH
+        JR      NC,SCPORH
         LD      HL,MHINT3
 SCPORH: LD      A,CLHINT
         CALL    CCOL
@@ -2825,14 +2791,14 @@ SCPOR1: CALL    CIN
         CP      '6'
         JP      Z,SCPAUX
         CP      'N'
-        JP      Z,SCPONO
+        JR      Z,SCPONO
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCPOR1
+        JR      SCPOR1
 SCPONO: XOR     A
         LD      (PKIND),A
         JP      PDONE
@@ -2867,7 +2833,7 @@ SCPOT1: CALL    CIN
         JP      Z,SCPORT
         LD      A,BEL
         CALL    COUT
-        JP      SCPOT1
+        JR      SCPOT1
 
 ;-----------------------------------------------------------------------
 ; SCPDEF - the default port: Z80 SIO/2 board 1 channel B, 82/83.
@@ -2900,30 +2866,30 @@ SCPSIO: CALL    CLS
 SCPSI1: CALL    CIN
         CALL    UPCASE
         CP      '1'
-        JP      Z,SCPS80
+        JR      Z,SCPS80
         CP      '2'
-        JP      Z,SCPS82
+        JR      Z,SCPS82
         CP      '3'
-        JP      Z,SCPS84
+        JR      Z,SCPS84
         CP      '4'
-        JP      Z,SCPS86
+        JR      Z,SCPS86
         CP      'B'
-        JP      Z,SCPSBA
+        JR      Z,SCPSBA
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCPSI1
+        JR      SCPSI1
 SCPS80: LD      A,80H
-        JP      SCPSSE
+        JR      SCPSSE
 SCPS82: LD      A,82H
-        JP      SCPSSE
+        JR      SCPSSE
 SCPS84: LD      A,84H
-        JP      SCPSSE
+        JR      SCPSSE
 SCPS86: LD      A,86H
-        JP      SCPSSE
+        JR      SCPSSE
 SCPSBA: CALL    HEXASK          ; any address the board happens to use
         RET     C               ; cancelled: leave the port alone
 SCPSSE: LD      (PBASE),A
@@ -2941,22 +2907,22 @@ SCPACI: CALL    CLS
 SCPAC1: CALL    CIN
         CALL    UPCASE
         CP      '1'
-        JP      Z,SCPA10
+        JR      Z,SCPA10
         CP      '2'
-        JP      Z,SCPA12
+        JR      Z,SCPA12
         CP      'B'
-        JP      Z,SCPABA
+        JR      Z,SCPABA
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCPAC1
+        JR      SCPAC1
 SCPA10: LD      A,10H
-        JP      SCPASE
+        JR      SCPASE
 SCPA12: LD      A,12H
-        JP      SCPASE
+        JR      SCPASE
 SCPABA: CALL    HEXASK
         RET     C
 SCPASE: LD      (PBASE),A
@@ -2979,18 +2945,18 @@ SCP88:  CALL    CLS
 SCP881: CALL    CIN
         CALL    UPCASE
         CP      '1'
-        JP      Z,SCP8800
+        JR      Z,SCP8800
         CP      'B'
-        JP      Z,SCP88B
+        JR      Z,SCP88B
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCP881
+        JR      SCP881
 SCP8800: XOR    A               ; status 00, data 01
-        JP      SCP88S
+        JR      SCP88S
 SCP88B: CALL    HEXASK
         RET     C
 SCP88S: LD      (PBASE),A
@@ -3009,7 +2975,7 @@ SCP88S: LD      (PBASE),A
 ;-----------------------------------------------------------------------
 SCPHB:  LD      A,(0008H)       ; the RST 8 vector
         CP      0C3H            ; a JP instruction?
-        JP      Z,SCPHB1
+        JR      Z,SCPHB1
         CALL    CRLF
         LD      HL,MNOHB
         CALL    PSTR
@@ -3023,10 +2989,10 @@ SCPHB1: CALL    CLS
         LD      A,CLRST
         CALL    CCOL
         CALL    HBCNT           ; how many units does the firmware have?
-        JP      NC,SCPHBC
+        JR      NC,SCPHBC
         LD      A,4             ; it would not say: offer the four we can pick
 SCPHBC: CP      5
-        JP      C,SCPHBD
+        JR      C,SCPHBD
         LD      A,4             ; more than the menu can address
 SCPHBD: LD      (HBMAX),A
         OR      A
@@ -3044,14 +3010,14 @@ SCPHBL: LD      HL,MHBIND       ; '  n  '
         CALL    COUT
         LD      A,(HBSCAN)
         CALL    HBDEV           ; ask the firmware what this unit is
-        JP      C,SCPHBN
+        JR      C,SCPHBN
         CALL    SHTYPE
         LD      HL,MHBBAS
         CALL    PSTR
         LD      A,(HBBASE)
         CALL    PHEX
         CALL    CRLF
-        JP      SCPHBI
+        JR      SCPHBI
 SCPHBN: LD      HL,MHBNON       ; refused: not present on this machine
         CALL    PSTR
 SCPHBI: LD      A,(HBSCAN)
@@ -3059,7 +3025,7 @@ SCPHBI: LD      A,(HBSCAN)
         LD      (HBSCAN),A
         LD      HL,HBMAX
         CP      (HL)
-        JP      C,SCPHBL
+        JR      C,SCPHBL
 SCPHBP: LD      HL,MPHBM        ; the prompt itself
         CALL    PSTR
 SCPHB2: CALL    CIN
@@ -3071,10 +3037,10 @@ SCPHB2: CALL    CIN
         SUB     '0'
         LD      HL,HBMAX        ; only a unit the firmware listed
         CP      (HL)
-        JP      C,SCPHBS
+        JR      C,SCPHBS
         LD      A,BEL
         CALL    COUT
-        JP      SCPHB2
+        JR      SCPHB2
 SCPHBS: LD      (PBASE),A
         LD      A,PKHBIO
         LD      (PKIND),A
@@ -3085,7 +3051,7 @@ SCPHBS: LD      (PBASE),A
 ; has moved it (RomWBW does on some boards).
 ;-----------------------------------------------------------------------
 SCPASC: CALL    ISZ180          ; the ASCI is part of the CPU: is it there?
-        JP      NC,SCPASF
+        JR      NC,SCPASF
         CALL    CRLF
         LD      HL,MNOZ180
         CALL    PSTR
@@ -3107,9 +3073,9 @@ SCPAS2: CALL    CRLF
 SCPAS1: CALL    CIN
         CALL    UPCASE
         CP      '0'
-        JP      Z,SCPAS0
+        JR      Z,SCPAS0
         CP      '1'
-        JP      Z,SCPASA
+        JR      Z,SCPASA
         CP      'C'
         JP      Z,SCASC0
         CP      'R'
@@ -3122,7 +3088,7 @@ SCPAS1: CALL    CIN
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCPAS1
+        JR      SCPAS1
 SCPAS0: XOR     A
         JP      SCPASS
 SCPASA: LD      A,1
@@ -3183,28 +3149,28 @@ ASCFND: XOR     A
         LD      (HBSCAN),A
 ASCFN1: LD      A,(HBSCAN)
         CALL    HBDEV
-        JP      C,ASCFN2
+        JR      C,ASCFN2
         LD      A,(HBTYPE)
         CP      01H             ; the published ASCI device type
-        JP      Z,ASCFN3
+        JR      Z,ASCFN3
 ASCFN2: LD      A,(HBSCAN)
         INC     A
         LD      (HBSCAN),A
         CP      4
-        JP      C,ASCFN1
+        JR      C,ASCFN1
         SCF
         RET
 ASCFN3: LD      A,(HBBASE)
         LD      E,A
         LD      A,(HBPHYS)
         CP      E               ; a channel above its own base is nonsense
-        JP      Z,ASCFN4
-        JP      NC,ASCFN2
+        JR      Z,ASCFN4
+        JR      NC,ASCFN2
 ASCFN4: LD      A,E
         LD      HL,HBPHYS
         SUB     (HL)
         CP      0F0H            ; base+9 must stay inside the I/O space
-        JP      NC,ASCFN2
+        JR      NC,ASCFN2
         OR      A               ; carry clear: A holds the block base
         RET
 
@@ -3220,19 +3186,19 @@ ASCHBU: LD      (HBWANT),A
         LD      (HBSCAN),A
 ASCHB1: LD      A,(HBSCAN)
         CALL    HBDEV
-        JP      C,ASCHB2
+        JR      C,ASCHB2
         LD      A,(HBTYPE)
         CP      01H             ; the published ASCI device type
-        JP      NZ,ASCHB2
+        JR      NZ,ASCHB2
         LD      A,(HBPHYS)
         LD      HL,HBWANT
         CP      (HL)            ; the channel the user asked for?
-        JP      Z,ASCHB3
+        JR      Z,ASCHB3
 ASCHB2: LD      A,(HBSCAN)
         INC     A
         LD      (HBSCAN),A
         CP      4
-        JP      C,ASCHB1
+        JR      C,ASCHB1
         SCF
         RET
 ASCHB3: LD      A,(HBSCAN)      ; carry clear: A is the unit to use
@@ -3255,7 +3221,7 @@ ASCHB3: LD      A,(HBSCAN)      ; carry clear: A is the unit to use
 ; register.  Getting that wrong would put every register one byte out.
 ;-----------------------------------------------------------------------
 SCASCR: CALL    ASCFND
-        JP      C,SCASRN
+        JR      C,SCASRN
         LD      (PABASE),A
         CALL    XDIRTS
         CALL    CRLF
@@ -3275,7 +3241,7 @@ SCASRN: CALL    CRLF            ; nothing to ask, or no ASCI unit listed
 SCPASB: CALL    HEXASK          ; internal I/O base
         RET     C
         CP      0F0H            ; base+9 must not run off the top of the
-        JP      NC,SCPASB       ; I/O space: ask again
+        JR      NC,SCPASB       ; I/O space: ask again
         LD      (PABASE),A
         JP      SCPAS2          ; then still ask for the channel
 ;-----------------------------------------------------------------------
@@ -3298,7 +3264,7 @@ SCPASB: CALL    HEXASK          ; internal I/O base
 ;-----------------------------------------------------------------------
 SCPASS: LD      (PCHAN),A
         CALL    ASCHBU          ; does the firmware serve this channel?
-        JP      C,SCPASD
+        JR      C,SCPASD
         LD      (PBASE),A       ; yes: use it, as QTERMH1 does
         LD      A,PKHBIO
         LD      (PKIND),A
@@ -3365,13 +3331,13 @@ HEXASK: LD      HL,MHEXA
 HEXDIG: CALL    CIN
         CALL    UPCASE
         CP      '0'
-        JP      C,HEXBAD
+        JR      C,HEXBAD
         CP      '9'+1
-        JP      C,HEXNUM
+        JR      C,HEXNUM
         CP      'A'
-        JP      C,HEXBAD
+        JR      C,HEXBAD
         CP      'F'+1
-        JP      NC,HEXBAD
+        JR      NC,HEXBAD
         CALL    COUT
         SUB     'A'-10
         RET                     ; carry clear from SUB of a smaller value
@@ -3409,30 +3375,30 @@ SCSETT: CALL    CLS
 SCSET1: CALL    CIN
         CALL    UPCASE
         CP      'P'
-        JP      Z,DOSPRT
+        JR      Z,DOSPRT
         CP      'A'
-        JP      Z,TOGANS
+        JR      Z,TOGANS
         CP      'E'
-        JP      Z,TOGECH
+        JR      Z,TOGECH
         CP      'L'
-        JP      Z,TOGCRL
+        JR      Z,TOGCRL
         CP      'K'
-        JP      Z,CHGESC
+        JR      Z,CHGESC
         CP      'B'
-        JP      Z,DOSLIN
+        JR      Z,DOSLIN
         CP      'C'
-        JP      Z,CYCCLS
+        JR      Z,CYCCLS
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCSET1
+        JR      SCSET1
 DOSPRT: CALL    SCPORT
-        JP      SCSETT          ; back to Settings, showing the new port
+        JR      SCSETT          ; back to Settings, showing the new port
 DOSLIN: CALL    SCLINE
-        JP      SCSETT
+        JR      SCSETT
 TOGANS: LD      HL,FLTMOD
         CALL    TOGGLE
         JP      SCSETT
@@ -3465,7 +3431,7 @@ CHGESC: CALL    CRLF
         CP      03H             ; ^C: changed my mind
         JP      Z,SCSETT
         CALL    ESCOK
-        JP      C,ESCREF
+        JR      C,ESCREF
         LD      (ESCCH),A
         CALL    XDIRTS
         JP      SCSETT          ; the redraw names the new key
@@ -3485,7 +3451,7 @@ ESCREF: CALL    CRLF
 CYCCLS: LD      A,(CLSMOD)
         INC     A
         CP      3
-        JP      C,CYCCL1
+        JR      C,CYCCL1
         XOR     A
 CYCCL1: LD      (CLSMOD),A
         CALL    XDIRTS
@@ -3497,10 +3463,10 @@ CYCCL1: LD      (CLSMOD),A
 SHCLS:  LD      A,(CLSMOD)
         OR      A
         LD      HL,MCLSZ
-        JP      Z,SHCLS1
+        JR      Z,SHCLS1
         DEC     A
         LD      HL,MCLSAN
-        JP      Z,SHCLS1
+        JR      Z,SHCLS1
         LD      HL,MCLSOF
 SHCLS1: CALL    PSTR
         JP      CRLF
@@ -3554,16 +3520,16 @@ SCLIN1: CALL    CIN
         CP      'D'
         JP      Z,SCFMT
         CP      'A'
-        JP      Z,SCLAPP
+        JR      Z,SCLAPP
         CP      'R'
-        JP      Z,SCLDEF
+        JR      Z,SCLDEF
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
         RET     Z
         LD      A,BEL
         CALL    COUT
-        JP      SCLIN1
+        JR      SCLIN1
 SCLAPP: CALL    LSAPLY          ; apply, and say what happened
         CALL    TWAIT
         JP      SCLINE
@@ -3589,19 +3555,19 @@ SCLDEF: XOR     A
 ;-----------------------------------------------------------------------
 SHRATE: LD      A,(PKIND)
         CP      PKSIO
-        JP      Z,SHRSIO
+        JR      Z,SHRSIO
         CP      PKS88
-        JP      Z,SHR88
+        JR      Z,SHR88
         CP      PKAUX
-        JP      Z,SHRAUX
+        JR      Z,SHRAUX
         CP      PKACIA
-        JP      Z,SHRACI
+        JR      Z,SHRACI
         CP      PKNONE
-        JP      Z,SHRNON
+        JR      Z,SHRNON
         CALL    PRATE           ; HBIOS and ASCI: a real number of bits/s
         LD      A,(PKIND)
         CP      PKASCI
-        JP      NZ,SHRAT1
+        JR      NZ,SHRAT1
         LD      HL,MLASCLK      ; ...on the clock the table assumes
         CALL    PSTR
 SHRAT1: JP      CRLF
@@ -3622,10 +3588,10 @@ SHRACI: LD      HL,MLRACI       ; a divider, not a rate: say divider
         LD      A,(LADIV)
         OR      A
         LD      HL,MLD1
-        JP      Z,SHRAC1
+        JR      Z,SHRAC1
         DEC     A
         LD      HL,MLD16
-        JP      Z,SHRAC1
+        JR      Z,SHRAC1
         LD      HL,MLD64
 SHRAC1: CALL    PSTR
         JP      CRLF
@@ -3656,10 +3622,10 @@ SHFMT:  LD      A,(LBITS)
         LD      A,(LPAR)
         OR      A
         LD      HL,MFPNO
-        JP      Z,SHFMT1
+        JR      Z,SHFMT1
         DEC     A
         LD      HL,MFPEV
-        JP      Z,SHFMT1
+        JR      Z,SHFMT1
         LD      HL,MFPOD
 SHFMT1: CALL    PSTR
         LD      A,(LSTOP)
@@ -3676,7 +3642,7 @@ SHFMT1: CALL    PSTR
 SHAPP:  LD      A,(LSAPP)
         OR      A
         LD      HL,MLAPPN
-        JP      Z,SHAPP1
+        JR      Z,SHAPP1
         LD      HL,MLAPPY
 SHAPP1: CALL    PSTR
         JP      CRLF
@@ -3688,11 +3654,11 @@ SHAPP1: CALL    PSTR
 ;-----------------------------------------------------------------------
 SCBAUD: LD      A,(PKIND)
         CP      PKACIA
-        JP      Z,SCBACI
+        JR      Z,SCBACI
         CP      PKHBIO
-        JP      Z,SCBRAT
+        JR      Z,SCBRAT
         CP      PKASCI
-        JP      Z,SCBRAT
+        JR      Z,SCBRAT
         CALL    CRLF            ; SIO, AUX or nothing selected
         LD      HL,MLNOSET
         CALL    PSTR
@@ -3710,13 +3676,13 @@ SCBRA1: CALL    CIN
         JP      Z,SCLINE
         SUB     'A'
         CP      RATEN           ; A..J, one per table entry
-        JP      NC,SCBRA2
+        JR      NC,SCBRA2
         LD      (LBAUD),A
         CALL    XDIRTS
         JP      SCLINE
 SCBRA2: LD      A,BEL
         CALL    COUT
-        JP      SCBRA1
+        JR      SCBRA1
 SCBACI: CALL    CLS
         CALL    CRLF
         LD      HL,MACIDM
@@ -3728,18 +3694,18 @@ SCBAC1: CALL    CIN
         CP      03H
         JP      Z,SCLINE
         CP      '1'
-        JP      Z,SCBAC2
+        JR      Z,SCBAC2
         CP      '2'
-        JP      Z,SCBAC3
+        JR      Z,SCBAC3
         CP      '3'
-        JP      Z,SCBAC4
+        JR      Z,SCBAC4
         LD      A,BEL
         CALL    COUT
-        JP      SCBAC1
+        JR      SCBAC1
 SCBAC2: XOR     A               ; /1
-        JP      SCBAC5
+        JR      SCBAC5
 SCBAC3: LD      A,1             ; /16
-        JP      SCBAC5
+        JR      SCBAC5
 SCBAC4: LD      A,2             ; /64
 SCBAC5: LD      (LADIV),A
         CALL    XDIRTS
@@ -3759,44 +3725,44 @@ SCFMT:  CALL    CLS
 SCFMT2: CALL    CIN
         CALL    UPCASE
         CP      '7'
-        JP      Z,SCFMT7
+        JR      Z,SCFMT7
         CP      '8'
-        JP      Z,SCFMT8
+        JR      Z,SCFMT8
         CP      'N'
-        JP      Z,SCFMTN
+        JR      Z,SCFMTN
         CP      'E'
-        JP      Z,SCFMTE
+        JR      Z,SCFMTE
         CP      'O'
-        JP      Z,SCFMTO
+        JR      Z,SCFMTO
         CP      '1'
-        JP      Z,SCFMS1
+        JR      Z,SCFMS1
         CP      '2'
-        JP      Z,SCFMS2
+        JR      Z,SCFMS2
         CP      'Q'
         JP      Z,SCLINE
         CP      03H
         JP      Z,SCLINE
         LD      A,BEL
         CALL    COUT
-        JP      SCFMT2
+        JR      SCFMT2
 SCFMT7: LD      A,7
         LD      (LBITS),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMT8: LD      A,8
         LD      (LBITS),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMTN: XOR     A
         LD      (LPAR),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMTE: LD      A,1
         LD      (LPAR),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMTO: LD      A,2
         LD      (LPAR),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMS1: LD      A,1
         LD      (LSTOP),A
-        JP      SCFMTD
+        JR      SCFMTD
 SCFMS2: LD      A,2
         LD      (LSTOP),A
 SCFMTD: CALL    XDIRTS
@@ -3837,9 +3803,9 @@ LSAPLY: XOR     A
 ;-----------------------------------------------------------------------
 LSAPP1: LD      A,(PKIND)
         CP      PKHBIO
-        JP      Z,LSHB
+        JR      Z,LSHB
         CP      PKACIA
-        JP      Z,LSACIA
+        JR      Z,LSACIA
         CP      PKASCI
         JP      Z,LSASCI
         LD      HL,MLNOSET      ; SIO, AUX, or nothing selected
@@ -3876,7 +3842,7 @@ LSMSG:  LD      A,(LSQUIT)
 ;-----------------------------------------------------------------------
 LSHB:   LD      A,(0008H)       ; a saved HBIOS setting can arrive on a
         CP      0C3H            ; machine that has no RST 8 at all - and this
-        JP      NZ,LSHBNO       ; runs at startup, before the user asks for
+        JR      NZ,LSHBNO       ; runs at startup, before the user asks for
         LD      A,(LBAUD)       ; anything, so it must check for itself
         LD      E,A
         LD      D,0
@@ -3893,7 +3859,7 @@ LSHB:   LD      A,(0008H)       ; a saved HBIOS setting can arrive on a
         LD      B,04H           ; CIOINIT
         RST     8
         OR      A               ; 0 = OK, anything else is a refusal
-        JP      NZ,LSHBNO
+        JR      NZ,LSHBNO
         LD      HL,MLOK
         CALL    LSMSG
         OR      A               ; carry clear: done
@@ -3911,19 +3877,19 @@ LSFRAM: LD      A,(LBITS)
         LD      E,A
         LD      A,(LSTOP)
         CP      2
-        JP      NZ,LSFRA1
+        JR      NZ,LSFRA1
         LD      A,E
         OR      04H             ; bit 2: two stop bits
         LD      E,A
 LSFRA1: LD      A,(LPAR)
         OR      A
-        JP      Z,LSFRA3        ; no parity: bits 4-3 stay clear
+        JR      Z,LSFRA3        ; no parity: bits 4-3 stay clear
         LD      A,E
         OR      08H             ; bit 3: parity enabled
         LD      E,A
         LD      A,(LPAR)
         CP      1
-        JP      NZ,LSFRA3       ; odd leaves bit 4 clear
+        JR      NZ,LSFRA3       ; odd leaves bit 4 clear
         LD      A,E
         OR      10H             ; bit 4: even parity
         LD      E,A
@@ -3941,18 +3907,18 @@ LSFRA3: LD      A,E
 ; symptom the user came here to fix.
 ;-----------------------------------------------------------------------
 LSACIA: CALL    LSAWRD          ; the word-select field, or carry set
-        JP      C,LSACNO
+        JR      C,LSACNO
         LD      E,A             ; hold it: bits 4-2 of the control byte
         LD      A,(LADIV)       ; the divider is bits 1-0, same order
         OR      E
         LD      E,A
         LD      A,(PBASE)
-        LD      (IOP15+1),A     ; as ACINIT: one port, two writes, both
-        LD      (IOP16+1),A     ; operands patched first
+        LD      C,A
+        LD      B,0
         LD      A,03H           ; master reset first, as the data sheet
-IOP15:  OUT     (0),A           ; requires before a control write
+        OUT     (C),A           ; requires before a control write
         LD      A,E
-IOP16:  OUT     (0),A
+        OUT     (C),A
         LD      HL,MLOK
         CALL    LSMSG
         OR      A               ; carry clear
@@ -3971,41 +3937,41 @@ LSACNO: LD      HL,MLACNO
 ;-----------------------------------------------------------------------
 LSAWRD: LD      A,(LBITS)
         CP      8
-        JP      Z,LSAW8
+        JR      Z,LSAW8
         LD      A,(LPAR)        ; 7 bits: parity is compulsory here
         OR      A
-        JP      Z,LSAWNO
+        JR      Z,LSAWNO
         LD      A,(LSTOP)
         CP      2
-        JP      Z,LSAW72
+        JR      Z,LSAW72
         LD      A,(LPAR)        ; 7 bits, 1 stop
         CP      1
         LD      A,08H           ; 010 = 7E1
-        JP      Z,LSAWOK
+        JR      Z,LSAWOK
         LD      A,0CH           ; 011 = 7O1
-        JP      LSAWOK
+        JR      LSAWOK
 LSAW72: LD      A,(LPAR)        ; 7 bits, 2 stop
         CP      1
         LD      A,00H           ; 000 = 7E2
-        JP      Z,LSAWOK
+        JR      Z,LSAWOK
         LD      A,04H           ; 001 = 7O2
-        JP      LSAWOK
+        JR      LSAWOK
 LSAW8:  LD      A,(LPAR)
         OR      A
-        JP      NZ,LSAW8P
+        JR      NZ,LSAW8P
         LD      A,(LSTOP)       ; 8 bits, no parity: both stop counts exist
         CP      2
         LD      A,10H           ; 100 = 8N2
-        JP      Z,LSAWOK
+        JR      Z,LSAWOK
         LD      A,14H           ; 101 = 8N1
-        JP      LSAWOK
+        JR      LSAWOK
 LSAW8P: LD      A,(LSTOP)       ; 8 bits with parity: only 1 stop bit
         CP      2
-        JP      Z,LSAWNO
+        JR      Z,LSAWNO
         LD      A,(LPAR)
         CP      1
         LD      A,18H           ; 110 = 8E1
-        JP      Z,LSAWOK
+        JR      Z,LSAWOK
         LD      A,1CH           ; 111 = 8O1
 LSAWOK: OR      A               ; carry clear, A holds the field
         RET
@@ -4035,7 +4001,7 @@ LSAWNO: SCF
 ; of the ASCI driver.
 ;-----------------------------------------------------------------------
 LSASCI: CALL    ISZ180          ; likewise: never execute IN0/OUT0 on a
-        JP      C,LSASNO        ; processor that has no such instruction
+        JR      C,LSASNO        ; processor that has no such instruction
         CALL    ASCPAT          ; make sure the operands match the channel
         LD      A,(LBAUD)
         LD      E,A
@@ -4046,7 +4012,7 @@ LSASCI: CALL    ISZ180          ; likewise: never execute IN0/OUT0 on a
         LD      E,A             ; E = PS, DR and SS bits for this rate
         LD      A,(LPAR)
         CP      2
-        JP      NZ,LSASC1
+        JR      NZ,LSASC1
         LD      A,E
         OR      10H             ; CNTLB bit 4: odd parity
         LD      E,A
@@ -4059,17 +4025,17 @@ LSASB2: DB      00H             ; OUT0 (CNTLBn),A
         LD      A,(LBITS)       ; CNTLA: MOD2 data bits, MOD1 parity,
         CP      8               ; MOD0 stop bits
         LD      E,0
-        JP      NZ,LSASC2
+        JR      NZ,LSASC2
         LD      E,04H           ; 8 data bits
 LSASC2: LD      A,(LPAR)
         OR      A
-        JP      Z,LSASC3
+        JR      Z,LSASC3
         LD      A,E
         OR      02H             ; parity enabled
         LD      E,A
 LSASC3: LD      A,(LSTOP)
         CP      2
-        JP      NZ,LSASC4
+        JR      NZ,LSASC4
         LD      A,E
         OR      01H             ; two stop bits
         LD      E,A
@@ -4135,7 +4101,7 @@ SCHELP: CALL    CLS
 ;=======================================================================
 MTITLE: DB      'Ethernet Gateway Terminal',CR,LF,0
 MRULE:  DB      '-------------------------',CR,LF,0
-MVER:   DB      'EGT8080 v0.7  CP/M 2.2 / CP/M 3  8080',CR,LF,0
+MVER:   DB      'EGT80 v0.7  CP/M 2.2 / CP/M 3  Z80',CR,LF,0
 
 MPORT:  DB      'Port: ',0
 MMKEY:  DB      'Keys: ',0
@@ -4161,7 +4127,7 @@ MMENU:  DB      CR,LF
         DB      '  U  Upload a file   (XMODEM, to the far end)',CR,LF
         DB      '  D  Download a file (XMODEM, from the far end)',CR,LF
         DB      '  H  Help',CR,LF
-        DB      '  V  Save settings into EGT8080.COM',CR,LF
+        DB      '  V  Save settings into EGT80.COM',CR,LF
         DB      '  X  Exit to CP/M',CR,LF
         DB      CR,LF,'Choice: ',0
 
@@ -4235,7 +4201,7 @@ MASCC0: DB      'Internal I/O base set to C0.',CR,LF,0
 MASCGOT: DB     'RomWBW reports the ASCI block at base ',0
 MASCPIK: DB     'Now pick the channel: 0 or 1.',CR,LF,0
 MASCHB: DB      'RomWBW drives this port itself, with interrupts, so',CR,LF
-        DB      'EGT8080 will reach it through the firmware instead of',CR,LF
+        DB      'EGT80 will reach it through the firmware instead of',CR,LF
         DB      'the registers - the way QTERM RomWBW builds do.',CR,LF
         DB      'HBIOS unit ',0
 MASCH2: DB     'Polling the chip directly here would race the',CR,LF
@@ -4304,8 +4270,8 @@ MFPNO:  DB      'no parity, ',0
 MFPEV:  DB      'even parity, ',0
 MFPOD:  DB      'odd parity, ',0
 MFSTOP: DB      ' stop',0
-MLAPPY: DB      'EGT8080 sets this on the port when it is selected.',0
-MLAPPN: DB      'EGT8080 programs nothing: the system setting stands.',0
+MLAPPY: DB      'EGT80 sets this on the port when it is selected.',0
+MLAPPN: DB      'EGT80 programs nothing: the system setting stands.',0
 MLDEF:  DB      'Back to programming nothing - 9600 8N1 shown, but',CR,LF
         DB      'not written to any port.  A chip already',CR,LF
         DB      'programmed keeps what it was given until the',CR,LF
@@ -4316,12 +4282,12 @@ MLHBNO: DB      'The firmware refused those line characteristics,',CR,LF
 MLACNO: DB      'The 6850 has no such combination.  It offers 7',CR,LF
         DB      'data bits only with parity, and 8 data bits with',CR,LF
         DB      'parity only with one stop bit.',CR,LF,0
-MLNOSET: DB     'This port has no line settings EGT8080 can write.',CR,LF
+MLNOSET: DB     'This port has no line settings EGT80 can write.',CR,LF
         DB      'Neither a Z80 SIO/2 nor an Altair 88-SIO has a rate',CR,LF
         DB      'generator in it at all -',CR,LF
         DB      'the bit rate comes from the board clock or its',CR,LF
         DB      'CTC - and its registers cannot be read back, so',CR,LF
-        DB      'EGT8080 will not guess at them.  CP/M AUX: belongs',CR,LF
+        DB      'EGT80 will not guess at them.  CP/M AUX: belongs',CR,LF
         DB      'to the operating system.  Set the rate where the',CR,LF
         DB      'machine sets it, or use HBIOS if this is a RomWBW',CR,LF
         DB      'system.  (Against the gateway itself nothing is',CR,LF
@@ -4412,8 +4378,8 @@ MXDISK: DB      'Disk full or write failed - transfer stopped.',CR,LF,0
 
 MUNSAVE: DB    CR,LF,'  (changed - press V to keep it for next time)',CR,LF
         DB      CR,LF,'Choice: ',0
-MSAVED: DB      'Settings saved into EGT8080.COM.',CR,LF,0
-MSAVERR: DB     'Could not save: EGT8080.COM must be on the current',CR,LF
+MSAVED: DB      'Settings saved into EGT80.COM.',CR,LF,0
+MSAVERR: DB     'Could not save: EGT80.COM must be on the current',CR,LF
         DB      'drive under its own name.  Settings still apply',CR,LF
         DB      'for this run.',CR,LF,0
 MCFGBAD: DB     'Saved settings were not valid - defaults restored.',CR,LF,0
@@ -4426,7 +4392,7 @@ CFGREF: DB      'EGT80CFG'      ; what CFGSIG must contain
 ; the wrong file.  Drive byte 0 = whichever drive is current.
 ;-----------------------------------------------------------------------
 CFGFCB: DB      0
-        DB      'EGT8080 '
+        DB      'EGT80   '
         DB      'COM'
         DB      0,0,0,0
         DB      0,0,0,0,0,0,0,0
@@ -4439,7 +4405,7 @@ MCTRLC: DB      CR,LF,'Press Ctrl-C for the menu.  Anything else you',CR,LF
         DB      'type here is ignored, so a half-typed line cannot',CR,LF
         DB      'run a menu command by accident. ',0
 MHUP:   DB      'Hanging up...',0
-MBYE:   DB      'EGT8080 done.',CR,LF,0
+MBYE:   DB      'EGT80 done.',CR,LF,0
 
 ; Printed on the way out, after the sign-off and before CP/M takes the screen
 ; back.  Wrapped to fit FORTY columns rather than the eighty this program's
@@ -4457,7 +4423,7 @@ MHELP:  DB      'Help - the serial port',CR,LF
         DB      'pick the one you are sitting at.  Get it wrong and',CR,LF
         DB      'nothing is sent, nothing arrives - just silence.',CR,LF,CR,LF
         DB      '1 Gateway   Its own emulated port, 82/83.  This is',CR,LF
-        DB      '            the default, so EGT8080 and the gateway',CR,LF
+        DB      '            the default, so EGT80 and the gateway',CR,LF
         DB      '            work together untouched.',CR,LF
         DB      '2 RomWBW    Asks the firmware to move the byte, so',CR,LF
         DB      '            it works on any RomWBW machine whatever',CR,LF
@@ -4487,20 +4453,20 @@ MHELP2: DB      'Help - using the terminal',CR,LF
         DB      'TAB, BS or BEL - which suits a printing terminal or',CR,LF
         DB      'a console with no cursor addressing: a remote menu',CR,LF
         DB      'drawn with graphics still reads as text.',CR,LF,CR,LF
-        DB      'Settings are saved into EGT8080.COM itself, so a copy',CR,LF
+        DB      'Settings are saved into EGT80.COM itself, so a copy',CR,LF
         DB      'carries them to another disk - the file must be on',CR,LF
         DB      'the current drive under its own name.',CR,LF,0
 MHELP3: DB      'Help - two things to know',CR,LF
         DB      '-------------------------',CR,LF,CR,LF
         DB      'CP/M AUX: has no way to ask whether a byte is',CR,LF
-        DB      'waiting - the OS offers no such call - so EGT8080',CR,LF
+        DB      'waiting - the OS offers no such call - so EGT80',CR,LF
         DB      'reads one byte ahead.  This family therefore cannot',CR,LF
         DB      'receive a literal ^Z, and on real CP/M 2.2 the read',CR,LF
         DB      'waits instead of returning.  Against the gateway it',CR,LF
         DB      'works well; on real hardware prefer the family that',CR,LF
         DB      'matches your serial chip.',CR,LF,CR,LF
         DB      'The Z180 ASCI registers live inside the CPU, and',CR,LF
-        DB      'the block moves.  On a RomWBW machine EGT8080 asks',CR,LF
+        DB      'the block moves.  On a RomWBW machine EGT80 asks',CR,LF
         DB      'the firmware where it is; otherwise press C for C0',CR,LF
         DB      'or B to type it, then pick the channel.',CR,LF,CR,LF
         DB      'Transfers are plain XMODEM, 128-byte blocks, CRC',CR,LF

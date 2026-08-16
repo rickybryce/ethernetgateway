@@ -687,17 +687,18 @@ impl TelnetSession {
                 // depends on what is running.  EGT8080 lives in the gateway's own
                 // drive A: folder, which a booted disk never sees.
                 //
-                // Singular since 0.9.2: this said "terminals" because drive A:
-                // carried the Z80 build beside the 8080 one and a mount hid
-                // both.  One ships now.  An operator who upgraded still has
-                // their old `EGT80.COM` there and a mount still hides it too,
-                // but naming a file we no longer ship, in a note that is the
-                // first thing `truncate_to_width` takes away, would spend the
-                // scarcest characters on the screen for the rarer case.
+                // Plural again: drive A: carries the Z80 build beside the
+                // 8080 one -- singular through 0.9.2, when only EGT8080
+                // shipped -- and a mount over A: hides both, along with
+                // whatever else the operator has put there.  The note stays
+                // "terminals" rather than naming either: this is the first
+                // thing `truncate_to_width` takes away on a 40-column
+                // PETSCII row, and a filename here would cost more than it
+                // tells.
                 note.push_str(if booting {
                     " - booted disk here"
                 } else {
-                    " - hides terminal"
+                    " - hides terminals"
                 });
             }
             // The *note* is bounded, not the finished line.  `truncate_to_width`

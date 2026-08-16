@@ -18,6 +18,7 @@ tests/fixtures/*.payload   binary
 # It was stale between the 0.9.2 folder rename and this line -- caught by
 # reading, not by CI.
 EGT8080/EGT8080.COM        binary
+EGT8080/EGT80.COM          binary
 
 # repodisks.txt is compiled in with include_str! and its *shape* is the
 # product: four line feeds before a collection, two between disks.  A Windows
