@@ -42,7 +42,8 @@ pub(in crate::telnet) use gateway::{gw_debug_enabled, gateway_terminal_name, gat
 #[cfg(test)]
 pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     GatewayInboundEvent, REMOTE_PORT_DISPLAY_CAP, read_gateway_event,
-    filter_gateway_output, normalize_gateway_input, gateway_default_window};
+    filter_gateway_output, GatewayOutState, GW_FILTER_FLUSH, OSC_TITLE_MAX,
+    normalize_gateway_input, gateway_default_window};
 mod io;
 pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
 
@@ -267,6 +268,34 @@ enum DownloadProtocol {
     /// ACK/block handshake.  File type (PRG/SEQ) is auto-detected from
     /// the file and overridable by the user.
     Punter,
+}
+
+// ─── Gateway output filtering ──────────────────────────────
+/// How much of a gateway peer's escape traffic reaches the client.
+///
+/// One value per terminal type rather than a pair of bools: they map 1:1, and
+/// two bools beside each other is how a call site silently says the opposite
+/// of what it means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GatewayFilter {
+    /// Commodore: strip every escape sequence, and case-swap the text.
+    Petscii,
+    /// A terminal with no escape handling: strip every sequence, text as-is.
+    Ascii,
+    /// A terminal that understands escapes.  CSI -- colour, cursor addressing
+    /// -- is the whole point of this mode and passes through untouched, and so
+    /// does everything else **except** a window-title OSC.
+    ///
+    /// `ESC ] 0 ; … BEL` sets a title no client of this gateway has, and a
+    /// terminal that does not implement OSC swallows the two-byte `ESC ]` and
+    /// prints the rest: bash's `\e]0;\u@\h: \w\a` arrives on screen as
+    /// `0;ricky@TelnetBible: ~` in front of every prompt.  Measured on a real
+    /// SC126 through the SSH gateway, under **both** EGT80 and QTERM -- which
+    /// is what rules out a fault in either terminal and puts the fix here.
+    ///
+    /// Only the title form is taken, and only when it completes, because this
+    /// stream also carries file transfers: see `filter_gateway_output`.
+    Ansi,
 }
 
 // ─── Input mode ────────────────────────────────────────────

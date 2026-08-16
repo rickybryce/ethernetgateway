@@ -88,8 +88,9 @@ options, and the full AT command set.
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.
 - **Outbound gateways** — proxy a telnet session to a remote **telnet** or
-  **SSH** host (ANSI stripped for PETSCII/ASCII terminals; TOFU host-key
-  verification for SSH).
+  **SSH** host (ANSI stripped for PETSCII/ASCII terminals, and the remote's
+  window-title sequence dropped for everyone, since no terminal here has a
+  title bar; TOFU host-key verification for SSH).
 - **Master/slave relay** — extend a slave gateway's serial ports to a master
   over SSH; files always land on the master.
 - **Web browser** — text-mode HTTP/HTTPS/Gopher browsing with numbered links,

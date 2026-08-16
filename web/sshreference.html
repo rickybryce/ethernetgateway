@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SSH Reference &mdash; Ethernet Gateway v0.9.3</title>
-    <meta name="description" content="Reference for the Ethernet Gateway SSH implementation (russh): the inbound SSH server (Ed25519 host key, unified credentials, per-IP lockout, the duplex bridge to a session), and the outbound SSH gateway/proxy (trust-on-first-use host-key verification against gateway_hosts, password or gateway-key authentication, and ANSI stripping for PETSCII/ASCII terminals).">
+    <meta name="description" content="Reference for the Ethernet Gateway SSH implementation (russh): the inbound SSH server (Ed25519 host key, unified credentials, per-IP lockout, the duplex bridge to a session), and the outbound SSH gateway/proxy (trust-on-first-use host-key verification against gateway_hosts, password or gateway-key authentication, ANSI stripping for PETSCII/ASCII terminals, and window-title removal for every terminal type).">
     <style>
         :root {
             --green: #33ff33;
@@ -714,7 +714,7 @@
                         <li>Enter the remote <strong>hostname / IP</strong>, the <strong>port</strong> (default 22), and your <strong>username</strong> on the remote.</li>
                         <li>The gateway connects and verifies the remote's <strong>host key</strong> against <code>gateway_hosts</code> (see <a href="#hostkey">Host-Key Verification</a>).</li>
                         <li>It authenticates using the <strong>one configured method</strong> &mdash; password <em>or</em> gateway key (see <a href="#auth">Authentication</a>).</li>
-                        <li>On success you get a full interactive shell. ANSI from the remote is stripped for PETSCII / ASCII terminals (see <a href="#ansi">ANSI Filtering</a>).</li>
+                        <li>On success you get a full interactive shell. ANSI from the remote is stripped for PETSCII / ASCII terminals, and the remote's window-title sequence is dropped for everyone (see <a href="#ansi">ANSI Filtering</a>).</li>
                         <li>Press <strong>Esc</strong> twice (PETSCII: the back-arrow key twice) to disconnect and return to the menu.</li>
                     </ol>
                 </div>
@@ -825,8 +825,47 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                     sequences &mdash; so raw colour and cursor-control codes don't splatter
                     across a screen that can't interpret them. The escape-state machine is
                     carried across reads so sequences split over packet boundaries are still
-                    caught. <strong>ANSI</strong> terminals get the stream through unchanged.
+                    caught. <strong>ANSI</strong> terminals keep their sequences &mdash;
+                    colour and cursor addressing are why the terminal asked for ANSI in the
+                    first place &mdash; with one exception, below.
                 </p>
+                <p class="dim-text">
+                    <strong>The window title goes for everyone.</strong> A shell sets the
+                    title of the window it thinks it is in: bash's default
+                    <code>PS1</code> sends <code>ESC ] 0 ; user@host: ~ BEL</code> before
+                    every prompt. No client of this gateway has a title bar, and a terminal
+                    with no OSC support swallows the two-byte <code>ESC ]</code> and
+                    <em>prints the rest</em>, so the title lands on screen in front of every
+                    prompt &mdash; which reads as the prompt appearing twice, since the
+                    title is user@host as well. Measured on a real SC126 under both EGT80
+                    and QTERM, which is what rules out a fault in either terminal.
+                    The drop is unconditional: a modern terminal that does have a
+                    title bar loses title updates through a gateway session too,
+                    because nothing can ask a terminal whether it implements OSC and
+                    the terminals that cannot are the ones this gateway is for.
+                </p>
+                <div class="callout callout-warn">
+                    <strong>Why it is held rather than swallowed:</strong> a gateway session
+                    is a plain terminal proxy, so if you run <code>sz</code> on the far host
+                    its ZMODEM bytes come down this same stream and nothing in the filter
+                    can tell them from a prompt. The bytes <code>1B 5D</code> turn up about
+                    once per 64&nbsp;KB of binary, so swallowing <code>ESC ]</code> to the
+                    next BEL would eat part of the download &mdash; and eat it
+                    <em>identically</em> on every retry, so the protocol's own CRC could
+                    never recover it. Instead a candidate is held and dropped only once it
+                    proves to be a title: <code>ESC ]</code>, then <code>0;</code> /
+                    <code>1;</code> / <code>2;</code>, then printable ASCII, then BEL or
+                    <code>ESC \</code>, all inside 256 bytes. Anything that fails any of
+                    those &mdash; a control byte, a high byte, an overlong run, a different
+                    OSC code, an unterminated one &mdash; is released byte for byte in the
+                    order it arrived. A candidate is released the moment the remote goes
+                    quiet, too (100&nbsp;ms): carrying one across a read is necessary,
+                    because a burst larger than the 4&nbsp;KB read buffer splits at an
+                    arbitrary byte, but carrying one indefinitely would deadlock a
+                    stop-and-wait transfer &mdash; a block whose last byte is being
+                    weighed never completes, the receiver times out, the sender resends
+                    the identical block, and the identical hold repeats.
+                </div>
                 <div class="callout callout-info">
                     <strong>See also:</strong> the
                     <a href="appendix.html#ansi-table">ANSI Escape Sequences</a> appendix for

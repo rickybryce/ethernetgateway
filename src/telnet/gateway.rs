@@ -144,18 +144,131 @@ fn gw_hexdump(bytes: &[u8]) -> String {
     format!("{} | \"{}\"", hex.join(" "), ascii)
 }
 
-/// Filter SSH gateway output for non-ANSI terminals.
+/// The longest window title held while deciding whether one is what we have.
+/// A real one is a user, a host and a path; past this it is not a title, and
+/// holding more would delay a stream that merely happens to start like one.
+pub(in crate::telnet) const OSC_TITLE_MAX: usize = 256;
+
+/// Parser state carried across reads, since a sequence can straddle any two of
+/// them.  `held` is the candidate title accumulated so far -- empty except
+/// while one is being weighed.
 ///
-/// Strips all ANSI escape sequences (CSI, OSC, DCS, PM, APC, SOS) from the
-/// byte stream.  For PETSCII terminals, plain-text bytes are also case-swapped.
-/// `state` is the ANSI parser state carried across calls (start at 0):
-///   0=normal, 1=ESC seen, 2=CSI sequence, 3=string sequence, 4=ESC in string
-pub(in crate::telnet) fn filter_gateway_output(input: &[u8], state: &mut u8, is_petscii: bool, out: &mut Vec<u8>) {
+/// The client's terminal type lives here rather than being passed to each
+/// call: it cannot change inside a session, and three functions that each
+/// took it separately could be called with three different answers.
+pub(in crate::telnet) struct GatewayOutState {
+    mode: GatewayFilter,
+    /// 0=normal, 1=ESC seen, 2=CSI sequence, 3=string sequence,
+    /// 4=ESC in string, 5=weighing a title, 6=ESC while weighing one
+    state: u8,
+    held: Vec<u8>,
+}
+
+/// How long a candidate may be withheld once the remote stops sending.
+///
+/// **Holding across a read is necessary; holding for ever is a broken file
+/// transfer.** A burst larger than the 4 KB read buffer is split at an
+/// arbitrary byte, so a title straddling two reads is ordinary, not exotic --
+/// which is why the candidate is carried between them. But a stop-and-wait
+/// sender goes quiet after each block and waits for an ACK, so if the block's
+/// last byte is one we are holding, the block never completes, the receiver
+/// times out, the sender resends the same block, and the identical hold
+/// repeats: a deadlock, not a retryable error. The next read of a burst
+/// follows in microseconds, so this window is enormous by comparison and
+/// nowhere near a protocol's multi-second block timeout.
+pub(in crate::telnet) const GW_FILTER_FLUSH: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+impl GatewayOutState {
+    /// A fresh parser for one client terminal.
+    pub(in crate::telnet) fn new(mode: GatewayFilter) -> Self {
+        Self { mode, state: 0, held: Vec::new() }
+    }
+
+    /// The parser phase, for tests that check a sequence is still open across
+    /// a read boundary.  The field stays private so the state machine keeps
+    /// one owner.
+    #[cfg(test)]
+    pub(in crate::telnet) fn phase(&self) -> u8 {
+        self.state
+    }
+
+    /// Whether any byte is being withheld from the client.
+    ///
+    /// Only the pass-through mode can withhold: the stripping modes are
+    /// discarding a sequence, so their parser states owe the client nothing
+    /// and an ESC held in `state` 1 there is one the client must never see.
+    pub(in crate::telnet) fn has_pending(&self) -> bool {
+        self.mode == GatewayFilter::Ansi && (!self.held.is_empty() || self.state == 1)
+    }
+
+    /// Give up on the candidate and release what it holds, in arrival order.
+    ///
+    /// Called when the remote has gone quiet: whatever was being weighed is
+    /// not going to be completed by a byte that never comes, and data the
+    /// client is owed outranks a title we might have dropped.  A no-op in the
+    /// stripping modes, which hold nothing.
+    pub(in crate::telnet) fn flush_pending(&mut self, out: &mut Vec<u8>) {
+        if !self.has_pending() {
+            return;
+        }
+        if self.state == 6 {
+            // Weighing, and an ESC arrived that no terminator followed.
+            out.extend_from_slice(&self.held);
+            out.push(0x1B);
+        } else if !self.held.is_empty() {
+            out.extend_from_slice(&self.held);
+        } else if self.state == 1 {
+            // A lone ESC, held only to see whether `]` followed it.
+            out.push(0x1B);
+        }
+        self.held.clear();
+        self.state = 0;
+    }
+}
+
+/// Filter gateway output for the client's terminal -- see `GatewayFilter` for
+/// what each type keeps.
+///
+/// **This stream also carries file transfers.** A gateway session is a plain
+/// terminal proxy: if the user runs `sz` on the far host, its XMODEM/ZMODEM
+/// bytes come through here, and nothing in this function can tell them from a
+/// prompt.  That is why the `Ansi` path does not simply swallow `ESC ]` to the
+/// next BEL the way the stripping modes do -- `1B 5D` turns up about once per
+/// 64 KB of binary, so a download would be eaten, and eaten *identically* on
+/// every retry, so the protocol's own CRC could never recover it.
+///
+/// Instead a candidate is **held** and only dropped once it proves to be a
+/// title: `ESC ]`, then `0;`/`1;`/`2;`, then printable ASCII, then BEL or
+/// `ESC \`, all within `OSC_TITLE_MAX`.  Anything failing any of those -- a
+/// control byte, a high byte, an overlong run, a different OSC code, an
+/// unterminated one -- is released byte for byte in the order it arrived.  So
+/// the escape hatch for binary data is the default, not the exception.
+///
+/// A candidate still open when the remote goes quiet is released by
+/// `flush_pending` -- see `GW_FILTER_FLUSH` for why holding one indefinitely
+/// deadlocks a stop-and-wait transfer.
+pub(in crate::telnet) fn filter_gateway_output(
+    input: &[u8],
+    st: &mut GatewayOutState,
+    out: &mut Vec<u8>,
+) {
+    let strip_all = st.mode != GatewayFilter::Ansi;
+    let is_petscii = st.mode == GatewayFilter::Petscii;
+    // A held candidate that turned out to be ordinary data, in arrival order.
+    fn release(st: &mut GatewayOutState, out: &mut Vec<u8>) {
+        out.extend_from_slice(&st.held);
+        st.held.clear();
+    }
+    // `ESC ] <0|1|2> ;` — the window-title codes, and the only ones dropped.
+    fn is_title(held: &[u8]) -> bool {
+        held.len() >= 4 && matches!(held[2], b'0' | b'1' | b'2') && held[3] == b';'
+    }
     for &b in input {
-        match *state {
+        match st.state {
             0 => {
                 if b == 0x1B {
-                    *state = 1;
+                    st.state = 1;
                 } else if is_petscii {
                     match b {
                         b'~' => {}  // tilde has no PETSCII equivalent
@@ -198,36 +311,115 @@ pub(in crate::telnet) fn filter_gateway_output(input: &[u8], state: &mut u8, is_
                     out.push(b);
                 }
             }
-            1 => {
-                *state = match b {
-                    b'[' => 2,                                   // CSI
-                    b']' | b'P' | b'^' | b'_' | b'X' => 3,      // OSC/DCS/PM/APC/SOS
-                    0x1B => 1,                                   // Another ESC
-                    _ => 0,                                      // 2-char sequence done
-                };
-            }
+            1 => match b {
+                // A string sequence.  The stripping modes swallow it whole;
+                // ANSI starts weighing an OSC and lets the rest through, since
+                // only the title form is ever dropped there.
+                b']' if !strip_all => {
+                    st.held.clear();
+                    st.held.extend_from_slice(&[0x1B, b']']);
+                    st.state = 5;
+                }
+                b']' | b'P' | b'^' | b'_' | b'X' if strip_all => st.state = 3,
+                // Another ESC: the held one stood alone, so an ANSI client
+                // gets it and we go on holding this one.
+                0x1B => {
+                    if !strip_all {
+                        out.push(0x1B);
+                    }
+                    st.state = 1;
+                }
+                // CSI and every other two-character sequence.  Stripping modes
+                // swallow them; ANSI releases the ESC with the byte that
+                // followed and reads the rest as the ordinary text it is.
+                _ => {
+                    if strip_all {
+                        st.state = if b == b'[' { 2 } else { 0 };
+                    } else {
+                        out.push(0x1B);
+                        out.push(b);
+                        st.state = 0;
+                    }
+                }
+            },
             2 => {
                 // CSI: parameter/intermediate bytes stay in state 2.
                 // Final byte (0x40-0x7E) ends the sequence.
                 if (0x40..=0x7E).contains(&b) {
-                    *state = 0;
+                    st.state = 0;
                 } else if b == 0x1B {
-                    *state = 1;
+                    st.state = 1;
                 } else if b < 0x20 || b == 0x7F {
-                    *state = 0;
+                    st.state = 0;
                 }
             }
             3 => {
                 // String sequence: consume until BEL or ESC
                 if b == 0x07 {
-                    *state = 0;
+                    st.state = 0;
                 } else if b == 0x1B {
-                    *state = 4;
+                    st.state = 4;
+                }
+            }
+            4 => {
+                // ESC inside string: '\' = ST (end), else resume string
+                st.state = if b == b'\\' { 0 } else { 3 };
+            }
+            5 => {
+                // Weighing a candidate title.  Everything here is held, and
+                // every exit that is not a completed title releases it.
+                if b == 0x07 {
+                    if is_title(&st.held) {
+                        st.held.clear(); // a title: the one thing we drop
+                    } else {
+                        release(st, out);
+                        out.push(b);
+                    }
+                    st.state = 0;
+                } else if b == 0x1B {
+                    st.state = 6;
+                } else if !(0x20..=0x7E).contains(&b) || st.held.len() >= OSC_TITLE_MAX {
+                    // A control byte, a high byte, or too long to be a title:
+                    // this is data that merely began like one.  ESC cannot
+                    // reach here -- it is the terminator check just above.
+                    release(st, out);
+                    out.push(b);
+                    st.state = 0;
+                } else {
+                    st.held.push(b);
                 }
             }
             _ => {
-                // ESC inside string: '\' = ST (end), else resume string
-                *state = if b == b'\\' { 0 } else { 3 };
+                // ESC while weighing: `ESC \` is ST, the other terminator.
+                if b == b'\\' {
+                    if is_title(&st.held) {
+                        st.held.clear();
+                    } else {
+                        release(st, out);
+                        out.extend_from_slice(&[0x1B, b'\\']);
+                    }
+                    st.state = 0;
+                } else if b == b']' {
+                    // The candidate is over, and the ESC we were weighing
+                    // belongs to the *next* one: this is `ESC ]` starting
+                    // again.  Releasing it as text instead would print the
+                    // very title this filter exists to drop, whenever an
+                    // unterminated OSC is followed straight by a real one.
+                    release(st, out);
+                    st.held.extend_from_slice(&[0x1B, b']']);
+                    st.state = 5;
+                } else {
+                    // Not a terminator, so the candidate is over.  Release it
+                    // with its ESC, then read this byte from the top.
+                    release(st, out);
+                    out.push(0x1B);
+                    if b == 0x1B {
+                        st.state = 1;
+                    } else {
+                        out.push(b);
+                        st.state = 0;
+                    }
+                }
             }
         }
     }
@@ -1427,7 +1619,13 @@ impl TelnetSession {
         let writer = &self.writer;
         let erase_char = self.erase_char;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
-        let is_ascii = self.terminal_type == TerminalType::Ascii;
+        // One value per terminal type -- see `GatewayFilter`.  ANSI keeps its
+        // CSI sequences and loses only a completed window title.
+        let gw_filter = match self.terminal_type {
+            TerminalType::Petscii => GatewayFilter::Petscii,
+            TerminalType::Ascii => GatewayFilter::Ascii,
+            _ => GatewayFilter::Ansi,
+        };
         // Idle bound for the live bridge: if neither side sends a byte
         // within this window, tear the session down so a half-open client
         // (laptop asleep, NAT drop) can't pin it — and its max_sessions
@@ -1437,7 +1635,13 @@ impl TelnetSession {
 
         let mut ssh_buf = [0u8; 4096];
         let mut filter_buf: Vec<u8> = Vec::new();
-        let mut ansi_state: u8 = 0;
+        let mut ansi_state = GatewayOutState::new(gw_filter);
+        // When a held candidate must be released if nothing more arrives.
+        // Set from the *remote's* reads, so it measures the remote going
+        // quiet -- a bare `sleep` in the `select!` would be restarted by any
+        // branch, including the user's own keystrokes, which is not what
+        // `GW_FILTER_FLUSH` promises.
+        let mut hold_deadline: Option<tokio::time::Instant> = None;
         let mut last_cr = false;
         let mut last_was_esc = false;
         let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
@@ -1465,12 +1669,34 @@ impl TelnetSession {
         }
 
         loop {
+            // A disabled branch never fires, so this value is only a
+            // placeholder when no candidate is held.
+            let flush_at = hold_deadline
+                .unwrap_or_else(|| tokio::time::Instant::now() + GW_FILTER_FLUSH);
             tokio::select! {
                 _ = tokio::time::sleep(idle_timeout), if !idle_timeout.is_zero() => {
                     // Idle in both directions past the timeout window —
                     // disconnect so a half-open client can't pin the
                     // session and leak its max_sessions slot.
                     break;
+                }
+                _ = tokio::time::sleep_until(flush_at), if hold_deadline.is_some() => {
+                    // The remote stopped mid-candidate.  Release it: a title
+                    // we might have dropped is worth less than bytes the
+                    // client is owed, and a stop-and-wait sender waiting for
+                    // an ACK will never send the byte that would decide it.
+                    hold_deadline = None;
+                    filter_buf.clear();
+                    ansi_state.flush_pending(&mut filter_buf);
+                    if !filter_buf.is_empty() {
+                        if gw_debug {
+                            glog!("[gw-out] released {} held bytes -> {}",
+                                filter_buf.len(), gw_hexdump(&filter_buf));
+                        }
+                        let mut w = writer.lock().await;
+                        if w.write_all(&filter_buf).await.is_err() { break; }
+                        if w.flush().await.is_err() { break; }
+                    }
                 }
                 byte = read_byte_iac_filtered(reader, true) => {
                     match byte {
@@ -1525,29 +1751,50 @@ impl TelnetSession {
                     match n {
                         Ok(0) => break,
                         Ok(n) => {
-                            let data = if is_petscii || is_ascii {
+                            // Every terminal type goes through the filter.
+                            // ANSI used to bypass it entirely and so kept the
+                            // window-title sequence, which a console without
+                            // OSC prints in front of every prompt.
+                            let data = {
                                 filter_buf.clear();
-                                filter_gateway_output(&ssh_buf[..n], &mut ansi_state, is_petscii, &mut filter_buf);
+                                filter_gateway_output(
+                                    &ssh_buf[..n],
+                                    &mut ansi_state,
+                                    &mut filter_buf,
+                                );
                                 &filter_buf[..]
-                            } else {
-                                &ssh_buf[..n]
                             };
                             if gw_debug {
                                 glog!("[gw-out] raw {} bytes -> {}", n, gw_hexdump(&ssh_buf[..n]));
-                                if is_petscii || is_ascii {
-                                    glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
-                                }
+                                glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
                             }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
                                 if w.write_all(data).await.is_err() { break; }
                                 if w.flush().await.is_err() { break; }
                             }
+                            // Restart the release window from this read: a
+                            // candidate the remote is still extending is not
+                            // a remote that has gone quiet.
+                            hold_deadline = ansi_state
+                                .has_pending()
+                                .then(|| tokio::time::Instant::now() + GW_FILTER_FLUSH);
                         }
                         Err(_) => break,
                     }
                 }
             }
+        }
+
+        // The loop can break with a candidate still held -- remote EOF is the
+        // ordinary way.  Those are the remote's last bytes of output; without
+        // this they are dropped and "Connection closed." prints over the gap.
+        filter_buf.clear();
+        ansi_state.flush_pending(&mut filter_buf);
+        if !filter_buf.is_empty() {
+            let mut w = writer.lock().await;
+            let _ = w.write_all(&filter_buf).await;
+            let _ = w.flush().await;
         }
 
         // Clean up SSH channel and session
@@ -1715,7 +1962,13 @@ impl TelnetSession {
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
-        let is_ascii = self.terminal_type == TerminalType::Ascii;
+        // One value per terminal type -- see `GatewayFilter`.  ANSI keeps its
+        // CSI sequences and loses only a completed window title.
+        let gw_filter = match self.terminal_type {
+            TerminalType::Petscii => GatewayFilter::Petscii,
+            TerminalType::Ascii => GatewayFilter::Ascii,
+            _ => GatewayFilter::Ansi,
+        };
 
         let erase_char = self.erase_char;
         let mut remote_buf = [0u8; 4096];
@@ -1724,7 +1977,13 @@ impl TelnetSession {
         // Zero disables it, matching the session's idle policy.
         let idle_timeout = self.idle_timeout;
         let mut filter_buf: Vec<u8> = Vec::new();
-        let mut ansi_state: u8 = 0;
+        let mut ansi_state = GatewayOutState::new(gw_filter);
+        // When a held candidate must be released if nothing more arrives.
+        // Set from the *remote's* reads, so it measures the remote going
+        // quiet -- a bare `sleep` in the `select!` would be restarted by any
+        // branch, including the user's own keystrokes, which is not what
+        // `GW_FILTER_FLUSH` promises.
+        let mut hold_deadline: Option<tokio::time::Instant> = None;
         let mut last_was_esc = false;
         let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
 
@@ -1780,12 +2039,36 @@ impl TelnetSession {
         }
 
         loop {
+            // A disabled branch never fires, so this value is only a
+            // placeholder when no candidate is held.
+            let flush_at = hold_deadline
+                .unwrap_or_else(|| tokio::time::Instant::now() + GW_FILTER_FLUSH);
             tokio::select! {
                 _ = tokio::time::sleep(idle_timeout), if !idle_timeout.is_zero() => {
                     // Idle in both directions past the timeout window —
                     // disconnect so a half-open client can't pin the
                     // session and leak its max_sessions slot.
                     break;
+                }
+                _ = tokio::time::sleep_until(flush_at), if hold_deadline.is_some() => {
+                    // The remote stopped mid-candidate.  Release it: a title
+                    // we might have dropped is worth less than bytes the
+                    // client is owed, and a stop-and-wait sender waiting for
+                    // an ACK will never send the byte that would decide it.
+                    hold_deadline = None;
+                    filter_buf.clear();
+                    ansi_state.flush_pending(&mut filter_buf);
+                    if !filter_buf.is_empty() {
+                        if gw_debug {
+                            glog!("[gw-out] released {} held bytes -> {}",
+                                filter_buf.len(), gw_hexdump(&filter_buf));
+                        }
+                        let mut w = writer.lock().await;
+                        // The same IAC escaping the read branch uses: one
+                        // loop must not have two ways out to the client.
+                        if write_telnet_data(&mut **w, &filter_buf).await.is_err() { break; }
+                        if w.flush().await.is_err() { break; }
+                    }
                 }
                 event = read_gateway_event(reader) => {
                     match event {
@@ -1890,18 +2173,20 @@ impl TelnetSession {
                                 }
                                 raw_slice = &data_from_remote[..];
                             }
-                            let data: &[u8] = if is_petscii || is_ascii {
+                            // As above: ANSI is filtered too, for a completed
+                            // window title and nothing else.
+                            let data: &[u8] = {
                                 filter_buf.clear();
-                                filter_gateway_output(raw_slice, &mut ansi_state, is_petscii, &mut filter_buf);
+                                filter_gateway_output(
+                                    raw_slice,
+                                    &mut ansi_state,
+                                    &mut filter_buf,
+                                );
                                 &filter_buf[..]
-                            } else {
-                                raw_slice
                             };
                             if gw_debug {
                                 glog!("[gw-out] raw {} bytes -> {}", raw_slice.len(), gw_hexdump(raw_slice));
-                                if is_petscii || is_ascii {
-                                    glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
-                                }
+                                glog!("[gw-out] filtered {} bytes -> {}", data.len(), gw_hexdump(data));
                             }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
@@ -1912,11 +2197,32 @@ impl TelnetSession {
                                 if write_telnet_data(&mut **w, data).await.is_err() { break; }
                                 if w.flush().await.is_err() { break; }
                             }
+                            // As above: the window runs from the remote's
+                            // last byte, not from any activity at all -- and
+                            // a read that was entirely IAC negotiation
+                            // carries no user byte, so it must not push the
+                            // release out.  A peer sending `IAC NOP` faster
+                            // than 10 Hz would otherwise postpone it for ever,
+                            // which is the stall this branch exists to break.
+                            if !raw_slice.is_empty() {
+                                hold_deadline = ansi_state
+                                    .has_pending()
+                                    .then(|| tokio::time::Instant::now() + GW_FILTER_FLUSH);
+                            }
                         }
                         Err(_) => break,
                     }
                 }
             }
+        }
+
+        // As above: the remote's final output must not die with the loop.
+        filter_buf.clear();
+        ansi_state.flush_pending(&mut filter_buf);
+        if !filter_buf.is_empty() {
+            let mut w = writer.lock().await;
+            let _ = write_telnet_data(&mut **w, &filter_buf).await;
+            let _ = w.flush().await;
         }
 
         // Clean up

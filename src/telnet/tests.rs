@@ -966,9 +966,20 @@ fn test_constant_time_eq_single_bit_diff() {
 
 /// Helper: run filter_gateway_output on a single chunk.
 fn filter_output(input: &[u8], is_petscii: bool) -> Vec<u8> {
-    let mut state = 0u8;
+    let mode = if is_petscii { GatewayFilter::Petscii } else { GatewayFilter::Ascii };
+    let mut state = GatewayOutState::new(mode);
     let mut out = Vec::new();
-    filter_gateway_output(input, &mut state, is_petscii, &mut out);
+    filter_gateway_output(input, &mut state, &mut out);
+    out
+}
+
+/// Helper: the same, for a terminal that keeps its escape sequences.
+fn filter_output_ansi(chunks: &[&[u8]]) -> Vec<u8> {
+    let mut state = GatewayOutState::new(GatewayFilter::Ansi);
+    let mut out = Vec::new();
+    for c in chunks {
+        filter_gateway_output(c, &mut state, &mut out);
+    }
     out
 }
 
@@ -1038,36 +1049,36 @@ fn test_filter_strips_multiple_sequences() {
 
 #[test]
 fn test_filter_state_spans_chunks() {
-    let mut state = 0u8;
+    let mut state = GatewayOutState::new(GatewayFilter::Ascii);
     let mut out = Vec::new();
-    filter_gateway_output(b"\x1b]0;ti", &mut state, false, &mut out);
+    filter_gateway_output(b"\x1b]0;ti", &mut state, &mut out);
     assert_eq!(out, b"");
-    assert_eq!(state, 3);
-    filter_gateway_output(b"tle\x07visible", &mut state, false, &mut out);
+    assert_eq!(state.phase(), 3);
+    filter_gateway_output(b"tle\x07visible", &mut state, &mut out);
     assert_eq!(out, b"visible");
-    assert_eq!(state, 0);
+    assert_eq!(state.phase(), 0);
 }
 
 #[test]
 fn test_filter_incomplete_csi_spans_chunks() {
-    let mut state = 0u8;
+    let mut state = GatewayOutState::new(GatewayFilter::Ascii);
     let mut out = Vec::new();
-    filter_gateway_output(b"\x1b[32", &mut state, false, &mut out);
+    filter_gateway_output(b"\x1b[32", &mut state, &mut out);
     assert_eq!(out, b"");
-    assert_eq!(state, 2);
-    filter_gateway_output(b"mhello", &mut state, false, &mut out);
+    assert_eq!(state.phase(), 2);
+    filter_gateway_output(b"mhello", &mut state, &mut out);
     assert_eq!(out, b"hello");
-    assert_eq!(state, 0);
+    assert_eq!(state.phase(), 0);
 }
 
 #[test]
 fn test_filter_bare_esc_at_end_of_chunk() {
-    let mut state = 0u8;
+    let mut state = GatewayOutState::new(GatewayFilter::Ascii);
     let mut out = Vec::new();
-    filter_gateway_output(b"text\x1b", &mut state, false, &mut out);
+    filter_gateway_output(b"text\x1b", &mut state, &mut out);
     assert_eq!(out, b"text");
-    assert_eq!(state, 1);
-    filter_gateway_output(b"[0mmore", &mut state, false, &mut out);
+    assert_eq!(state.phase(), 1);
+    filter_gateway_output(b"[0mmore", &mut state, &mut out);
     assert_eq!(out, b"textmore");
 }
 
@@ -1233,28 +1244,537 @@ fn test_filter_double_esc() {
 
 #[test]
 fn test_filter_unclosed_osc_spans_chunks() {
-    let mut state = 0u8;
+    let mut state = GatewayOutState::new(GatewayFilter::Ascii);
     let mut out = Vec::new();
-    filter_gateway_output(b"\x1b]0;title", &mut state, false, &mut out);
-    assert_eq!(state, 3);
+    filter_gateway_output(b"\x1b]0;title", &mut state, &mut out);
+    assert_eq!(state.phase(), 3);
     assert_eq!(out, b"");
-    filter_gateway_output(b"more title", &mut state, false, &mut out);
-    assert_eq!(state, 3);
+    filter_gateway_output(b"more title", &mut state, &mut out);
+    assert_eq!(state.phase(), 3);
     assert_eq!(out, b"");
-    filter_gateway_output(b"\x07visible", &mut state, false, &mut out);
-    assert_eq!(state, 0);
+    filter_gateway_output(b"\x07visible", &mut state, &mut out);
+    assert_eq!(state.phase(), 0);
     assert_eq!(out, b"visible");
 }
 
 #[test]
 fn test_filter_csi_interrupted_by_new_esc() {
-    let mut state = 0u8;
+    let mut state = GatewayOutState::new(GatewayFilter::Ascii);
     let mut out = Vec::new();
-    filter_gateway_output(b"\x1b[32", &mut state, false, &mut out);
-    assert_eq!(state, 2);
-    filter_gateway_output(b"\x1b]title\x07text", &mut state, false, &mut out);
-    assert_eq!(state, 0);
+    filter_gateway_output(b"\x1b[32", &mut state, &mut out);
+    assert_eq!(state.phase(), 2);
+    filter_gateway_output(b"\x1b]title\x07text", &mut state, &mut out);
+    assert_eq!(state.phase(), 0);
     assert_eq!(out, b"text");
+}
+
+// ─── Gateway window-title stripping (ANSI clients) ───
+
+/// **The reported bug, byte for byte.**
+///
+/// bash sets the window title from `PS1` with `\e]0;\u@\h: \w\a`.  A terminal
+/// that does not implement OSC eats the two-byte `ESC ]` and prints the rest,
+/// so the SC126 showed `0;ricky@TelnetBible: ~` in front of every prompt --
+/// which also looks like the prompt appearing twice, because the title *is*
+/// user@host.  Seen under EGT80 *and* QTERM, which is what places the fix here
+/// rather than in either terminal.
+#[test]
+fn test_ansi_gateway_drops_the_window_title_but_keeps_the_prompt() {
+    let wire = b"\x1b]0;ricky@TelnetBible: ~\x07ricky@TelnetBible:~$ ";
+    assert_eq!(
+        filter_output_ansi(&[wire]),
+        b"ricky@TelnetBible:~$ ".to_vec(),
+        "the title must go and the prompt must stay"
+    );
+}
+
+/// Colour and cursor addressing are the whole reason a client asks for ANSI,
+/// so a CSI sequence has to arrive exactly as sent -- including one split
+/// across two reads, since the parser state is carried between them.
+#[test]
+fn test_ansi_gateway_keeps_csi_sequences_intact() {
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b[1;32mgreen\x1b[0m"]),
+        b"\x1b[1;32mgreen\x1b[0m".to_vec(),
+    );
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b[32", b"mhalf"]),
+        b"\x1b[32mhalf".to_vec(),
+        "a CSI split across reads must still come out whole"
+    );
+}
+
+/// **A gateway session also carries file transfers, so this must be a filter
+/// that binary data survives.**
+///
+/// If the user runs `sz` on the far host, XMODEM/ZMODEM bytes come through
+/// this same function and nothing here can tell them from a prompt.  `1B 5D`
+/// occurs about once per 64 KB of binary, so swallowing `ESC ]` to the next
+/// BEL -- which is what the stripping modes do, and what the first draft of
+/// this fix did -- would eat part of a download, and eat it *identically* on
+/// every retry, so the protocol's CRC could never recover it.
+///
+/// Every one of these begins like a title and must come back byte for byte.
+#[test]
+fn test_ansi_gateway_never_eats_binary_that_merely_starts_like_a_title() {
+    // ESC ] followed by binary: a control byte ends the candidate.
+    let bin = b"\x1b]\x00\x01\x02data";
+    assert_eq!(filter_output_ansi(&[bin]), bin.to_vec(), "control byte");
+
+    // The full title prefix, then a high byte — still data, not a title.
+    let high = b"\x1b]0;\xff\xfe\x80payload";
+    assert_eq!(filter_output_ansi(&[high]), high.to_vec(), "high byte");
+
+    // A different OSC code is not a title and is passed through untouched.
+    let palette = b"\x1b]4;1;rgb:00/00/00\x07";
+    assert_eq!(filter_output_ansi(&[palette]), palette.to_vec(), "OSC 4");
+
+    // Looks like a title, but never terminates: released once it is too long
+    // to be one, so a stream cannot be held hostage by a stray prefix.
+    let mut runaway = b"\x1b]0;".to_vec();
+    runaway.extend(std::iter::repeat_n(b'A', 400));
+    assert_eq!(filter_output_ansi(&[&runaway]), runaway, "unterminated");
+
+    // A real XMODEM-ish block of every byte value, twice, must be untouched.
+    let mut block: Vec<u8> = (0..=255u8).collect();
+    block.extend(0..=255u8);
+    assert_eq!(filter_output_ansi(&[&block]), block, "all byte values");
+}
+
+/// The title may arrive in pieces, and the ST terminator (`ESC \`) is as valid
+/// as BEL.  Both are checked here because the candidate is held across reads,
+/// which is exactly where a state machine gets this wrong.
+#[test]
+fn test_ansi_gateway_title_split_across_reads_and_st_terminated() {
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b]0;ric", b"ky@host: ~", b"\x07done"]),
+        b"done".to_vec(),
+        "a title split across three reads must still be dropped whole"
+    );
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b]0;title\x1b\\after"]),
+        b"after".to_vec(),
+        "ST terminates a title as well as BEL"
+    );
+    // A lone ESC is held, then released when the next byte proves it ordinary.
+    assert_eq!(filter_output_ansi(&[b"a\x1b", b"Zb"]), b"a\x1bZb".to_vec());
+}
+
+/// **The length cap is a boundary, so it is pinned at the boundary.**
+///
+/// The only other length cover is a 400-byte runaway, which passes wherever
+/// the cap sits; moving the check after the push, or `>` for `>=`, would go
+/// unnoticed.  A byte is added only while `held` is shorter than the cap, and
+/// `held` carries the four-byte `ESC ] <code> ;` prefix, so the longest title
+/// that can still be dropped has `OSC_TITLE_MAX - 4` payload bytes.
+#[test]
+fn test_the_title_length_cap_is_pinned_at_its_boundary() {
+    let longest = OSC_TITLE_MAX - 4;
+
+    let mut at_cap = b"\x1b]0;".to_vec();
+    at_cap.extend(std::iter::repeat_n(b'A', longest));
+    at_cap.push(0x07);
+    assert_eq!(
+        filter_output_ansi(&[&at_cap]),
+        Vec::<u8>::new(),
+        "the longest title that fits must still be dropped",
+    );
+
+    let mut over_cap = b"\x1b]0;".to_vec();
+    over_cap.extend(std::iter::repeat_n(b'A', longest + 1));
+    over_cap.push(0x07);
+    assert_eq!(
+        filter_output_ansi(&[&over_cap]),
+        over_cap,
+        "one byte past the cap is data, and comes back whole",
+    );
+}
+
+/// **A candidate that ends in `ESC ]` is the start of the next one.**
+///
+/// An unterminated OSC followed straight by a real title used to release the
+/// second `ESC ]` as text and read the title from state 0 -- printing
+/// `0;user@host`, the exact symptom this filter exists to remove.  The ESC
+/// being weighed belongs to whatever follows it, not to what came before.
+#[test]
+fn test_an_unterminated_osc_does_not_let_the_next_title_through() {
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b]0;stalled\x1b]0;ricky@host\x07after"]),
+        b"\x1b]0;stalledafter".to_vec(),
+        "the abandoned candidate comes back as data; the real title still goes",
+    );
+    // And across a read boundary, where the two ESCs straddle the seam.
+    assert_eq!(
+        filter_output_ansi(&[b"\x1b]2;a\x1b", b"]1;b\x07tail"]),
+        b"\x1b]2;atail".to_vec(),
+    );
+}
+
+/// PETSCII and ASCII clients keep the old behaviour exactly: every sequence
+/// stripped, whatever its shape.  Those terminals cannot use an escape at all,
+/// and this is the path that has always protected them from the title.
+#[test]
+fn test_stripping_modes_still_swallow_every_sequence() {
+    assert_eq!(filter_output(b"\x1b]0;title\x07text", false), b"text".to_vec());
+    assert_eq!(filter_output(b"\x1b[1;32mtext\x1b[0m", false), b"text".to_vec());
+    assert_eq!(filter_output(b"\x1b]4;1;rgb:0/0/0\x07x", false), b"x".to_vec());
+}
+
+/// **A held byte must never be held for ever — this is the file-transfer case.**
+///
+/// The filter has to carry a candidate across reads (a burst larger than the
+/// 4 KB read buffer splits at an arbitrary byte, so a title straddling two
+/// reads is ordinary).  But a stop-and-wait sender goes quiet after each block
+/// and waits for an ACK, so a block whose *last* byte is one we are holding
+/// never completes: the receiver times out, the sender resends the identical
+/// block, and the identical hold repeats.  That is a deadlock, not a retryable
+/// error — no CRC can recover from a byte that was never sent.
+///
+/// So going quiet releases the candidate.  Here that is the flush called
+/// directly; in the session it is a `GW_FILTER_FLUSH` branch in the same
+/// `select!` as the idle timeout.
+#[test]
+fn test_a_held_byte_is_released_once_the_remote_goes_quiet() {
+    // An XMODEM block whose CRC low byte happens to be 0x1B — one block in
+    // 256, so near-certain over a real file.
+    let mut block = vec![0x01u8, 0x01, 0xFE];
+    block.extend(std::iter::repeat_n(b'X', 128));
+    block.push(0x9A);
+    block.push(0x1B); // CRC-lo, and the byte the filter wants to weigh
+    let mut state = GatewayOutState::new(GatewayFilter::Ansi);
+    let mut out = Vec::new();
+    filter_gateway_output(&block, &mut state, &mut out);
+    assert_eq!(out.len(), block.len() - 1, "the trailing ESC is held, as designed");
+    assert!(state.has_pending(), "and the filter knows it owes the client a byte");
+
+    // The sender is now waiting for an ACK it will never get.  The flush is
+    // what breaks that.
+    state.flush_pending(&mut out);
+    assert_eq!(out, block, "the block must arrive byte for byte");
+    assert!(!state.has_pending(), "and nothing may be left behind");
+}
+
+/// The same for a full candidate: `ESC ]` and a run of printable bytes is
+/// nearly a title, so it is held — and if the remote stops there, all of it
+/// must still be delivered.  Answering `sz`'s `**` header, a shell prompt with
+/// no newline, any half-finished burst.
+#[test]
+fn test_a_held_candidate_is_released_whole_and_in_order() {
+    for (name, wire) in [
+        ("mid-title", &b"\x1b]0;partial"[..]),
+        ("mid-title after ESC", &b"\x1b]0;partial\x1b"[..]),
+        ("bare introducer", &b"\x1b]"[..]),
+        ("lone ESC", &b"\x1b"[..]),
+    ] {
+        let mut state = GatewayOutState::new(GatewayFilter::Ansi);
+        let mut out = Vec::new();
+        filter_gateway_output(wire, &mut state, &mut out);
+        state.flush_pending(&mut out);
+        assert_eq!(out, wire.to_vec(), "{name}: every byte, in arrival order");
+        assert!(!state.has_pending(), "{name}: nothing left held");
+        // A second flush must not invent anything.
+        let before = out.len();
+        state.flush_pending(&mut out);
+        assert_eq!(out.len(), before, "{name}: flushing twice must be a no-op");
+    }
+}
+
+/// The flush window is a **guess about other people's timeouts**, so it is
+/// pinned rather than left to drift.  The tightest wait anything in this
+/// codebase uses mid-transfer is 3 s (`AUTO_DETECT_TRAILER_TIMEOUT_SECS` and
+/// `EOB_TIMEOUT_SECS` in `xmodem.rs`); vintage senders are slower still.  The
+/// release has to be an order of magnitude inside that, or it stops being a
+/// safety net and becomes part of the stall.  The floor matters too: the next
+/// read of a split burst follows in microseconds, so anything above a
+/// millisecond or two is generous, and a very short window would start
+/// releasing titles that were merely split across two reads.
+#[test]
+fn test_the_flush_window_is_far_inside_the_tightest_transfer_timeout() {
+    // The real constants, not copies of them: a literal here would keep
+    // passing if someone lowered the timeout it claims to track.
+    let tightest_protocol_wait = std::time::Duration::from_secs(
+        crate::xmodem::AUTO_DETECT_TRAILER_TIMEOUT_SECS
+            .min(crate::xmodem::EOB_TIMEOUT_SECS),
+    );
+    assert!(
+        GW_FILTER_FLUSH * 10 <= tightest_protocol_wait,
+        "flush window {GW_FILTER_FLUSH:?} is not an order of magnitude inside {tightest_protocol_wait:?}",
+    );
+    assert!(
+        GW_FILTER_FLUSH >= std::time::Duration::from_millis(20),
+        "too short a window releases titles that were merely split across reads",
+    );
+}
+
+/// **A stripping terminal is owed nothing, and must be given nothing.** Its
+/// pending ESC belongs to a sequence being discarded; releasing it on a quiet
+/// line would put a raw escape on a C64 screen — the very thing the PETSCII
+/// path exists to prevent.
+#[test]
+fn test_the_stripping_modes_never_release_a_pending_escape() {
+    for mode in [GatewayFilter::Petscii, GatewayFilter::Ascii] {
+        let mut state = GatewayOutState::new(mode);
+        let mut out = Vec::new();
+        // Digits, not letters: PETSCII case-swaps text, and this test is
+        // about the escape rather than the swap.
+        filter_gateway_output(b"12\x1b", &mut state, &mut out);
+        assert!(!state.has_pending(), "a stripping mode holds nothing for the client");
+        state.flush_pending(&mut out);
+        assert_eq!(out, b"12".to_vec(), "and the flush adds nothing");
+    }
+}
+
+/// Where a held-candidate filter goes wrong is the read boundary, and TCP puts
+/// that boundary anywhere.  These two properties need no model of what a title
+/// is, so they cannot agree with the implementation by sharing its assumptions.
+mod gateway_filter_proptest {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Feed the bytes through as one read, or split at exactly one point.
+    fn filtered(bytes: &[u8], cut: Option<usize>, mode: GatewayFilter) -> Vec<u8> {
+        let mut state = GatewayOutState::new(mode);
+        let mut out = Vec::new();
+        match cut {
+            None => filter_gateway_output(bytes, &mut state, &mut out),
+            Some(p) => {
+                filter_gateway_output(&bytes[..p], &mut state, &mut out);
+                filter_gateway_output(&bytes[p..], &mut state, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Uniform random bytes are the wrong generator here and quietly make the
+    /// whole property vacuous: `ESC ]` needs two specific bytes in a row, so a
+    /// held candidate almost never exists at a boundary and the bug the test
+    /// is for goes unseen.  (Measured — a mutation that cleared the candidate
+    /// on every read passed 256 uniform cases.)  So draw from the alphabet the
+    /// state machine actually branches on.
+    fn interesting_byte() -> impl Strategy<Value = u8> {
+        prop_oneof![
+            6 => Just(0x1Bu8),          // ESC
+            4 => Just(b']'),            // OSC introducer
+            3 => prop::sample::select(vec![b'0', b'1', b'2', b'4', b';']),
+            3 => Just(0x07u8),          // BEL
+            2 => Just(b'\\'),           // the ST half
+            2 => Just(b'['),            // CSI
+            4 => 0x20u8..=0x7Eu8,       // ordinary text
+            2 => 0x80u8..=0xFFu8,       // high bytes: binary, never a title
+            2 => 0x00u8..=0x06u8,       // control bytes: ditto
+        ]
+    }
+
+    /// Loose bytes alone leave the *drop* path nearly unvisited -- a complete
+    /// title is six specific bytes in a row -- so half the fragments are whole
+    /// sequences and the stream is built from fragments rather than bytes.
+    fn fragment() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            // Loose bytes: the boundaries and every malformed case.
+            4 => prop::collection::vec(interesting_byte(), 1..6),
+            // A complete window title -- the one thing the ANSI mode drops.
+            3 => (
+                prop::sample::select(vec![b'0', b'1', b'2']),
+                prop::collection::vec(0x20u8..=0x7Eu8, 0..8),
+                prop::bool::ANY,
+            ).prop_map(|(code, text, use_st)| {
+                let mut v = vec![0x1B, b']', code, b';'];
+                v.extend(text);
+                v.extend(if use_st { vec![0x1B, b'\\'] } else { vec![0x07] });
+                v
+            }),
+            // An OSC that is *not* a title, and must survive untouched.
+            2 => prop::collection::vec(0x20u8..=0x7Eu8, 0..6).prop_map(|text| {
+                let mut v = vec![0x1B, b']', b'4', b';'];
+                v.extend(text);
+                v.push(0x07);
+                v
+            }),
+            // A CSI: colour and cursor addressing, which ANSI must keep.
+            2 => prop::collection::vec(prop::sample::select(vec![b'0', b'1', b';', b'3']), 0..4)
+                .prop_map(|params| {
+                    let mut v = vec![0x1B, b'['];
+                    v.extend(params);
+                    v.push(b'm');
+                    v
+                }),
+        ]
+    }
+
+    /// A stream of fragments, flattened.
+    fn stream() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(fragment(), 0..8)
+            .prop_map(|frags| frags.into_iter().flatten().collect())
+    }
+
+    /// The same shapes, but each fragment carries **whether it should
+    /// survive**, so the expected output is known exactly instead of scored.
+    ///
+    /// Filler here is deliberately ESC-free.  Every other fragment starts with
+    /// ESC and terminates itself, so with no loose ESC between them no
+    /// fragment can run into its neighbour and the survivors concatenated are
+    /// the whole answer.  Loose bytes *can* form a title across a fragment
+    /// boundary by chance -- rare enough to look like a flake and be believed
+    /// -- which is why they stay out of the oracle and are left to the two
+    /// properties above.
+    fn oracle_fragment() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+        prop_oneof![
+            // ESC-free filler: text, binary, control bytes.  Always survives.
+            4 => prop::collection::vec(
+                prop_oneof![0x20u8..=0x7Eu8, 0x80u8..=0xFFu8, 0x00u8..=0x06u8],
+                1..8,
+            ).prop_map(|v| (v.clone(), v)),
+            // A complete window title: dropped.
+            3 => (
+                prop::sample::select(vec![b'0', b'1', b'2']),
+                prop::collection::vec(0x20u8..=0x7Eu8, 0..8),
+                prop::bool::ANY,
+            ).prop_map(|(code, text, use_st)| {
+                let mut v = vec![0x1B, b']', code, b';'];
+                v.extend(text);
+                v.extend(if use_st { vec![0x1B, b'\\'] } else { vec![0x07] });
+                (v, Vec::new())
+            }),
+            // An OSC that is not a title: survives.
+            2 => prop::collection::vec(0x20u8..=0x7Eu8, 0..6).prop_map(|text| {
+                let mut v = vec![0x1B, b']', b'4', b';'];
+                v.extend(text);
+                v.push(0x07);
+                (v.clone(), v)
+            }),
+            // A CSI: survives.
+            2 => prop::collection::vec(prop::sample::select(vec![b'0', b'1', b';', b'3']), 0..4)
+                .prop_map(|params| {
+                    let mut v = vec![0x1B, b'['];
+                    v.extend(params);
+                    v.push(b'm');
+                    (v.clone(), v)
+                }),
+            // **An OSC the remote abandoned, then a real title.**  The ESC
+            // being weighed belongs to the title that follows, so the
+            // abandoned bytes come back as data and the title still goes.
+            // Without this shape the whole property suite cannot tell
+            // "second title dropped" from "second title printed as
+            // `0;user@host`" -- the reported symptom itself.  It terminates,
+            // so it stays determinate whatever follows it.
+            2 => (
+                prop::sample::select(vec![b'0', b'1', b'2']),
+                prop::collection::vec(0x20u8..=0x7Eu8, 0..6),
+                prop::sample::select(vec![b'0', b'1', b'2']),
+                prop::collection::vec(0x20u8..=0x7Eu8, 0..8),
+            ).prop_map(|(c1, t1, c2, t2)| {
+                let mut abandoned = vec![0x1B, b']', c1, b';'];
+                abandoned.extend(t1);
+                let mut wire = abandoned.clone();
+                wire.extend([0x1B, b']', c2, b';']);
+                wire.extend(t2);
+                wire.push(0x07);
+                (wire, abandoned)
+            }),
+        ]
+    }
+
+    proptest! {
+        /// **Where the reads fall must not change a single byte.** The remote's
+        /// output arrives in whatever pieces TCP chooses, and a filter that
+        /// holds a candidate across a boundary is exactly the kind that drops
+        /// or duplicates one there.  Every split point is tried, not a sampled
+        /// few, because the interesting one is a specific byte pair.
+        #[test]
+        fn prop_chunking_never_changes_the_output(
+            bytes in stream(),
+        ) {
+            for mode in [GatewayFilter::Ansi, GatewayFilter::Ascii, GatewayFilter::Petscii] {
+                let whole = filtered(&bytes, None, mode);
+                for p in 0..=bytes.len() {
+                    prop_assert_eq!(
+                        &whole,
+                        &filtered(&bytes, Some(p), mode),
+                        "a read boundary at {} changed the output of {:02X?}",
+                        p,
+                        bytes,
+                    );
+                }
+            }
+        }
+
+        /// **The ANSI filter may only delete.** Its output must be a
+        /// subsequence of its input — never a byte invented, never one
+        /// reordered — which is what makes a file transfer through a gateway
+        /// session recoverable at worst rather than silently corrupt.
+        #[test]
+        fn prop_ansi_output_is_a_subsequence_of_the_input(
+            bytes in stream(),
+        ) {
+            let out = filtered(&bytes, None, GatewayFilter::Ansi);
+            let mut it = bytes.iter();
+            for b in &out {
+                prop_assert!(
+                    it.any(|x| x == b),
+                    "filter emitted a byte the remote never sent, or out of order: \
+                     {:02X} from {:02X?}",
+                    b,
+                    bytes,
+                );
+            }
+        }
+
+        /// **What survives is known, not scored.**  The generator builds the
+        /// stream out of fragments it has already labelled, so the expected
+        /// output is the surviving fragments concatenated -- an exact answer.
+        /// A property that only bounds the output (a subsequence, the right
+        /// length) will sit at "nearly right" while a title is half-eaten.
+        #[test]
+        fn prop_ansi_drops_exactly_the_titles_and_nothing_else(
+            frags in prop::collection::vec(oracle_fragment(), 0..8),
+        ) {
+            let mut bytes = Vec::new();
+            let mut want = Vec::new();
+            for (wire, expected) in &frags {
+                bytes.extend_from_slice(wire);
+                want.extend_from_slice(expected);
+            }
+            prop_assert_eq!(
+                filtered(&bytes, None, GatewayFilter::Ansi),
+                want,
+                "stream {:02X?}",
+                bytes,
+            );
+        }
+
+        /// **A candidate the remote never finished is delivered, not lost.**
+        /// The generalisation of the XMODEM-block case: whatever precedes it,
+        /// an unterminated title at the tail of the stream must come back
+        /// whole once the line goes quiet, and the parser must then hold
+        /// nothing.  Holding it instead is what deadlocks a stop-and-wait
+        /// transfer, since the byte that would decide it is the one the
+        /// sender is waiting for an ACK before sending.
+        #[test]
+        fn prop_an_unterminated_candidate_is_delivered_once_the_line_is_quiet(
+            frags in prop::collection::vec(oracle_fragment(), 0..6),
+            code in prop::sample::select(vec![b'0', b'1', b'2']),
+            tail in prop::collection::vec(0x20u8..=0x7Eu8, 0..6),
+        ) {
+            let mut bytes = Vec::new();
+            let mut want = Vec::new();
+            for (wire, expected) in &frags {
+                bytes.extend_from_slice(wire);
+                want.extend_from_slice(expected);
+            }
+            // A title the remote stopped in the middle of.
+            let mut open = vec![0x1B, b']', code, b';'];
+            open.extend(tail.iter().copied());
+            bytes.extend_from_slice(&open);
+            want.extend_from_slice(&open);
+
+            let mut state = GatewayOutState::new(GatewayFilter::Ansi);
+            let mut out = Vec::new();
+            filter_gateway_output(&bytes, &mut state, &mut out);
+            state.flush_pending(&mut out);
+            prop_assert_eq!(&out, &want, "stream {:02X?}", bytes);
+            prop_assert!(!state.has_pending(), "nothing may be left held");
+        }
+    }
 }
 
 // ─── Gateway onward window geometry ──────────────────

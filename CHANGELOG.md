@@ -11,6 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A remote's window title no longer prints in front of every prompt on an
+  ANSI terminal.** bash sets the title from its prompt with
+  `ESC ] 0 ; user@host: ~ BEL`; no client of this gateway has a title bar, and
+  a terminal that does not implement OSC swallows the two-byte `ESC ]` and
+  prints the rest — so an SC126 through the SSH gateway showed
+  `0;ricky@TelnetBible: ~` ahead of each prompt, which reads as the prompt
+  appearing twice. Measured under both EGT80 and QTERM, which is what ruled out
+  a fault in either terminal. ANSI clients previously bypassed the output
+  filter entirely; they now go through it and lose a *completed* window title
+  and nothing else — CSI colour and cursor addressing pass through untouched,
+  as they must. PETSCII and ASCII terminals are unchanged: they still have
+  every sequence stripped.
+
+  Only the title form is dropped, and only once it completes, because a gateway
+  session is a plain terminal proxy and the same stream carries file transfers.
+  Run `sz` on the far host and its ZMODEM bytes arrive here; `1B 5D` turns up
+  about once per 64 KB of binary, so swallowing `ESC ]` to the next BEL would
+  eat part of a download — identically on every retry, so the protocol's own
+  CRC could never recover it. A candidate is instead held and released byte for
+  byte unless it proves to be `ESC ]`, then `0;` / `1;` / `2;`, then printable
+  ASCII, then BEL or `ESC \`, all inside 256 bytes.
+
+  A candidate is also released as soon as the remote goes quiet (100 ms).
+  Carrying one across a read is necessary — a burst larger than the 4 KB read
+  buffer is split at an arbitrary byte, so a title straddling two reads is
+  ordinary — but carrying one indefinitely would deadlock a stop-and-wait
+  transfer: a block whose last byte the filter is weighing never completes, the
+  receiver times out, the sender resends the identical block, and the identical
+  hold repeats, which no CRC can recover from. A stripping terminal releases
+  nothing, its pending escape belonging to a sequence being discarded.
+
+  Note the trade: terminal detection classifies any client whose backspace is
+  `0x08` / `0x7F` as ANSI, so a modern terminal that *does* have a title bar
+  (xterm, PuTTY, the inbound SSH path) loses title updates through a gateway
+  session as well. Nothing can ask a terminal whether it implements OSC, and
+  the terminals that cannot are the ones this gateway is for.
+
 - **The bundled CP/M terminals are placed at start-up, not only when someone
   enters the emulator.** Erasing the transfer directory and restarting
   recreated the sixteen drive folders with no `EGT8080.COM` or `EGT80.COM` in

@@ -54,7 +54,7 @@ const BLOCK_BODY_TIMEOUT_SECS: u64 = 60;
 /// arrive in this window we conclude there is no second trailer byte and fall
 /// back to 1-byte-checksum validation.  Kept generous enough that inter-byte
 /// jitter on a real CRC trailer can never be mistaken for its absence.
-const AUTO_DETECT_TRAILER_TIMEOUT_SECS: u64 = 3;
+pub(crate) const AUTO_DETECT_TRAILER_TIMEOUT_SECS: u64 = 3;
 
 /// Classification of the block read between YMODEM batch files (after an EOT).
 enum InterFileBlock0 {
@@ -1523,7 +1523,7 @@ async fn send_ymodem_block_zero(
 /// NAK without burning the user's time.  Hoisted to module scope so
 /// the budget contract is visible to tests — the user-visible stall
 /// after a failed EOT must stay bounded by these constants.
-const EOB_TIMEOUT_SECS: u64 = 3;
+pub(crate) const EOB_TIMEOUT_SECS: u64 = 3;
 const EOB_MAX_RETRIES: usize = 2;
 
 /// After the last data EOT is ACKed, the YMODEM receiver sends one more

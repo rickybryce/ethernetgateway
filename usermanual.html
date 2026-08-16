@@ -4463,8 +4463,30 @@ key turns out to be a man-in-the-middle attempt.
 <p>
 For PETSCII and ASCII terminals, ANSI escape sequences from the remote are
 automatically stripped and text is converted to the appropriate encoding.
-ANSI terminals get the raw output unmodified. PTY size is set to 40&times;25
+ANSI terminals keep their sequences &mdash; colour and cursor addressing are
+why a terminal asks for ANSI &mdash; except for the remote's <strong>window
+title</strong>. PTY size is set to 40&times;25
 for PETSCII and 80&times;24 for ANSI/ASCII.
+</p>
+
+<p>
+A shell sets the title of the window it believes it is in: bash's default
+prompt sends <code>ESC ] 0 ; user@host: ~ BEL</code> before every prompt. No
+client of this gateway has a title bar, and a terminal without OSC support
+swallows the two-byte <code>ESC ]</code> and prints the rest &mdash; so the
+title appears on screen ahead of the prompt, which looks like the prompt
+printing twice. That sequence is therefore dropped for every terminal type
+&mdash; including a modern terminal that <em>does</em> have a title bar, which
+loses title updates through a gateway session as a result. Nothing can ask a
+terminal whether it implements OSC, and the terminals that cannot are the ones
+this gateway exists for.
+Only the title form is taken, and only when it completes: the same stream
+carries file transfers (run <code>sz</code> on the far host and its ZMODEM
+bytes come through here), so a candidate is <em>held</em> and released byte
+for byte unless it proves to be <code>ESC ]</code>, then <code>0;</code> /
+<code>1;</code> / <code>2;</code>, then printable ASCII, then BEL or
+<code>ESC \</code>, all inside 256 bytes. A download that merely happens to
+contain <code>1B 5D</code> is untouched.
 </p>
 
 <h2>10.4 Key File Summary</h2>
@@ -4569,7 +4591,10 @@ Port (23): 23</code></pre>
 
 <p>
 Press <span class="kbd">ESC</span> twice to disconnect. For PETSCII and ASCII
-terminals, ANSI escape sequences from the remote are filtered out. The
+terminals, ANSI escape sequences from the remote are filtered out; an ANSI
+terminal keeps them, apart from the remote's window title, which is dropped
+for every terminal type (§10.3 &mdash; the same filter serves both gateways).
+The
 gateway also has an 8 KiB cap on subnegotiation body length, so a malicious
 remote cannot exhaust memory by sending huge <code>SB</code> bodies without a
 terminating <code>IAC SE</code>.
@@ -5235,6 +5260,62 @@ discards every CSI sequence. Measurement ruled it out: at <code>TERM=dumb</code>
 readline emits <strong>no CSI sequences at all</strong> &mdash; it has no
 clr_eol or cursor-addressing capability to use, so it redraws with carriage
 return, spaces and backspaces only. There was nothing for the filter to discard.
+</aside>
+
+<h2 id="ch16-osctitle">16.16 The Prompt Appears Twice on a Gateway Session (fixed)</h2>
+
+<p>
+<strong>Symptom:</strong> on the SSH or Telnet Gateway from an ANSI terminal
+&mdash; measured on a real SC126 &mdash; every bash prompt is preceded by what
+looks like a second copy of itself with a stray number in front:
+</p>
+
+<pre><code>0;ricky@TelnetBible: ~ricky@TelnetBible:~$ </code></pre>
+
+<p>
+<strong>Cause (a real bug, fixed in this release):</strong> bash sets the title
+of the window it believes it is in, by sending
+<code>ESC ] 0 ; user@host: ~ BEL</code> ahead of the prompt. A terminal that
+implements OSC consumes the whole sequence and puts the text in its title bar.
+A terminal that does not swallows only the two-byte <code>ESC ]</code> it does
+not recognise and <em>prints the rest</em> &mdash; and since the title is
+user@host, the result reads as the prompt printed twice. No client of this
+gateway has a title bar, so the sequence had no destination in the first place.
+It reached ANSI terminals because the ANSI path bypassed the output filter
+entirely; PETSCII and ASCII terminals, which have every sequence stripped,
+never saw it. Seen under both EGT80 and QTERM, which is what ruled out a fault
+in either terminal and put the fix in the gateway.
+</p>
+
+<p>
+<strong>Fix:</strong> the window-title sequence is now dropped for every
+terminal type. ANSI terminals keep everything else, colour and cursor
+addressing included &mdash; that is what they asked for. If you are on an older
+build and cannot upgrade, unset the title from your own shell:
+<code>PROMPT_COMMAND=</code> in bash, or a <code>PS1</code> without the
+<code>\e]0;…\a</code> part.
+</p>
+
+<aside class="note">
+<span class="label">Why the title is weighed rather than swallowed</span>
+A gateway session is a plain terminal proxy, so a file transfer run on the far
+host comes down the same stream &mdash; run <code>sz</code> there and its
+ZMODEM bytes arrive here with nothing to distinguish them from a prompt. The
+bytes <code>1B 5D</code> occur about once per 64&nbsp;KB of binary, so a filter
+that swallowed <code>ESC ]</code> through to the next BEL would eat part of the
+download, and eat it <em>identically</em> on every retry &mdash; so the
+protocol's own CRC could never recover it. The filter therefore holds a
+candidate and drops it only once it has proved to be a title:
+<code>ESC ]</code>, then <code>0;</code> / <code>1;</code> / <code>2;</code>,
+then printable ASCII, then BEL or <code>ESC \</code>, all inside 256 bytes.
+Anything that fails any of those is released byte for byte in the order it
+arrived, so passing data through is the default and dropping is the exception.
+And a candidate is released the moment the remote goes quiet (100&nbsp;ms):
+carrying one across a read is necessary, since a burst larger than the
+4&nbsp;KB read buffer splits at an arbitrary byte, but carrying one
+indefinitely would deadlock a stop-and-wait transfer &mdash; a block whose last
+byte is being weighed never completes, the receiver times out, the sender
+resends the identical block, and the identical hold repeats.
 </aside>
 
 <!-- ═══════════════════ Appendix A ═══════════════════ -->

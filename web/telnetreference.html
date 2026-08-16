@@ -966,6 +966,17 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                     the <a href="index.html#gateways">Gateways section of the User Manual</a>.
                     The same RFC&nbsp;1143 Q-method drives the cooperative mode's option state.
                 </div>
+                <div class="callout callout-info">
+                    <strong>Output filtering is shared with the SSH gateway.</strong> A
+                    PETSCII or ASCII terminal has every escape sequence from the remote
+                    stripped; an ANSI terminal keeps them, less the remote's window-title
+                    sequence (<code>ESC ] 0 ; &hellip; BEL</code>), which is dropped for
+                    every terminal type because no client here has a title bar and a
+                    terminal without OSC prints the payload in front of the prompt. See
+                    <a href="sshreference.html#ansi">ANSI Filtering</a> for the whole rule,
+                    including why a title is held and weighed rather than swallowed &mdash;
+                    this stream also carries file transfers.
+                </div>
             </div>
 
             <hr class="divider">
