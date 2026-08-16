@@ -25,28 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CTRL-C reaches a booted CP/M guest while it is printing.** Reported from an
-  SC126: a BASIC `PRINT` loop on a booted Altair disk could not be broken with
-  CTRL-C, though the identical disk broke normally on an Altairduino. The
-  keystrokes were never lost -- the gateway's log shows ~878 consecutive lines
-  of output with not one byte read from the wire, then all twelve CTRL-Cs
-  arriving at once and BASIC breaking two lines later.
-
-  The modem's online-mode pump is a single loop that reads the serial port,
-  then writes whatever the session produced back to it. That write was handed a
-  whole 4096-byte read, synchronously, followed by a `flush()` that waits for
-  the UART to physically drain: at 9600 baud that is 4.3 seconds during which
-  the serial port -- the only place a keystroke can enter -- is never read. A
-  guest printing continuously keeps that path saturated, so the keyboard is
-  effectively dead until the guest stops. The comment on that line already said
-  "write in small chunks so slow baud rates stay responsive"; it did not.
-
-  Output is now written a bounded chunk per pass, sized as a fixed slice of
-  *wire time* (25 ms) rather than a fixed byte count, so the latency is the
-  same at 300 baud and at 115200. Both pumps had it -- the one behind
-  `ATDT ethernetgateway` and the one behind a TCP dial-out. Measured under both
-  EGT80 and QTERM, which is what placed the fault below the terminal.
-
 - **A single ESC now reaches the remote through all three gateways.** Reported
   from an SC126: `ATDT telnetbible.com:6400` straight from the modem passes ESC
   through fine, but the same host reached through the telnet gateway never saw
