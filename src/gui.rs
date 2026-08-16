@@ -4259,7 +4259,7 @@ impl eframe::App for App {
                         .clicked()
                     {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(
-                            "https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf",
+                            crate::webserver::MANUAL_URL,
                         ));
                     }
                 });

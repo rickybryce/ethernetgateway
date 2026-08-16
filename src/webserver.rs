@@ -1850,15 +1850,31 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     out
 }
 
+/// Where "User Manual" goes, on this page and in the desktop GUI.
+///
+/// One constant rather than two literals: the GUI opens this same URL from its
+/// own button, and a manual link that disagreed between the two surfaces would
+/// send two operators to two different documents.
+pub(crate) const MANUAL_URL: &str =
+    "https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf";
+
 fn render_header(cfg: &Config) -> String {
     let ip = local_ip();
     format!(
+        // The manual link is the same destination the desktop GUI's "User
+        // Manual" button opens, so the two surfaces send an operator to the
+        // same document.  `target=_blank` because this page is a form the
+        // operator may be part-way through filling in -- navigating away from
+        // it in place would discard their edits.
         "<header><h1>Ethernet Gateway v{ver}</h1>\
-         <div class=\"server-ip\">Server IP: <code>{ip}</code></div>\
+         <div class=\"server-ip\">Server IP: <code>{ip}</code> \
+         <a class=\"linkbtn\" href=\"{manual}\" target=\"_blank\" \
+         rel=\"noopener\">User Manual</a></div>\
          </header>\
          <div class=\"hint\">Telnet: {tport} &middot; SSH: {sport} &middot; Kermit: {kport} &middot; Web: {wport}</div>",
         ver = env!("CARGO_PKG_VERSION"),
         ip = html_escape(&ip),
+        manual = MANUAL_URL,
         tport = cfg.telnet_port,
         sport = cfg.ssh_port,
         kport = cfg.kermit_server_port,
@@ -2795,12 +2811,16 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"1.5\" {z150}>150%</option>\
          <option value=\"2.0\" {z200}>200%</option>\
          </select></div>\
+         <h3>Telnet Gateway</h3>\
          <div class=\"row\">{tneg} {traw}</div>\
-         <div class=\"row\"><span class=\"label\">SSH Gateway Auth:</span>\
+         <h3>SSH Gateway</h3>\
+         <div class=\"row\"><span class=\"label\">Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
          <option value=\"key\" {key_sel}>Key</option>\
          <option value=\"password\" {pwd_sel}>Password</option>\
          </select></div>\
+         {gwpubkey}\
+         <h3>Terminal size reported to remote</h3>\
          <div class=\"row\">{gwcols} {gwrows}</div>\
          <div class=\"row\"><span class=\"hint\">{gwgeom_hint}</span></div>\
          {master_slave}\
@@ -2836,18 +2856,42 @@ fn render_more_popups(cfg: &Config) -> String {
         // raw mode is unticked.
         tneg = checkbox_with_attr(
             "telnet_gateway_negotiate",
-            "Telnet Gateway: negotiate TTYPE/NAWS",
+            "Negotiate TTYPE / NAWS with remote (Telnet mode only)",
             cfg.telnet_gateway_negotiate,
             if cfg.telnet_gateway_raw { "disabled" } else { "" },
         ),
         traw = checkbox_with_attr(
             "telnet_gateway_raw",
-            "Telnet Gateway: raw TCP mode",
+            "Raw TCP mode (no telnet IAC layer)",
             cfg.telnet_gateway_raw,
             "onchange=\"updateGatewayFields()\"",
         ),
         key_sel = if cfg.ssh_gateway_auth == "key" { "selected" } else { "" },
         pwd_sel = if cfg.ssh_gateway_auth == "password" { "selected" } else { "" },
+        // The gateway's own public key, for pasting into a remote's
+        // `authorized_keys`.  Same condition and same source as the GUI
+        // (`ssh::client_public_key_openssh`), so an operator reads the identical
+        // string on either surface -- a key that differed between the two would
+        // be the worst possible kind of disagreement here.
+        //
+        // Deliberately **unnamed**: a named control is submitted back on save,
+        // and there is no key to write.  Read-only, and selected on click
+        // because the whole point is to copy it.
+        gwpubkey = if cfg.ssh_gateway_auth == "password" {
+            String::new()
+        } else {
+            let key = match crate::ssh::client_public_key_openssh() {
+                Ok(s) => s,
+                Err(e) => format!("<could not load key: {e}>"),
+            };
+            format!(
+                "<div class=\"row\"><span class=\"sub\">Gateway public key (paste into \
+                 remote ~/.ssh/authorized_keys):</span></div>\
+                 <div class=\"row\"><textarea class=\"pubkey\" readonly rows=\"2\" \
+                 onclick=\"this.select()\">{}</textarea></div>",
+                html_escape(&key)
+            )
+        },
         // Plain number fields, not checkboxes — an unsubmitted plain key
         // preserves the stored value, so these need no skip-list entry and no
         // re-enabling JS (the asymmetry from review pass #3).  Never greyed:
@@ -2900,6 +2944,7 @@ fn render_more_popups(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-general\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">General \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-general\">\u{00d7}</button></div>\
+         <h3>Log File</h3>\
          <div class=\"row\">{logfile}</div>\
          <div class=\"row\">{logpath}</div>\
          <div class=\"row\">{logsize} {logkeep}</div>\
@@ -3358,11 +3403,14 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
          <span class=\"label\">Parity:</span><select name=\"{prefix}_parity\">{po}</select>\
          <span class=\"label\">Flow:</span><select name=\"{prefix}_flowcontrol\">{fo}</select>\
          </div>\
+         <h3>Hayes AT Saved State</h3>\
          <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
          <div class=\"row\">{xc} {dtr} {flw} {dcd} {carrier}</div>\
+         <h3>S-Registers</h3>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\
          <input type=\"text\" name=\"{prefix}_s_regs\" value=\"{sregs}\" size=\"40\"></div>\
-         <h3>Stored numbers</h3>\
+         <div class=\"row\"><span class=\"sub\">Stored Phone Numbers \
+         (AT&amp;Zn=s / ATDSn)</span></div>\
          <div class=\"row\">{n0} {n1}</div>\
          <div class=\"row\">{n2} {n3}</div>\
          <div class=\"modal-foot\">{save}</div>\
@@ -3805,6 +3853,16 @@ button.more.alert { color: #ff5a4a; border-color: #ff5a4a; }
 .logo-wrap { flex: 0 0 auto; }
 .logo { max-width: 366px; height: auto; }
 h3 { color: var(--amber); margin: 12px 0 4px; font-size: 14px; }
+/* The SSH gateway's public key.  Monospaced and wrapped rather than scrolled:
+   an operator is copying the whole thing, so a horizontal scrollbar hiding the
+   tail is exactly the wrong behaviour. */
+textarea.pubkey {
+  width: 100%; resize: vertical;
+  background: var(--popup-input); color: var(--text-input);
+  border: 1px solid var(--border); border-radius: 3px;
+  font-family: inherit; font-size: 12px; padding: 4px 6px;
+  word-break: break-all;
+}
 .modal {
   display: none;
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -5561,6 +5619,69 @@ mod tests {
         // The header keeps its ports line and nothing else — a second copy
         // would be two things to keep in step for no gain.
         assert!(!render_header(&Config::default()).contains("/vdm"));
+    }
+
+    /// The manual link the desktop GUI has, and this page used to lack.
+    ///
+    /// Pinned to the shared [`MANUAL_URL`] rather than to a literal, because
+    /// the point of the constant is that the two surfaces cannot drift to two
+    /// different documents — a test carrying its own copy of the URL would let
+    /// exactly that happen and still pass.
+    #[test]
+    fn test_header_offers_the_user_manual() {
+        let head = render_header(&Config::default());
+        assert!(head.contains(MANUAL_URL), "no manual link: {head}");
+        assert!(head.contains(">User Manual</a>"), "not labelled: {head}");
+        // A new tab: this page is a form, and navigating away in place would
+        // discard whatever the operator had part-way typed into it.
+        assert!(head.contains("target=\"_blank\""), "would lose form edits: {head}");
+    }
+
+    /// The SSH gateway's public key, shown on the same terms as in the GUI.
+    ///
+    /// Two assertions that matter beyond "it renders": it is **absent** under
+    /// password auth (the GUI's `!= "password"` condition), and it carries no
+    /// `name`, so the save cannot post it back as if it were a setting.
+    #[test]
+    fn test_ssh_gateway_public_key_is_shown_for_key_auth_only() {
+        let mut cfg = Config { ssh_gateway_auth: "key".to_string(), ..Default::default() };
+
+        let with_key = render_more_popups(&cfg);
+        assert!(with_key.contains("class=\"pubkey\""), "no key box under key auth");
+        assert!(with_key.contains("authorized_keys"), "no caption saying what to do with it");
+        // Read-only and unnamed.  A named control is submitted on save, and
+        // there is no key to write — it would arrive as an unknown field.
+        assert!(with_key.contains("class=\"pubkey\" readonly"));
+        assert!(!with_key.contains("name=\"pubkey\""), "it must not be submitted");
+
+        cfg.ssh_gateway_auth = "password".to_string();
+        let with_password = render_more_popups(&cfg);
+        assert!(
+            !with_password.contains("class=\"pubkey\""),
+            "password auth does not use this key, so showing it invites a pointless paste"
+        );
+    }
+
+    /// The Server / General / serial popups group their controls under the
+    /// same headings the desktop GUI uses.
+    ///
+    /// Grouping is the part of "looks like the GUI" that is structural rather
+    /// than cosmetic: these popups were flat lists, so a reader had to know
+    /// already which control belonged to which subsystem.
+    #[test]
+    fn test_more_popups_carry_the_guis_section_headings() {
+        let html = render_more_popups(&Config::default());
+        for heading in [
+            "<h3>Telnet Gateway</h3>",
+            "<h3>SSH Gateway</h3>",
+            "<h3>Terminal size reported to remote</h3>",
+            "<h3>Master/Slave</h3>",
+            "<h3>Log File</h3>",
+            "<h3>Hayes AT Saved State</h3>",
+            "<h3>S-Registers</h3>",
+        ] {
+            assert!(html.contains(heading), "missing {heading}");
+        }
     }
 
     /// A class with no CSS rule is how this page has silently lost styling
