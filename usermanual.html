@@ -866,6 +866,7 @@ upgrade transparently, with Port B disabled by default.
         <tr><td><code>dcd_mode</code></td><td>u8 0–1</td><td><code>1</code></td><td>Saved <code>AT&amp;C</code> mode.</td></tr>
         <tr><td><code>stored_0</code> … <code>stored_3</code></td><td>string</td><td>empty</td><td>Stored phone-number slots for <code>AT&amp;Zn=s</code> / <code>ATDSn</code>.</td></tr>
         <tr><td><code>petscii_translate</code></td><td>bool</td><td><code>false</code></td><td>Saved <code>AT+PETSCII</code> state (PETSCII translation on direct-TCP dials). Also editable from the telnet, web, and GUI config surfaces.</td></tr>
+        <tr><td><code>drive_carrier</code></td><td>bool</td><td><code>false</code></td><td>Drive <strong>DTR</strong> as a hardware carrier proxy. When true the modem emulator asserts and drops DTR with the connection (tied to <code>AT&amp;C</code>), so a terminal wired DTR&rarr;DCD sees carrier detect. When false the gateway never touches the modem-control lines, so a port with no DCD wiring behaves exactly as before. Modem mode only. Editable in all three config UIs.</td></tr>
     </tbody>
 </table>
 
