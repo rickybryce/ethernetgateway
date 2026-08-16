@@ -144,13 +144,13 @@ impl TelnetSession {
                 self.send_line(&format!("  {colour}")).await?;
                 // Name what failed rather than only counting it: "3 failed" with
                 // no names leaves the operator unable to retry anything.
-                for (name, why) in r.failed.iter().take(4) {
+                // Grouped by reason -- with no internet every disk fails the
+                // same way, and four identical truncated lines on a 40-column
+                // screen is four lines saying nothing.
+                for line in r.failure_lines(4) {
                     let w = if self.terminal_type == TerminalType::Petscii { 34 } else { 70 };
-                    self.send_line(&format!(
-                        "  {}",
-                        self.red(&truncate_to_width(&format!("{name}: {why}"), w))
-                    ))
-                    .await?;
+                    self.send_line(&format!("  {}", self.red(&truncate_to_width(&line, w))))
+                        .await?;
                 }
             }
             Err(e) => self.send_line(&format!("  {}", self.red(&e))).await?,

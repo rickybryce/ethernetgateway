@@ -216,6 +216,38 @@ impl Report {
         }
         parts.join(", ")
     }
+
+    /// The failures, with identical reasons collapsed into one line.
+    ///
+    /// **Because the common failure is the same failure thirty-four times.**
+    /// With no internet every disk fails with the same name-resolution error,
+    /// and the callers used to print the first three verbatim — the same
+    /// sentence three times over, ~200 characters saying one thing, on a
+    /// screen that may be 40 columns wide.  Grouping says it once and counts
+    /// the rest, which is both shorter and more informative: "34 disks: <err>"
+    /// tells you the network is down, where three named disks suggested three
+    /// unlucky files.
+    ///
+    /// Order is first-seen, so a single odd failure among many identical ones
+    /// keeps its own line rather than being buried.  `max` bounds the number of
+    /// *groups*, not the number of disks.
+    pub fn failure_lines(&self, max: usize) -> Vec<String> {
+        let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+        for (name, why) in &self.failed {
+            match groups.iter_mut().find(|(reason, _)| reason == why) {
+                Some((_, names)) => names.push(name),
+                None => groups.push((why.clone(), vec![name])),
+            }
+        }
+        groups
+            .into_iter()
+            .take(max)
+            .map(|(reason, names)| match names.as_slice() {
+                [one] => format!("{one}: {reason}"),
+                many => format!("{} disks: {reason}", many.len()),
+            })
+            .collect()
+    }
 }
 
 /// SHA-256, for verifying what arrived is what was tested.
@@ -325,6 +357,55 @@ fn fetch_one(disk: &Disk) -> Result<Vec<u8>, String> {
         return Err(format!("checksum mismatch (got {}…)", &got[..12]));
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    /// The offline case: every disk fails with the same message.
+    ///
+    /// Measured, not imagined — running the gateway in a network namespace
+    /// with no route produced exactly this, 34 times over: "io: failed to
+    /// lookup address information: Temporary failure in name resolution".
+    #[test]
+    fn test_identical_failures_are_reported_once_with_a_count() {
+        let why = "io: failed to lookup address information";
+        let report = Report {
+            failed: (0..34).map(|i| (format!("DISK{i:02}.DSK"), why.to_string())).collect(),
+            ..Default::default()
+        };
+        let lines = report.failure_lines(3);
+        assert_eq!(lines.len(), 1, "one reason should be one line, got {lines:?}");
+        assert_eq!(lines[0], format!("34 disks: {why}"));
+    }
+
+    /// A lone odd failure keeps its own name rather than being buried in the
+    /// crowd — first-seen order, so it survives the `max` cut.
+    #[test]
+    fn test_a_single_distinct_failure_keeps_its_name() {
+        let report = Report {
+            failed: vec![
+                ("ODD.DSK".into(), "checksum mismatch".into()),
+                ("A.DSK".into(), "HTTP 404".into()),
+                ("B.DSK".into(), "HTTP 404".into()),
+            ],
+            ..Default::default()
+        };
+        let lines = report.failure_lines(4);
+        assert_eq!(lines, vec!["ODD.DSK: checksum mismatch", "2 disks: HTTP 404"]);
+    }
+
+    /// `max` bounds groups, and an empty report says nothing at all.
+    #[test]
+    fn test_failure_lines_bounds_groups_and_handles_empty() {
+        assert!(Report::default().failure_lines(3).is_empty());
+        let report = Report {
+            failed: (0..5).map(|i| (format!("D{i}.DSK"), format!("reason {i}"))).collect(),
+            ..Default::default()
+        };
+        assert_eq!(report.failure_lines(2).len(), 2, "max bounds the group count");
+    }
 }
 
 /// Fetch every disk that is not already there.

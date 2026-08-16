@@ -1417,8 +1417,10 @@ impl App {
             let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
                 Ok(r) => {
                     let mut m = r.summary();
-                    for (name, why) in r.failed.iter().take(3) {
-                        m.push_str(&format!("  {name}: {why}"));
+                    // Grouped by reason: with no internet this is one fact
+                    // repeated once per disk, not three unlucky files.
+                    for line in r.failure_lines(3) {
+                        m.push_str(&format!("  {line}"));
                     }
                     m
                 }

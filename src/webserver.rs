@@ -958,9 +958,11 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
             Ok(r) => {
                 let mut m = format!("Sample disks: {}.", r.summary());
                 // Named, not just counted: "3 failed" with no names leaves the
-                // operator unable to retry or report anything.
-                for (name, why) in r.failed.iter().take(3) {
-                    m.push_str(&format!(" {name}: {why}."));
+                // operator unable to retry or report anything.  Grouped by
+                // reason, because "no internet" is one fact repeated once per
+                // disk, not thirty-four separate problems.
+                for line in r.failure_lines(3) {
+                    m.push_str(&format!(" {line}."));
                 }
                 m
             }
