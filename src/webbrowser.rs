@@ -508,10 +508,16 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
 /// dangerous for any page that reads cookies, form data, or
 /// authentication.
 fn prepend_tls_downgrade_notice(page: &mut WebPage, width: usize) {
-    let notice = "[!] HTTPS failed (TLS error) — page fetched over plain HTTP.";
-    // Use char count (not byte length) so the separator width matches
-    // the rendered notice on terminals that count visual columns —
-    // the notice contains a 3-byte UTF-8 em-dash.
+    // ASCII ONLY, deliberately.  This notice is prepended AFTER
+    // `page.sanitize()`, so it never passes through the terminal-safe fold
+    // that page text does -- whatever is written here reaches the wire as-is.
+    // It used to carry an em-dash, which is three bytes of UTF-8 and three
+    // unrenderable characters on a 7-bit console: our own security warning
+    // arrived as garbage on exactly the terminals this gateway exists for.
+    // Found by surveying real sites, on a site whose TLS actually fails.
+    let notice = "[!] HTTPS failed (TLS error) - page fetched over plain HTTP.";
+    // Char count rather than byte length: the two agree while this is ASCII,
+    // and this stays correct if it ever legitimately gains a wider character.
     let separator = "-".repeat(notice.chars().count().min(width));
     let mut header: Vec<String> = Vec::new();
     header.extend(wrap_line(notice, width));
@@ -1685,6 +1691,37 @@ mod tests {
         assert_eq!(parse_meta_refresh("2 ; url = \"/c\""), Some("/c".to_string()));
         // Some pages omit the delay entirely.
         assert_eq!(parse_meta_refresh("url=/d"), Some("/d".to_string()));
+    }
+
+    /// Strings WE generate must be ASCII, because they bypass the fold.
+    ///
+    /// `prepend_tls_downgrade_notice` runs after `WebPage::sanitize`, so its
+    /// text reaches the wire exactly as written -- it never passes through the
+    /// terminal-safe fold that page content does.  The notice used to carry an
+    /// em-dash: three bytes of UTF-8, three unrenderable characters on a 7-bit
+    /// console, which made our own security warning arrive as garbage on
+    /// precisely the terminals this gateway serves.
+    #[test]
+    fn test_tls_downgrade_notice_is_pure_ascii() {
+        let mut page = WebPage {
+            title: None,
+            lines: vec!["body".to_string()],
+            links: vec![],
+            forms: vec![],
+            url: "http://example.com/".to_string(),
+        };
+        prepend_tls_downgrade_notice(&mut page, 80);
+        for line in &page.lines {
+            assert!(
+                line.is_ascii(),
+                "a line we generate ourselves is not ASCII and bypasses the fold: {line:?}",
+            );
+        }
+        assert!(
+            page.lines.iter().any(|l| l.contains("HTTPS failed")),
+            "the warning must actually be there: {:?}",
+            page.lines,
+        );
     }
 
     /// `<noscript>` content is markup for us, not text.
