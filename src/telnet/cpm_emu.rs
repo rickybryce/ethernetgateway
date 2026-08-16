@@ -410,17 +410,32 @@ pub(in crate::telnet) fn keyname(b: u8) -> String {
 /// without a global, and so both callers are visibly passing the same key --
 /// the alternative was a gate at each call site, which is one rule written in
 /// two places.
-/// `cpm_drives` is `cpm_emu_enabled`: CP/M drive A: is only laid out when the
-/// emulator is on, so its copy is placed only then.  The transfer-directory
-/// copy does not depend on it -- that copy exists so the file-transfer menus
-/// can reach a terminal *without* the emulator, which is exactly the case an
-/// operator who set `cpm_emu_enabled = false` is in.
-pub(crate) fn place_bundled_terminals(transfer_dir: &str, enabled: bool, cpm_drives: bool) {
+/// Whether CP/M drive A: is one of the destinations.
+///
+/// An enum rather than a second `bool` on purpose.  The two flags here are
+/// different config keys -- `place_bundled_terminals` and `cpm_emu_enabled` --
+/// and as two bools they swap silently: the whole suite passes, and the
+/// swapped call reproduces exactly the bug this parameter was added to fix
+/// (emulator off, key on, so `enabled` reads false and no copy is written
+/// anywhere).  Measured, not feared: the swap was tried and 2315 tests passed.
+/// With distinct types it does not compile.
+pub(crate) enum DriveA {
+    /// The emulator is on, so `CPM/A` has been laid out and gets a copy.
+    Include,
+    /// The emulator is off: its folders do not exist, and the loose
+    /// transfer-directory copy is the whole point of the setting.
+    Skip,
+}
+
+/// The transfer-directory copy does not depend on the emulator -- that copy
+/// exists so the file-transfer menus can reach a terminal *without* it, which
+/// is exactly the case an operator who set `cpm_emu_enabled = false` is in.
+pub(crate) fn place_bundled_terminals(transfer_dir: &str, enabled: bool, drive_a: DriveA) {
     if !enabled {
         return;
     }
     for (name, bytes) in BUNDLED_TERMINALS {
-        if cpm_drives {
+        if matches!(drive_a, DriveA::Include) {
             let mut drive_a = PathBuf::from(transfer_dir);
             drive_a.push("CPM");
             drive_a.push("A");
@@ -848,7 +863,7 @@ impl TelnetSession {
         let on = cfg.place_bundled_terminals;
         // Drive A: included unconditionally here: reaching this code *is* the
         // emulator running, so its folders are laid out.
-        tokio::task::spawn_blocking(move || place_bundled_terminals(&td, on, true))
+        tokio::task::spawn_blocking(move || place_bundled_terminals(&td, on, DriveA::Include))
             .await
             .ok();
         // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
@@ -3192,7 +3207,7 @@ mod repl_tests {
 
 #[cfg(test)]
 mod egt80_tests {
-    use super::{BUNDLED_TERMINALS, EGT80_COM, EGT80_NAME, EGT8080_COM, EGT8080_NAME};
+    use super::{BUNDLED_TERMINALS, DriveA, EGT80_COM, EGT80_NAME, EGT8080_COM, EGT8080_NAME};
 
     /// The committed `.COM`s are build artifacts of `EGT8080/*.Z80`, and CI
     /// cannot rebuild them: that needs SLR's `Z80ASM.COM` and `zxcc`, neither
@@ -3305,7 +3320,7 @@ mod egt80_tests {
         let drive_a = base.join("CPM").join("A");
         std::fs::create_dir_all(&drive_a).expect("temp drive A:");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, true);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, DriveA::Include);
 
         // Four files: two builds x two destinations.
         for (name, bytes) in BUNDLED_TERMINALS {
@@ -3322,7 +3337,7 @@ mod egt80_tests {
         std::fs::write(&configured, b"not the shipped build").expect("write");
         std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, true);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, DriveA::Include);
 
         assert_eq!(
             std::fs::read(&configured).expect("still there"),
@@ -3347,7 +3362,7 @@ mod egt80_tests {
         // *missing* terminal is written; it never removes one, which is why the
         // configured copy above is still expected to be sitting there.
         std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), false, true);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), false, DriveA::Include);
         assert!(
             !base.join(EGT8080_NAME).exists(),
             "place_bundled_terminals = false still wrote a missing terminal",
@@ -3384,7 +3399,7 @@ mod egt80_tests {
         // and the test passes against the very bug it is here to catch.
         std::fs::create_dir_all(&drive_a).expect("temp drive A:");
 
-        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, false);
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"), true, DriveA::Skip);
 
         for (name, bytes) in BUNDLED_TERMINALS {
             let p = base.join(name);

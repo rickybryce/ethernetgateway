@@ -76,7 +76,7 @@ pub(crate) fn is_normal_disconnect(e: &std::io::Error) -> bool {
 /// Placing the bundled CP/M terminals is reached from `main.rs` at start-up as
 /// well as from a session entering the emulator, so it is re-exported rather
 /// than staying `pub(in crate::telnet)` like the rest of the CP/M helpers.
-pub(crate) use cpm_emu::place_bundled_terminals;
+pub(crate) use cpm_emu::{place_bundled_terminals, DriveA};
 mod session;
 pub(crate) use session::is_backspace_key;
 // Test-only re-exports: `match_terminal_name` is now reached through

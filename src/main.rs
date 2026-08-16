@@ -210,7 +210,8 @@ fn main() {
         telnet::place_bundled_terminals(
             &cfg.transfer_dir,
             cfg.place_bundled_terminals,
-            cfg.cpm_emu_enabled,
+            // Distinct type, so this cannot be swapped with the flag above.
+            if cfg.cpm_emu_enabled { telnet::DriveA::Include } else { telnet::DriveA::Skip },
         );
 
         // Start tokio runtime on a worker thread so the main thread is free for the GUI.
