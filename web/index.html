@@ -1118,7 +1118,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>If the host key is unknown, confirm the SHA-256 fingerprint; if it has changed, review the warning carefully before accepting</li>
                         <li>The gateway authenticates with the <strong>single configured method</strong> (config key <code>ssh_gateway_auth</code>): in <code>password</code> mode (default) it prompts you for the remote password; in <code>key</code> mode it uses the gateway's own client key. There is <strong>no fallback</strong> between the two &mdash; the remote sees exactly one auth attempt</li>
                         <li>Once authenticated, you have a full interactive shell on the remote server</li>
-                        <li>Press <strong>Esc</strong> twice to disconnect and return to the main menu</li>
+                        <li>Press <strong>Esc</strong> twice <em>quickly</em> to disconnect and return to the main menu (a single Esc goes to the remote)</li>
                     </ol>
                 </div>
 
@@ -1175,7 +1175,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>At the mode prompt, press <strong>T</strong> to toggle between <em>Telnet protocol</em> and <em>Raw TCP</em> mode (see <em>Protocol Modes</em> below), or any other key to continue</li>
                         <li>Enter the remote host and port (default 23)</li>
                         <li>Session bytes are proxied between your terminal and the remote</li>
-                        <li>Press <strong>Esc</strong> twice to disconnect</li>
+                        <li>Press <strong>Esc</strong> twice <em>quickly</em> to disconnect (a single Esc goes to the remote)</li>
                     </ol>
                 </div>
 

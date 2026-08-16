@@ -435,7 +435,7 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (33 for PETSCII, 73 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
-    fetch_and_render_from(url, width, 0)
+    fetch_and_render_from(url, width, 0, None)
 }
 
 /// `start_hops` carries the redirect budget across a `<meta refresh>` hop.
@@ -445,7 +445,19 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
 /// page that 302s to a page that meta-refreshes back could ping-pong for ever,
 /// each side resetting the other's count.  Recursion depth is therefore
 /// bounded by `MAX_REDIRECTS`.
-fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<WebPage, String> {
+///
+/// `carried` is the HTTPS-downgrade reason from an earlier hop, and it has to
+/// be threaded through or it is lost: the notice used to be prepended *after*
+/// the meta-refresh returned, so a site that downgraded to HTTP and then
+/// refreshed to another page handed the reader cleartext with no warning at
+/// all -- and `no_https_service` / `https_timed_out` sites are exactly the
+/// ones the downgrade exists for.
+fn fetch_and_render_from(
+    url: &str,
+    width: usize,
+    start_hops: usize,
+    carried: Option<DowngradeReason>,
+) -> Result<WebPage, String> {
     // Follow redirects manually (auto-follow disabled below) so EVERY hop
     // is SSRF-checked before we connect — otherwise ureq would follow a
     // public→internal redirect and dial the internal host before our guard
@@ -473,7 +485,9 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
     );
 
     let mut current = url.to_string();
-    let mut downgrade: Option<DowngradeReason> = None;
+    // Seeded from the hop that got us here, so a downgrade survives a
+    // `<meta refresh>`.  A fresh fetch passes `None`.
+    let mut downgrade: Option<DowngradeReason> = carried;
     let mut hops = start_hops;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
@@ -572,13 +586,21 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
             if hops > MAX_REDIRECTS {
                 return Err("Too many redirects".to_string());
             }
-            return fetch_and_render_from(&next, width, hops);
+            return fetch_and_render_from(&next, width, hops, downgrade);
         }
     }
 
     page.sanitize();
 
-    if let Some(reason) = downgrade {
+    // The notice describes the page in front of the reader -- "fetched over
+    // plain HTTP" -- so it is shown when *this* page is cleartext, not merely
+    // because some earlier hop was.  A refresh that lands back on a working
+    // HTTPS URL is encrypted and must not be flagged; one that stays on HTTP
+    // carries the original reason forward, which is the case that used to be
+    // silent.
+    if let Some(reason) = downgrade
+        && page.url.starts_with("http://")
+    {
         prepend_downgrade_notice(&mut page, width, reason);
     }
     Ok(page)
@@ -1280,10 +1302,7 @@ fn extract_form_fields(
                         }
                     }
                     "submit" => {
-                        if submit_label.is_none() && !value.is_empty() {
-                            *submit_label = Some(value.clone());
-                        }
-                        // ONLY THE FIRST named submit button is sent.
+                        // ONLY THE FIRST submit control is sent.
                         //
                         // A submit button is a "successful control" only when
                         // it is the one that submitted the form -- a browser
@@ -1299,12 +1318,29 @@ fn extract_form_fields(
                         // First, because that is the form's DEFAULT button --
                         // the one a browser activates when you press Enter in a
                         // text field, which is what submitting from our form UI
-                        // means.  It is also the same one `submit_label`
-                        // already names, so the button shown and the button
-                        // sent agree.
-                        if !field_name.is_empty() && !*submit_taken {
+                        // means.
+                        //
+                        // **The label and the name come from this one
+                        // decision**, so the button shown and the button sent
+                        // cannot disagree.  They used to be decided
+                        // separately -- the label by the first submit with a
+                        // non-empty *value*, the name by the first with a
+                        // non-empty *name* -- so an unnamed `value="Go"`
+                        // followed by `name="btnI" value="Lucky"` displayed
+                        // "Go" and posted `btnI`, which is the very swap the
+                        // comment above says was fixed.
+                        //
+                        // An unnamed default button therefore sends nothing,
+                        // which is also what a real browser does: a control
+                        // with no name is not successful.
+                        if !*submit_taken {
                             *submit_taken = true;
-                            fields.push(FormField::Hidden { name: field_name, value });
+                            if !value.is_empty() {
+                                *submit_label = Some(value.clone());
+                            }
+                            if !field_name.is_empty() {
+                                fields.push(FormField::Hidden { name: field_name, value });
+                            }
                         }
                     }
                     "checkbox" => {
@@ -1354,10 +1390,22 @@ fn extract_form_fields(
             }
             "button" => {
                 let btn_type = get_attr(node, "type").unwrap_or_else(|| "submit".to_string());
-                if btn_type == "submit" && submit_label.is_none() {
+                // A `<button type=submit>` is a submit control too, so it goes
+                // through the same first-one-wins claim as `<input
+                // type=submit>` above -- otherwise a leading `<button>` names
+                // the UI while a later `<input>` is what gets posted, which is
+                // the same disagreement by another route.  A named one is a
+                // successful control and is sent.
+                if btn_type == "submit" && !*submit_taken {
+                    *submit_taken = true;
                     let text = get_text_content(node);
                     if !text.is_empty() {
                         *submit_label = Some(text);
+                    }
+                    let name = get_attr(node, "name").unwrap_or_default();
+                    if !name.is_empty() {
+                        let value = get_attr(node, "value").unwrap_or_default();
+                        fields.push(FormField::Hidden { name, value });
                     }
                 }
             }
@@ -1978,6 +2026,87 @@ mod tests {
         );
         // And the button named on screen is the one actually sent.
         assert_eq!(form.label, "Google Search", "label should name the sent button");
+    }
+
+    /// Collect every field name on the first form of a rendered document.
+    fn form_field_names(html: &[u8]) -> (Vec<String>, String) {
+        let (page, _refresh) = render_html_body(html, "https://example.com/".to_string(), 80)
+            .expect("renders");
+        let form = page.forms.first().expect("one form");
+        let names = form
+            .fields
+            .iter()
+            .map(|f| match f {
+                FormField::Text { name, .. }
+                | FormField::Hidden { name, .. }
+                | FormField::TextArea { name, .. }
+                | FormField::Select { name, .. }
+                | FormField::Checkbox { name, .. }
+                | FormField::Radio { name, .. } => name.clone(),
+            })
+            .collect();
+        (names, form.label.clone())
+    }
+
+    /// **The button shown and the button sent must be the same control.**
+    ///
+    /// They used to be two separate decisions -- the label taken from the
+    /// first submit with a non-empty *value*, the posted name from the first
+    /// with a non-empty *name* -- which agree on every ordinary form and
+    /// diverge as soon as the default button is unnamed.  Then the screen says
+    /// "Go" and the server is told `btnI`, which is exactly the swap the
+    /// Google fix above was about, arriving by a different route.
+    ///
+    /// An unnamed default button sends no button field at all, which is what a
+    /// browser does: a control with no name is not a successful control.
+    #[test]
+    fn test_an_unnamed_default_button_is_not_replaced_by_a_later_named_one() {
+        let html = br#"<html><body><form action="/s">
+            <input name="q" value="">
+            <input type="submit" value="Go">
+            <input type="submit" name="btnI" value="Lucky">
+        </form></body></html>"#;
+        let (names, label) = form_field_names(html);
+
+        assert_eq!(label, "Go", "the first submit control names the UI");
+        assert!(
+            !names.iter().any(|n| n == "btnI"),
+            "a later submit button must not be posted under the first one's label: {names:?}",
+        );
+        assert!(names.iter().any(|n| n == "q"), "the text field must survive: {names:?}");
+    }
+
+    /// A `<button type=submit>` is a submit control, so it claims the form the
+    /// same way -- otherwise a leading `<button>` names the screen while a
+    /// later `<input type=submit>` is what gets posted.  A named one is
+    /// successful and is sent.
+    #[test]
+    fn test_a_leading_button_element_claims_the_form() {
+        let named = br#"<html><body><form action="/s">
+            <input name="q" value="">
+            <button type="submit" name="go" value="1">Search</button>
+            <input type="submit" name="btnI" value="Lucky">
+        </form></body></html>"#;
+        let (names, label) = form_field_names(named);
+        assert_eq!(label, "Search", "the button's text names the UI");
+        assert!(names.iter().any(|n| n == "go"), "a named button is sent: {names:?}");
+        assert!(
+            !names.iter().any(|n| n == "btnI"),
+            "and it stops a later submit being sent under its label: {names:?}",
+        );
+
+        // The same, unnamed: it still claims the form, and still posts nothing.
+        let unnamed = br#"<html><body><form action="/s">
+            <input name="q" value="">
+            <button type="submit">Search</button>
+            <input type="submit" name="btnI" value="Lucky">
+        </form></body></html>"#;
+        let (names, label) = form_field_names(unnamed);
+        assert_eq!(label, "Search");
+        assert!(
+            !names.iter().any(|n| n == "btnI"),
+            "an unnamed default button posts nothing, it does not defer: {names:?}",
+        );
     }
 
     #[test]

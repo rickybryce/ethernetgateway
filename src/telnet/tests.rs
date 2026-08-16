@@ -1777,6 +1777,198 @@ mod gateway_filter_proptest {
     }
 }
 
+// ─── The byte trace must not become a credential log ───
+
+/// The log lines recorded after `mark`, so a global buffer shared with every
+/// other test can still answer a question about one prompt.
+fn log_lines_after(mark: &str) -> Vec<String> {
+    let all = crate::logger::snapshot(2000);
+    match all.iter().rposition(|l| l.contains(mark)) {
+        Some(i) => all[i + 1..].to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// **A keystroke diagnostic must not write down passwords.**
+///
+/// The byte trace sits in `session_read_byte`, under *every* prompt in the
+/// gateway -- so with `gateway_debug` on, the telnet login, the SSH gateway's
+/// remote password and the Groq API key were each emitted one byte per line.
+/// `log_to_file` ships enabled and the same buffer is served at `/logs`, so
+/// turning on a diagnostic to chase a stuck ESC key also put credentials on
+/// disk.
+///
+/// The positive control is the point of this test, not decoration: asserting
+/// only that nothing was logged passes just as well when the buffer was never
+/// initialised, when the trace is off, or when the reader never ran.  So an
+/// ordinary line is traced first, in the same session, and *must* appear.
+#[tokio::test]
+async fn test_the_byte_trace_never_records_a_password() {
+    use tokio::io::AsyncWriteExt;
+    crate::logger::init();
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    session.trace_bytes = true;
+
+    // Positive control: an ordinary prompt IS traced.
+    glog!("pwtrace-probe-normal");
+    peer.write_all(b"DIR\r").await.unwrap();
+    assert_eq!(session.get_line_input().await.unwrap().as_deref(), Some("DIR"));
+    let traced = log_lines_after("pwtrace-probe-normal");
+    assert!(
+        traced.iter().any(|l| l.contains("WIRE")),
+        "the trace must be armed, or this test proves nothing: {traced:?}",
+    );
+
+    // The same bytes at a password prompt: nothing on the wire is recorded.
+    glog!("pwtrace-probe-password");
+    peer.write_all(b"hunter2\r").await.unwrap();
+    assert_eq!(
+        session.get_password_input().await.unwrap().as_deref(),
+        Some("hunter2"),
+        "the password itself must still be read correctly",
+    );
+    let traced = log_lines_after("pwtrace-probe-password");
+    assert!(
+        !traced.iter().any(|l| l.contains("WIRE")),
+        "a password reached the log: {traced:?}",
+    );
+}
+
+// ─── Gateway ESC: pass it on, and pair it by time ───
+
+/// A clock for the ESC-pair tests: **one** anchor, with offsets measured from
+/// it, so presses can be placed in time without sleeping.
+///
+/// It has to be one anchor.  Taking a fresh `Instant::now()` per call adds
+/// however long the test itself took to every offset — which is precisely the
+/// quantity under test, so a boundary case lands on the wrong side of the
+/// window and the whole suite becomes load-dependent.  (Measured: the
+/// exactly-at-the-window assertion below failed that way first.)
+struct EscClock(tokio::time::Instant);
+
+impl EscClock {
+    fn new() -> Self {
+        Self(tokio::time::Instant::now())
+    }
+    fn at(&self, ms: u64) -> tokio::time::Instant {
+        self.0 + std::time::Duration::from_millis(ms)
+    }
+}
+
+/// **The reported bug.** From an SC126: `ATDT telnetbible.com:6400` straight
+/// from the modem passes ESC through fine, but the same host reached through
+/// the telnet gateway never sees the first ESC -- and a second one leaves the
+/// gateway instead of reaching the remote.
+///
+/// The old rule *held* an ESC and forwarded it only when a following byte
+/// arrived, so a lone ESC waited for a second byte that never came.  Pressing
+/// ESC once at a remote's prompt did nothing at all.  Now every ESC is
+/// forwarded and only the pair is ours, so this test is about `press`
+/// reporting "not a pair" for a single press: the caller forwards on that.
+#[test]
+fn test_a_single_esc_is_never_swallowed_by_the_gateway() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)), "one ESC must go to the remote, not be held");
+
+    // And again much later: a lone ESC is a lone ESC however often it happens.
+    assert!(!esc.press(c.at(10_000)), "a second lone ESC, long after, is also just an ESC");
+    assert!(!esc.press(c.at(20_000)));
+}
+
+/// Two ESCs in a row and close together is the way out, which is the half of
+/// the contract that already worked and must keep working.
+#[test]
+fn test_two_quick_escs_in_a_row_leave_the_gateway() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)), "the first is not yet a pair");
+    assert!(esc.press(c.at(80)), "the second, 80 ms later, leaves");
+}
+
+/// **Time is what separates a deliberate pair from two unrelated presses.**
+/// A user who pressed ESC to leave `vi`'s insert mode, worked for a minute and
+/// pressed ESC again must still be connected -- under the old rule those two
+/// were a pair however far apart, so the session simply ended.
+#[test]
+fn test_two_escs_far_apart_are_two_escs_not_a_way_out() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)));
+    assert!(
+        !esc.press(c.at(GW_ESC_PAIR.as_millis() as u64 + 1)),
+        "one millisecond past the window is not a pair",
+    );
+
+    // The boundary itself is inclusive, and pinned so it cannot drift
+    // silently: at exactly the window, it is still a pair.
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)));
+    assert!(esc.press(c.at(GW_ESC_PAIR.as_millis() as u64)), "exactly at the window pairs");
+}
+
+/// **A press too late to pair becomes the first half of a new pair.**
+/// Otherwise a user whose first attempt was too slow could never get out
+/// without pressing ESC three times, which is not a rule anyone would guess.
+#[test]
+fn test_a_press_too_late_to_pair_starts_a_fresh_pair() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)));
+    assert!(!esc.press(c.at(5_000)), "too late to pair with the first");
+    assert!(esc.press(c.at(5_050)), "but it armed a new pair, so this one leaves");
+}
+
+/// **An arrow key is `ESC [ A`, and two of them are not a pair.**
+///
+/// This is why the rule is "consecutive AND inside the window" rather than
+/// time alone: two cursor presses put two ESCs a few milliseconds apart, which
+/// any purely time-based rule would read as a deliberate double-tap and throw
+/// the user out mid-edit.  The intervening `[` is the whole signal, so every
+/// non-ESC byte must reach `other()`.
+#[test]
+fn test_two_arrow_presses_are_not_a_way_out() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    // ESC [ A
+    assert!(!esc.press(c.at(0)));
+    esc.other(); // '['
+    esc.other(); // 'A'
+    // ESC [ A again, 4 ms later — faster than any human double-tap.
+    assert!(!esc.press(c.at(4)), "the second arrow key must not leave the gateway");
+    esc.other();
+    esc.other();
+    // A third, for good measure.
+    assert!(!esc.press(c.at(8)));
+}
+
+/// After a leave, the state is clear.  A stale half-pair would make the very
+/// next ESC of a *new* session-level action look like a second press.
+#[test]
+fn test_leaving_clears_the_pair_state() {
+    let c = EscClock::new();
+    let mut esc = EscHold::new();
+    assert!(!esc.press(c.at(0)));
+    assert!(esc.press(c.at(10)), "leaves");
+    assert!(!esc.press(c.at(20)), "the next ESC starts over, it does not re-leave");
+}
+
+/// The window is a **guess about human hands**, so it is pinned rather than
+/// left to drift.  Too short and a deliberate double-tap cannot be made at
+/// all; too long and two unrelated ESCs at a remote's prompt end the session.
+#[test]
+fn test_the_esc_pair_window_is_in_the_range_a_human_can_hit() {
+    assert!(
+        GW_ESC_PAIR >= std::time::Duration::from_millis(250),
+        "shorter than a deliberate double-tap: {GW_ESC_PAIR:?}",
+    );
+    assert!(
+        GW_ESC_PAIR <= std::time::Duration::from_millis(1500),
+        "long enough to catch two unrelated presses: {GW_ESC_PAIR:?}",
+    );
+}
+
 // ─── Gateway onward window geometry ──────────────────
 
 /// The geometry a gateway session reports to the remote: operator override

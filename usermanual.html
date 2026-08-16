@@ -738,7 +738,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>Telnet listen port. Must be &ge; 1.</td></tr>
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>. Ignored when <code>telnet_gateway_raw</code> is set &mdash; raw TCP has no IAC layer to negotiate over &mdash; so every config surface greys this control in raw mode and leaves its stored value alone.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
-        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>Byte-level trace of SSH/Telnet gateway sessions. Toggle from the GUI/web General frame or the telnet Other / Serial Configuration menus; takes effect next session. <code>EGATEWAY_GATEWAY_DEBUG</code> env var forces it on. See §16.10.</td></tr>
+        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>Byte-level trace of SSH/Telnet gateway sessions, and of every key typed at a session prompt. Passwords are excluded: the trace is suppressed for the duration of any password prompt, so enabling this cannot put a credential in the log. Toggle from the GUI/web General frame or the telnet Other / Serial Configuration menus; takes effect next session. <code>EGATEWAY_GATEWAY_DEBUG</code> env var forces it on. See §16.10.</td></tr>
         <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>Columns reported to the remote host by both gateways (SSH PTY request / telnet NAWS). <code>0</code> = automatic: your client&rsquo;s NAWS if it sent one, else the terminal-type default. Set it when a client cannot report its real width &mdash; see §16.14.</td></tr>
         <tr><td><code>gateway_term_height</code></td><td>u16</td><td><code>0</code></td><td>Rows counterpart of <code>gateway_term_width</code>. <code>0</code> = automatic. Resolved independently, so you can pin the width and leave the rows automatic.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
@@ -4434,7 +4434,10 @@ other, so auth failures are unambiguous:
 </ul>
 
 <p>
-Press <span class="kbd">ESC</span> twice to disconnect.
+Press <span class="kbd">ESC</span> twice, quickly, to disconnect. A single
+ESC is passed to the remote, so <code>vi</code> and other ESC-driven software
+work through a gateway session; the two presses that disconnect must be in
+quick succession (within half a second) and with no other key between them.
 </p>
 
 <h2>10.2 Host-Key Trust (TOFU)</h2>
@@ -4590,7 +4593,8 @@ After the mode prompt, enter the host and port:
 Port (23): 23</code></pre>
 
 <p>
-Press <span class="kbd">ESC</span> twice to disconnect. For PETSCII and ASCII
+Press <span class="kbd">ESC</span> twice, quickly, to disconnect &mdash; a
+single ESC goes to the remote (§10.3). For PETSCII and ASCII
 terminals, ANSI escape sequences from the remote are filtered out; an ANSI
 terminal keeps them, apart from the remote's window title, which is dropped
 for every terminal type (§10.3 &mdash; the same filter serves both gateways).
@@ -5318,6 +5322,49 @@ byte is being weighed never completes, the receiver times out, the sender
 resends the identical block, and the identical hold repeats.
 </aside>
 
+<h2 id="ch16-gwesc">16.17 A Single ESC Never Reaches the Remote (fixed)</h2>
+
+<p>
+<strong>Symptom:</strong> through the SSH gateway, the telnet gateway or the
+serial console bridge, pressing <span class="kbd">ESC</span> once does nothing
+at the remote &mdash; <code>vi</code> will not leave insert mode, a menu driven
+by ESC does not respond &mdash; and pressing it a second time disconnects you
+back to the gateway menu. Dialling the same host straight from the modem with
+<code>ATDT host:port</code> works perfectly, which is what makes it look like
+the gateway rather than the remote.
+</p>
+
+<p>
+<strong>Cause (a real bug, fixed in this release):</strong> the gateway
+<em>held</em> an ESC rather than sending it, and released it only when a
+following byte arrived. That is how an arrow key &mdash;
+<code>ESC [ A</code> &mdash; reached the remote intact, and it meant a
+<em>lone</em> ESC waited for a second byte that never came. So one press was
+swallowed and the next was read as the second half of the pair that
+disconnects. A modem dial-out is a raw TCP passthrough that intercepts nothing,
+which is why that path was unaffected. Reported from an SC126; the same defect
+was present in all three bridges, which were three copies of one rule.
+</p>
+
+<p>
+<strong>Fix:</strong> nothing is held. Every ESC is passed to the remote along
+with every other byte, and what disconnects you is <strong>two ESC presses in a
+row, within half a second</strong>, with no other key between them. The second
+one is the gateway's and is not forwarded.
+</p>
+
+<aside class="note">
+<span class="label">Why the pair is timed <em>and</em> consecutive</span>
+An arrow key is <code>ESC [ A</code>, so two cursor presses put two ESC bytes a
+few milliseconds apart &mdash; far closer together than any human double-tap. A
+rule that measured only elapsed time would disconnect you for pressing Up
+twice. The <code>[</code> between them is the entire signal, so any other key
+resets the pair. Note also what changed for the way you leave: the two presses
+must now be <em>quick</em>. They used to count as a pair however far apart, so
+an ESC to leave <code>vi</code>'s insert mode and another a minute later ended
+the session.
+</aside>
+
 <!-- ═══════════════════ Appendix A ═══════════════════ -->
 <h1 id="appA">Appendix A — Configuration Key Reference</h1>
 
@@ -5357,7 +5404,7 @@ numeric values fall back to the default.
         <tr><td><code>cpm_emu_uart</code></td><td>string</td><td><code>rc2014_1b</code></td><td>a profile name</td><td>How the emulated CP/M's comms software reaches the virtual modem. Default <code>rc2014_1b</code> &mdash; the port the bundled EGT8080 expects. <code>off</code> = no modem; a machine/port profile: <code>rc2014_1a</code>&hellip;<code>rc2014_2b</code> (RC2014/RomWBW Z80 SIO/2, 0x80&ndash;0x87), <code>altair_2sio1</code>/<code>altair_2sio2</code> (Altair 88‑2SIO, 0x10&ndash;0x13), <code>altair_sio</code> (Altair 88‑SIO, 0x00/0x01); <code>aux</code> (BDOS AUX: device, funcs 3/4, for SC126/RomWBW); or <code>hbios_1</code>/<code>hbios_2</code> (RomWBW HBIOS serial unit 1/2, reached by <code>RST 8</code> — for software built for RomWBW rather than a bare UART, e.g. the QTERM <code>h</code> builds). With a port selected, the guest dials out with <code>AT</code> commands (<code>ATD A</code>/<code>B</code> to the gateway's serial ports, <code>ATDT host:port</code> to a network host). See §8.11.</td></tr>
         <tr><td><code>disable_gateway_connections</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Refuse connections from this network&rsquo;s router (the default route&rsquo;s next hop, queried from the OS &mdash; see &sect;7.6; falls back to <code>*.*.*.1</code> if the query fails) while the private-IP allowlist applies. Off by default &mdash; traffic from that address is as often an administrator&rsquo;s machine or hairpinned LAN traffic as it is something forwarded from outside, and refusing it left <code>disable_ip_safety</code> as the only way in. Loopback (<code>127.0.0.1</code>) is exempt either way. Takes effect on the next connection, no restart.</td></tr><tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist. For telnet this only matters when <code>security_enabled</code> is <code>false</code> (auth otherwise gates any IP). The configuration web server keeps the allowlist even with login on (its page shows the password/API key), so this flag is the only way to reach the web UI from a non-private IP. Lets any source address connect &mdash; use only on isolated networks; for internet-exposed telnet, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
-        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, for diagnosing input corruption / terminal-translation issues. Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
+        <tr><td><code>gateway_debug</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Byte-level trace of SSH/Telnet gateway sessions, and of every key typed at a session prompt, for diagnosing input corruption / terminal-translation issues. <strong>Passwords are excluded</strong> &mdash; the trace is suppressed for the length of any password prompt, so this cannot write a login, an SSH gateway password or an API key into the log (it did until 0.9.3; outbound tracing was never affected, since a password prompt echoes <code>*</code>). Read fresh each session, so toggling takes effect on the next gateway session. The <code>EGATEWAY_GATEWAY_DEBUG</code> environment variable forces it on regardless. See §16.10.</td></tr>
         <tr><td><code>gateway_term_height</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Rows reported to the remote host by the SSH and Telnet gateways. <code>0</code> = automatic, resolved independently of the width &mdash; see <code>gateway_term_width</code>.</td></tr>
         <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Columns reported to the remote host by the SSH gateway (in its PTY request) and the Telnet Gateway (via NAWS). <code>0</code> = automatic: the size the local client negotiated by NAWS, else the terminal-type default (40&times;25 PETSCII, 80&times;24 ANSI/ASCII). Set it when the automatic answer is wrong, which it is for most retro clients: terminal <em>type</em> does not imply terminal <em>width</em>. A C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it is detected as ANSI and would be told it has 80 columns for a physically 40-column screen; CCGMS&rsquo;s soft 80-column mode is the same mistake in reverse under PETSCII. WiFi modems and tcpser do not send NAWS on the C64&rsquo;s behalf, so only the operator can say. When the remote has the wrong width, everything past the real margin &mdash; line wrap, backspace, history recall, tab completion &mdash; is drawn in the wrong place. Set from the telnet Gateway Configuration menu (<code>W</code>/<code>R</code>), or Server &rarr; More in the GUI and web UI. Takes effect on the next gateway connection, no restart. See §16.14.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>

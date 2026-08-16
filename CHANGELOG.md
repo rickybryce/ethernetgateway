@@ -9,7 +9,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.3] - Unreleased
 
+### Security
+
+- **The byte trace no longer records passwords.** The per-keystroke diagnostic
+  added this cycle sits under *every* prompt in the gateway, so with
+  `gateway_debug = true` the telnet/SSH login password, the SSH gateway's
+  remote password and the Groq API key were each written to the log one byte
+  per line (`cpmkey WIRE 'p' (0x70)`). `log_to_file` ships enabled and the same
+  buffer is served at `/logs`, so turning on a diagnostic to chase a stuck key
+  also put credentials on disk. The trace is now suppressed for the duration of
+  any password prompt. The suppression is an argument threaded to the reader
+  rather than a flag on the session, so it cannot outlive the prompt it belongs
+  to — an early return anywhere in the input loop would leak a flag. Outbound
+  tracing was never affected: a password prompt echoes `*`.
+
 ### Fixed
+
+- **A single ESC now reaches the remote through all three gateways.** Reported
+  from an SC126: `ATDT telnetbible.com:6400` straight from the modem passes ESC
+  through fine, but the same host reached through the telnet gateway never saw
+  the first ESC — and a second one left the gateway instead. The SSH gateway
+  and the serial console bridge had it too; they were three copies of one rule.
+
+  The cause was that an ESC was *held* rather than sent, and forwarded only
+  when a following byte arrived — which is how an arrow key (`ESC [ A`) reached
+  the remote whole, and which meant a **lone** ESC waited for a second byte
+  that never came. Pressing ESC once at a remote's prompt did nothing at all,
+  so `vi`, WordStar and every menu driven by the key were unusable through a
+  gateway session. The serial menu's own help text has claimed "a single ESC is
+  forwarded so editors like vi keep working" the whole time; the code never
+  did it.
+
+  Nothing is held now. Every ESC goes to the remote with every other byte, and
+  leaving is two ESCs **in a row and within half a second**. *In a row* is not
+  redundant with the timer: an arrow key is `ESC [ A`, so two cursor presses put
+  two ESCs a few milliseconds apart, and a rule that measured only time would
+  throw you out for pressing Up twice — the intervening `[` is what tells them
+  apart. The rule lives in one type used by all three bridges rather than being
+  written out three times.
+
+  **Note the change in how you leave:** the two presses must now be quick. They
+  used to count as a pair however far apart, so an ESC to leave `vi`'s insert
+  mode and another a minute later ended the session. The on-screen banner and
+  the serial help text say "twice quickly" accordingly.
+
+- **A bare ENTER in the text browser redraws the page instead of throwing it
+  away.** The browser prompt moved to a line reader this cycle, which reports an
+  empty line where the old one silently ignored it — and the empty line fell
+  into the ESC branch, so it reset the browser and returned to the main menu.
+  A reader part-way down a long page who pressed Enter — to redraw, or out of
+  habit — lost the page, the scroll position, the URL and the history. Every
+  other menu ignores a stray Enter, and now so does this one.
+
+- **Following a `<meta refresh>` no longer discards the HTTPS-downgrade
+  warning.** Both features landed in this cycle and had never worked together:
+  the notice was prepended *after* the refresh was followed, so a site that
+  offered no working HTTPS, was fetched over cleartext, and then refreshed to
+  another page handed the reader that page with no `[!]` notice at all — on
+  exactly the HTTP-only sites the downgrade exists for. The reason is now
+  carried across the hop. It is shown when the page in front of you is
+  cleartext, so a refresh that lands back on working HTTPS is correctly not
+  flagged.
+
+- **A form posts the button it says it will.** The button *shown* was the first
+  submit control with a non-empty `value`, while the button *sent* was the
+  first with a non-empty `name` — two separate decisions that agree on ordinary
+  forms and diverge the moment the default button is unnamed, so a form with
+  `<input type=submit value="Go">` ahead of `<input type=submit name="btnI">`
+  displayed "Go" and posted `btnI`. That is the same swap as the Google
+  `btnI` / "I'm Feeling Lucky" defect fixed earlier this cycle, arriving by
+  another route. Both now come from one first-control-wins decision, which
+  `<button type=submit>` takes part in as well; an unnamed default button posts
+  no button field, as in a real browser.
+
+- **`place_bundled_terminals` is parsed like every other boolean.** It was the
+  one bool in `egateway.conf` compared case-sensitively, while the config UIs
+  used a case-insensitive compare for the same key — so a hand-edited
+  `place_bundled_terminals = True` meant `false` at start-up and `true`
+  everywhere else.
 
 - **A remote's window title no longer prints in front of every prompt on an
   ANSI terminal.** bash sets the title from its prompt with

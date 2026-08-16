@@ -967,6 +967,15 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                     The same RFC&nbsp;1143 Q-method drives the cooperative mode's option state.
                 </div>
                 <div class="callout callout-info">
+                    <strong>The Esc key is shared with the SSH gateway too.</strong>
+                    Every Esc is passed straight to the remote &mdash; <code>vi</code>
+                    and other full-screen software need it &mdash; and what disconnects
+                    you is two of them <em>in a row and within half a second</em>. Until
+                    0.9.3 an Esc was held rather than sent, so a lone one never arrived
+                    and a second disconnected instead; see
+                    <a href="sshreference.html#esc">The Esc Key</a>.
+                </div>
+                <div class="callout callout-info">
                     <strong>Output filtering is shared with the SSH gateway.</strong> A
                     PETSCII or ASCII terminal has every escape sequence from the remote
                     stripped; an ANSI terminal keeps them, less the remote's window-title

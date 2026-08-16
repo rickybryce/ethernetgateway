@@ -166,10 +166,20 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn read_byte_filtered(&mut self) -> Result<Option<u8>, std::io::Error> {
+        self.read_byte_filtered_muted(false).await
+    }
+
+    /// `read_byte_filtered`, with the byte trace suppressed.
+    ///
+    /// Exists for exactly one caller -- the password branch of
+    /// `read_input_loop_end` -- and takes the flag as an argument rather than
+    /// reading a field on the session so that the mute cannot outlive the
+    /// prompt it belongs to.  A `?` anywhere in that loop would leak a field.
+    async fn read_byte_filtered_muted(&mut self, mute: bool) -> Result<Option<u8>, std::io::Error> {
         if self.idle_timeout.is_zero() {
-            self.session_read_byte().await
+            self.session_read_byte_muted(mute).await
         } else {
-            match tokio::time::timeout(self.idle_timeout, self.session_read_byte()).await {
+            match tokio::time::timeout(self.idle_timeout, self.session_read_byte_muted(mute)).await {
                 Ok(result) => result,
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -196,9 +206,24 @@ impl TelnetSession {
     /// which is exactly the mistake this wrapper exists to undo.
     ///
     /// Costs one `bool` load per byte when disarmed.
+    ///
+    /// **What it must never record is a password.** This wrapper sits under
+    /// *every* prompt in the gateway, `get_password_input` among them, so with
+    /// the trace armed the telnet login, the SSH gateway's remote password and
+    /// the Groq API key would each be written to the log one byte per line --
+    /// and `log_to_file` ships enabled, with the same buffer served at
+    /// `/logs`.  An operator turning on a keystroke diagnostic is not
+    /// consenting to that.  So the password branch of `read_input_loop_end`
+    /// reads through `session_read_byte_muted` instead; see there for why the
+    /// mute is an argument rather than a field.
     pub(in crate::telnet) async fn session_read_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
+        self.session_read_byte_muted(false).await
+    }
+
+    /// `session_read_byte`, optionally without the trace.  See the note above.
+    async fn session_read_byte_muted(&mut self, mute: bool) -> Result<Option<u8>, std::io::Error> {
         let r = self.session_read_byte_inner().await;
-        if self.trace_bytes {
+        if self.trace_bytes && !mute {
             match &r {
                 Ok(Some(b)) => {
                     glog!("cpmkey WIRE {} (0x{:02X})", super::cpm_emu::keyname(*b), b)
@@ -684,7 +709,9 @@ impl TelnetSession {
     ) -> Result<LineEnd, std::io::Error> {
         let is_password = matches!(mode, InputMode::Password);
         loop {
-            let byte = match self.read_byte_filtered().await? {
+            // Muted for a password: the byte trace must not become a
+            // credential log.  See `session_read_byte`.
+            let byte = match self.read_byte_filtered_muted(is_password).await? {
                 Some(b) => b,
                 None => return Ok(LineEnd::Disconnected),
             };

@@ -715,7 +715,7 @@
                         <li>The gateway connects and verifies the remote's <strong>host key</strong> against <code>gateway_hosts</code> (see <a href="#hostkey">Host-Key Verification</a>).</li>
                         <li>It authenticates using the <strong>one configured method</strong> &mdash; password <em>or</em> gateway key (see <a href="#auth">Authentication</a>).</li>
                         <li>On success you get a full interactive shell. ANSI from the remote is stripped for PETSCII / ASCII terminals, and the remote's window-title sequence is dropped for everyone (see <a href="#ansi">ANSI Filtering</a>).</li>
-                        <li>Press <strong>Esc</strong> twice (PETSCII: the back-arrow key twice) to disconnect and return to the menu.</li>
+                        <li>Press <strong>Esc</strong> twice <em>quickly</em> (PETSCII: the back-arrow key twice) to disconnect and return to the menu. A single Esc is passed through to the remote, so ESC-driven software keeps working &mdash; see <a href="#esc">The Esc Key</a>.</li>
                     </ol>
                 </div>
 
@@ -807,6 +807,52 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                     <code>authorized_keys</code> (or switch the mode back to
                     <code>password</code>) &mdash; the gateway will not quietly try the other
                     method.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- THE ESC KEY                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="esc">
+                <div class="section-title">The Esc Key</div>
+                <p class="intro">One Esc is the remote's. Two, quickly, are the gateway's.</p>
+                <p class="dim-text">
+                    Esc has to do two jobs on a gateway session: it is how you leave
+                    the gateway, and it is a key the remote needs &mdash;
+                    <code>vi</code>, WordStar, and most full-screen software on the
+                    far end are driven with it. The rule is that <strong>every Esc is
+                    passed straight to the remote</strong>, and what disconnects you is
+                    <strong>two of them in a row, within half a second</strong>, with no
+                    other key in between. The second one is the gateway's and is not
+                    forwarded. This applies identically to the SSH gateway, the telnet
+                    gateway and the serial console bridge.
+                </p>
+                <div class="callout callout-warn">
+                    <strong>Fixed in 0.9.3:</strong> a single Esc used to reach the remote
+                    only if you typed something after it. It was <em>held</em> rather
+                    than sent &mdash; that is how an arrow key (<code>ESC [ A</code>)
+                    got through intact &mdash; so a lone Esc waited for a second byte
+                    that never came, and pressing Esc again disconnected you instead.
+                    Measured from an SC126: dialling a host straight from the modem with
+                    <code>ATDT host:port</code> passed Esc through fine, because that is
+                    a raw TCP passthrough that intercepts nothing, while the same host
+                    through the gateway never saw the first press.
+                </div>
+                <div class="callout callout-info">
+                    <strong>Why &ldquo;in a row&rdquo; as well as &ldquo;quickly&rdquo;:</strong>
+                    an arrow key is <code>ESC [ A</code>, so two cursor presses put two
+                    Esc bytes a few milliseconds apart &mdash; closer together than any
+                    human double-tap. A rule that measured only elapsed time would throw
+                    you out for pressing Up twice. The <code>[</code> between them is the
+                    whole signal, so any other key resets the pair.
+                </div>
+                <div class="callout callout-warn">
+                    <strong>Changed behaviour:</strong> the two presses must now be
+                    <em>quick</em>. They previously counted as a pair however far apart,
+                    so an Esc to leave <code>vi</code>'s insert mode and another a minute
+                    later ended the session.
                 </div>
             </div>
 

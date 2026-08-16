@@ -1547,7 +1547,13 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .unwrap_or_else(|| DEFAULT_TRANSFER_DIR.into()),
         place_bundled_terminals: map
             .get("place_bundled_terminals")
-            .map(|v| v == "true")
+            // `eq_ignore_ascii_case` like every other bool in this file --
+            // and like `apply_config_key` for this same key, which is what
+            // made the odd one out a real disagreement: a hand-edited
+            // `= True` read as false at start-up and as true through the
+            // config UIs, so the file and the live config differed about
+            // the same text.
+            .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_PLACE_BUNDLED_TERMINALS),
         gui_window_geometry: map
             .get("gui_window_geometry")

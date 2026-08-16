@@ -750,8 +750,18 @@ impl TelnetSession {
 
             let input = match input {
                 Some(s) if !s.is_empty() => s,
-                _ => {
-                    // ESC pressed — go to main menu or stay
+                // A bare ENTER, which only the browser can produce -- every
+                // other menu uses `get_menu_input`, which loops on an empty
+                // line itself.  It means "redraw", not "leave": the loop
+                // re-renders at the top, so the page, its scroll position,
+                // URL and history all survive.  Sharing the ESC arm below
+                // threw all of that away, so a reader who pressed Enter
+                // part-way down a long page landed on the main menu with the
+                // page gone -- and Enter after reading is a habit, not an
+                // error.
+                Some(_) => continue,
+                None => {
+                    // ESC pressed, or the session dropped — go to main menu.
                     if self.current_menu == Menu::Browser {
                         self.web_reset();
                     }

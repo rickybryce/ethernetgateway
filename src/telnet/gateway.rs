@@ -149,6 +149,66 @@ fn gw_hexdump(bytes: &[u8]) -> String {
 /// holding more would delay a stream that merely happens to start like one.
 pub(in crate::telnet) const OSC_TITLE_MAX: usize = 256;
 
+/// How close together two ESC presses must be to mean "leave the gateway".
+///
+/// A human double-tapping a key is well inside this; two presses further
+/// apart than this are two separate ESCs meant for the remote.  Generous
+/// rather than tight, because the cost of being too long is only that a
+/// deliberate pair is also delivered to the remote -- which is harmless, the
+/// session is ending -- while the cost of being too short is that the user
+/// cannot get out at all.
+pub(in crate::telnet) const GW_ESC_PAIR: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// The double-ESC rule for a gateway bridge.
+///
+/// **Every ESC is passed to the remote; the pair is what this watches for.**
+/// It used to be the other way round: an ESC was *held* and forwarded only
+/// when a following byte arrived, so that an arrow key (`ESC [ A`) reached the
+/// remote whole.  That worked for arrow keys and silently broke a lone ESC --
+/// the byte was held for a second byte that never came, so pressing ESC once
+/// at a remote's prompt did nothing at all, and pressing it again left the
+/// gateway instead.  Reported from an SC126: dialling `telnetbible.com`
+/// straight from the modem passed ESC through fine (a raw TCP passthrough
+/// intercepts nothing), while the same host through the telnet gateway never
+/// saw the first ESC.
+///
+/// So nothing is held.  An ESC goes out with every other byte, and leaving is
+/// two of them **in a row and inside `GW_ESC_PAIR`**.
+///
+/// *In a row* is not redundant with the timer: an arrow key is `ESC [ A`, so
+/// two cursor presses put two ESCs a few milliseconds apart, and a rule that
+/// only measured time would throw the user out for pressing Up twice.  The
+/// intervening `[` is what tells them apart, which is why `other()` exists and
+/// why every non-ESC byte must call it.
+pub(in crate::telnet) struct EscHold {
+    /// When the immediately preceding byte was an ESC, and when it arrived.
+    last: Option<tokio::time::Instant>,
+}
+
+impl EscHold {
+    pub(in crate::telnet) fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// An ESC arrived.  `true` means leave the bridge; the caller forwards the
+    /// byte either way *except* on a leave, where the keystroke is the
+    /// gateway's own and the session is being torn down regardless.
+    pub(in crate::telnet) fn press(&mut self, now: tokio::time::Instant) -> bool {
+        let leave = matches!(self.last, Some(at) if now.duration_since(at) <= GW_ESC_PAIR);
+        // A leave clears the state; so does a press too late to pair, which
+        // then becomes the first half of a possible new pair.
+        self.last = if leave { None } else { Some(now) };
+        leave
+    }
+
+    /// Any byte that is not an ESC.  Breaks the pair -- see the type comment
+    /// for why an arrow key depends on this being called.
+    pub(in crate::telnet) fn other(&mut self) {
+        self.last = None;
+    }
+}
+
 /// Parser state carried across reads, since a sequence can straddle any two of
 /// them.  `held` is the candidate title accumulated so far -- empty except
 /// while one is being weighed.
@@ -1604,7 +1664,7 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
-            "  Press {} twice to disconnect.",
+            "  Press {} twice quickly to disconnect.",
             self.cyan(esc_label)
         ))
         .await?;
@@ -1643,8 +1703,8 @@ impl TelnetSession {
         // `GW_FILTER_FLUSH` promises.
         let mut hold_deadline: Option<tokio::time::Instant> = None;
         let mut last_cr = false;
-        let mut last_was_esc = false;
-        let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
+        // The double-ESC rule.  Nothing is held: see `EscHold`.
+        let mut esc = EscHold::new();
 
         // Gateway byte-tracing (EGATEWAY_GATEWAY_DEBUG).  `dbg_in` accumulates
         // every byte we forward to the remote shell and is flushed to the log
@@ -1700,19 +1760,15 @@ impl TelnetSession {
                 }
                 byte = read_byte_iac_filtered(reader, true) => {
                     match byte {
-                        Ok(Some(b)) if is_esc_key(b, is_petscii) => {
-                            if last_was_esc {
-                                break; // Two consecutive ESC presses — disconnect
-                            }
-                            last_was_esc = true;
-                        }
                         Ok(Some(b)) => {
-                            // Forward the previously held ESC before this byte
-                            if last_was_esc {
-                                last_was_esc = false;
-                                let e = if is_petscii { petscii_to_ascii_byte(esc_byte) } else { esc_byte };
-                                if let Some(e) = normalize_gateway_input(e, &mut last_cr)
-                                    && ssh_writer.write_all(&[e]).await.is_err() { break; }
+                            // ESC is forwarded like any other byte -- see
+                            // `EscHold`.  Only a *consecutive* pair inside
+                            // `GW_ESC_PAIR` leaves, and that pair's second
+                            // byte is ours rather than the remote's.
+                            if is_esc_key(b, is_petscii) {
+                                if esc.press(tokio::time::Instant::now()) { break; }
+                            } else {
+                                esc.other();
                             }
                             let raw = b;
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
@@ -1949,7 +2005,7 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
-            "  Press {} twice to disconnect.",
+            "  Press {} twice quickly to disconnect.",
             self.cyan(esc_label)
         ))
         .await?;
@@ -1984,8 +2040,8 @@ impl TelnetSession {
         // branch, including the user's own keystrokes, which is not what
         // `GW_FILTER_FLUSH` promises.
         let mut hold_deadline: Option<tokio::time::Instant> = None;
-        let mut last_was_esc = false;
-        let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
+        // The double-ESC rule.  Nothing is held: see `EscHold`.
+        let mut esc = EscHold::new();
 
         // Telnet-client IAC state machine + option negotiator.  Whether
         // we offer TTYPE / NAWS proactively at connect is gated by the
@@ -2072,23 +2128,15 @@ impl TelnetSession {
                 }
                 event = read_gateway_event(reader) => {
                     match event {
-                        Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
-                            if last_was_esc {
-                                break; // Two consecutive ESC presses — disconnect
-                            }
-                            last_was_esc = true;
-                        }
                         Ok(GatewayInboundEvent::Data(b)) => {
-                            // Forward the previously held ESC before this byte
-                            if last_was_esc {
-                                last_was_esc = false;
-                                let e = if is_petscii { petscii_to_ascii_byte(esc_byte) } else { esc_byte };
-                                let write_ok = if raw {
-                                    remote_writer.write_all(&[e]).await.is_ok()
-                                } else {
-                                    write_telnet_data(&mut remote_writer, &[e]).await.is_ok()
-                                };
-                                if !write_ok { break; }
+                            // ESC is forwarded like any other byte -- see
+                            // `EscHold`.  Only a *consecutive* pair inside
+                            // `GW_ESC_PAIR` leaves, and that pair's second
+                            // byte is ours rather than the remote's.
+                            if is_esc_key(b, is_petscii) {
+                                if esc.press(tokio::time::Instant::now()) { break; }
+                            } else {
+                                esc.other();
                             }
                             let raw_in = b;
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
@@ -2804,8 +2852,11 @@ impl TelnetSession {
         // half-open client so it can't pin the session's max_sessions
         // slot.  Zero disables it.
         let idle_timeout = self.idle_timeout;
-        let mut last_was_esc = false;
-        let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
+        // The double-ESC rule.  Nothing is held: see `EscHold`.  It matters
+        // as much here as on the network gateways -- this bridge is how a
+        // real CP/M machine on the wire is reached, and WordStar and vi are
+        // driven with the ESC key.
+        let mut esc = EscHold::new();
 
         let mut bridge_buf = [0u8; 4096];
 
@@ -2819,23 +2870,15 @@ impl TelnetSession {
                 }
                 event = read_gateway_event(reader) => {
                     match event {
-                        Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
-                            if last_was_esc {
-                                break; // double-ESC — exit bridge
-                            }
-                            last_was_esc = true;
-                        }
                         Ok(GatewayInboundEvent::Data(b)) => {
-                            if last_was_esc {
-                                last_was_esc = false;
-                                let e = if is_petscii {
-                                    petscii_to_ascii_byte(esc_byte)
-                                } else {
-                                    esc_byte
-                                };
-                                if bridge_write.write_all(&[e]).await.is_err() {
-                                    break;
-                                }
+                            // ESC is forwarded like any other byte -- see
+                            // `EscHold`.  Only a *consecutive* pair inside
+                            // `GW_ESC_PAIR` leaves, and that pair's second
+                            // byte is ours rather than the far machine's.
+                            if is_esc_key(b, is_petscii) {
+                                if esc.press(tokio::time::Instant::now()) { break; }
+                            } else {
+                                esc.other();
                             }
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
                             // Map an unusual erase byte (e.g. PETSCII
