@@ -155,6 +155,26 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn handle_web_browser_command(&mut self, input: &str) -> Result<bool, std::io::Error> {
+        // More than one character is not a command — it is somewhere to go.
+        // `normalize_url` decides which: a scheme or a dot makes it a URL,
+        // anything else becomes a search.  A *single* character stays a
+        // command, so `s` is still Find rather than a search for "s".
+        //
+        // Done before either menu's match so it works on the browser home
+        // screen and on a loaded page alike — on the home screen it is the
+        // whole point, since it means you can type an address without pressing
+        // G first.
+        let typed = input.trim();
+        if typed.chars().count() > 1 {
+            let url = crate::webbrowser::normalize_url(typed);
+            self.web_fetch_page(&url, true).await?;
+            return Ok(true);
+        }
+        // The line reader does not fold case the way the one-key reader did,
+        // and every arm below is written lower-case.
+        let lowered = typed.to_ascii_lowercase();
+        let input = lowered.as_str();
+
         if self.web_lines.is_empty() {
             // Home screen commands
             match input {

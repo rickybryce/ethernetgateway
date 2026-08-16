@@ -1077,6 +1077,11 @@ impl TelnetSession {
                 "  R    Reload current page",
                 "  Q    Close page",
                 "  ESC  Exit browser",
+                "",
+                "  Press ENTER after a command.",
+                "  Type more than one character",
+                "  and it is taken as a URL or",
+                "  a search instead.",
             ]
         } else {
             &[
@@ -1091,6 +1096,11 @@ impl TelnetSession {
                 "  R      Reload current page",
                 "  Q      Close page (browser home)",
                 "  ESC    Exit browser to main menu",
+                "",
+                "  Commands take effect on ENTER.  Anything",
+                "  longer than a single character is treated",
+                "  as a URL or a search, so you can type an",
+                "  address at the prompt without pressing G.",
             ]
         }
     }
@@ -1101,6 +1111,12 @@ impl TelnetSession {
             "  G  Go to a URL or search query",
             "  K  Open saved bookmarks",
             "  Q  Exit browser to main menu",
+            "",
+            "  Commands take effect on ENTER.",
+            "  Type more than one character and",
+            "  it is taken as a URL or a search,",
+            "  so an address can be typed here",
+            "  without pressing G first.",
         ]
     }
 

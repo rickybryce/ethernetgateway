@@ -726,7 +726,27 @@ impl TelnetSession {
             self.send(&prompt).await?;
             self.flush().await?;
 
-            let input = self.get_menu_input(true).await?;
+            // The browser menu reads a whole LINE; every other menu acts the
+            // instant you press a letter.
+            //
+            // One-key menus are right for a short fixed list, and wrong here,
+            // because this prompt has to accept a URL or a search phrase as
+            // well as a command — and a one-key menu cannot tell `n` (next
+            // page) from the first letter of `news.bbc.co.uk`.  It fired on the
+            // `n` and threw the rest away.  Waiting for Enter dissolves that:
+            // one character is a command, more than one is somewhere to go.
+            //
+            // `get_line_input` already handles ESC (returns None, so ESC still
+            // leaves the browser exactly as before), backspace, the RFC 854
+            // line erase, the PETSCII translation and the length cap.  What it
+            // does not carry is `get_menu_input`'s ZMODEM auto-start sniffer —
+            // no loss here, since an upload is started from the file-transfer
+            // menu, not from the browser.
+            let input = if self.current_menu == Menu::Browser {
+                self.get_line_input().await?
+            } else {
+                self.get_menu_input(true).await?
+            };
 
             let input = match input {
                 Some(s) if !s.is_empty() => s,
