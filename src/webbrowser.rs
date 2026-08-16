@@ -376,6 +376,17 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (33 for PETSCII, 73 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
+    fetch_and_render_from(url, width, 0)
+}
+
+/// `start_hops` carries the redirect budget across a `<meta refresh>` hop.
+///
+/// A meta refresh is a redirect the *document* asks for rather than the
+/// server, and it has to share one budget with the HTTP ones -- otherwise a
+/// page that 302s to a page that meta-refreshes back could ping-pong for ever,
+/// each side resetting the other's count.  Recursion depth is therefore
+/// bounded by `MAX_REDIRECTS`.
+fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<WebPage, String> {
     // Follow redirects manually (auto-follow disabled below) so EVERY hop
     // is SSRF-checked before we connect — otherwise ureq would follow a
     // public→internal redirect and dial the internal host before our guard
@@ -392,7 +403,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
 
     let mut current = url.to_string();
     let mut tls_downgraded = false;
-    let mut hops = 0usize;
+    let mut hops = start_hops;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
         let resp = match agent
@@ -446,7 +457,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
         .read_to_end(&mut body_bytes)
         .map_err(|e| format!("Read error: {}", e))?;
 
-    let mut page = if content_type.contains("text/plain") {
+    let (mut page, meta_refresh) = if content_type.contains("text/plain") {
         // Plain text: just split into lines and wrap
         let text = String::from_utf8_lossy(&body_bytes);
         let lines: Vec<String> = text
@@ -454,16 +465,34 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
             .flat_map(|line| wrap_line(line, width))
             .take(MAX_RENDERED_LINES)
             .collect();
-        WebPage {
-            title: None,
-            lines,
-            links: Vec::new(),
-            url: final_url,
-            forms: Vec::new(),
-        }
+        (
+            WebPage {
+                title: None,
+                lines,
+                links: Vec::new(),
+                url: final_url,
+                forms: Vec::new(),
+            },
+            None,
+        )
     } else {
         render_html_body(&body_bytes, final_url, width)?
     };
+
+    // A `<meta refresh>` redirect.  Followed through the same entry point, so
+    // the new URL is SSRF-guarded exactly like an HTTP hop, and against the
+    // shared budget.  A target equal to the page we are on is a self-refresh
+    // ("reload me"), which must not be chased.
+    if let Some(target) = meta_refresh {
+        let next = resolve_url(&page.url, &target);
+        if next != page.url {
+            let hops = hops + 1;
+            if hops > MAX_REDIRECTS {
+                return Err("Too many redirects".to_string());
+            }
+            return fetch_and_render_from(&next, width, hops);
+        }
+    }
 
     page.sanitize();
 
@@ -608,23 +637,36 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             .read_to_end(&mut body_bytes)
             .map_err(|e| format!("Read error: {}", e))?;
 
-        let mut page = if content_type.contains("text/plain") {
+        let (mut page, meta_refresh) = if content_type.contains("text/plain") {
             let text = String::from_utf8_lossy(&body_bytes);
             let lines: Vec<String> = text
                 .lines()
                 .flat_map(|line| wrap_line(line, width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
-            WebPage {
-                title: None,
-                lines,
-                links: Vec::new(),
-                url: final_url,
-                forms: Vec::new(),
-            }
+            (
+                WebPage {
+                    title: None,
+                    lines,
+                    links: Vec::new(),
+                    url: final_url,
+                    forms: Vec::new(),
+                },
+                None,
+            )
         } else {
             render_html_body(&body_bytes, final_url, width)?
         };
+
+        // Same treatment a POST already gives an HTTP redirect: follow it
+        // through the guarded fetch path rather than rendering the notice.
+        if let Some(target) = meta_refresh {
+            let next = resolve_url(&page.url, &target);
+            if next != page.url {
+                return fetch_and_render(&next, width);
+            }
+        }
+
         page.sanitize();
         Ok(page)
     } else {
@@ -642,8 +684,93 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     }
 }
 
+/// Longest `<meta refresh>` delay we treat as a redirect, in seconds.
+///
+/// A refresh with a real delay is a page saying "reload me periodically" -- a
+/// scoreboard, a status display -- and jumping instantly would be wrong.  A
+/// redirect is written as 0, or a small courtesy delay so the reader can see
+/// the "click here if you are not redirected" line.  Five is comfortably above
+/// the latter and below any sane refresh interval.
+const MAX_META_REFRESH_DELAY: f64 = 5.0;
+
+/// The URL out of a `<meta http-equiv="refresh" content="...">`, if it is a
+/// redirect worth following.
+///
+/// The content syntax is loose and old: a delay, then optionally `; url=...`,
+/// with the keyword in any case and the value sometimes quoted.  Returns
+/// `None` when there is no URL at all -- that is a self-refresh, and following
+/// it would spin -- or when the delay is longer than a redirect would use.
+fn parse_meta_refresh(content: &str) -> Option<String> {
+    let parts: Vec<&str> = content.split(';').collect();
+    // The delay is first *when there is one*.  It is read without consuming
+    // the part, because some pages write only `url=...` with no delay at all
+    // -- consuming it unconditionally swallowed exactly that form.  An absent
+    // or non-numeric delay is treated as 0; a parseable one that is too long
+    // is a periodic refresh and is rejected here.
+    let delay: f64 = parts
+        .first()
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or(0.0);
+    if delay > MAX_META_REFRESH_DELAY {
+        return None;
+    }
+    for part in &parts {
+        // Split on the FIRST '=' so a query string in the target keeps its
+        // own: `url=/a?b=c` gives key `url`, value `/a?b=c`.  Trimming each
+        // side is what admits `url = "..."`, which real pages write and a
+        // fixed `"url="` prefix test misses -- found by the test, not by
+        // reading the spec.
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("url") {
+            let raw = value.trim();
+            // Strip one layer of matching quotes, which both forms use.
+            let unquoted = raw
+                .strip_prefix('"')
+                .and_then(|r| r.strip_suffix('"'))
+                .or_else(|| raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+                .unwrap_or(raw);
+            let target = unquoted.trim();
+            if !target.is_empty() {
+                return Some(target.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find a followable `<meta http-equiv="refresh">` target in the document.
+fn meta_refresh_from_dom(dom: &RcDom) -> Option<String> {
+    fn walk(node: &Handle) -> Option<String> {
+        if let Element { ref name, .. } = node.data
+            && name.local.as_ref() == "meta"
+            && get_attr(node, "http-equiv")
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("refresh"))
+            && let Some(content) = get_attr(node, "content")
+            && let Some(target) = parse_meta_refresh(&content) {
+                return Some(target);
+            }
+        for child in node.children.borrow().iter() {
+            if let Some(found) = walk(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(&dom.document)
+}
+
 /// Parse an HTML body into a rendered WebPage with title, links, and forms.
-fn render_html_body(body_bytes: &[u8], final_url: String, width: usize) -> Result<WebPage, String> {
+/// Returns the page and, if the document carries one, a `<meta refresh>`
+/// target for the caller to follow.  Reported rather than followed here
+/// because following it means another guarded fetch, and this function does
+/// not fetch -- the redirect budget lives with the caller that does.
+fn render_html_body(
+    body_bytes: &[u8],
+    final_url: String,
+    width: usize,
+) -> Result<(WebPage, Option<String>), String> {
     let cfg = config::rich();
     let dom = cfg.parse_html(body_bytes)
         .map_err(|e| format!("Parse error: {}", e))?;
@@ -660,6 +787,7 @@ fn render_html_body(body_bytes: &[u8], final_url: String, width: usize) -> Resul
 
     let title = extract_title_from_dom(&dom);
     let forms = extract_forms_from_dom(&dom);
+    let meta_refresh = meta_refresh_from_dom(&dom);
 
     let render_tree = cfg.dom_to_render_tree(&dom)
         .map_err(|e| format!("Render error: {}", e))?;
@@ -730,13 +858,16 @@ fn render_html_body(body_bytes: &[u8], final_url: String, width: usize) -> Resul
         cleaned.push(trimmed);
     }
 
-    Ok(WebPage {
-        title,
-        lines: cleaned,
-        links,
-        url: final_url,
-        forms,
-    })
+    Ok((
+        WebPage {
+            title,
+            lines: cleaned,
+            links,
+            url: final_url,
+            forms,
+        },
+        meta_refresh,
+    ))
 }
 
 /// Resolve a potentially relative URL against a base URL.
@@ -1507,6 +1638,59 @@ mod tests {
     /// These five are exactly what a live capture of `telnetbible.com` page 3
     /// contained — 284 of the first alone — and each is three bytes of UTF-8
     /// that a 7-bit console draws as three unrenderable characters.
+    /// `<meta refresh>` content is loose, old syntax: a delay, then an
+    /// optional `url=`, keyword in any case, value sometimes quoted.
+    #[test]
+    fn test_parse_meta_refresh_handles_the_old_syntax() {
+        // The shape Google's JS interstitial uses.
+        assert_eq!(
+            parse_meta_refresh("0;url=/httpservice/retry/enablejs?sei=abc"),
+            Some("/httpservice/retry/enablejs?sei=abc".to_string()),
+        );
+        // Case, spacing and quotes all vary in the wild.
+        assert_eq!(parse_meta_refresh("0; URL=/a"), Some("/a".to_string()));
+        assert_eq!(parse_meta_refresh("0;Url='/b'"), Some("/b".to_string()));
+        assert_eq!(parse_meta_refresh("2 ; url = \"/c\""), Some("/c".to_string()));
+        // Some pages omit the delay entirely.
+        assert_eq!(parse_meta_refresh("url=/d"), Some("/d".to_string()));
+    }
+
+    /// The two cases that must NOT be followed.
+    #[test]
+    fn test_parse_meta_refresh_refuses_self_refresh_and_slow_reloads() {
+        // No URL is a self-refresh -- "reload me".  Following it would spin.
+        assert_eq!(parse_meta_refresh("30"), None);
+        assert_eq!(parse_meta_refresh("0"), None);
+        assert_eq!(parse_meta_refresh(""), None);
+        // A long delay is a periodic reload (a scoreboard, a status page),
+        // not a redirect; jumping instantly would be wrong.
+        assert_eq!(parse_meta_refresh("30;url=/live"), None);
+        assert_eq!(parse_meta_refresh("6;url=/live"), None);
+        // ...but a short courtesy delay is still a redirect.
+        assert_eq!(parse_meta_refresh("5;url=/x"), Some("/x".to_string()));
+    }
+
+    /// The target is found through the document, and only on a refresh.
+    #[test]
+    fn test_meta_refresh_is_read_from_the_document() {
+        let html = br#"<html><head>
+            <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+            <meta http-equiv="REFRESH" content="0; url=/next">
+            </head><body>hi</body></html>"#;
+        let (_page, refresh) =
+            render_html_body(html, "https://example.com/a".to_string(), 80).expect("renders");
+        assert_eq!(refresh.as_deref(), Some("/next"), "should find the refresh");
+
+        // A document with no refresh reports none -- and Content-Type, which
+        // is also an http-equiv, must not be mistaken for one.
+        let plain = br#"<html><head>
+            <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+            </head><body>hi</body></html>"#;
+        let (_p2, none) =
+            render_html_body(plain, "https://example.com/b".to_string(), 80).expect("renders");
+        assert_eq!(none, None, "Content-Type is not a refresh");
+    }
+
     /// A form sends the button you pressed, not every button on it.
     ///
     /// This is the shape of Google's home page, and it was a real defect:
@@ -1527,7 +1711,7 @@ mod tests {
             <input type="submit" name="btnG" value="Google Search">
             <input type="submit" name="btnI" value="I&#39;m Feeling Lucky">
         </form></body></html>"#;
-        let page = render_html_body(html, "https://example.com/".to_string(), 80)
+        let (page, _refresh) = render_html_body(html, "https://example.com/".to_string(), 80)
             .expect("renders");
         let form = page.forms.first().expect("one form");
 
@@ -1759,7 +1943,7 @@ mod tests {
         for _ in 0..depth { body.push_str("<div>"); }
         body.push_str("hello world");
         for _ in 0..depth { body.push_str("</div>"); }
-        let page = render_html_body(body.as_bytes(), "http://x/".to_string(), 73)
+        let (page, _refresh) = render_html_body(body.as_bytes(), "http://x/".to_string(), 73)
             .expect("moderately-nested page should render");
         assert!(
             page.lines.iter().any(|l| l.contains("hello world")),
@@ -1784,7 +1968,7 @@ mod tests {
     #[test]
     fn test_page_text_cannot_carry_escapes_to_the_terminal() {
         let html = b"<html><body><p>hello \x1b[2J\x1b[31mred\x1b]0;title\x07 \x7f done</p></body></html>";
-        let page = render_html_body(html, "http://example.invalid/".into(), 80)
+        let (page, _refresh) = render_html_body(html, "http://example.invalid/".into(), 80)
             .expect("a small page must render");
         let text = page.lines.join("\n");
         for (name, ch) in [("ESC", '\u{1b}'), ("BEL", '\u{7}'), ("DEL", '\u{7f}')] {
