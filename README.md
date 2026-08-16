@@ -1,12 +1,12 @@
 # Ethernet Gateway
 
 A telnet/SSH file-transfer gateway for retro and modern terminals, written in
-Rust. It speaks **XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter**,
-emulates a **Hayes AT modem** on two independent serial ports, bridges out to
-remote **telnet and SSH** hosts, runs real **CP/M 2.2** software on an emulated
-Z80, and adds a CP/M-inspired **Gateway Shell** (an `A>` file manager over the
-transfer directory), a text-mode **web browser**, **AI chat**, and a **weather**
-service. Supports PETSCII (Commodore 64), ANSI,
+Rust. It speaks **a range of file-transfer protocols**, tested against real
+vintage hardware, emulates a **Hayes AT modem** on two independent serial
+ports, bridges out to remote **telnet and SSH** hosts, runs real **CP/M 2.2**
+software on an emulated Z80 or 8080, and adds a CP/M-inspired **Gateway Shell**
+(an `A>` file manager over the transfer directory), a text-mode **web browser**,
+**AI chat**, and a **weather** service. Supports PETSCII (Commodore 64), ANSI,
 and ASCII terminals. Designed for local-network use. An optional
 **master/slave** mode extends one gateway's serial ports to another over SSH.
 
@@ -14,15 +14,13 @@ and ASCII terminals. Designed for local-network use. An optional
 
 **[User Manual](http://ethernetgateway.com/index.html)**
 &nbsp;&middot;&nbsp;
-**[Kermit Reference](http://ethernetgateway.com/kermit.html)**
-&nbsp;&middot;&nbsp;
 **[Releases](https://github.com/rickybryce/ethernetgateway/releases)**
 
 Author: Ricky Bryce. Licensed **GPL-3.0-or-later** (see [License](#license)).
 
-> **The full manual lives at [ethernetgateway.com](http://ethernetgateway.com/index.html).**
-> This README is a quick start and feature overview; every setting, AT command,
-> S-register, RFC, and protocol tunable is documented there in depth.
+> **This README is a quick start and feature overview.** Everything else lives
+> at [ethernetgateway.com](http://ethernetgateway.com/index.html) — see
+> [Documentation](#documentation).
 
 ## Quick Start
 
@@ -63,38 +61,27 @@ options, and the full AT command set.
 
 ## Features
 
-- **File transfer** — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with
-  autostart), Kermit (send/receive plus **server mode**, which answers a remote
-  client's `get`/`send`/`dir`/`remote` commands), and Punter C1 (Commodore),
-  with auto-detection on upload and a protocol prompt on download.
+- **File transfer** — a range of protocols, covering everything from a 1970s
+  8-bit micro to a modern terminal emulator, with auto-detection on upload and a
+  protocol prompt on download. Tested against real vintage hardware and against
+  the reference implementations its users actually run.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
-- **CP/M 2.2 emulator** — a separate thing from the shell above: a real Z80
-  (or an 8080 — `cpm_cpu`, which serves a booted disk too)
-  running real `.COM` software (PIP, STAT, ED, ASM, DDT, WordStar…), with the
-  CCP built-ins, `SUBMIT` batch jobs, and drives A:–P: as folders under the
-  transfer directory — or as mounted **`.dsk` disk images** (Altair 88-HDSK,
-  and the 8" single-density format used by Tarbell, Cromemco and
-  IMSAI/z80pack). Ships **EGT8080**, this project's own CP/M terminal in period
-  assembly — built to the 8080 instruction set, so it runs on either processor —
-  and **EGT80**, the Z80 build of it, which adds the Z180 ASCI ports an SC126
-  uses as its console and which no 8080 binary can reach. Both are placed on
-  drive A: and in the transfer directory. Also a virtual modem so guest software
-  can dial out. On by default
-  and bounded three ways: every file call jailed under `transfer_dir/CPM`, a
-  runaway stopped by an instruction ceiling, and a double-`ESC` always returning
-  to `A>`. `cpm_emu_enabled = false` shuts it off; `cpm_emu_uart = off` keeps it
-  while denying guest code any network access.
-- **CP/M printer** — `cpm_printer` captures what CP/M software sends to `LST:`
-  and leaves an **OpenDocument** (`.odt`) or plain-text file in a `printer`
-  folder inside the transfer directory, ready to collect over any of the file
-  transfer protocols. Serves both CP/M machines by two different routes: in the
-  emulator the printer is an OS service (BDOS 5 and the BIOS `LIST` vector), so
-  WordStar, MBASIC's `LPRINT` and `PIP LST:=FILE.TXT` all arrive; a booted disk
-  drives a printer **board** instead (`cpm_printer_port`). Captures to a text
-  file by default — nothing is written until a guest actually prints — and
-  `cpm_printer = off` sends the output to your terminal instead, where it
-  cannot be recovered.
+- **CP/M 2.2 emulator** — a separate thing from the shell above: real `.COM`
+  software (WordStar, MBASIC, PIP, ED, ASM…) on an emulated Z80 or 8080, with
+  drives A:–P: as folders under the transfer directory or as mounted **`.dsk`
+  disk images**. Ships this project's own CP/M terminal program, and a virtual
+  modem so guest software can dial out. On by default, and bounded: guest file
+  access is jailed, a runaway is stopped, and a double-`ESC` always returns to
+  `A>`.
+- **Booting a disk image** — not a mode of the emulator but a third thing: the
+  disk gets the whole machine and its *own* operating system runs, which is how
+  it reaches CP/M 3, Altair DOS and Disk Extended BASIC. Period video cards
+  (Processor Technology VDM-1, Cromemco Dazzler) are shown in a browser.
+- **CP/M printer** — captures what CP/M software sends to `LST:` and leaves an
+  **OpenDocument** (`.odt`) or plain-text file in a `printer` folder inside the
+  transfer directory, ready to collect. Serves both the emulator and a booted
+  disk, and turns period **overstrike** into real bold and underline.
 - **Modem emulator** — Hayes-compatible AT command set on **two physically
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.
@@ -112,9 +99,7 @@ options, and the full AT command set.
   optional web UI, and a desktop GUI (eframe/egui) with live console output.
 - **A port test** — connects to each bound listener at this machine's own
   address and marks any that something local is blocking. On all three
-  interfaces, and once at start-up. A port that answers is *not* reported as
-  open: on Windows and macOS a self-connection skips the firewall entirely, so
-  only the failing direction means anything there.
+  interfaces, and once at start-up.
 
 ## Building from Source
 
@@ -156,10 +141,8 @@ after that, you can edit everything three ways, all writing the same file:
 - **In-session menu** — press **C** (Configuration) over telnet/SSH.
 - **Desktop GUI** — shown on startup when `enable_console = true`; edit
   everything and *Save and Restart*. Set `enable_console = false` for headless.
-  On a fresh install it opens into the setup wizard; *Server → More… → Run setup
-  wizard…* brings it back (the `setup_wizard_completed` key tracks this, and an
-  existing config file without that key is treated as already configured, so
-  upgrades never see the wizard).
+  On a fresh install it opens into the setup wizard, and *Server → More… → Run
+  setup wizard…* brings it back.
 - **Web UI** — set `web_enabled = true` (default off), then browse to
   `http://<server-ip>:8080`.
 
@@ -177,11 +160,9 @@ to the public internet; use the SSH interface for encrypted access, and treat
 even that as a trusted-environment tool.
 
 - **Inbound, security disabled (default):** the telnet listener accepts
-  connections only from private/loopback/link-local ranges (RFC 1918, `127/8`,
-  `169.254/16`, IPv6 `::1` / `fe80::/10` / `fd00::/8`) and refuses `*.*.*.1`
-  gateway addresses. To accept any source you must set `security_enabled = true`
-  with a strong `username` / `password` (still not recommended on public
-  networks — telnet is cleartext).
+  connections only from private, loopback and link-local addresses. To accept
+  any source you must set `security_enabled = true` with a strong `username` /
+  `password` (still not recommended on public networks — telnet is cleartext).
 - **Authentication:** one `username` / `password` pair covers telnet, SSH, and
   the web UI. Three failed logins from an IP trip a shared 5-minute lockout.
   Credentials are stored in plaintext in `egateway.conf` — protect it with file
