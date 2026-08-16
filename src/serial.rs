@@ -5308,16 +5308,6 @@ where
     state.plus_count = 0;
     state.last_data_time = Instant::now();
 
-    // Byte trace of the **wire** side, read once per call rather than per byte.
-    //
-    // `cpmkey WIRE` is logged where the *session* reads, which is two buffers
-    // further on -- the pump's read, the duplex, then the session.  So a
-    // keystroke that never produces a WIRE line could be stuck in any of them,
-    // and a whole investigation was spent attributing that to the wrong one.
-    // This line says whether the byte reached the gateway at all, which is the
-    // question the other trace cannot answer.
-    let trace = crate::config::get_gateway_debug();
-
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
         if state.shutdown.load(Ordering::SeqCst)
@@ -5330,8 +5320,27 @@ where
         match state.port.read(&mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
-                if trace {
-                    glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                // The wire-side trace.  `cpmkey WIRE` is logged where the
+                // *session* reads, two buffers further on -- the pump's read,
+                // then the duplex, then the session -- so a keystroke that
+                // produces no WIRE line could be held in any of the three,
+                // and an investigation was sent to the wrong layer by exactly
+                // that ambiguity.  This line says whether the byte reached
+                // the gateway at all.
+                //
+                // `modem_trace_enabled` rather than the config key directly:
+                // it is this module's one gate and it also honours
+                // EGATEWAY_GATEWAY_DEBUG, which is how the flag gets armed on
+                // a running machine without editing its config.  Reading it
+                // per call instead would leave a session that started before
+                // the toggle silently untraceable -- which reads as "the byte
+                // never arrived", the very wrong answer this exists to stop.
+                if modem_trace_enabled() {
+                    if wire_trace_worth_logging(n) {
+                        glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                    } else {
+                        glog!("cpmkey PORT {} bytes (bulk)", n);
+                    }
                 }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
@@ -5564,12 +5573,26 @@ impl PetsciiPunctState {
     }
 }
 
-/// A run of bytes off the wire, compactly, for the pump's byte trace.
+/// A run of bytes off the wire for the pump's trace -- **control bytes named,
+/// everything else reduced to a dot.**
 ///
-/// Control bytes are named rather than shown, because the whole point of the
-/// trace is to answer "did the CTRL-C arrive", and a `^C` is invisible in a
-/// terminal-shaped dump. Truncated because a screen paint is hundreds of bytes
-/// and the interesting part is always the front.
+/// This deliberately renders *less* than `cpm_emu::render_bytes` does for the
+/// `cpmkey TX` / `cpmkey WIRE` lines, and the difference is the point rather
+/// than drift.
+///
+/// **It cannot be allowed to record content.** `telnet/io.rs` mutes the
+/// session's own trace for the length of a password prompt, because that
+/// trace would otherwise write the telnet login, the SSH gateway's remote
+/// password and the Groq API key into a log that ships enabled and is served
+/// at `/logs`. This line is read *one buffer earlier*, on the raw port, where
+/// no mute can reach it -- and on an `ATDT bbs.example:23` call it would be
+/// the user's password on someone else's system. A printable byte is
+/// therefore never shown, only counted.
+///
+/// Nothing is lost for the question it exists to answer. "Did the CTRL-C
+/// arrive, and when" needs the control bytes and the timing, not the letters
+/// around them; the session's `WIRE` line already carries content, muted where
+/// it must be.
 fn wire_preview(bytes: &[u8]) -> String {
     const MAX: usize = 32;
     let mut out = String::new();
@@ -5578,15 +5601,29 @@ fn wire_preview(bytes: &[u8]) -> String {
             0x0D => out.push_str("<CR>"),
             0x0A => out.push_str("<LF>"),
             0x1B => out.push_str("<ESC>"),
-            0x00..=0x1F => out.push_str(&format!("^{}", (b + 0x40) as char)),
-            0x20..=0x7E => out.push(b as char),
-            _ => out.push_str(&format!("<{:02X}>", b)),
+            0x7F => out.push_str("<DEL>"),
+            // Named, because these are what the trace is for.
+            0x00..=0x1F => out.push_str(&format!("<^{}>", (b + 0x40) as char)),
+            // Printable and high bytes: present, but never quoted.
+            _ => out.push('.'),
         }
     }
     if bytes.len() > MAX {
         out.push_str(&format!(" … (+{} more)", bytes.len() - MAX));
     }
     out
+}
+
+/// Whether a pump read is worth a trace line.
+///
+/// A person types in ones and twos; a file transfer arrives in full buffers.
+/// `ATDT KERMIT` and an XMODEM upload both cross this same read, and one line
+/// per 256-byte read would flush the whole 2000-line console ring — evicting
+/// the keystrokes the trace was added to catch, and doing an unbuffered log
+/// write per read on the very thread whose responsiveness is under
+/// investigation. So bulk reads are counted, not described.
+fn wire_trace_worth_logging(n: usize) -> bool {
+    n <= 16
 }
 
 /// Online mode for direct TCP connections (ATDT host:port).
@@ -5597,10 +5634,6 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
-
-    // The wire-side byte trace -- see `online_mode_duplex` for why the
-    // session's own `cpmkey WIRE` cannot answer the same question.
-    let trace = crate::config::get_gateway_debug();
 
     // ANSI ESC-stripper state for the inbound (TCP→serial) direction.
     // Only consulted when AT+PETSCII=1 is active, but its state has to live
@@ -5624,8 +5657,27 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
         match state.port.read(&mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
-                if trace {
-                    glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                // The wire-side trace.  `cpmkey WIRE` is logged where the
+                // *session* reads, two buffers further on -- the pump's read,
+                // then the duplex, then the session -- so a keystroke that
+                // produces no WIRE line could be held in any of the three,
+                // and an investigation was sent to the wrong layer by exactly
+                // that ambiguity.  This line says whether the byte reached
+                // the gateway at all.
+                //
+                // `modem_trace_enabled` rather than the config key directly:
+                // it is this module's one gate and it also honours
+                // EGATEWAY_GATEWAY_DEBUG, which is how the flag gets armed on
+                // a running machine without editing its config.  Reading it
+                // per call instead would leave a session that started before
+                // the toggle silently untraceable -- which reads as "the byte
+                // never arrived", the very wrong answer this exists to stop.
+                if modem_trace_enabled() {
+                    if wire_trace_worth_logging(n) {
+                        glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
+                    } else {
+                        glog!("cpmkey PORT {} bytes (bulk)", n);
+                    }
                 }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
@@ -6112,6 +6164,60 @@ fn send_result(state: &mut ModemState, msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The wire trace must never be able to quote a password.**
+    ///
+    /// `telnet/io.rs` mutes the session's own byte trace for the length of a
+    /// password prompt. This line is read one buffer earlier, on the raw port,
+    /// where that mute cannot reach -- and on an `ATDT bbs.example:23` call it
+    /// would be the user's password on somebody else's system. So the property
+    /// is structural: no printable byte survives into the rendering, whatever
+    /// it is.
+    #[test]
+    fn test_the_wire_trace_cannot_quote_what_was_typed() {
+        // Every printable byte.  Taken in short runs rather than one long
+        // one, because a run past the truncation cap appends a "… (+N more)"
+        // suffix whose own spaces would satisfy a naive `contains` check --
+        // the assertion has to look at the rendered bytes, not the whole line.
+        let printable: Vec<u8> = (0x20u8..=0x7Eu8).collect();
+        for run in printable.chunks(16) {
+            assert_eq!(
+                wire_preview(run),
+                ".".repeat(run.len()),
+                "a printable run reached the log: {:?}",
+                String::from_utf8_lossy(run),
+            );
+        }
+
+        // A realistic secret, one byte per read as a person types.
+        for &b in b"hunter2!".iter() {
+            let line = wire_preview(&[b]);
+            assert_eq!(line, ".", "0x{b:02X} must render as a bare dot, got {line:?}");
+        }
+
+        // High bytes carry content too (a PETSCII keyboard, an 8-bit paste).
+        assert_eq!(wire_preview(&[0x80, 0xC1, 0xFF]), "...");
+
+        // What it *must* keep: the control bytes the trace exists for.
+        assert_eq!(wire_preview(&[0x03]), "<^C>", "CTRL-C is the whole question");
+        assert_eq!(wire_preview(&[0x0D]), "<CR>");
+        assert_eq!(wire_preview(&[0x1B]), "<ESC>");
+        assert_eq!(wire_preview(&[0x7F]), "<DEL>");
+        // A mixed read still shows the control byte in its place.
+        assert_eq!(wire_preview(b"ab\x03cd"), "..<^C>..");
+    }
+
+    /// Bulk reads are counted, not described: one line per 256-byte read would
+    /// flush the 2000-line console ring during a file transfer over this same
+    /// pump, evicting the keystrokes the trace was added to catch.
+    #[test]
+    fn test_only_keystroke_sized_reads_are_described() {
+        assert!(wire_trace_worth_logging(1), "a keypress");
+        assert!(wire_trace_worth_logging(3), "an arrow key's ESC [ A");
+        assert!(wire_trace_worth_logging(16), "the boundary itself");
+        assert!(!wire_trace_worth_logging(17), "past the boundary");
+        assert!(!wire_trace_worth_logging(256), "a full XMODEM-ish read");
+    }
 
     /// Serialize tests that touch the global `CONSOLE_REQUEST`,
     /// `BRIDGE_ACTIVE`, or `SERIAL_RESTART` state.  cargo test runs

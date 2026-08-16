@@ -708,7 +708,7 @@ pub struct Config {
     /// began as the SSH/Telnet gateway proxy loops alone, and the doc said
     /// so long after `serial.rs` had joined it -- a key whose description
     /// understates what it does is how the next reader fails to find the
-    /// instrument they need.  It now covers four things:
+    /// instrument they need.  It now covers five things:
     ///
     /// * the **SSH/Telnet gateway proxy loops** (`telnet/gateway.rs`);
     /// * the **Hayes escape** state machine, `[esc]` -- which escape
@@ -721,7 +721,15 @@ pub struct Config {
     ///   the host you dialled;
     /// * every **session byte in and out**, `cpmkey` -- which reader or
     ///   writer saw it, and what the CP/M console's escape state machine
-    ///   decided about it.
+    ///   decided about it;
+    /// * what the **modem pump reads off the wire**, `cpmkey PORT`. The line
+    ///   above it is logged where the *session* reads, which is two buffers
+    ///   further on, so a keystroke that produces no `WIRE` line could be
+    ///   held in the pump, the duplex or the session -- and that ambiguity
+    ///   once sent an investigation to the wrong layer. This one says whether
+    ///   the byte reached the gateway at all. **Control bytes only**: this
+    ///   read is below the password mute in `telnet/io.rs`, so a printable
+    ///   byte is counted and never quoted.
     ///
     /// Anything added here should be listed above rather than left for
     /// someone to find by reading the source.
@@ -2252,8 +2260,12 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # so toggling takes effect on the next one without a restart.  Toggleable
 # from the GUI/web General settings and the Serial Configuration menu.  The
 # EGATEWAY_GATEWAY_DEBUG environment variable forces it on too.
-#   It covers FOUR things, all under this one key:
+#   It covers FIVE things, all under this one key:
 #     - the SSH/Telnet gateway proxy loops;
+#     - cpmkey PORT  what the modem pump reads off the wire, so a missing
+#               keystroke can be told from one held further in.  Control
+#               bytes only - a printable byte is counted, never quoted,
+#               because this read is below the password mute;
 #     - [esc]   the Hayes escape: which escape character was accepted, how
 #               much silence preceded it, and the byte that broke a
 #               sequence - that last one tells a failed +++ from a slow one;

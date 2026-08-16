@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The modem pump now traces what it reads off the wire** (under
-  `gateway_debug`), one line per read. The existing `cpmkey WIRE` trace is
+  `gateway_debug`), one line per read. **Control bytes only** — a printable
+  byte is counted, never quoted. This read is one buffer *below* the password
+  mute in the session's own trace, so nothing there can protect it, and on an
+  `ATDT bbs.example:23` call the content would be the user's password on
+  someone else's system. Bulk reads are counted rather than described, so a
+  file transfer over the same pump cannot flush the console ring and evict the
+  keystrokes the line exists to catch. The existing `cpmkey WIRE` trace is
   logged where the *session* reads, which is two buffers further on — the
   pump's read, then the duplex, then the session — so a keystroke that produces
   no WIRE line could be held in any of the three. That ambiguity sent an
