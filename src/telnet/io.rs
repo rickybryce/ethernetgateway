@@ -177,7 +177,32 @@ impl TelnetSession {
     /// (ECHO, SGA, TTYPE, NAWS). AYT (Are You There) gets a visible
     /// reply. IP (Interrupt Process) and BRK (Break) surface as the
     /// terminal's ESC byte so callers treat them like a Ctrl+C / ESC.
+    /// Byte trace wrapper.  Every session byte -- telnet, SSH or serial --
+    /// passes through here, whichever reader eventually consumes it, so this
+    /// is the one place that can answer "what did the gateway actually receive
+    /// when that key was pressed".
+    ///
+    /// It had to be here rather than in the CP/M console reader: the emulator's
+    /// `A>` prompt reads its command line with `get_line_input`, so a trace in
+    /// `cpmemu_conin` sees nothing at all until a guest program is running --
+    /// which is exactly the mistake this wrapper exists to undo.
+    ///
+    /// Costs one `bool` load per byte when disarmed.
     pub(in crate::telnet) async fn session_read_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
+        let r = self.session_read_byte_inner().await;
+        if super::cpm_emu::keytrace_on() {
+            match &r {
+                Ok(Some(b)) => {
+                    glog!("cpmkey WIRE {} (0x{:02X})", super::cpm_emu::keyname(*b), b)
+                }
+                Ok(None) => glog!("cpmkey WIRE <disconnect>"),
+                Err(e) => glog!("cpmkey WIRE <error: {}>", e.kind()),
+            }
+        }
+        r
+    }
+
+    async fn session_read_byte_inner(&mut self) -> Result<Option<u8>, std::io::Error> {
         if let Some(b) = self.pushback.take() {
             // A pushed-back byte is a real one, so it decides what "straight
             // after a CR" means for the next call as much as a freshly read

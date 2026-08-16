@@ -65,6 +65,7 @@ use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Instructions per [`Cpm::run`] batch before the driver regains control to
@@ -305,6 +306,47 @@ const EGT80_NAME: &str = "EGT80.COM";
 /// [`test_the_terminal_that_runs_on_both_comes_first`].
 const BUNDLED_TERMINALS: &[(&str, &[u8])] =
     &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
+
+/// Is the console-input byte trace armed?
+///
+/// **A diagnostic, not a setting.** It exists to answer one question on real
+/// hardware — what does the gateway actually receive when a key is pressed on
+/// an SC126 running EGT80, and what does the escape state machine do with it —
+/// and questions like that are answered once and then stop being interesting.
+/// A config key would cost three screens and a manual entry for ever; an
+/// environment variable costs a line, and follows the `EGATEWAY_GATEWAY_DEBUG`
+/// precedent already in `config.rs`.
+///
+/// Read once: an operator cannot change their mind mid-session, and this is
+/// consulted on every keystroke.
+pub(in crate::telnet) fn keytrace_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("EGATEWAY_CPM_KEYTRACE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// A byte as a human reads it on a key-trace line.
+///
+/// Control codes are the whole point here, so they get names rather than the
+/// caret notation a CP/M console would echo — `ESC` and `^Y` are what the
+/// operator pressed, and matching the words to the keycap is what makes a
+/// trace readable at a glance.
+pub(in crate::telnet) fn keyname(b: u8) -> String {
+    match b {
+        0x1B => "ESC".to_string(),
+        0x0D => "CR".to_string(),
+        0x0A => "LF".to_string(),
+        0x08 => "BS".to_string(),
+        0x09 => "TAB".to_string(),
+        0x7F => "DEL".to_string(),
+        b if b < 0x20 => format!("^{}", (b + 0x40) as char),
+        b if b.is_ascii_graphic() || b == b' ' => format!("'{}'", b as char),
+        _ => "high".to_string(),
+    }
+}
 
 /// Put both bundled terminals in both places they belong, if they are missing.
 ///
@@ -2114,6 +2156,15 @@ impl TelnetSession {
         // break-out pair, so don't retrack here (leave `last_esc` to the drain
         // / wire path) — just translate.
         if let Some(code) = Self::cpmemu_pending_key(pending, is_petscii) {
+            if keytrace_on() {
+                glog!(
+                    "cpmkey CONIN from-buffer {} (0x{:02X}) last_esc={} pending_left={}",
+                    keyname(code),
+                    code,
+                    *last_esc,
+                    pending.len()
+                );
+            }
             return Ok(ConIn::Byte(code));
         }
         loop {
@@ -2127,15 +2178,39 @@ impl TelnetSession {
                 Err(e) => return Err(e),
             };
 
+            if keytrace_on() {
+                glog!(
+                    "cpmkey CONIN wire {} (0x{:02X}) last_esc={} petscii={}",
+                    keyname(b),
+                    b,
+                    *last_esc,
+                    is_petscii
+                );
+            }
+
             // A pending first ESC + another ESC = break-out (slow, human).
             if is_esc_key(b, is_petscii) {
                 if *last_esc {
                     *last_esc = false;
+                    if keytrace_on() {
+                        glog!("cpmkey CONIN second ESC -> BREAKOUT");
+                    }
                     return Ok(ConIn::BreakOut);
                 }
                 // Peek for a fast CSI arrow (ANSI terminals only).
                 if !is_petscii {
-                    match self.cpmemu_peek_arrow().await? {
+                    let peek = self.cpmemu_peek_arrow().await?;
+                    if keytrace_on() {
+                        glog!(
+                            "cpmkey CONIN ESC peek -> {}",
+                            match peek {
+                                ArrowPeek::Arrow(c) => format!("Arrow(0x{c:02X})"),
+                                ArrowPeek::UnknownCsi => "UnknownCsi (swallowed)".to_string(),
+                                ArrowPeek::NotCsi => "NotCsi (deliver ESC)".to_string(),
+                            }
+                        );
+                    }
+                    match peek {
                         ArrowPeek::Arrow(code) => return Ok(ConIn::Byte(code)),
                         // A non-arrow CSI was consumed whole; read the next key.
                         ArrowPeek::UnknownCsi => continue,
@@ -2144,7 +2219,13 @@ impl TelnetSession {
                 }
                 // Lone ESC: deliver it; a following ESC becomes the break-out.
                 *last_esc = true;
+                if keytrace_on() {
+                    glog!("cpmkey CONIN first ESC delivered to guest, last_esc:=true");
+                }
                 return Ok(ConIn::Byte(0x1B));
+            }
+            if keytrace_on() && *last_esc {
+                glog!("cpmkey CONIN non-ESC after ESC -> last_esc cleared (pair broken)");
             }
             *last_esc = false;
 
@@ -2240,13 +2321,28 @@ impl TelnetSession {
                 Ok(Some(b)) => {
                     // Escape tracking uses the SAME `last_esc` as cpmemu_conin,
                     // so a double-`ESC` split across the two still pairs.
+                    if keytrace_on() {
+                        glog!(
+                            "cpmkey DRAIN wire {} (0x{:02X}) last_esc={} pending={}",
+                            keyname(b),
+                            b,
+                            *last_esc,
+                            pending.len()
+                        );
+                    }
                     if is_esc_key(b, is_petscii) {
                         if *last_esc {
                             *last_esc = false;
+                            if keytrace_on() {
+                                glog!("cpmkey DRAIN second ESC -> BREAKOUT");
+                            }
                             return Ok(OobDrain::BreakOut);
                         }
                         *last_esc = true;
                     } else {
+                        if keytrace_on() && *last_esc {
+                            glog!("cpmkey DRAIN non-ESC after ESC -> last_esc cleared (pair broken)");
+                        }
                         *last_esc = false;
                     }
                     // Buffer for CONIN, bounded so a flood can't grow it.
