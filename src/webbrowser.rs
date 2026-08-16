@@ -684,6 +684,39 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     }
 }
 
+/// Parse HTML the way a browser that does not run JavaScript should.
+///
+/// **`scripting_enabled: false`, and that is the whole point.**  html5ever
+/// parses `<noscript>` content as raw TEXT when scripting is on, which is its
+/// default and what `html2text::Config::parse_html` gives you -- it hardcodes
+/// `TreeBuilderOpts::default()` and exposes no way to change it.  For us that
+/// default is simply wrong: we are a text browser with no JavaScript, so
+/// `<noscript>` holds the markup written *for* us.
+///
+/// With the default, a `<noscript>` block renders as visible tag soup -- the
+/// reader sees `<style>...</style><meta ...>` as text -- and nothing inside it
+/// is reachable by a DOM walk, so a fallback link or a meta refresh in there
+/// may as well not exist.  That is exactly what Google's no-JavaScript
+/// interstitial does, and why following meta refresh did not rescue it.
+///
+/// The `RcDom` returned is html2text's own re-exported type, so it feeds
+/// `dom_to_render_tree` unchanged -- see the pin note in `Cargo.toml` for why
+/// the html5ever version must track html2text's.
+fn parse_html_no_scripting(body_bytes: &[u8]) -> Result<RcDom, String> {
+    use html5ever::tendril::TendrilSink;
+    let opts = html5ever::driver::ParseOpts {
+        tree_builder: html5ever::tree_builder::TreeBuilderOpts {
+            scripting_enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    html5ever::parse_document(RcDom::default(), opts)
+        .from_utf8()
+        .read_from(&mut &body_bytes[..])
+        .map_err(|e| format!("Parse error: {}", e))
+}
+
 /// Longest `<meta refresh>` delay we treat as a redirect, in seconds.
 ///
 /// A refresh with a real delay is a page saying "reload me periodically" -- a
@@ -772,8 +805,7 @@ fn render_html_body(
     width: usize,
 ) -> Result<(WebPage, Option<String>), String> {
     let cfg = config::rich();
-    let dom = cfg.parse_html(body_bytes)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let dom = parse_html_no_scripting(body_bytes)?;
 
     // Guard against pathologically deep DOMs before our recursive title/form
     // extractors walk them and overflow the stack, aborting the whole process.
@@ -1653,6 +1685,41 @@ mod tests {
         assert_eq!(parse_meta_refresh("2 ; url = \"/c\""), Some("/c".to_string()));
         // Some pages omit the delay entirely.
         assert_eq!(parse_meta_refresh("url=/d"), Some("/d".to_string()));
+    }
+
+    /// `<noscript>` content is markup for us, not text.
+    ///
+    /// html5ever parses `<noscript>` as raw TEXT when scripting is enabled,
+    /// which is its default.  For a browser that runs no JavaScript that is
+    /// backwards: the block holds the markup written *for* us.  With the
+    /// default, this meta is invisible to any DOM walk and the tags render as
+    /// visible tag soup -- which is exactly what Google's no-JS interstitial
+    /// does, and why following meta refresh alone did not rescue it.
+    #[test]
+    fn test_noscript_content_is_parsed_as_markup() {
+        let html = br#"<html><body><noscript>
+            <style>p{display:none}</style>
+            <meta http-equiv="refresh" content="0;url=/fallback">
+            <div>Please click <a href="/fallback">here</a>.</div>
+            </noscript></body></html>"#;
+        let (page, refresh) =
+            render_html_body(html, "https://example.com/x".to_string(), 80).expect("renders");
+
+        assert_eq!(
+            refresh.as_deref(),
+            Some("/fallback"),
+            "a meta refresh inside <noscript> must be reachable",
+        );
+        // The link inside it is a real link, not text.
+        assert!(
+            page.links.iter().any(|l| l.contains("/fallback")),
+            "the <noscript> link should be a link: {:?}",
+            page.links,
+        );
+        // And the markup must not be rendered as visible text.
+        let text = page.lines.join("\n");
+        assert!(!text.contains("<style"), "tag soup leaked into the page: {text:?}");
+        assert!(!text.contains("http-equiv"), "tag soup leaked into the page: {text:?}");
     }
 
     /// The two cases that must NOT be followed.

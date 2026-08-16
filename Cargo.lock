@@ -1355,6 +1355,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "html2text",
+ "html5ever",
  "if-addrs",
  "iz80",
  "libc",

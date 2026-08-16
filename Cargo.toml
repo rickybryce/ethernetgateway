@@ -39,6 +39,22 @@ russh = "0.60"
 ureq = "3"
 serde_json = "1"
 html2text = "0.14"
+# Pinned to html2text 0.14's OWN html5ever, and it must stay that way.
+#
+# We parse the DOM ourselves rather than through `Config::parse_html` for one
+# reason: that helper hardcodes `TreeBuilderOpts::default()`, which leaves
+# `scripting_enabled` true, and html5ever then parses <noscript> content as raw
+# TEXT.  We do not run JavaScript, so <noscript> content is exactly the content
+# meant for us -- with the default it renders as visible tag soup and anything
+# inside it (a meta refresh, a fallback link) is invisible to a DOM walk.
+#
+# The version must match html2text's transitively so cargo unifies them into
+# ONE crate instance: our `RcDom` comes from html2text's re-export, and if the
+# two html5ever versions diverged, that `RcDom` would implement a different
+# crate's `TreeSink` and stop compiling.  `cargo tree -d html5ever` must show a
+# single entry -- if a html2text bump moves this, follow it here in the same
+# commit.
+html5ever = "0.31"
 url = "2"
 serialport = "4"
 bytes = "1"
