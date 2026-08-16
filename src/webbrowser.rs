@@ -21,6 +21,20 @@ const MAX_BODY_SIZE: usize = 1024 * 1024;
 const MAX_RENDERED_LINES: usize = 5000;
 /// HTTP request timeout in seconds.
 const HTTP_TIMEOUT_SECS: u64 = 15;
+/// How long to wait for the TCP connection itself, as opposed to the reply.
+///
+/// Separate from `HTTP_TIMEOUT_SECS` because the two failures are different
+/// and deserve different patience.  A host that offers no HTTPS usually
+/// *drops* packets on 443 rather than refusing them, so the only way to learn
+/// that is to stop waiting -- and charging that to the whole-request budget
+/// made a bare hostname for an HTTP-only site sit for fifteen seconds before
+/// falling back.  A TCP handshake to any reachable host completes in well
+/// under five; it is the *response* that can legitimately be slow, and that
+/// still gets the full `HTTP_TIMEOUT_SECS`.
+///
+/// A TLS error needs none of this: the far end answers immediately, so that
+/// fallback was always instant.  This shortens only the silent case.
+const CONNECT_TIMEOUT_SECS: u64 = 5;
 /// Maximum HTTP redirects to follow.  We follow them manually (ureq's
 /// auto-follow is disabled) so each hop is SSRF-checked before we connect;
 /// 10 matches ureq's former default.
@@ -441,6 +455,7 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
+            .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
             .max_redirects(0)
             .max_redirects_will_error(false)
             .build(),
@@ -654,6 +669,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
+            .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
             .max_redirects(0)
             .max_redirects_will_error(false)
             .build(),
