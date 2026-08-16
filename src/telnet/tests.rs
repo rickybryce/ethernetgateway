@@ -685,6 +685,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         web_links: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
+        web_home_tried: false,
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -740,6 +741,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         web_links: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
+        web_home_tried: false,
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -1781,11 +1783,22 @@ mod gateway_filter_proptest {
 
 /// The log lines recorded after `mark`, so a global buffer shared with every
 /// other test can still answer a question about one prompt.
+///
+/// **A missing marker panics rather than returning nothing.** The buffer is a
+/// process-global ring that the whole parallel suite writes to, so the marker
+/// can be rotated out -- and an empty `Vec` would satisfy the negative
+/// assertion ("no password was logged") without having looked at anything. The
+/// one assertion carrying the security claim must not be able to pass
+/// vacuously.
 fn log_lines_after(mark: &str) -> Vec<String> {
     let all = crate::logger::snapshot(2000);
     match all.iter().rposition(|l| l.contains(mark)) {
         Some(i) => all[i + 1..].to_vec(),
-        None => Vec::new(),
+        None => panic!(
+            "marker {mark:?} not found in the last {} log lines -- it was rotated out, \
+             so this test cannot see what it is asserting about",
+            all.len(),
+        ),
     }
 }
 
@@ -1820,8 +1833,15 @@ async fn test_the_byte_trace_never_records_a_password() {
     );
 
     // The same bytes at a password prompt: nothing on the wire is recorded.
+    //
+    // A byte deliberately follows the terminating CR.  The drain that runs
+    // after it (`drain_trailing_eol`) reads one byte before pushing it back,
+    // so with only the input loop muted the first character of whatever comes
+    // next was still traced -- on a pasted `secret1\rsecret2\r`, the leading
+    // character of the second secret.  Ending the wire at the CR hides that
+    // entirely, because the drain then times out with nothing to read.
     glog!("pwtrace-probe-password");
-    peer.write_all(b"hunter2\r").await.unwrap();
+    peer.write_all(b"hunter2\rZ").await.unwrap();
     assert_eq!(
         session.get_password_input().await.unwrap().as_deref(),
         Some("hunter2"),

@@ -644,13 +644,25 @@ impl TelnetSession {
     /// was then consumed by the launched program's first console read (e.g. a
     /// `Y/N` prompt read via BDOS 1/6), skipping the prompt.
     pub(in crate::telnet) async fn drain_trailing_eol(&mut self, max: usize) {
+        self.drain_trailing_eol_muted(max, false).await
+    }
+
+    /// `drain_trailing_eol`, with the byte trace suppressed.
+    ///
+    /// The password prompt needs this: the drain runs *after* the terminating
+    /// CR and reads the first byte of whatever follows before pushing it back,
+    /// so on a pasted `secret1\rsecret2\r` the leading character of the second
+    /// secret would be traced.  Muting only the loop above and not its drain
+    /// leaves the claim "suppressed for the duration of the prompt" untrue at
+    /// exactly one byte.
+    pub(in crate::telnet) async fn drain_trailing_eol_muted(&mut self, max: usize, mute: bool) {
         if self.pushback.is_some() {
             return;
         }
         for _ in 0..max {
             let res = tokio::time::timeout(
                 std::time::Duration::from_millis(20),
-                self.session_read_byte(),
+                self.session_read_byte_muted(mute),
             )
             .await;
             match res {
@@ -721,7 +733,9 @@ impl TelnetSession {
                 self.flush().await?;
                 // Drain the paired byte of a CRLF (or LFCR) so the next
                 // prompt isn't silently satisfied by a leftover newline.
-                self.drain_trailing_eol(1).await;
+                // Muted with the loop above -- the drain reads the first
+                // byte of what follows before pushing it back.
+                self.drain_trailing_eol_muted(1, is_password).await;
                 let result: String = if self.terminal_type == TerminalType::Petscii {
                     buf.iter()
                         .map(|&b| petscii_to_ascii_byte(b) as char)
@@ -737,7 +751,7 @@ impl TelnetSession {
             }
 
             if is_esc_key(byte, self.terminal_type == TerminalType::Petscii) {
-                return Ok(LineEnd::Escaped(self.drain_after_esc().await));
+                return Ok(LineEnd::Escaped(self.drain_after_esc_muted(is_password).await));
             }
 
             if is_backspace_key(byte, self.erase_char) {
@@ -953,12 +967,16 @@ impl TelnetSession {
     /// an ESC by callers that pair ESCs, because the discarded bytes are the
     /// only evidence of whether the ESC was a keypress or the head of an
     /// escape sequence, and of whether a second ESC came with it.
-    pub(in crate::telnet) async fn drain_after_esc(&mut self) -> EscBurst {
+    /// `mute` suppresses the byte trace, for the password prompt -- whose
+    /// ESC-cancel path drains here.  See `drain_trailing_eol_muted`.  There is
+    /// only one caller, so this takes the flag directly rather than carrying a
+    /// convenience wrapper nothing uses.
+    pub(in crate::telnet) async fn drain_after_esc_muted(&mut self, mute: bool) -> EscBurst {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let mut burst = EscBurst::default();
         while let Ok(Ok(Some(b))) = tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            self.session_read_byte(),
+            self.session_read_byte_muted(mute),
         )
         .await
         {

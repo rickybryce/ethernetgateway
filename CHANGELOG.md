@@ -71,7 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleartext, so a refresh that lands back on working HTTPS is correctly not
   flagged.
 
-- **A form posts the button it says it will.** The button *shown* was the first
+- **A form posts the button it says it will**, whatever the case of its
+  `type` attribute (`<button type="Submit">` was not recognised as a submit
+  control at all, so a later `<input type=submit>` took both the label and the
+  posted name). The button *shown* was the first
   submit control with a non-empty `value`, while the button *sent* was the
   first with a non-empty `name` — two separate decisions that agree on ordinary
   forms and diverge the moment the default button is unnamed, so a form with

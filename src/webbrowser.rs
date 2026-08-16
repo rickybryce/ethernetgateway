@@ -452,6 +452,19 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
 /// refreshed to another page handed the reader cleartext with no warning at
 /// all -- and `no_https_service` / `https_timed_out` sites are exactly the
 /// ones the downgrade exists for.
+/// Whether a downgrade reason from an earlier hop still describes `url`.
+///
+/// **A reason must not outlive the cleartext run it belongs to.** It says how
+/// the page in front of the reader was fetched, so carrying it across every
+/// `<meta refresh>` unconditionally mislabels a later page: `https://a` fails
+/// TLS, is refetched as `http://a`, refreshes to a working `https://b`, which
+/// refreshes to an ordinary `http://c` -- and `c`, never tried over TLS at
+/// all, would be announced as a TLS failure.  Reaching an HTTPS URL ends the
+/// run and drops the reason; a fresh downgrade on a later hop sets its own.
+fn carry_downgrade(url: &str, carried: Option<DowngradeReason>) -> Option<DowngradeReason> {
+    if url.starts_with("https://") { None } else { carried }
+}
+
 fn fetch_and_render_from(
     url: &str,
     width: usize,
@@ -486,8 +499,8 @@ fn fetch_and_render_from(
 
     let mut current = url.to_string();
     // Seeded from the hop that got us here, so a downgrade survives a
-    // `<meta refresh>`.  A fresh fetch passes `None`.
-    let mut downgrade: Option<DowngradeReason> = carried;
+    // `<meta refresh>` -- but only while the chain stays cleartext.
+    let mut downgrade: Option<DowngradeReason> = carry_downgrade(url, carried);
     let mut hops = start_hops;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
@@ -1389,7 +1402,14 @@ fn extract_form_fields(
                 }
             }
             "button" => {
-                let btn_type = get_attr(node, "type").unwrap_or_else(|| "submit".to_string());
+                // Lower-cased like `input`'s above: the HTML `type` attribute
+                // is case-insensitive, so `<button type="Submit">` is a submit
+                // control.  Missing it let a later `<input type=submit>` take
+                // both the label and the posted name -- the very disagreement
+                // this first-one-wins rule exists to close.
+                let btn_type = get_attr(node, "type")
+                    .unwrap_or_else(|| "submit".to_string())
+                    .to_lowercase();
                 // A `<button type=submit>` is a submit control too, so it goes
                 // through the same first-one-wins claim as `<input
                 // type=submit>` above -- otherwise a leading `<button>` names
@@ -2074,6 +2094,69 @@ mod tests {
             "a later submit button must not be posted under the first one's label: {names:?}",
         );
         assert!(names.iter().any(|n| n == "q"), "the text field must survive: {names:?}");
+    }
+
+    /// **A downgrade reason must not outlive its cleartext run.**
+    ///
+    /// It is threaded across `<meta refresh>` hops so a site fetched over
+    /// cleartext that then refreshes still warns the reader. Carried
+    /// unconditionally, though, it mislabels a later page: `https://a` fails
+    /// TLS → `http://a` → refresh to a working `https://b` → refresh to an
+    /// ordinary `http://c`, and `c` is announced as a TLS failure though it
+    /// was never tried over TLS. Reaching HTTPS ends the run.
+    #[test]
+    fn test_a_downgrade_reason_does_not_outlive_the_cleartext_run() {
+        let tls = Some(DowngradeReason::TlsFailed);
+
+        // Still cleartext: the reason describes this page, so it is kept.
+        assert_eq!(carry_downgrade("http://c/", tls), tls, "http keeps the reason");
+
+        // The run ended at an HTTPS hop: dropped, and stays dropped for
+        // whatever that page refreshes to.
+        assert_eq!(carry_downgrade("https://b/", tls), None, "https ends the run");
+        assert_eq!(
+            carry_downgrade("http://c/", carry_downgrade("https://b/", tls)),
+            None,
+            "a page reached via a working HTTPS hop is not a TLS failure",
+        );
+
+        // Nothing carried is still nothing, either way.
+        assert_eq!(carry_downgrade("http://c/", None), None);
+        assert_eq!(carry_downgrade("https://b/", None), None);
+    }
+
+    /// **The HTML `type` attribute is case-insensitive.** `<button
+    /// type="Submit">` was not recognised as a submit control, so it did not
+    /// claim the form and a later `<input type=submit>` took both the label and
+    /// the posted name -- reintroducing the disagreement the claim exists to
+    /// close.  `<input>` was already lower-cased; `<button>` was not.
+    #[test]
+    fn test_a_submit_type_is_matched_whatever_its_case() {
+        for ty in ["Submit", "SUBMIT", "submit"] {
+            let html = format!(
+                r#"<html><body><form action="/s">
+                <input name="q" value="">
+                <button type="{ty}" name="go" value="1">Search</button>
+                <input type="submit" name="btnI" value="Lucky">
+            </form></body></html>"#
+            );
+            let (names, label) = form_field_names(html.as_bytes());
+            assert_eq!(label, "Search", "type={ty}: the button must name the UI");
+            assert!(
+                !names.iter().any(|n| n == "btnI"),
+                "type={ty}: a later submit must not be posted under its label: {names:?}",
+            );
+        }
+
+        // `type=button` is *not* a submit control and must not claim anything.
+        let html = br#"<html><body><form action="/s">
+            <input name="q" value="">
+            <button type="button" name="nope">Click</button>
+            <input type="submit" name="btnG" value="Search">
+        </form></body></html>"#;
+        let (names, label) = form_field_names(html);
+        assert_eq!(label, "Search", "a non-submit button must not name the form");
+        assert!(names.iter().any(|n| n == "btnG"), "the real submit is sent: {names:?}");
     }
 
     /// A `<button type=submit>` is a submit control, so it claims the form the

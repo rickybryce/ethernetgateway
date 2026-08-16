@@ -30,10 +30,18 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn render_web_browser(&mut self) -> Result<(), std::io::Error> {
-        // Auto-load homepage on first visit if configured
-        if self.web_lines.is_empty() && self.web_url.is_none() {
+        // Auto-load homepage on first visit if configured.
+        //
+        // `web_home_tried` is what makes it *once*: a failed fetch leaves
+        // `web_lines` and `web_url` both empty, which is the same state as
+        // "never visited", so an unreachable homepage otherwise started a
+        // fresh blocking fetch on every redraw and made the user wait out the
+        // timeout each time.  Cleared by `web_reset`, so leaving the browser
+        // and coming back does retry.
+        if !self.web_home_tried && self.web_lines.is_empty() && self.web_url.is_none() {
             let cfg = config::get_config();
             if !cfg.browser_homepage.is_empty() {
+                self.web_home_tried = true;
                 let url = crate::webbrowser::normalize_url(&cfg.browser_homepage);
                 self.web_fetch_page(&url, false).await?;
             }
@@ -849,5 +857,8 @@ impl TelnetSession {
         self.web_history.clear();
         self.web_url = None;
         self.web_title = None;
+        // Leaving the browser ends the visit, so the homepage is auto-loaded
+        // again next time -- the once-only guard is per visit, not per session.
+        self.web_home_tried = false;
     }
 }
