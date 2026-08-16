@@ -833,7 +833,9 @@ impl russh::server::Handler for SshHandler {
                 sess.note_announced_terminal(&term);
             }
             if let Err(e) = sess.run().await {
-                glog!("SSH: session error: {}", e);
+                if !crate::telnet::is_normal_disconnect(&e) {
+                    glog!("SSH: session error: {}", e);
+                }
             }
             let mut w = writer_for_task.lock().await;
             let _ = w.shutdown().await;

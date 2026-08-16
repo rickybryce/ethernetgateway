@@ -8140,3 +8140,29 @@ fn test_bootable_size_lines_fit_petscii_and_name_every_medium() {
         assert!(m.bytes > 0, "{}: a bootable medium of no size", m.label);
     }
 }
+
+/// A hangup is not a fault.
+///
+/// The three disconnect kinds are how a call normally ends — Ricky saw
+/// `Serial modem: session error: broken pipe` after every EGT80 hangup on a
+/// call that had ended perfectly well.
+///
+/// `ConnectionAborted` is the one that must NOT be swallowed: `transfer.rs`
+/// uses it as a control signal meaning "tear this session down", so it is a
+/// decision the gateway made rather than a peer that went away.
+#[test]
+fn test_normal_disconnect_covers_hangups_but_not_deliberate_aborts() {
+    use std::io::{Error, ErrorKind};
+    for kind in [ErrorKind::BrokenPipe, ErrorKind::UnexpectedEof, ErrorKind::ConnectionReset] {
+        assert!(
+            crate::telnet::is_normal_disconnect(&Error::new(kind, "peer went away")),
+            "{kind:?} is an ordinary end of session and must not be logged as an error",
+        );
+    }
+    for kind in [ErrorKind::ConnectionAborted, ErrorKind::PermissionDenied, ErrorKind::TimedOut] {
+        assert!(
+            !crate::telnet::is_normal_disconnect(&Error::new(kind, "real")),
+            "{kind:?} must still reach the log",
+        );
+    }
+}

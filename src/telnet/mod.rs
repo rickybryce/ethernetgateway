@@ -45,6 +45,34 @@ pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     filter_gateway_output, normalize_gateway_input, gateway_default_window};
 mod io;
 pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
+
+/// Is this the ordinary end of a session rather than a fault?
+///
+/// A hangup closes our end of the transport, so the session's next write
+/// fails.  That is how a call *normally* ends — reported by Ricky as
+/// `Serial modem: session error: broken pipe` after every EGT80 hangup, on a
+/// call that had ended perfectly well.
+///
+/// Logging it as an error is worse than noise: it trains the reader to skip
+/// the very lines a real fault would appear in.
+///
+/// One function rather than a `matches!` at each call site.  The rule already
+/// existed in `cpm_modem.rs` and was needed at four, which is the shape of
+/// defect this project has been bitten by before — a rule written in two
+/// places holds in one.
+///
+/// `ConnectionAborted` is deliberately **not** here: `transfer.rs` uses it as
+/// a control signal meaning "tear this session down", so it is a decision the
+/// gateway made rather than a peer that went away, and swallowing it would
+/// hide a path worth seeing.
+pub(crate) fn is_normal_disconnect(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
 /// Placing the bundled CP/M terminals is reached from `main.rs` at start-up as
 /// well as from a session entering the emulator, so it is re-exported rather
 /// than staying `pub(in crate::telnet)` like the rest of the CP/M helpers.
@@ -1670,7 +1698,9 @@ pub fn start_server(
                                     window_height: None,
                                 };
                                 if let Err(e) = session.run().await {
-                                    glog!("Telnet: session error from {}: {}", addr, e);
+                                    if !is_normal_disconnect(&e) {
+                                        glog!("Telnet: session error from {}: {}", addr, e);
+                                    }
                                 }
                                 {
                                     let mut w = writer_arc.lock().await;

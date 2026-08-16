@@ -794,13 +794,7 @@ fn menu_session(
             // write fails - that is how this session *normally* ends, and
             // logging it as an error trains the reader to skip the very lines
             // a real fault would appear in.  Only genuine failures are logged.
-            let normal = matches!(
-                e.kind(),
-                std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::ConnectionReset
-            );
-            if !normal {
+            if !super::is_normal_disconnect(&e) {
                 crate::glog!("CP/M modem: gateway menu session error: {}", e);
             }
         }

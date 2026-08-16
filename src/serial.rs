@@ -4995,7 +4995,11 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
             lockouts,
         );
         if let Err(e) = session.run().await {
-            glog!("Serial modem: session error: {}", e);
+            // A hangup closes our end, so the next write fails -- that is how
+            // this session normally ends.  See `is_normal_disconnect`.
+            if !crate::telnet::is_normal_disconnect(&e) {
+                glog!("Serial modem: session error: {}", e);
+            }
         }
         let mut w = writer_for_task.lock().await;
         let _ = w.shutdown().await;
