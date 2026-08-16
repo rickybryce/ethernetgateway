@@ -2,13 +2,15 @@
 
 A telnet/SSH file-transfer gateway for retro and modern terminals, written in
 Rust. It speaks **a range of file-transfer protocols**, tested against real
-vintage hardware, emulates a **Hayes AT modem** on two independent serial
-ports, bridges out to remote **telnet and SSH** hosts, runs real **CP/M 2.2**
-software on an emulated Z80 or 8080, and adds a CP/M-inspired **Gateway Shell**
-(an `A>` file manager over the transfer directory), a text-mode **web browser**,
-**AI chat**, and a **weather** service. Supports PETSCII (Commodore 64), ANSI,
-and ASCII terminals. Designed for local-network use. An optional
-**master/slave** mode extends one gateway's serial ports to another over SSH.
+vintage hardware, and emulates a **Hayes AT modem** on two independent serial
+ports. It bridges out to remote **telnet and SSH** hosts, and runs real
+**CP/M 2.2** software on an emulated Z80 or 8080. Alongside those sit a
+CP/M-inspired **Gateway Shell** (an `A>` file manager over the transfer
+directory), a text-mode **web browser**, **AI chat**, and a **weather** service.
+
+PETSCII (Commodore 64), ANSI and ASCII terminals are all supported. The gateway
+is designed for local-network use. An optional **master/slave** mode extends one
+gateway's serial ports to another over SSH.
 
 ![Ethernet Gateway](web/screenshot.png)
 
@@ -30,11 +32,11 @@ cargo build --release
 ```
 
 On first run a default `egateway.conf` is created in the working directory, and
-the desktop GUI opens into a short **setup wizard** — a login, which servers to
-start, where transferred files go, and whether the machine is standalone or part
-of a master/slave pair. It ends with the commands to connect with and the
-inbound ports to open on your firewall. Skip it and the defaults below apply;
-it can be re-run later from the GUI's *Server → More…* window.
+the desktop GUI opens into a short **setup wizard**. It asks for a login, which
+servers to start, where transferred files go, and whether the machine is
+standalone or part of a master/slave pair. It ends with the commands to connect
+with and the inbound ports to open on your firewall. Skip it and the defaults
+below apply. It can be re-run later from the GUI's *Server → More…* window.
 
 The telnet server listens on **port 2323** by default (SSH on **2222** when
 enabled). Connect from anywhere on your network (open the firewall port first):
@@ -49,10 +51,10 @@ ssh <user>@<server-ip> -p 2222   # if the SSH interface is enabled
 The gateway also acts as a **modem emulator** over a serial port, so vintage
 machines can dial it with standard AT commands:
 
-- **Altairduino PRO** — connect directly, set the modem port to 2SIO2 (A6/A7 on
-  mine; configure the serial ports with *stop + aux1 up*). Run IMP8, press **T**
-  for terminal mode, then `ATDT :2323` (or `ATDT ethernetgateway` for the
-  gateway menu). I used a USB-to-RS232 adapter into the 9-pin connector.
+- **Altairduino PRO** — connect directly and set the modem port to 2SIO2 (A6/A7
+  on mine; configure the serial ports with *stop + aux1 up*). Run IMP8, press
+  **T** for terminal mode, then `ATDT :2323` — or `ATDT ethernetgateway` for the
+  gateway menu. I used a USB-to-RS232 adapter into the 9-pin connector.
 - **RC2014 / SC126** and similar — also supported. Most machines need a
   **null-modem** adapter (cross RX/TX).
 
@@ -62,23 +64,23 @@ options, and the full AT command set.
 ## Features
 
 - **File transfer** — a range of protocols, covering everything from a 1970s
-  8-bit micro to a modern terminal emulator, with auto-detection on upload and a
+  8-bit micro to a modern terminal emulator. Auto-detection on upload, a
   protocol prompt on download. Tested against real vintage hardware and against
   the reference implementations its users actually run.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
-- **CP/M 2.2 emulator** — a separate thing from the shell above: real `.COM`
-  software (WordStar, MBASIC, PIP, ED, ASM…) on an emulated Z80 or 8080, with
-  drives A:–P: as folders under the transfer directory or as mounted **`.dsk`
-  disk images**. Ships this project's own CP/M terminal program, and a virtual
+- **CP/M 2.2 emulator** — a separate thing from the shell above. It runs real
+  `.COM` software (WordStar, MBASIC, PIP, ED, ASM…) on an emulated Z80 or 8080.
+  Drives A:–P: are folders under the transfer directory, or mounted **`.dsk`
+  disk images**. Ships this project's own CP/M terminal program, plus a virtual
   modem so guest software can dial out. On by default, and bounded: guest file
   access is jailed, a runaway is stopped, and a double-`ESC` always returns to
   `A>`.
-- **Booting a disk image** — not a mode of the emulator but a third thing: the
-  disk gets the whole machine and its *own* operating system runs, which is how
+- **Booting a disk image** — not a mode of the emulator but a third thing. The
+  disk gets the whole machine, and its *own* operating system runs. That is how
   it reaches CP/M 3, Altair DOS and Disk Extended BASIC. Period video cards
   (Processor Technology VDM-1, Cromemco Dazzler) are shown in a browser.
-- **CP/M printer** — captures what CP/M software sends to `LST:` and leaves an
+- **CP/M printer** — captures what CP/M software sends to `LST:`. It leaves an
   **OpenDocument** (`.odt`) or plain-text file in a `printer` folder inside the
   transfer directory, ready to collect. Serves both the emulator and a booted
   disk, and turns period **overstrike** into real bold and underline.
@@ -91,7 +93,7 @@ options, and the full AT command set.
 - **Master/slave relay** — extend a slave gateway's serial ports to a master
   over SSH; files always land on the master.
 - **Web browser** — text-mode HTTP/HTTPS/Gopher browsing with numbered links,
-  forms, and bookmarks, rendered for 40-column PETSCII up to modern terminals.
+  forms, and bookmarks. Rendered for 40-column PETSCII up to modern terminals.
 - **AI chat** — Q&A powered by the Groq API (free key required).
 - **Weather** — current conditions + 3-day forecast for any city/postal code
   worldwide (Open-Meteo, no key required).
@@ -115,9 +117,9 @@ Per-distro dependency one-liners (Debian/Fedora/Arch/macOS/Windows) are in the
 [manual](http://ethernetgateway.com/index.html#ch2-source).
 
 Pre-built, signed binaries for Linux, macOS, and Windows are on the
-[Releases](https://github.com/rickybryce/ethernetgateway/releases) page; each
+[Releases](https://github.com/rickybryce/ethernetgateway/releases) page. Each
 ships a SHA-256 checksum, an optional GPG signature, and a keyless
-[Sigstore](https://www.sigstore.dev/) signature so you can verify a download
+[Sigstore](https://www.sigstore.dev/) signature, so you can verify a download
 against its GitHub Actions build.
 
 ## Running as a Service
@@ -134,9 +136,10 @@ notifying connected sessions first.
 ## Configuration
 
 All settings live in `egateway.conf` (auto-created on first run; plain
-`key = value`, `#` comments). A fresh install is walked through the essentials by
-the **first-run setup wizard** in the desktop GUI (see [Quick Start](#quick-start));
-after that, you can edit everything three ways, all writing the same file:
+`key = value`, `#` comments). A fresh install is walked through the essentials
+by the **first-run setup wizard** in the desktop GUI (see
+[Quick Start](#quick-start)). After that, you can edit everything three ways,
+all writing the same file:
 
 - **In-session menu** — press **C** (Configuration) over telnet/SSH.
 - **Desktop GUI** — shown on startup when `enable_console = true`; edit
@@ -156,7 +159,7 @@ the two serial ports (`serial_a_*` / `serial_b_*`), and per-protocol tunables.
 
 **The telnet interface is for local/private networks only.** Telnet transmits
 everything — including credentials — in cleartext. Do not expose the telnet port
-to the public internet; use the SSH interface for encrypted access, and treat
+to the public internet. Use the SSH interface for encrypted access, and treat
 even that as a trusted-environment tool.
 
 - **Inbound, security disabled (default):** the telnet listener accepts
@@ -165,15 +168,15 @@ even that as a trusted-environment tool.
   `password` (still not recommended on public networks — telnet is cleartext).
 - **Authentication:** one `username` / `password` pair covers telnet, SSH, and
   the web UI. Three failed logins from an IP trip a shared 5-minute lockout.
-  Credentials are stored in plaintext in `egateway.conf` — protect it with file
-  permissions; it's lightweight access control, not a security boundary.
+  Credentials are stored in plaintext in `egateway.conf`, so protect it with
+  file permissions. It's lightweight access control, not a security boundary.
 - **Outbound (dial-out):** the modem's `ATDT`, the telnet/SSH gateways, and the
   relay's onward-dial connect to whatever host you ask for, with **no**
   internal-address filtering (a modem dials anywhere). The text-mode web browser
   is the exception — it refuses internal addresses (SSRF guard) unless
   `disable_ip_safety` is set.
 
-The master/slave relay lets a trusted slave reach the master's network; only
+The master/slave relay lets a trusted slave reach the master's network. Only
 enable `master_accept_relays` for slaves you trust at that level. Full details,
 including the outbound and relay threat model, are in the
 [manual](http://ethernetgateway.com/index.html).
@@ -209,7 +212,7 @@ This project is licensed under the
 [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html)
 (GPL-3.0-or-later).
 
-Ethernet Gateway builds on a number of open-source Rust crates; their copyright
+Ethernet Gateway builds on a number of open-source Rust crates. Their copyright
 notices and license texts are reproduced in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), generated by
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about). All dependencies
