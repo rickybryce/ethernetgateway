@@ -39,13 +39,16 @@
 # wayland, ...) should all be included in the notices.
 accepted = [
     "GPL-3.0-or-later",
-    # `GPL-3.0` is intentionally retained here (unlike deny.toml, which
-    # dropped it): a dual-licensed dep offered as `GPL-3.0 OR MIT` (e.g.
-    # `unescaper`) is then attributed under GPL-3.0 in the notices — the
-    # natural choice inside this GPL-3.0-or-later work.  deny.toml only needs
-    # to *permit* the crate, which MIT already does, so the two configs
-    # legitimately differ.  Drop this line to attribute such deps under MIT.
-    "GPL-3.0",
+    # `GPL-3.0` is deliberately NOT accepted here, matching deny.toml.  It used
+    # to be, so that a dual-licensed dep offered as `GPL-3.0 OR MIT` (today
+    # only `unescaper`, reached through `serialport`) was attributed under
+    # GPL-3.0 as the seemingly natural choice inside a GPL-3.0-or-later work.
+    # It is the wrong arm to elect: `GPL-3.0` is GPL-3.0-*only*, so taking that
+    # component on those terms pins the whole combined work to v3 and quietly
+    # spends the "or later" this project grants.  Electing MIT costs nothing —
+    # the dep offers it — and keeps the grant intact.  cargo-about picks the
+    # first accepted license of an `OR` expression, so the fix is to leave this
+    # list without a copyleft arm that a permissive one could satisfy.
     "MIT",
     "MIT-0",
     "Apache-2.0",

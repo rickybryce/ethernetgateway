@@ -3148,8 +3148,12 @@ mod tests {
         // And it is in the image the caller would persist.
         let dirty = m.take_dirty();
         assert_eq!(dirty.len(), 1, "the written image comes back for saving");
+        // The window is taken from the name's own length: it was `windows(5)`
+        // against `b"EGT80"`, and the rename to EGT8080 left a 5-byte window
+        // compared with 7 bytes, which is false for every image ever written.
+        const ENTRY: &[u8] = b"EGT8080";
         assert!(
-            dirty[0].1.windows(5).any(|w| w == b"EGT8080"),
+            dirty[0].1.windows(ENTRY.len()).any(|w| w == ENTRY),
             "the directory entry is in the image we would write out"
         );
     }
@@ -5025,8 +5029,11 @@ mod tests {
                 .expect("our own blank mounts read-write");
         assert!(!fs.is_read_only(), "a fresh blank must not arrive damaged");
         assert!(fs.entries().is_empty(), "a fresh blank has no files on it");
-        let mut name = [b' '; 8];
-        name[..5].copy_from_slice(b"EGT8080");
+        // The CP/M name field is 8 bytes, space-padded -- written as one literal
+        // so there is no length to keep in step with the name.  It was
+        // `name[..5].copy_from_slice(b"EGT80")`, and the rename to EGT8080
+        // widened the literal but not the index, which panics.
+        let name = *b"EGT8080 ";
         let ext = *b"COM";
         fs.create(0, &name, &ext).unwrap();
         for (rec, chunk) in EGT8080_COM.chunks(128).enumerate() {
@@ -5121,8 +5128,11 @@ mod tests {
         )
         .expect("mounts read-write");
         assert!(!fs.is_read_only(), "the image arrived in a writable state");
-        let mut name = [b' '; 8];
-        name[..5].copy_from_slice(b"EGT8080");
+        // The CP/M name field is 8 bytes, space-padded -- written as one literal
+        // so there is no length to keep in step with the name.  It was
+        // `name[..5].copy_from_slice(b"EGT80")`, and the rename to EGT8080
+        // widened the literal but not the index, which panics.
+        let name = *b"EGT8080 ";
         let ext = *b"COM";
         fs.create(0, &name, &ext).expect("creates the file");
         for (rec, chunk) in EGT8080_COM.chunks(128).enumerate() {
