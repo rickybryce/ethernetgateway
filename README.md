@@ -75,7 +75,7 @@ options, and the full AT command set.
   disk images**. Ships this project's own CP/M terminal program, plus a virtual
   modem so guest software can dial out. On by default, and bounded: guest file
   access is jailed, a runaway is stopped, and a double-`ESC` always returns to
-  `A>`.
+  `A>` — or leaves the emulator when you are already there.
 - **Booting a disk image** — not a mode of the emulator but a third thing. The
   disk gets the whole machine, and its *own* operating system runs. That is how
   it reaches CP/M 3, Altair DOS and Disk Extended BASIC. Period video cards

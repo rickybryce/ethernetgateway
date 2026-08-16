@@ -5153,6 +5153,84 @@ async fn test_drain_input_until_quiet_clears_buffered_then_stops() {
     assert_eq!(got, Some(b'Z'), "drain should have consumed all stale bytes");
 }
 
+/// **ESC and a dropped session are different facts.**
+///
+/// `get_line_input` reports both as `None`.  The CP/M emulator's `A>` prompt
+/// read that `None` as "the user is gone" and returned to the gateway menu,
+/// so a single ESC left the emulator while every other CP/M surface here
+/// (stopping a transient, leaving a booted disk) needs ESC twice.  Nothing
+/// chose that behaviour -- it fell out of two facts sharing one value.  A
+/// caller can only be right about this if the reader keeps them apart.
+#[tokio::test]
+async fn test_line_input_reports_esc_and_disconnect_differently() {
+    use tokio::io::AsyncWriteExt;
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+
+    peer.write_all(b"DIR\r").await.unwrap();
+    match session.get_line_input_end().await.unwrap() {
+        LineEnd::Line(s) => assert_eq!(s, "DIR"),
+        other => panic!("a typed line must come back as Line, got {:?}", other),
+    }
+
+    peer.write_all(&[0x1B]).await.unwrap();
+    assert!(
+        matches!(session.get_line_input_end().await.unwrap(), LineEnd::Escaped(_)),
+        "ESC is a keypress, not a disconnect"
+    );
+
+    // Closing the peer is the disconnect -- and must not look like an ESC.
+    drop(peer);
+    assert!(
+        matches!(session.get_line_input_end().await.unwrap(), LineEnd::Disconnected),
+        "a closed session must report Disconnected"
+    );
+}
+
+/// **The drain after an ESC is the only place the burst can be seen.**
+///
+/// It has to run -- an arrow key's `[A` would otherwise be typed into the
+/// next prompt as text -- so a caller pairing ESCs would lose a fast second
+/// ESC to it, and could not tell an arrow key from a keypress.  Both would
+/// break the `A>` prompt in opposite directions: a terminal-sent pair would
+/// never exit, and two cursor presses would exit when nobody asked.
+#[tokio::test]
+async fn test_esc_burst_tells_a_pair_from_an_arrow_key() {
+    use tokio::io::AsyncWriteExt;
+
+    // A lone ESC: nothing follows it.
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    peer.write_all(&[0x1B]).await.unwrap();
+    let lone = match session.get_line_input_end().await.unwrap() {
+        LineEnd::Escaped(b) => b,
+        other => panic!("expected Escaped, got {:?}", other),
+    };
+    assert!(!lone.another_esc && !lone.sequence, "a lone ESC carries nothing: {lone:?}");
+
+    // Both ESCs in one burst -- how a terminal or a paste sends a pair.
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    peer.write_all(&[0x1B, 0x1B]).await.unwrap();
+    let pair = match session.get_line_input_end().await.unwrap() {
+        LineEnd::Escaped(b) => b,
+        other => panic!("expected Escaped, got {:?}", other),
+    };
+    assert!(
+        pair.another_esc,
+        "the second ESC of a burst must survive the drain that eats it: {pair:?}"
+    );
+
+    // An arrow key is ESC [ A -- a sequence, not a keypress of its own.
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    peer.write_all(&[0x1B, b'[', b'A']).await.unwrap();
+    let arrow = match session.get_line_input_end().await.unwrap() {
+        LineEnd::Escaped(b) => b,
+        other => panic!("expected Escaped, got {:?}", other),
+    };
+    assert!(
+        arrow.sequence && !arrow.another_esc,
+        "an arrow key must read as a sequence, never as an ESC pair: {arrow:?}"
+    );
+}
+
 /// **The NUL of an RFC 854 `CR NUL` pair is not a keystroke.**
 ///
 /// A telnet client spells a bare CR as `CR NUL`, and forwarding the NUL to a

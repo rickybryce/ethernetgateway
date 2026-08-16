@@ -733,7 +733,7 @@
                         <tr><td><code>ECHO</code></td><td>Interactive console demo.</td></tr>
                         <tr><td><em>batch</em><br><span class="dim-text"><code>$$$.SUB</code></span></td><td>While <code>A:$$$.SUB</code> exists the next command is taken from it instead of the keyboard and echoed as it runs; the file is consumed a record at a time and erased when done. Written by CP/M's own <code>SUBMIT.COM</code>. As on real CP/M&nbsp;2.2: an unrecognised command ends the batch, and batches only work from A: (SUBMIT writes to the current drive, the processor reads A:). CP/M&nbsp;3's conditionals/parameters and <code>XSUB</code> are not emulated.</td></tr>
                         <tr><td><code>HELP</code><br><span class="dim-text">also <code>?</code></span></td><td>This command list.</td></tr>
-                        <tr><td><code>EXIT</code><br><span class="dim-text">also <code>BYE</code>, <code>QUIT</code></span></td><td>Leave CP/M and return to the gateway menu.</td></tr>
+                        <tr><td><code>EXIT</code><br><span class="dim-text">also <code>BYE</code>, <code>QUIT</code></span></td><td>Leave CP/M and return to the gateway menu. Pressing <strong>ESC twice</strong> at the prompt does the same; a single <code>ESC</code> just cancels the line you are typing.</td></tr>
                         <tr><td><em>name</em></td><td>Run <code>name.COM</code> from the drive. A drive prefix works (<code>B:PIP</code>); the extension is always forced to <code>COM</code>, as the real CCP does.</td></tr>
                     </tbody>
                 </table>
@@ -912,7 +912,7 @@ altairhd_cobol.dsk</code></pre>
                         <tr><td>Filesystem</td><td>Ours</td><td>The guest's</td></tr>
                         <tr><td>Other drives</td><td>Folders and images alongside</td><td>Mounted images come along, at the board slot their letter names; folders do not</td></tr>
                         <tr><td>Our <code>A&gt;</code>, <code>EXIT</code>, EGT8080</td><td>Yes</td><td>No &mdash; the guest talks to hardware</td></tr>
-                        <tr><td>Getting out</td><td><code>EXIT</code></td><td>Press <strong>ESC twice</strong></td></tr>
+                        <tr><td>Getting out</td><td><code>EXIT</code>, or <strong>ESC twice</strong></td><td>Press <strong>ESC twice</strong></td></tr>
                     </tbody>
                 </table>
 

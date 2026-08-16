@@ -278,6 +278,48 @@ enum InputMode {
     Password,
 }
 
+// ─── How a line of input ended ─────────────────────────────
+/// `get_line_input` answers `Option<String>`, which folds two different
+/// facts into one `None`: the user pressed ESC, and the session went away.
+/// Most prompts want the same thing for both -- leave -- so they keep using
+/// it.  The CP/M emulator's `A>` prompt does not: a single ESC there used to
+/// read as a disconnect and drop the user back to the gateway menu, while
+/// every other CP/M surface (stopping a transient, leaving a booted disk)
+/// needs ESC twice.  Callers that must tell the two apart use
+/// `get_line_input_end` and match on this instead.
+#[derive(Debug)]
+enum LineEnd {
+    /// The user pressed Enter; carries the line (trimmed in `Normal` mode).
+    Line(String),
+    /// The user pressed ESC.  The session is still up.  The burst says what
+    /// arrived with it, which a caller pairing ESCs cannot do without: the
+    /// drain that clears an escape sequence would otherwise swallow a fast
+    /// second ESC, and would make an arrow key indistinguishable from one.
+    Escaped(EscBurst),
+    /// The session ended -- there is nobody left to prompt.
+    Disconnected,
+    /// The line ran past `MAX_INPUT_LENGTH` and was refused (the error is
+    /// already on screen).  Not an ESC and not a disconnect: a caller that
+    /// can re-prompt should, which is what the `A>` prompt does.
+    TooLong,
+}
+
+/// What arrived in the same burst as an ESC, gathered by the drain that
+/// follows one.  The drain has to happen -- an arrow key's `[A` would
+/// otherwise be typed into the next prompt as text -- so anything a caller
+/// needs to know about the burst has to be collected on the way past.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EscBurst {
+    /// A second ESC was in the burst.  A human double-tapping ESC is far
+    /// slower than the 50 ms drain window and so does *not* land here -- this
+    /// is the terminal-sent pair (EGT80, a script, a paste).
+    another_esc: bool,
+    /// Bytes other than ESC were discarded, so this ESC was the head of a
+    /// sequence rather than a keypress in its own right: an arrow key sends
+    /// `ESC [ A`.  Two arrow presses must not read as ESC ESC.
+    sequence: bool,
+}
+
 /// Outcome of `TelnetSession::save_received_file`.  Used by every
 /// batch-upload save loop (ZMODEM autostart, Kermit server, ZMODEM /
 /// Kermit batch upload) so each site can map the result to its own

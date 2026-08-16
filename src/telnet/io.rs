@@ -654,6 +654,13 @@ impl TelnetSession {
         self.read_input_loop(&mut Vec::new(), InputMode::Password).await
     }
 
+    /// Line input for a caller that must tell ESC from a dropped session --
+    /// see `LineEnd`.  `get_line_input` is this with the two `None` cases
+    /// merged, which is what nearly every prompt wants.
+    pub(in crate::telnet) async fn get_line_input_end(&mut self) -> Result<LineEnd, std::io::Error> {
+        self.read_input_loop_end(&mut Vec::new(), InputMode::Normal).await
+    }
+
     /// Core input loop shared by `get_line_input` and `get_password_input`.
     /// In `Normal` mode, typed characters are echoed
     /// and the result is trimmed. In `Password` mode, `*` is echoed instead and
@@ -663,11 +670,23 @@ impl TelnetSession {
         buf: &mut Vec<u8>,
         mode: InputMode,
     ) -> Result<Option<String>, std::io::Error> {
+        Ok(match self.read_input_loop_end(buf, mode).await? {
+            LineEnd::Line(s) => Some(s),
+            LineEnd::Escaped(_) | LineEnd::Disconnected | LineEnd::TooLong => None,
+        })
+    }
+
+    /// `read_input_loop`, keeping ESC and disconnect apart.
+    pub(in crate::telnet) async fn read_input_loop_end(
+        &mut self,
+        buf: &mut Vec<u8>,
+        mode: InputMode,
+    ) -> Result<LineEnd, std::io::Error> {
         let is_password = matches!(mode, InputMode::Password);
         loop {
             let byte = match self.read_byte_filtered().await? {
                 Some(b) => b,
-                None => return Ok(None),
+                None => return Ok(LineEnd::Disconnected),
             };
 
             if byte == b'\r' || byte == b'\n' {
@@ -683,7 +702,7 @@ impl TelnetSession {
                 } else {
                     buf.iter().map(|&b| b as char).collect()
                 };
-                return Ok(Some(if is_password {
+                return Ok(LineEnd::Line(if is_password {
                     result
                 } else {
                     result.trim().to_string()
@@ -691,8 +710,7 @@ impl TelnetSession {
             }
 
             if is_esc_key(byte, self.terminal_type == TerminalType::Petscii) {
-                self.drain_input().await;
-                return Ok(None);
+                return Ok(LineEnd::Escaped(self.drain_after_esc().await));
             }
 
             if is_backspace_key(byte, self.erase_char) {
@@ -723,7 +741,7 @@ impl TelnetSession {
             if buf.len() >= MAX_INPUT_LENGTH {
                 self.send_raw(b"\r\n").await?;
                 self.show_error("Input too long.").await?;
-                return Ok(None);
+                return Ok(LineEnd::TooLong);
             }
 
             if is_password {
@@ -902,6 +920,28 @@ impl TelnetSession {
 
     pub(in crate::telnet) async fn drain_input(&mut self) {
         self.drain_input_until_quiet(50, None).await;
+    }
+
+    /// `drain_input`, reporting what went past -- see `EscBurst`.  Used after
+    /// an ESC by callers that pair ESCs, because the discarded bytes are the
+    /// only evidence of whether the ESC was a keypress or the head of an
+    /// escape sequence, and of whether a second ESC came with it.
+    pub(in crate::telnet) async fn drain_after_esc(&mut self) -> EscBurst {
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        let mut burst = EscBurst::default();
+        while let Ok(Ok(Some(b))) = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            self.session_read_byte(),
+        )
+        .await
+        {
+            if is_esc_key(b, is_petscii) {
+                burst.another_esc = true;
+            } else {
+                burst.sequence = true;
+            }
+        }
+        burst
     }
 
     /// Read and discard pending input until the line is quiet for `quiet_ms`,

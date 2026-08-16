@@ -654,7 +654,7 @@ impl TelnetSession {
         // leave the emulator, and how to stop a running program.
         self.send_line(&format!(
             "  {}",
-            self.amber("Type EXIT to return to the gateway.")
+            self.amber("Type EXIT or ESC twice to leave.")
         ))
         .await?;
         self.send_line(&format!(
@@ -908,6 +908,13 @@ impl TelnetSession {
         // (below) moves the CCP default.  Without this, `A>STAT B:` left the
         // user stranded at `B>`.
         let mut ccp_drive = fs.current_drive();
+        // ESC at the prompt is half of the break-out, exactly as it is while a
+        // transient runs (`cpmemu_conin`'s `last_esc`): the first one cancels
+        // the line, the second leaves, and anything else breaks the pair.
+        // A single ESC used to leave outright -- not because that was chosen,
+        // but because `get_line_input` reports ESC and a dropped session with
+        // the same `None` and the call site below read it as the disconnect.
+        let mut esc_armed = false;
         loop {
             // Re-establish the CCP default each cycle, undoing any drive a
             // just-finished transient selected for its own use.
@@ -925,12 +932,40 @@ impl TelnetSession {
             let submitted = submitted_line.is_some();
             let line = match submitted_line {
                 Some(s) => {
+                    esc_armed = false;
                     self.send_line(&s).await?;
                     s
                 }
-                None => match self.get_line_input().await? {
-                    Some(s) => s,
-                    None => return Ok(()), // disconnected
+                None => match self.get_line_input_end().await? {
+                    LineEnd::Line(s) => {
+                        esc_armed = false;
+                        s
+                    }
+                    // The reader has already said why; re-prompt rather than
+                    // treating a fat-fingered line as a request to leave.
+                    LineEnd::TooLong => {
+                        esc_armed = false;
+                        continue;
+                    }
+                    LineEnd::Disconnected => return Ok(()),
+                    LineEnd::Escaped(burst) => {
+                        // Leave on the second ESC -- whether it came as its own
+                        // keypress (armed from the previous prompt) or inside
+                        // the same burst, which is how a terminal sends a pair.
+                        // An arrow key is `ESC [ A`: it must neither leave nor
+                        // arm, or two cursor presses would drop the user out.
+                        if burst.another_esc || (esc_armed && !burst.sequence) {
+                            // Leave on the same terms as `EXIT` -- don't strand
+                            // a half-consumed batch.
+                            Self::cpmemu_abort_submit(fs);
+                            return Ok(());
+                        }
+                        esc_armed = !burst.sequence;
+                        // Cancel the typed line and re-prompt, the way `^U`
+                        // does on real CP/M, so the ESC visibly did something.
+                        self.send_line("").await?;
+                        continue;
+                    }
                 },
             };
             let trimmed = line.trim();
@@ -1454,7 +1489,7 @@ impl TelnetSession {
                 "  VER        emulator version",
                 "  name       run name.COM",
                 "  HELP / ?   this help",
-                "  EXIT       leave CP/M",
+                "  EXIT       leave CP/M (ESC ESC)",
                 "",
                 "  Loading your own files:",
                 "  The drives are folders under the",
@@ -2506,6 +2541,155 @@ mod repl_tests {
             out.extend_from_slice(&buf[..n]);
         }
         String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// Drive the real `A>` prompt with a series of keystroke bursts and return
+    /// everything it printed, once the CCP leaves.
+    ///
+    /// Bursts are written whole and then separated by a gap longer than the
+    /// 50 ms ESC drain window, so bytes *inside* one burst are what a terminal
+    /// sends together and separate bursts are separate keypresses -- the
+    /// distinction the whole ESC-pairing rule turns on.  Output is collected
+    /// concurrently because the duplex pipe holds only 512 bytes: a prompt
+    /// nobody is reading would block long before the test could look at it.
+    ///
+    /// The REPL is bounded by a timeout, so "did not leave" fails as a timeout
+    /// rather than hanging the suite.
+    async fn run_ccp(fs: &mut CpmFs, bursts: &[&[u8]]) -> String {
+        use tokio::io::AsyncWriteExt;
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ascii);
+        let (mut peer_rd, mut peer_wr) = tokio::io::split(peer);
+
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 512];
+            while let Ok(n) = peer_rd.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            out
+        });
+
+        let owned: Vec<Vec<u8>> = bursts.iter().map(|b| b.to_vec()).collect();
+        let feeder = tokio::spawn(async move {
+            for burst in owned {
+                if peer_wr.write_all(&burst).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+            // Held open until the REPL leaves, so a prompt still waiting for
+            // input blocks on a live line rather than seeing a disconnect --
+            // which would end the REPL for the wrong reason and pass the test.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let left = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            sess.cpmemu_repl(fs, "z80"),
+        )
+        .await;
+        feeder.abort();
+        drop(sess); // close the writer so the collector sees EOF
+        let out = collector.await.unwrap();
+        assert!(
+            left.is_ok(),
+            "the CCP never left; it printed {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        left.unwrap().unwrap();
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// **One ESC at `A>` must not leave the emulator; two must.**
+    ///
+    /// It used to leave on the first, because `get_line_input` reports ESC and
+    /// a dropped session with the same `None` and the prompt read it as the
+    /// disconnect.  Nothing chose that: the emulator's own banner says ESC
+    /// twice, a booted disk needs ESC twice, and a transient is stopped with
+    /// ESC twice.  `DIR` between the ESCs is the evidence -- if the first ESC
+    /// still left, its "No file" never gets printed.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_one_esc_does_not_leave_the_ccp_but_two_do() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let (base, mut fs) = scratch_fs("escpair");
+
+        let out = run_ccp(
+            &mut fs,
+            &[
+                &[0x1B],        // first ESC: cancels the line, arms
+                b"DIR\r",       // must still run -- the prompt is alive
+                &[0x1B, 0x1B],  // a terminal-sent pair: leaves
+            ],
+        )
+        .await;
+        assert!(
+            out.contains("No file"),
+            "the first ESC left the emulator: DIR never ran. Got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The two ESCs may also arrive as separate keypresses -- which is how a
+    /// human sends them, far slower than the 50 ms drain window -- and a
+    /// command between them breaks the pair, exactly as a non-ESC key does
+    /// while a transient is running (`cpmemu_conin`'s `last_esc`).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_a_command_between_two_escs_breaks_the_pair() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let (base, mut fs) = scratch_fs("escbreak");
+
+        let out = run_ccp(
+            &mut fs,
+            &[
+                &[0x1B],   // arms
+                b"DIR\r",  // breaks the pair
+                &[0x1B],   // arms again -- must NOT leave on its own
+                b"DIR\r",  // proves it did not: a second "No file"
+                &[0x1B],   // arms
+                &[0x1B],   // separate keypress: leaves
+            ],
+        )
+        .await;
+        assert_eq!(
+            out.matches("No file").count(),
+            2,
+            "an ESC after a command must re-arm, not leave. Got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **An arrow key is `ESC [ A`, and two of them are not ESC ESC.**
+    ///
+    /// The drain that clears the `[A` is what makes this dangerous: without
+    /// looking at what it discarded, a cursor press is indistinguishable from
+    /// a keypress of ESC, and a user pressing Up twice at `A>` would be thrown
+    /// out of CP/M.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_arrow_keys_at_the_prompt_do_not_leave_the_ccp() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let (base, mut fs) = scratch_fs("escarrow");
+
+        let out = run_ccp(
+            &mut fs,
+            &[
+                &[0x1B, b'[', b'A'], // Up
+                &[0x1B, b'[', b'B'], // Down -- two "ESCs" in a row
+                b"DIR\r",            // must still run
+                &[0x1B, 0x1B],
+            ],
+        )
+        .await;
+        assert!(
+            out.contains("No file"),
+            "two arrow presses were read as ESC ESC and left CP/M. Got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Write a `$$$.SUB` the way DRI's `SUBMIT.COM` does: 128-byte records,
