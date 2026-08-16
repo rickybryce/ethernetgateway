@@ -456,6 +456,17 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
             .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+            // Render what the server sent on 4xx/5xx instead of discarding it.
+            //
+            // ureq's default turns any non-2xx into an Err, which threw away
+            // the response body -- so a 404 with directions, or a 403 challenge
+            // page, reached the reader as an opaque error and the page they
+            // were told to read was never shown.  `aichat.rs` hit the same
+            // default and opted out for the same reason.
+            //
+            // Redirects are unaffected: `max_redirects_will_error(false)`
+            // already hands 3xx back as a response for the hop logic below.
+            .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .build(),
@@ -670,6 +681,17 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS)))
             .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+            // Render what the server sent on 4xx/5xx instead of discarding it.
+            //
+            // ureq's default turns any non-2xx into an Err, which threw away
+            // the response body -- so a 404 with directions, or a 403 challenge
+            // page, reached the reader as an opaque error and the page they
+            // were told to read was never shown.  `aichat.rs` hit the same
+            // default and opted out for the same reason.
+            //
+            // Redirects are unaffected: `max_redirects_will_error(false)`
+            // already hands 3xx back as a response for the hop logic below.
+            .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .build(),
