@@ -7,6 +7,15 @@ egateway.conf
 # by a different name.
 ethernetgateway.log
 ethernetgateway.log.*
+# The outbound SSH gateway's client key, generated on first use beside the
+# config -- so running the binary from the repo root leaves one here, exactly
+# as it leaves a config and a log.  Ignored above all because it is a PRIVATE
+# key: untracked-but-not-ignored is how one gets committed by accident.  The
+# web UI's public-key test renders the key-auth popup, which reaches
+# `client_public_key_openssh` and generates it, so `cargo test` produces one too.
+ethernet_gateway_ssh_key
+# The SSH *server's* host key, by the same argument.
+ethernet_ssh_host_key
 *.swp
 *.swo
 *~
