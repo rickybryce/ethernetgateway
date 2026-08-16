@@ -306,6 +306,91 @@ const EGT80_NAME: &str = "EGT80.COM";
 const BUNDLED_TERMINALS: &[(&str, &[u8])] =
     &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
 
+/// Put both bundled terminals in both places they belong, if they are missing.
+///
+/// **Four files**: each of the two builds goes on CP/M drive A:, where the
+/// emulator runs it, *and* loose in the transfer directory, where the
+/// file-transfer menus can see it.  Drive A: lives inside `CPM/`, which those
+/// menus do not list, so without the second copy the only way to get a terminal
+/// onto real hardware is to start the emulator and send it from inside — which
+/// is backwards, since the reason to want the file is usually that you have no
+/// terminal on the far end yet.  Copies rather than a move: CP/M has to find it
+/// on A:, the transfer-dir copy stays the pristine shipped build holding no
+/// settings, so an operator who has configured theirs on A: still has exactly
+/// one file that remembers and knows which.
+///
+/// **Only when absent, never overwriting.** Each terminal saves its settings —
+/// the selected serial port, the ANSI/ASCII choice, the menu key — into a patch
+/// area inside its own `.COM` file, so refreshing the copy on every launch would
+/// silently throw away the user's configuration.  It also means a user may
+/// deliberately keep an older build, or their own with different defaults.
+/// Deleting a file restores the shipped copy on the next launch, which is the
+/// documented way back to a known state.
+///
+/// A failure is logged and ignored rather than propagated: not having the
+/// bundled terminal is a missing convenience, and it must not stop someone
+/// reaching a CP/M prompt to run their own software.
+///
+/// **A free function, and synchronous, because two callers need it and one of
+/// them is start-up.** It used to be an `async` method on `TelnetSession`
+/// reachable only from `cpmemu_ensure_drives`, i.e. only once somebody entered
+/// the emulator — so erasing the transfer directory and restarting recreated
+/// the drive folders with no terminal in any of them, and the loose copy whose
+/// whole purpose is "reach it without starting the emulator" required starting
+/// the emulator.  It never touched `self`.
+pub(crate) fn place_bundled_terminals(transfer_dir: &str) {
+    for (name, bytes) in BUNDLED_TERMINALS {
+        let mut drive_a = PathBuf::from(transfer_dir);
+        drive_a.push("CPM");
+        drive_a.push("A");
+        place_one_terminal(&drive_a, "drive A:", name, bytes);
+        place_one_terminal(
+            std::path::Path::new(transfer_dir),
+            "the transfer directory",
+            name,
+            bytes,
+        );
+    }
+}
+
+/// Put one bundled terminal in `dir` if it is not already there.
+///
+/// Split out when the second build arrived: copies of "never overwrite,
+/// write-and-rename, log a failure" would have been several places for the
+/// settings-preserving rule to hold, and it only has to fail in one of them to
+/// throw away a user's configuration.  It now serves two destinations for the
+/// same reason.
+fn place_one_terminal(dir: &std::path::Path, where_: &str, name: &str, bytes: &[u8]) {
+    let path = dir.join(name);
+    if path.exists() {
+        return; // already there — leave it, settings and all
+    }
+    // Written to a temporary name and renamed into place, the way `config.rs`
+    // writes the config file.  Start-up and a session entering the emulator can
+    // both find the file absent and both write it; a plain write would let a
+    // CP/M program load a half-written image.  A rename is atomic, so every
+    // reader sees either no file or the whole one.  The temporary name carries
+    // the process id so two gateways sharing a transfer directory cannot
+    // collide either.
+    let tmp = path.with_extension(format!("t{}", std::process::id()));
+    let placed = match std::fs::write(&tmp, bytes) {
+        Ok(()) => std::fs::rename(&tmp, &path),
+        Err(e) => Err(e),
+    };
+    match placed {
+        Ok(()) => glog!(
+            "CP/M: placed the bundled {} ({} bytes) in {}",
+            name,
+            bytes.len(),
+            where_
+        ),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp); // don't leave litter
+            glog!("CP/M: could not place {} in {}: {}", name, where_, e);
+        }
+    }
+}
+
 /// Outcome of a single console-input read while a program runs.
 enum ConIn {
     /// A translated data byte to hand to the guest.
@@ -673,7 +758,12 @@ impl TelnetSession {
         tokio::task::spawn_blocking(move || crate::cpm::layout::ensure_cpm_tree(&transfer_dir))
             .await
             .map_err(std::io::Error::other)??;
-        self.cpmemu_place_egt80(&cfg.transfer_dir).await;
+        // Also done at start-up (see `main.rs`).  Repeated here because a
+        // folder deleted while the gateway is running should be repaired by the
+        // next session rather than waiting for a restart -- and it is cheap:
+        // four `exists()` checks when everything is already in place.
+        let td = cfg.transfer_dir.clone();
+        tokio::task::spawn_blocking(move || place_bundled_terminals(&td)).await.ok();
         // Bring up whatever `cpm_mounts` asks for.  Idempotent: a drive already
         // holding the requested image is left alone, so a second session
         // entering the emulator does not reopen a disk the first one is using.
@@ -689,92 +779,6 @@ impl TelnetSession {
         Ok(())
     }
 
-    /// Put the bundled terminals on drive A: if they are not already there.
-    ///
-    /// **Only when absent, never overwriting.** Each saves its settings — the
-    /// selected serial port, the ANSI/ASCII choice, the menu key — into a patch
-    /// area inside its own `.COM` file, so refreshing the copy on every launch
-    /// would silently throw away the user's configuration. It also means a user
-    /// may deliberately keep an older build, or their own build with different
-    /// defaults. Deleting the file restores the shipped copy on the next launch,
-    /// which is the documented way to get back to a known state.
-    ///
-    /// A failure here is logged and ignored rather than propagated: not having
-    /// the bundled terminal is a missing convenience, and it must not stop
-    /// someone from reaching a CP/M prompt to run their own software.
-    async fn cpmemu_place_egt80(&mut self, transfer_dir: &str) {
-        for (name, bytes) in BUNDLED_TERMINALS {
-            // Drive A:, where CP/M runs it...
-            let mut drive_a = PathBuf::from(transfer_dir);
-            drive_a.push("CPM");
-            drive_a.push("A");
-            self.cpmemu_place_one_terminal(&drive_a, "drive A:", name, bytes).await;
-            // ...and the transfer directory, where the file-transfer menus can
-            // see it.  Drive A: is *inside* `CPM/`, which those menus do not
-            // list, so without this copy the only way to get the terminal onto
-            // a real CP/M machine is to start the emulator and send it from
-            // inside — which is backwards, since the reason to want the file
-            // is usually that you have no terminal on the far end yet.
-            //
-            // A second copy rather than a move: CP/M has to find it on A:, and
-            // the two serve different jobs.  The transfer-dir copy is the
-            // pristine shipped build and holds no settings, so an operator who
-            // has configured theirs on A: still has exactly one file that
-            // remembers, and knows which.
-            self.cpmemu_place_one_terminal(
-                std::path::Path::new(transfer_dir),
-                "the transfer directory",
-                name,
-                bytes,
-            )
-            .await;
-        }
-    }
-
-    /// Put one bundled terminal in `dir` if it is not already there.
-    ///
-    /// Split out when the second build arrived: copies of "never overwrite,
-    /// write-and-rename, log a failure" would have been several places for the
-    /// settings-preserving rule to hold, and it only has to fail in one of them
-    /// to throw away a user's configuration.  It now serves two destinations
-    /// for the same reason.
-    async fn cpmemu_place_one_terminal(
-        &mut self,
-        dir: &std::path::Path,
-        where_: &str,
-        name: &str,
-        bytes: &[u8],
-    ) {
-        let path = dir.join(name);
-        if tokio::fs::metadata(&path).await.is_ok() {
-            return; // already there — leave it, settings and all
-        }
-        // Written to a temporary name and renamed into place, the way
-        // `config.rs` writes the config file.  Two sessions can enter the
-        // emulator at the same moment on a first-ever launch, both find the
-        // file absent, and both write it; a plain write would let a CP/M
-        // program load a half-written image.  A rename is atomic, so every
-        // reader sees either no file or the whole one.  The temporary name
-        // carries the process id so two gateways sharing a transfer directory
-        // cannot collide either.
-        let tmp = path.with_extension(format!("t{}", std::process::id()));
-        let placed = match tokio::fs::write(&tmp, bytes).await {
-            Ok(()) => tokio::fs::rename(&tmp, &path).await,
-            Err(e) => Err(e),
-        };
-        match placed {
-            Ok(()) => glog!(
-                "CP/M: placed the bundled {} ({} bytes) in {}",
-                name,
-                bytes.len(),
-                where_
-            ),
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp).await; // don't leave litter
-                glog!("CP/M: could not place {} in {}: {}", name, where_, e);
-            }
-        }
-    }
 
     /// The Rust CCP-lite command loop.  Prints the `A>` prompt, reads a
     /// line, and dispatches: host-exit words leave; built-ins run; anything
@@ -2952,6 +2956,69 @@ mod egt80_tests {
     #[test]
     fn test_the_terminal_that_runs_on_both_comes_first() {
         assert_eq!(BUNDLED_TERMINALS[0].0, EGT8080_NAME);
+    }
+
+    /// Every bundled terminal lands in **both** places, and a second run
+    /// changes nothing.
+    ///
+    /// The regression this pins is a real one, reported after an operator
+    /// erased their transfer directory: the placement was an `async` method on
+    /// `TelnetSession` called only from `cpmemu_ensure_drives`, so start-up
+    /// recreated the sixteen drive folders with no terminal in any of them, and
+    /// the loose transfer-directory copies — whose entire purpose is to reach a
+    /// terminal *without* starting the emulator — appeared only once you had
+    /// started the emulator.
+    ///
+    /// Both halves matter and they pull opposite ways: place all four, and
+    /// overwrite none of them.  A terminal saves its settings inside its own
+    /// `.COM`, so a run that "helpfully" refreshed the copies would silently
+    /// discard the operator's configuration.
+    #[test]
+    fn test_bundled_terminals_are_placed_in_both_places_and_never_overwritten() {
+        let base = std::env::temp_dir().join(format!("egw_place_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let drive_a = base.join("CPM").join("A");
+        std::fs::create_dir_all(&drive_a).expect("temp drive A:");
+
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"));
+
+        // Four files: two builds x two destinations.
+        for (name, bytes) in BUNDLED_TERMINALS {
+            for dir in [base.as_path(), drive_a.as_path()] {
+                let p = dir.join(name);
+                let got = std::fs::read(&p).unwrap_or_else(|e| panic!("{p:?} missing: {e}"));
+                assert_eq!(&got, bytes, "{p:?} is not the shipped build");
+            }
+        }
+
+        // Now stand in for an operator who has configured their copy, and for
+        // one they deleted.  A second run must restore only the missing file.
+        let configured = drive_a.join(EGT80_NAME);
+        std::fs::write(&configured, b"not the shipped build").expect("write");
+        std::fs::remove_file(base.join(EGT8080_NAME)).expect("remove");
+
+        super::place_bundled_terminals(base.to_str().expect("utf-8 temp path"));
+
+        assert_eq!(
+            std::fs::read(&configured).expect("still there"),
+            b"not the shipped build",
+            "a configured terminal was overwritten — that is the operator's settings gone",
+        );
+        assert_eq!(
+            std::fs::read(base.join(EGT8080_NAME)).expect("restored"),
+            EGT8080_COM,
+            "a deleted terminal should come back, which is the documented reset",
+        );
+        // And no half-written temporaries left behind.
+        let litter: Vec<_> = std::fs::read_dir(&base)
+            .expect("readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".t"))
+            .collect();
+        assert!(litter.is_empty(), "left temporaries behind: {litter:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

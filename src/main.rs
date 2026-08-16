@@ -171,6 +171,15 @@ fn main() {
                 // and a gateway must still come up for its other services.
                 glog!("Warning: could not create the CP/M folders: {}", e);
             }
+            // And the bundled terminals, for the same reason the folders are
+            // laid out here rather than on someone's first session: erasing the
+            // transfer directory and restarting used to recreate the drive
+            // folders with no terminal in any of them, because the only caller
+            // was the CP/M session path.  The loose transfer-directory copies
+            // exist precisely so you can send a terminal to real hardware
+            // *without* starting the emulator, so requiring a session to create
+            // them defeated the feature.  Never overwrites.
+            telnet::place_bundled_terminals(&cfg.transfer_dir);
             // And bring `cpm_mounts` up, here, at startup.
             //
             // This used to happen only when somebody first entered the
