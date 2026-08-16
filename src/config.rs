@@ -698,11 +698,33 @@ pub struct Config {
     /// BBS software).  Supersedes `telnet_gateway_negotiate` — when raw
     /// is on, there is no negotiation to do.
     pub telnet_gateway_raw: bool,
-    /// Byte-level trace of the SSH/Telnet gateway proxy loops, for
-    /// diagnosing input corruption / terminal-translation issues.  Read
-    /// fresh by each gateway session, so toggling it takes effect on the
-    /// next session without a restart.  The `EGATEWAY_GATEWAY_DEBUG`
-    /// environment variable still forces it on regardless of this flag.
+    /// Byte-level trace, for diagnosing input corruption and
+    /// terminal-translation issues.  Read fresh by each session, so toggling
+    /// it takes effect on the next one without a restart.  The
+    /// `EGATEWAY_GATEWAY_DEBUG` environment variable forces it on regardless
+    /// of this flag.
+    ///
+    /// **This key's scope has grown twice, so it is spelled out here.**  It
+    /// began as the SSH/Telnet gateway proxy loops alone, and the doc said
+    /// so long after `serial.rs` had joined it -- a key whose description
+    /// understates what it does is how the next reader fails to find the
+    /// instrument they need.  It now covers four things:
+    ///
+    /// * the **SSH/Telnet gateway proxy loops** (`telnet/gateway.rs`);
+    /// * the **Hayes escape** state machine, `[esc]` -- which escape
+    ///   character was accepted, how much silence preceded it, and the byte
+    ///   that broke a sequence, that last one being how a failed `+++` is
+    ///   distinguished from a slow one;
+    /// * the **modem's result codes**, `[modem]` -- `OK`, `NO CARRIER` and
+    ///   the rest.  These are traced apart from session output because they
+    ///   really are separate: a result code comes from the modem, not from
+    ///   the host you dialled;
+    /// * every **session byte in and out**, `cpmkey` -- which reader or
+    ///   writer saw it, and what the CP/M console's escape state machine
+    ///   decided about it.
+    ///
+    /// Anything added here should be listed above rather than left for
+    /// someone to find by reading the source.
     pub gateway_debug: bool,
     /// Columns to report to the remote for SSH/Telnet gateway sessions, or
     /// `0` for auto (client NAWS, else the per-terminal-type default).
@@ -2219,12 +2241,23 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
-# Gateway byte-trace (debug).  When true, the SSH/Telnet gateway logs every
-# byte crossing the proxy — verbose, per-byte output for diagnosing input
-# corruption and terminal-translation issues.  Read fresh by each gateway
-# session, so toggling takes effect on the next session without a restart.
-# Toggleable from the GUI/web General settings and the Serial Configuration
-# menu.  The EGATEWAY_GATEWAY_DEBUG environment variable forces it on too.
+# Byte-trace (debug).  Verbose, per-byte output for diagnosing input
+# corruption and terminal-translation issues.  Read fresh by each session,
+# so toggling takes effect on the next one without a restart.  Toggleable
+# from the GUI/web General settings and the Serial Configuration menu.  The
+# EGATEWAY_GATEWAY_DEBUG environment variable forces it on too.
+#   It covers FOUR things, all under this one key:
+#     - the SSH/Telnet gateway proxy loops;
+#     - [esc]   the Hayes escape: which escape character was accepted, how
+#               much silence preceded it, and the byte that broke a
+#               sequence - that last one tells a failed +++ from a slow one;
+#     - [modem] the modem's result codes (OK, NO CARRIER, ...).  Traced
+#               apart from session output because they ARE separate: a
+#               result code comes from the modem, not from the host you
+#               dialled;
+#     - cpmkey  every session byte in and out, and what the CP/M console's
+#               escape state machine decided about it.
+#   Leave it off in normal use: it logs a line per byte or per write.
 ");
     write_kv(&mut content, "gateway_debug", cfg.gateway_debug);
     content.push('\n');

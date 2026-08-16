@@ -8166,3 +8166,65 @@ fn test_normal_disconnect_covers_hangups_but_not_deliberate_aborts() {
         );
     }
 }
+
+/// `render_bytes` is the outbound half of the byte trace, and its whole job
+/// is being readable at a glance.
+///
+/// Printable bytes must stay themselves — a result code has to read as `OK`,
+/// not as hex — while control bytes must be named, because "did a CR LF come
+/// back" is the question the trace exists to answer.
+#[test]
+fn test_render_bytes_keeps_text_readable_and_names_controls() {
+    use crate::telnet::cpm_emu::render_bytes;
+    assert_eq!(render_bytes(b"OK", 48), "OK");
+    assert_eq!(render_bytes(b"\r\nOK\r\n", 48), "<CR><LF>OK<CR><LF>");
+    assert_eq!(render_bytes(b"\x1b[2J", 48), "<ESC>[2J");
+    assert_eq!(render_bytes(&[0x19], 48), "<^Y>");
+    assert_eq!(render_bytes(b"", 48), "");
+    // Truncated with a count, so a screen paint cannot bury the log and a
+    // reader still knows how much was dropped.
+    let long = vec![b'x'; 100];
+    let out = render_bytes(&long, 10);
+    assert!(out.starts_with("xxxxxxxxxx"), "{out}");
+    assert!(out.contains("+90 more"), "{out}");
+    // A high byte has no glyph worth inventing.
+    assert_eq!(render_bytes(&[0xFF], 48), "<high>");
+}
+
+/// The hangup guard's two waits must not be swapped back.
+///
+/// `HUPLEAD` is the silence BEFORE `+++` and is paid in full every time —
+/// nothing arrives during it, because silence is what it waits for.
+/// `HUPTAIL` is the silence AFTER, and is free in the normal case because
+/// `XGETB` returns the moment the far end's `OK` lands.
+///
+/// They were 4 and 1 — generous where it costs, stingy where it does not —
+/// which made an SC126 hangup take fourteen seconds AND left the trailing
+/// wait with no margin over the far end's one-second Hayes guard.  Both
+/// halves of that are pinned here: the paid wait stays small, the free wait
+/// stays at least as large, and neither drops below the two passes a fast
+/// machine needs to clear one second.
+#[test]
+fn test_egt80_hangup_guard_keeps_its_cheap_wait_generous() {
+    let src = include_str!("../../EGT8080/EGT80.Z80");
+    let value = |name: &str| -> u32 {
+        src.lines()
+            .find_map(|l| {
+                let l = l.trim_start();
+                let rest = l.strip_prefix(name)?;
+                let rest = rest.trim_start().strip_prefix("EQU")?;
+                // Strip the trailing comment before parsing.
+                rest.trim().split(';').next()?.trim().parse().ok()
+            })
+            .unwrap_or_else(|| panic!("{name} EQU not found in EGT80.Z80"))
+    };
+    let lead = value("HUPLEAD");
+    let tail = value("HUPTAIL");
+    assert!(lead >= 2, "HUPLEAD={lead}: must clear the far end's 1s guard on a fast machine");
+    assert!(tail >= 2, "HUPTAIL={tail}: must clear the far end's 1s guard on a fast machine");
+    assert!(
+        tail >= lead,
+        "HUPTAIL={tail} < HUPLEAD={lead}: the FREE wait is now smaller than the PAID one, \
+         which is the arrangement that cost fourteen seconds and broke the escape's margin",
+    );
+}

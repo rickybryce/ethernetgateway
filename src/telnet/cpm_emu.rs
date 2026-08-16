@@ -65,7 +65,6 @@ use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Instructions per [`Cpm::run`] batch before the driver regains control to
@@ -307,25 +306,26 @@ const EGT80_NAME: &str = "EGT80.COM";
 const BUNDLED_TERMINALS: &[(&str, &[u8])] =
     &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
 
-/// Is the console-input byte trace armed?
+/// Is the byte trace armed?
 ///
-/// **A diagnostic, not a setting.** It exists to answer one question on real
-/// hardware — what does the gateway actually receive when a key is pressed on
-/// an SC126 running EGT80, and what does the escape state machine do with it —
-/// and questions like that are answered once and then stop being interesting.
-/// A config key would cost three screens and a manual entry for ever; an
-/// environment variable costs a line, and follows the `EGATEWAY_GATEWAY_DEBUG`
-/// precedent already in `config.rs`.
+/// **Folded into `gateway_debug`, not a switch of its own.** It began as a
+/// private `EGATEWAY_CPM_KEYTRACE` env var, which was a mistake twice over:
+/// an env var is undiscoverable, and the project already had this switch.
+/// `gateway_debug` is on all three configuration screens, is documented, and
+/// already carries `serial.rs`'s `[esc]` trace of the Hayes escape state
+/// machine.  Two answers to "how do I see the bytes" is the duplicated-rule
+/// shape this codebase keeps meeting.
 ///
-/// Read once: an operator cannot change their mind mid-session, and this is
-/// consulted on every keystroke.
+/// `EGATEWAY_GATEWAY_DEBUG` still forces it on for a headless run, because
+/// that override already existed for the same key.
+///
+/// Read fresh rather than cached: `gateway_debug` is documented as taking
+/// effect on the next session without a restart, and a `OnceLock` here would
+/// quietly break that promise.  The read is a mutex-guarded flag, and it is
+/// consulted once per byte on paths that already do far more per byte.
 pub(in crate::telnet) fn keytrace_on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("EGATEWAY_CPM_KEYTRACE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    crate::config::get_gateway_debug()
+        || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
 }
 
 /// A run of bytes, compactly, for the outbound half of the key trace.

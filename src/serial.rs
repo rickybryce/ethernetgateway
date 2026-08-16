@@ -3797,7 +3797,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
     state.last_command = cmd.to_string();
     // Gateway-debug: log every AT command the caller issues and a plain
     // description of what it does, alongside the existing [esc] traces.
-    if escape_trace_enabled() {
+    if modem_trace_enabled() {
         glog!(
             "[cmd] Port {}: \"{}\" -> {}",
             state.port_id.label(),
@@ -5208,7 +5208,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
                 return;
             }
             Some(Ok(s)) => {
-                if escape_trace_enabled() {
+                if modem_trace_enabled() {
                     glog!(
                         "Serial modem (Port {}): dial {} connected via {}",
                         label, addr_str, addr
@@ -5218,7 +5218,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
                 break;
             }
             Some(Err(e)) => {
-                if escape_trace_enabled() {
+                if modem_trace_enabled() {
                     glog!(
                         "Serial modem (Port {}): dial {} — connect to {} failed: {}",
                         label, addr_str, addr, e
@@ -5659,7 +5659,13 @@ fn guard_time(state: &ModemState) -> Duration {
 /// sequence) can see exactly which byte defeated it.  The flag read is a
 /// single Mutex acquisition with no allocation; called once per read, not
 /// per byte, so it costs nothing meaningful when off.
-fn escape_trace_enabled() -> bool {
+/// Is the modem trace armed?
+///
+/// One gate for everything this module reports at byte level: the `[esc]`
+/// Hayes escape state machine and the result codes below.  Named for the
+/// modem rather than the escape because its scope grew -- a gate whose name
+/// understates what it covers is how the next reader fails to find it.
+fn modem_trace_enabled() -> bool {
     config::get_gateway_debug()
         || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
 }
@@ -5678,7 +5684,7 @@ fn process_online_bytes(
     let guard = guard_time(state);
     // Per Hayes standard, S2 > 127 or S12 = 0 disables escape detection.
     let escape_enabled = esc <= 127 && !guard.is_zero();
-    let trace = escape_trace_enabled();
+    let trace = modem_trace_enabled();
 
     for &byte in data {
         let now = Instant::now();
@@ -5756,7 +5762,7 @@ fn check_plus_complete(state: &mut ModemState) -> bool {
         && Instant::now().duration_since(state.plus_start) >= guard_time(state)
     {
         state.plus_count = 0;
-        if escape_trace_enabled() {
+        if modem_trace_enabled() {
             glog!(
                 "[esc] Port {}: escape complete (guard time after 3rd char elapsed) — returning to command mode",
                 state.port_id.label()
@@ -6016,6 +6022,27 @@ fn verbose_message(msg: &str, x_code: u8, baud: u32) -> String {
 fn send_result(state: &mut ModemState, msg: &str) -> bool {
     if state.quiet {
         return true;
+    }
+    // The modem's own speech, traced separately from the session's.
+    //
+    // These bytes go straight to the UART, not through `TelnetSession`, and
+    // that is correct rather than a shortcut: on real hardware `OK` and
+    // `NO CARRIER` come from the modem on the desk, not from the host you
+    // dialled.  The trace has to mirror that split or it misreads the wire --
+    // during the EGT80 hangup work the session trace showed nothing here, and
+    // "the gateway sent nothing more" was a wrong conclusion drawn
+    // confidently from a real measurement.
+    //
+    // RESULT CODES ONLY.  Command-mode echo and forwarded data are not here,
+    // and the tag says `RESULT` so this cannot be read as every byte the
+    // modem writes.  A trace that overclaims its coverage is worse than none.
+    if modem_trace_enabled() {
+        glog!(
+            "[modem] Port {}: RESULT {}{}",
+            state.port_id.label(),
+            msg,
+            if state.verbose { "" } else { " (numeric)" }
+        );
     }
     let cr = state.s_regs[3];
     let lf = state.s_regs[4];
