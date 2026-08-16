@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - Unreleased
+
+### Changed
+
+- **`cpm_boot_writable` now defaults to `true`** — a booted disk may write to
+  its images unless you say otherwise. A vintage operating system saves files,
+  formats disks and updates its own directory; booting one read-only made every
+  `SAVE` appear to succeed and vanish at the next boot, which is a worse failure
+  than losing a disk because it is silent. The reason the setting exists is
+  unchanged — a booted guest writes raw sectors and no guard above it
+  understands the format — but the disks most people run here come from public
+  collections and can be fetched again, so a scrambled one costs a download
+  rather than the work on it. Turn it off to keep every disk exactly as it is.
+  **Existing installations are unaffected**: the key is written explicitly into
+  every `egateway.conf`, so an upgrade keeps whatever it already said. Note that
+  re-downloading a disk a guest scrambled means deleting your copy first — the
+  sample download never overwrites a file already in the images folder.
+
 ## [0.9.2] - 2026-08-15
 
 ### Added
@@ -5126,6 +5144,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - S-register persistence via `AT&W`.
 
 [Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.2...HEAD
+[0.9.3]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.2...HEAD
 [0.9.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.2
 [0.9.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.1
 [0.9.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.0

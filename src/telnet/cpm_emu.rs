@@ -438,12 +438,12 @@ impl TelnetSession {
             // disk, differing in what they asked and what they remembered, was
             // the confusion it caused.
             //
-            // `cpm_boot_writable` is off by default and it is a standing
-            // setting, so turning it on lets *every* visitor write to the
-            // image, not one person for one visit.  That is a real change in
-            // kind from the question the picker asked, which is why the key
-            // says so in `egateway.conf` and on all three screens rather than
-            // reading as a convenience.
+            // `cpm_boot_writable` is a standing setting rather than the
+            // per-visit question the picker asked, so it answers for *every*
+            // visitor at once — which is why the key says so in
+            // `egateway.conf` and on all three screens rather than reading as
+            // a convenience.  It defaults on: a booted OS that cannot save is
+            // the more surprising machine, and the disks are replaceable.
             let cfg = config::get_config();
             let erase = crate::cpm::boot::backspace_erases(&cfg.cpm_boot_backspace);
             let writable = cfg.cpm_boot_writable;

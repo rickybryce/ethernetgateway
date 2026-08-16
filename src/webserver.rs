@@ -3116,7 +3116,7 @@ fn render_more_popups(cfg: &Config) -> String {
         ),
         cpmwrite = checkbox(
             "cpm_boot_writable",
-            "A booted disk may WRITE to its images (off keeps every disk safe)",
+            "A booted disk may WRITE to its images (untick to discard its writes)",
             cfg.cpm_boot_writable,
         ),
         cpmmax = numfield(

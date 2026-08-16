@@ -147,11 +147,12 @@ Hard Disk BASIC, and CP/M 3.0.
 
 Inside a booted disk there is no jail, no A> from us and no EGT8080.  Press
 ESC twice to get back to the gateway.  A booted image is held by one session
-at a time.  Disks are opened READ-ONLY unless cpm_boot_writable is on, and
-that one answer covers the mounted disks as well as the booted one - the
-guest may write any of them, exactly as a machine with the write-protect
-tabs off would.  An image the host will not let us write stays read-only
-whatever that setting says.
+at a time.  Disks are opened WRITABLE unless cpm_boot_writable is turned
+off, and that one answer covers the mounted disks as well as the booted one
+- the guest may write any of them, exactly as a machine with the
+write-protect tabs off would.  Turn it off and writes are accepted and
+discarded, which keeps every disk exactly as it is.  An image the host will
+not let us write stays read-only whatever that setting says.
 
 Your mounted images do come along: each rides the controller slot its
 drive letter names (B: is slot 1, C: is slot 2), and the disk being booted
@@ -268,10 +269,12 @@ alone unless something misbehaves: the machine (auto - the disk is asked)
 and the processor.
 
 A booted image is held by ONE session at a time, and one disk cannot be
-booted and mounted at the same moment.  It opens READ-ONLY unless
-cpm_boot_writable is on (W on the telnet Boot settings screen, a checkbox
-in the web and desktop UIs).  Whatever you have mounted comes along for
-the ride, each disk at the controller slot its drive letter names.
+booted and mounted at the same moment.  It opens WRITABLE unless
+cpm_boot_writable is turned off (W on the telnet Boot settings screen, a
+checkbox in the web and desktop UIs) - a booted OS expects to be able to
+save, and discarding its writes loses the work silently.  Whatever you have
+mounted comes along for the ride, each disk at the controller slot its
+drive letter names.
 
 
 FORMATS YOU CAN MOUNT

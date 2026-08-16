@@ -1842,9 +1842,20 @@ impl App {
         // being a second way to boot.  Kept beside the CP/M controls rather than
         // with the disk mounting, because it is about what the guest may do,
         // not about which image is where.
+        //
+        // The label names what UNTICKING does, because ticked is the default:
+        // an operator reads a checkbox to find out what the other state costs.
         ui.checkbox(
             &mut self.cfg.cpm_boot_writable,
-            "A booted disk may WRITE to its images (off keeps every disk safe)",
+            "A booted disk may WRITE to its images (untick to discard its writes)",
+        )
+        .on_hover_text(
+            "On by default: a booted operating system saves files, formats disks \
+             and updates its own directory, and discarding those writes loses the \
+             work silently.  Covers the boot disk and every image mounted beside \
+             it.  Untick to keep every disk exactly as it is.  Re-downloading a \
+             disk a guest scrambled means deleting your copy first -- the sample \
+             download never overwrites a file already in the images folder.",
         );
         ui.horizontal(|ui| {
             labeled_field(
@@ -2014,7 +2025,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "A booted disk runs its OWN operating system and owns every drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not apply inside it.  Disks are opened read-only unless \"a booted disk may WRITE\" is ticked above, and that answer covers the mounted disks too.",
+            "A booted disk runs its OWN operating system and owns every drive: the gateway's A:-P:, EGT8080 and the CP/M prompt do not apply inside it.  Disks are opened writable unless \"a booted disk may WRITE\" is unticked above, and that answer covers the mounted disks too.",
         );
         // Which machine a BOOTED disk believes it is running on -- specifically
         // where it finds its console.  The same `MACHINE_CHOICES` list the telnet

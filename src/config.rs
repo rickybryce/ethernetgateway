@@ -386,15 +386,29 @@ const DEFAULT_CPM_EMU_ENABLED: bool = true;
 /// somebody else is sitting at is not a keystroke.
 const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 
-/// Booting is read-only unless the operator says otherwise.
+/// Booting writes to its images unless the operator says otherwise.
 ///
-/// The safe answer, and the one that was already in force: until 0.9.2 a
-/// writable boot could only be asked for on the telnet mount wizard's boot
-/// picker, one visit at a time, and every other route booted read-only.  When
-/// that picker went — two ways to boot one disk was the confusion it caused —
-/// the *question* had to survive it, or removing a screen would have quietly
-/// removed a capability.
-const DEFAULT_CPM_BOOT_WRITABLE: bool = false;
+/// **On, because a disk that cannot be written is not the machine the software
+/// expects.**  A vintage operating system saves files, formats disks and
+/// updates its own directory; boot one read-only and every `SAVE` appears to
+/// work and is gone at the next boot.  That is a worse failure than losing a
+/// disk, because it is silent — the guest is told the write succeeded, since
+/// the alternative is to fail writes at a guest that has no idea what to do
+/// about it.
+///
+/// This was `false` up to 0.9.2, on the argument that a booted guest has no
+/// guard left that understands its requests.  That argument is still true and
+/// is why this is a key at all; what changed is the judgement of which failure
+/// an operator would rather have.  The disks most people run here come from
+/// public collections and can be had again, so a scrambled one costs a
+/// download rather than the work on it.
+///
+/// **Recovery is not automatic, and every surface that offers this says so.**
+/// [`crate::cpm::fetch::missing`] never overwrites a file already in the
+/// images folder — that file is the operator's, possibly their own disk under
+/// a catalogue name — so re-fetching a disk the guest scrambled means deleting
+/// it first.
+const DEFAULT_CPM_BOOT_WRITABLE: bool = true;
 /// Refuse connections whose source address ends in `.1` — typically the router
 /// on the local subnet — while the IP allowlist is in force.
 ///
@@ -878,11 +892,13 @@ pub struct Config {
     pub open_screen_after_restart: bool,
     /// May a booted disk write to the images it is running?
     ///
-    /// **Off, because a booted disk has no guard left that understands its
-    /// requests.**  Mounting goes through our own filesystem and can refuse a
-    /// bad one; a booted guest owns the whole image and rewrites the file when
-    /// it leaves, so the only protections that remain are blunt — this, and one
-    /// session per image.  See [`DEFAULT_CPM_BOOT_WRITABLE`].
+    /// **On, because a guest whose writes are discarded loses work silently.**
+    /// A booted disk has no guard left that understands its requests — mounting
+    /// goes through our own filesystem and can refuse a bad one, while a booted
+    /// guest owns the whole image and rewrites the file when it leaves — so the
+    /// only protections that remain are blunt: this key, and one session per
+    /// image.  See [`DEFAULT_CPM_BOOT_WRITABLE`] for why the blunt one defaults
+    /// open, and what recovery does and does not do for you.
     pub cpm_boot_writable: bool,
     /// Refuse connections from `*.*.*.1` (the local router, typically) while
     /// the IP allowlist applies.  Off by default; see
@@ -2527,15 +2543,18 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   terminal is.  The ESC ESC exit gesture is NOT honoured from a browser:
 #   ending a session somebody else is sitting at is not a keystroke.
 # cpm_boot_writable: may a booted disk WRITE to the images it is running?
-#   Off by default, and think before turning it on.  A mounted image is read
-#   through our own filesystem, which can refuse a request it does not like; a
-#   booted disk owns the whole image and rewrites the file when it leaves, so
-#   there is no guard left that understands what the guest is asking for.  What
-#   remains is blunt: this key, and one session per image.  It applies to the
-#   boot disk AND to every image that comes along mounted, because they are all
-#   in the same machine.  Off means the guest's writes are accepted and
-#   discarded, which is what most vintage software expects to be able to do
-#   without you losing the disk.
+#   ON by default, because a vintage OS saves files, formats disks and updates
+#   its own directory -- boot one read-only and every SAVE appears to work and
+#   is gone at the next boot.  A mounted image is read through our own
+#   filesystem, which can refuse a request it does not like; a booted disk owns
+#   the whole image and rewrites the file when it leaves, so there is no guard
+#   left that understands what the guest is asking for.  What remains is blunt:
+#   this key, and one session per image.  It applies to the boot disk AND to
+#   every image that comes along mounted, because they are all in the same
+#   machine.  Turn it off and the guest's writes are accepted and discarded,
+#   which keeps every disk exactly as it is.  Note that re-downloading a disk
+#   the guest scrambled means deleting your copy first: the download never
+#   overwrites a file already in the images folder.
 # open_screen_after_restart: NOT a setting -- a one-shot marker the desktop UI
 #   leaves for itself.  Turning the web server on from the VDM / Dazzler button
 #   restarts the gateway, and this is how the window that comes back knows to
@@ -2578,7 +2597,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   which carries four to a drive.  The guest names them itself and reaches
 #   only as many as its own BIOS knows - four drives for stock Altair CP/M, and
 #   for the 88-HDSK CP/M the fixed platter as its B:.  Disks are opened
-#   READ-ONLY unless cpm_boot_writable is on, and that answer covers
+#   WRITABLE unless cpm_boot_writable is turned off, and that answer covers
 #   the mounted disks as well as the booted one.
 #   A name that is no longer in CPM/images runs the EMULATOR instead and says
 #   so in the log: this is a preference about which machine to run, so deleting
@@ -4178,8 +4197,10 @@ mod tests {
             cpm_mounts: "A=altair8_games.dsk,C=ibm3740_tools.dsk".to_string(),
             cpm_boot_image: "altair8_cpm.dsk".to_string(),
             // Deliberately not the default, so the roundtrip proves the key is
-            // written and read back rather than merely defaulting twice.
-            cpm_boot_writable: true,
+            // written and read back rather than merely defaulting twice.  It
+            // was `true` while the default was `false`; both have to move
+            // together or this stops testing anything.
+            cpm_boot_writable: false,
             // A one-shot marker, not a setting -- but it round-trips like any
             // other key and a roundtrip test that skipped it would not notice
             // it being dropped from the writer.

@@ -825,7 +825,11 @@ impl Wizard {
             &format!(
                 "{}. They are not ours — this fetches them for you when you finish, into \
                  {}/CPM/images, and anything already there is left alone. You can do it \
-                 later instead from Mount CP/M Drives.",
+                 later instead from Mount CP/M Drives. A disk you go on to BOOT may write \
+                 to these images, which is how a vintage operating system saves your work; \
+                 untick \"a booted disk may WRITE to its images\" under More... on the \
+                 AI Chat, Browser, Weather & CP/M panel if you would rather they never \
+                 changed.",
                 sample_disk_offer(),
                 self.transfer_dir.trim(),
             ),
