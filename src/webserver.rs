@@ -3347,13 +3347,8 @@ fn render_more_popups(cfg: &Config) -> String {
         kma = numfield("kermit_resume_max_age_hours", "Resume max age (h)", cfg.kermit_resume_max_age_hours),
         kls = checkbox("kermit_locking_shifts", "Locking shifts", cfg.kermit_locking_shifts),
         kwr = checkbox("kermit_wait_for_receiver", "Wait for receiver NAK (download)", cfg.kermit_wait_for_receiver),
-        atd = checkbox_with_attr(
-            "allow_atdt_kermit",
-            "Allow ATDT KERMIT (modem emulator)",
-            cfg.allow_atdt_kermit,
-            "onchange=\"warnOnEnable(this, 'warn-atdt-kermit')\"",
-        ),
-        apd = checkbox("allow_peer_dial", "Allow peer-dial (ATD Port@IP / ring modem ports)", cfg.allow_peer_dial),
+        atd = atdt_kermit_checkbox(cfg),
+        apd = peer_dial_checkbox(cfg),
         pbs = numfield("punter_block_size", "Block size (8-255)", cfg.punter_block_size),
         pneg = numfield("punter_negotiation_timeout", "Neg (s)", cfg.punter_negotiation_timeout),
         pblk = numfield("punter_block_timeout", "Block (s)", cfg.punter_block_timeout),
@@ -3364,12 +3359,24 @@ fn render_more_popups(cfg: &Config) -> String {
     ));
 
     // Per-port serial popups.
-    out.push_str(&serial_more_popup("serial_a", "Port A", &cfg.serial_a));
-    out.push_str(&serial_more_popup("serial_b", "Port B", &cfg.serial_b));
+    out.push_str(&serial_more_popup("serial_a", "Port A", &cfg.serial_a, cfg));
+    out.push_str(&serial_more_popup("serial_b", "Port B", &cfg.serial_b, cfg));
     out
 }
 
-fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig) -> String {
+/// One serial port's "More" popup.
+///
+/// Takes the whole `cfg` as well as the port, because the Modem Dial Targets
+/// section at the foot shows two **global** settings rather than per-port ones.
+/// That is deliberate and it mirrors the desktop GUI, where the same two
+/// checkboxes appear under Port A and Port B: either port's modem can reach
+/// either dial target, so tucking them under one port would be arbitrary.
+fn serial_more_popup(
+    prefix: &str,
+    label: &str,
+    port: &config::SerialPortConfig,
+    cfg: &Config,
+) -> String {
     let mode_sel_modem = if port.mode == "modem" { "selected" } else { "" };
     let mode_sel_console = if port.mode == "console" { "selected" } else { "" };
     let mode_sel_kermit = if port.mode == "kermit" { "selected" } else { "" };
@@ -3413,6 +3420,11 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
          (AT&amp;Zn=s / ATDSn)</span></div>\
          <div class=\"row\">{n0} {n1}</div>\
          <div class=\"row\">{n2} {n3}</div>\
+         <h3>Modem Dial Targets</h3>\
+         <div class=\"row\"><span class=\"sub\">Both are single global settings, \
+         shown on each port because either port's modem can reach them.</span></div>\
+         <div class=\"row\">{atd}</div>\
+         <div class=\"row\">{apd}</div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save_and_restart_serial", "Save", "secondary"),
@@ -3445,6 +3457,13 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
             "title=\"Drive DTR as a carrier proxy (asserted on CONNECT, dropped on NO CARRIER, per AT&C). Wire DTR->DCD via null-modem. Off = the gateway never touches the modem-control lines. Modem mode only.\"",
         ),
         sregs = html_escape(&port.s_regs),
+        // The two global dial-target opt-ins, rendered from the one definition
+        // the Kermit section also uses -- see `atdt_kermit_checkbox`.  They are
+        // NOT per-port, hence no `prefix`: this popup shows them the way the
+        // desktop GUI does, once per port popup, and `syncShared` keeps the
+        // copies from disagreeing inside the single form.
+        atd = atdt_kermit_checkbox(cfg),
+        apd = peer_dial_checkbox(cfg),
         n0 = textfield(&format!("{}_stored_0", prefix), "Slot 0", &port.stored_numbers[0], false, 16),
         n1 = textfield(&format!("{}_stored_1", prefix), "Slot 1", &port.stored_numbers[1], false, 16),
         n2 = textfield(&format!("{}_stored_2", prefix), "Slot 2", &port.stored_numbers[2], false, 16),
@@ -3496,6 +3515,41 @@ fn checkbox_with_attr(name: &str, label: &str, checked: bool, attr: &str) -> Str
         chk = if checked { "checked" } else { "" },
         attr = attr,
         label = html_escape(label),
+    )
+}
+
+/// The `allow_atdt_kermit` checkbox, wherever it appears.
+///
+/// One definition because this control is rendered in more than one place, and
+/// two hand-written copies is how the *same* setting came to be described two
+/// different ways: this page said "(modem emulator)" where the desktop GUI said
+/// "(bypasses security)".  One named a subsystem, the other named the cost --
+/// and the cost is the thing an operator scanning the page needs to see.  The
+/// GUI's wording won.
+///
+/// `syncShared` runs from inside `warnOnEnable`, so every copy tracks both the
+/// click and a cancelled warning.
+fn atdt_kermit_checkbox(cfg: &Config) -> String {
+    checkbox_with_attr(
+        "allow_atdt_kermit",
+        "Allow ATDT KERMIT (bypasses security)",
+        cfg.allow_atdt_kermit,
+        "onchange=\"warnOnEnable(this, 'warn-atdt-kermit')\"",
+    )
+}
+
+/// The `allow_peer_dial` checkbox, wherever it appears.
+///
+/// Same reasoning as [`atdt_kermit_checkbox`].  No warning modal on this one:
+/// it dials another of your own serial ports rather than bypassing an auth
+/// gate, so it is an ordinary opt-in -- but it still has to stay in step with
+/// its copies, hence `syncShared`.
+fn peer_dial_checkbox(cfg: &Config) -> String {
+    checkbox_with_attr(
+        "allow_peer_dial",
+        "Allow peer-dial (ATD Port@IP / ring modem ports)",
+        cfg.allow_peer_dial,
+        "onchange=\"syncShared(this)\"",
     )
 }
 
@@ -3998,9 +4052,31 @@ function warnIfChangingWebPort(input) {
 }
 // Security-sensitive ENABLE toggles (mirrors the GUI's confirm-on-enable
 // popups): warn when the box is checked; Cancel unchecks it.
+// Keep every copy of a shared setting in step.
+//
+// `allow_atdt_kermit` and `allow_peer_dial` are single global settings shown in
+// more than one place (the Kermit section and both serial popups), the way the
+// desktop GUI shows them in both port popups.  There the two widgets bind to one
+// `&mut bool` and cannot disagree; here they are separate <input>s in ONE form
+// -- every popup is a modal div inside `cfg-form`, not a form of its own.
+//
+// Letting them disagree is a real defect, not a cosmetic one: `parse_form` keeps
+// the LAST value for a repeated name, and an unchecked checkbox submits nothing
+// at all.  So unticking one copy while another stayed ticked would submit `on`
+// and silently discard the operator's change -- on `allow_atdt_kermit`, the one
+// setting here that bypasses the auth gate.
+function syncShared(el) {
+  document.querySelectorAll('input[name=' + el.name + ']').forEach(function(o) {
+    if (o !== el) o.checked = el.checked;
+  });
+}
 function warnOnEnable(cb, id) {
+  // Sync first, so every copy reflects the click even if the warning is
+  // cancelled a moment later -- and again on cancel, because `showWarn`'s
+  // revert only knows about the box that was clicked.
+  syncShared(cb);
   if (cb.checked) {
-    showWarn(id, function() { cb.checked = false; });
+    showWarn(id, function() { cb.checked = false; syncShared(cb); });
   }
 }
 // Grey out the Master/Slave fields that don't apply to the selected role:
@@ -5660,6 +5736,49 @@ mod tests {
             !with_password.contains("class=\"pubkey\""),
             "password auth does not use this key, so showing it invites a pointless paste"
         );
+    }
+
+    /// The two global dial-target opt-ins appear on every surface that can
+    /// reach them, and every copy is wired to stay in step.
+    ///
+    /// This page is **one** `<form>` -- the popups are modal divs inside it --
+    /// so repeating a checkbox name is not free.  `parse_form` keeps the last
+    /// value for a repeated key and an unchecked box submits nothing, so two
+    /// copies that disagree submit `on` and silently discard an operator's
+    /// untick.  Every copy therefore carries an `onchange` that calls
+    /// `syncShared` (directly, or via `warnOnEnable` which calls it too).
+    ///
+    /// The browser-side behaviour was verified by driving a real headless
+    /// browser: ticking one copy checks all three, unticking a *different* copy
+    /// clears all three, and cancelling the ATDT warning reverts all three.
+    /// That last one matters most -- without it a cancelled security warning
+    /// would still have submitted `on` from the copies it did not know about.
+    #[test]
+    fn test_shared_dial_target_checkboxes_are_kept_in_step() {
+        let html = render_main_page(&Config::default(), None, false);
+        for (name, handler) in
+            [("allow_atdt_kermit", "warnOnEnable"), ("allow_peer_dial", "syncShared")]
+        {
+            let needle = format!("name=\"{name}\"");
+            let copies = html.matches(&needle).count();
+            assert!(copies > 1, "{name} should appear more than once, got {copies}");
+            // Every occurrence must carry a handler, not just the first.
+            let wired = html.matches(handler).count();
+            assert!(
+                wired >= copies,
+                "{name} has {copies} copies but only {wired} {handler} handlers — \
+                 an unwired copy can disagree with the others and eat a change",
+            );
+        }
+        assert!(html.contains("function syncShared"), "the sync itself is missing");
+        // The label names the cost, as the GUI's does.  "(modem emulator)" said
+        // which subsystem it belonged to and not what it does to your security.
+        assert!(html.contains("Allow ATDT KERMIT (bypasses security)"));
+        // One heading per serial popup, and it covers BOTH checkboxes: the old
+        // "Direct-to-Kermit Dial Target" named only the first of the two, and
+        // peer-dial does not reach Kermit at all.
+        assert_eq!(html.matches("<h3>Modem Dial Targets</h3>").count(), 2);
+        assert!(!html.contains("Direct-to-Kermit"), "the misleading heading is gone");
     }
 
     /// The Server / General / serial popups group their controls under the

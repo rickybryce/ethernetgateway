@@ -2811,7 +2811,13 @@ impl App {
         ui.separator();
         ui.add_space(2.0);
         ui.label(
-            egui::RichText::new("Direct-to-Kermit Dial Target")
+            // "Modem Dial Targets", not "Direct-to-Kermit Dial Target", which
+            // named only the first of the two checkboxes below it.  Peer-dial
+            // reaches another *serial port* (ATD Port@IP), not Kermit -- filing
+            // it under a Kermit heading described the wrong destination.  What
+            // the two do share is that each opens a dial target an ATD/ATDT
+            // command can reach from a modem port, which is what this says.
+            egui::RichText::new("Modem Dial Targets")
                 .strong()
                 .color(AMBER),
         );
