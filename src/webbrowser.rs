@@ -267,6 +267,51 @@ fn is_tls_error(e: &ureq::Error) -> bool {
     msg.contains("corrupt message") || msg.contains("InvalidContentType")
 }
 
+/// Does this error mean the host simply serves no HTTPS at all?
+///
+/// A great deal of the web this browser exists for is HTTP-only, with nothing
+/// listening on 443 -- textfiles.com is the canonical example.  Typing a bare
+/// hostname gives `https://` (see `normalize_url`), so without this those
+/// sites were unreachable by name: the connection was refused and the error
+/// was returned rather than retried.  Only an explicit `http://` worked, which
+/// is not something a reader should have to know.
+///
+/// Matched on the ERROR VARIANT rather than on message text, and narrowly:
+///
+/// * `Io` with a refused/reset/aborted connection means nothing is answering
+///   on 443.  Retrying over HTTP is the useful thing to do.
+/// * `HostNotFound` is deliberately excluded -- DNS failed, so HTTP would fail
+///   identically and a retry only doubles the wait before the same error.
+/// * `Timeout` IS included, via `https_timed_out` -- and that is a judgement
+///   call worth stating.  A filtered 443 and a merely slow HTTPS server look
+///   identical from here, so a genuinely slow site can be dropped to
+///   cleartext.  It is included anyway because DROPPING packets on 443 is how
+///   most HTTP-only hosts present (textfiles.com among them), the fallback is
+///   announced rather than silent, and a site that cannot answer within
+///   `HTTP_TIMEOUT_SECS` is already unusable here.  The alternative was that
+///   a large part of the old web could not be reached by name at all.
+///
+/// The downgrade stays **visible** either way -- see the notice prepended by
+/// the caller.  An attacker able to refuse 443 can force this, exactly as one
+/// able to break the handshake could already; the answer to that is to tell
+/// the reader, not to make honest HTTP-only sites unreachable.
+fn https_timed_out(e: &ureq::Error) -> bool {
+    matches!(e, ureq::Error::Timeout(_))
+}
+
+fn no_https_service(e: &ureq::Error) -> bool {
+    matches!(
+        e,
+        ureq::Error::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+    )
+}
+
 /// True if `ip` is an address the text browser must never reach — a basic
 /// SSRF guard so a telnet/SSH user (or an attacker-controlled redirect)
 /// can't pivot to the gateway's own services (e.g. the web-config server
@@ -402,7 +447,7 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
     );
 
     let mut current = url.to_string();
-    let mut tls_downgraded = false;
+    let mut downgrade: Option<DowngradeReason> = None;
     let mut hops = start_hops;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
@@ -413,10 +458,21 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
             .call()
         {
             Ok(r) => r,
-            // HTTPS TLS failure: retry the same resource over HTTP
-            // (re-guarded at the top of the next iteration).
-            Err(e) if current.starts_with("https://") && is_tls_error(&e) => {
-                tls_downgraded = true;
+            // No usable HTTPS: retry the same resource over HTTP (re-guarded
+            // at the top of the next iteration).  Two distinct reasons, kept
+            // apart so the warning can say which -- "TLS error" is alarming
+            // and wrong for a site that simply never offered HTTPS.
+            Err(e)
+                if current.starts_with("https://")
+                    && (is_tls_error(&e) || no_https_service(&e) || https_timed_out(&e)) =>
+            {
+                downgrade = Some(if is_tls_error(&e) {
+                    DowngradeReason::TlsFailed
+                } else if https_timed_out(&e) {
+                    DowngradeReason::NoResponse
+                } else {
+                    DowngradeReason::NoHttps
+                });
                 current = format!("http://{}", &current["https://".len()..]);
                 continue;
             }
@@ -496,18 +552,35 @@ fn fetch_and_render_from(url: &str, width: usize, start_hops: usize) -> Result<W
 
     page.sanitize();
 
-    if tls_downgraded {
-        prepend_tls_downgrade_notice(&mut page, width);
+    if let Some(reason) = downgrade {
+        prepend_downgrade_notice(&mut page, width, reason);
     }
     Ok(page)
 }
 
-/// Insert a visible warning at the top of the page when we silently
-/// fell back from HTTPS to HTTP because of a TLS error.  Without this,
-/// the user has no signal that their request is now in the clear —
-/// dangerous for any page that reads cookies, form data, or
-/// authentication.
-fn prepend_tls_downgrade_notice(page: &mut WebPage, width: usize) {
+/// Why a page ended up being fetched over cleartext HTTP.
+///
+/// Kept apart because the two say different things to a reader: one is a
+/// site that never offered HTTPS, which is ordinary on the web this browser
+/// serves; the other is HTTPS that was offered and did not work, which is
+/// worth a raised eyebrow.  Reporting both as "TLS error" made the common,
+/// harmless case look like the alarming one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DowngradeReason {
+    /// Nothing is listening for HTTPS on this host.
+    NoHttps,
+    /// HTTPS never answered -- 443 is filtered rather than refused, which is
+    /// how most HTTP-only hosts present.
+    NoResponse,
+    /// HTTPS answered but the handshake failed.
+    TlsFailed,
+}
+
+/// Insert a visible warning at the top of the page when we fell back from
+/// HTTPS to HTTP.  Without this, the user has no signal that their request is
+/// now in the clear - dangerous for any page that reads cookies, form data,
+/// or authentication.
+fn prepend_downgrade_notice(page: &mut WebPage, width: usize, reason: DowngradeReason) {
     // ASCII ONLY, deliberately.  This notice is prepended AFTER
     // `page.sanitize()`, so it never passes through the terminal-safe fold
     // that page text does -- whatever is written here reaches the wire as-is.
@@ -515,7 +588,11 @@ fn prepend_tls_downgrade_notice(page: &mut WebPage, width: usize) {
     // unrenderable characters on a 7-bit console: our own security warning
     // arrived as garbage on exactly the terminals this gateway exists for.
     // Found by surveying real sites, on a site whose TLS actually fails.
-    let notice = "[!] HTTPS failed (TLS error) - page fetched over plain HTTP.";
+    let notice = match reason {
+        DowngradeReason::NoHttps => "[!] No HTTPS on this site - fetched over plain HTTP.",
+        DowngradeReason::NoResponse => "[!] HTTPS did not respond - fetched over plain HTTP.",
+        DowngradeReason::TlsFailed => "[!] HTTPS failed (TLS error) - fetched over plain HTTP.",
+    };
     // Char count rather than byte length: the two agree while this is ASCII,
     // and this stays correct if it ever legitimately gains a wider character.
     let separator = "-".repeat(notice.chars().count().min(width));
@@ -1710,7 +1787,7 @@ mod tests {
             forms: vec![],
             url: "http://example.com/".to_string(),
         };
-        prepend_tls_downgrade_notice(&mut page, 80);
+        prepend_downgrade_notice(&mut page, 80, DowngradeReason::TlsFailed);
         for line in &page.lines {
             assert!(
                 line.is_ascii(),
@@ -1722,6 +1799,24 @@ mod tests {
             "the warning must actually be there: {:?}",
             page.lines,
         );
+
+        // The other reason takes the same path and must be ASCII too -- and
+        // must NOT cry "TLS error" at a site that simply has no HTTPS, which
+        // is ordinary on the web this browser is for.
+        let mut plain = WebPage {
+            title: None,
+            lines: vec!["body".to_string()],
+            links: vec![],
+            forms: vec![],
+            url: "http://textfiles.com/".to_string(),
+        };
+        prepend_downgrade_notice(&mut plain, 80, DowngradeReason::NoHttps);
+        for line in &plain.lines {
+            assert!(line.is_ascii(), "not ASCII: {line:?}");
+        }
+        let text = plain.lines.join(" ");
+        assert!(text.contains("No HTTPS"), "must say what happened: {text:?}");
+        assert!(!text.contains("TLS error"), "must not blame TLS: {text:?}");
     }
 
     /// `<noscript>` content is markup for us, not text.
