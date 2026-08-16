@@ -5304,6 +5304,12 @@ where
 
     let mut serial_buf = [0u8; 256];
     let mut duplex_buf = [0u8; 4096];
+    // Output still owed to the wire, and how much of it has gone.  See
+    // `wire_chunk`: this is what keeps the read above running while a talkative
+    // guest is printing.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut sent = 0usize;
+    let chunk = wire_chunk(state.baud);
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
@@ -5342,21 +5348,32 @@ where
             Err(_) => return OnlineExit::Disconnected,
         }
 
-        // Duplex → serial (write in small chunks so slow baud rates stay responsive)
-        let result = state.handle.block_on(async {
-            tokio::time::timeout(Duration::from_millis(10), duplex_read.read(&mut duplex_buf))
-                .await
-        });
-        match result {
-            Ok(Ok(0)) => return OnlineExit::Disconnected,
-            Ok(Ok(n)) => {
-                if state.port.write_all(&duplex_buf[..n]).is_err() {
-                    return OnlineExit::Disconnected;
-                }
-                let _ = state.port.flush();
+        // Duplex → serial, in bounded chunks so the read above keeps running.
+        //
+        // Only fetch more once the last lot is on the wire: that is the
+        // backpressure, and it lets the duplex buffer hold the backlog instead
+        // of this thread.
+        if sent >= pending.len() {
+            pending.clear();
+            sent = 0;
+            let result = state.handle.block_on(async {
+                tokio::time::timeout(Duration::from_millis(10), duplex_read.read(&mut duplex_buf))
+                    .await
+            });
+            match result {
+                Ok(Ok(0)) => return OnlineExit::Disconnected,
+                Ok(Ok(n)) => pending.extend_from_slice(&duplex_buf[..n]),
+                Ok(Err(_)) => return OnlineExit::Disconnected,
+                Err(_) => {} // timeout — no data from duplex
             }
-            Ok(Err(_)) => return OnlineExit::Disconnected,
-            Err(_) => {} // timeout — no data from duplex
+        }
+        if sent < pending.len() {
+            let end = (sent + chunk).min(pending.len());
+            if state.port.write_all(&pending[sent..end]).is_err() {
+                return OnlineExit::Disconnected;
+            }
+            let _ = state.port.flush();
+            sent = end;
         }
 
         // Check trailing +++ guard time
@@ -5553,9 +5570,37 @@ impl PetsciiPunctState {
 
 /// Online mode for direct TCP connections (ATDT host:port).
 /// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
+/// How many bytes an online-mode pump hands the serial port in one pass.
+///
+/// **This is the keyboard's latency, not a buffer-size preference.** The write
+/// is synchronous and `flush()` waits for the UART to drain, so the pump is
+/// deaf to the wire for exactly as long as the chunk takes to go out. Handing
+/// it a whole 4 KB read is 4.3 seconds of that at 9600 baud -- which is how a
+/// booted guest sitting in a `PRINT` loop made CTRL-C look dead: the bytes were
+/// never lost, just never *read*, and they all arrived at once when the guest
+/// finally stopped printing. Measured from an SC126, under EGT80 **and** QTERM,
+/// which is what put the fault below the terminal.
+///
+/// Sized as a fixed slice of wire time rather than a fixed byte count so the
+/// answer is the same at every baud: 25 ms is far below what a person notices
+/// while still being many bytes at speed. The floor of one byte matters --
+/// below about 400 baud a 25 ms budget rounds to zero, and a chunk of zero
+/// would make no progress at all.
+fn wire_chunk(baud: u32) -> usize {
+    const BUDGET_MS: usize = 25;
+    // 8N1 is ten bits on the wire per byte, start and stop included.
+    let bytes_per_sec = (baud.max(50) / 10) as usize;
+    (bytes_per_sec * BUDGET_MS / 1000).clamp(1, 256)
+}
+
 fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> OnlineExit {
     let mut serial_buf = [0u8; 256];
     let mut tcp_buf = [0u8; 4096];
+    // As in `online_mode_duplex`: output owed to the wire, written a bounded
+    // chunk per pass so the serial read keeps running.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut sent = 0usize;
+    let chunk = wire_chunk(state.baud);
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
@@ -5599,37 +5644,43 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Err(_) => return OnlineExit::Disconnected,
         }
 
-        // TCP → serial
-        match tcp.read(&mut tcp_buf) {
-            Ok(0) => return OnlineExit::Disconnected,
-            Ok(n) => {
-                if state.petscii_translate {
-                    let mut translated = Vec::with_capacity(n);
-                    for &b in &tcp_buf[..n] {
-                        if let Some(stripped) = ansi.feed(b) {
-                            punct.feed(stripped, &mut translated);
+        // TCP → serial.  Translation happens as the bytes are taken from the
+        // socket; the wire sees them a bounded chunk at a time below, so a
+        // remote that floods cannot make this thread deaf to the keyboard.
+        if sent >= pending.len() {
+            pending.clear();
+            sent = 0;
+            match tcp.read(&mut tcp_buf) {
+                Ok(0) => return OnlineExit::Disconnected,
+                Ok(n) => {
+                    if state.petscii_translate {
+                        let mut translated = Vec::with_capacity(n);
+                        for &b in &tcp_buf[..n] {
+                            if let Some(stripped) = ansi.feed(b) {
+                                punct.feed(stripped, &mut translated);
+                            }
                         }
-                    }
-                    for b in translated.iter_mut() {
-                        *b = translate_ascii_to_petscii_byte(*b);
-                    }
-                    if !translated.is_empty() {
-                        if state.port.write_all(&translated).is_err() {
-                            return OnlineExit::Disconnected;
+                        for b in translated.iter_mut() {
+                            *b = translate_ascii_to_petscii_byte(*b);
                         }
-                        let _ = state.port.flush();
+                        pending.append(&mut translated);
+                    } else {
+                        pending.extend_from_slice(&tcp_buf[..n]);
                     }
-                } else {
-                    if state.port.write_all(&tcp_buf[..n]).is_err() {
-                        return OnlineExit::Disconnected;
-                    }
-                    let _ = state.port.flush();
                 }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return OnlineExit::Disconnected,
             }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => return OnlineExit::Disconnected,
+        }
+        if sent < pending.len() {
+            let end = (sent + chunk).min(pending.len());
+            if state.port.write_all(&pending[sent..end]).is_err() {
+                return OnlineExit::Disconnected;
+            }
+            let _ = state.port.flush();
+            sent = end;
         }
 
         // Check trailing +++ guard time
@@ -6067,6 +6118,48 @@ fn send_result(state: &mut ModemState, msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A chunk is a latency budget, so it is checked as one.**
+    ///
+    /// The pump writes synchronously and `flush()` waits for the UART, so it
+    /// cannot read the keyboard for as long as the chunk takes on the wire.
+    /// The property that matters is therefore not "the number is 24" but "no
+    /// chunk takes much longer than the budget at its own baud" -- which is
+    /// what a fixed byte count gets wrong, and what made CTRL-C look dead
+    /// through a booted guest printing in a loop.
+    #[test]
+    fn test_a_write_chunk_is_a_bounded_slice_of_wire_time() {
+        for baud in [110u32, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200] {
+            let chunk = wire_chunk(baud);
+            assert!(chunk >= 1, "{baud}: a zero chunk makes no progress at all");
+
+            // Milliseconds this chunk occupies the wire, at 10 bits a byte.
+            let ms = chunk as u64 * 10 * 1000 / baud as u64;
+            assert!(
+                ms <= 120,
+                "{baud} baud: a {chunk}-byte chunk holds the wire {ms} ms, so a \
+                 keystroke waits that long to be read",
+            );
+        }
+
+        // For contrast, the behaviour this replaced: the pump handed the port a
+        // whole 4096-byte read, which by the same arithmetic is 4266 ms at 9600
+        // baud -- not asserted here, because it is a constant expression and an
+        // assertion on one proves nothing.
+
+        // Faster wires get more bytes per pass, never fewer.
+        let mut last = 0;
+        for baud in [300u32, 1200, 9600, 115200] {
+            let c = wire_chunk(baud);
+            assert!(c >= last, "chunk must not shrink as the wire gets faster");
+            last = c;
+        }
+
+        // Bounded above, so a fast port cannot recreate the original stall.
+        assert!(wire_chunk(921_600) <= 256);
+        // And a nonsense baud cannot divide by zero or produce nothing.
+        assert!(wire_chunk(0) >= 1);
+    }
 
     /// Serialize tests that touch the global `CONSOLE_REQUEST`,
     /// `BRIDGE_ACTIVE`, or `SERIAL_RESTART` state.  cargo test runs
