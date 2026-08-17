@@ -1144,8 +1144,47 @@ impl TelnetSession {
                 // per character — a guest printing a directory listing would
                 // make two thousand of them — and a seam is a fifth of a
                 // millisecond, so nothing a person could perceive is lost.
-                // It comes first in the seam so that output is always on its
-                // way out before the idle nap below.
+                //
+                // **The keys below are read first, deliberately.** This write
+                // blocks whenever the caller's link is slower than the guest
+                // prints, which for a talkative guest on a serial line is
+                // always — and a keystroke waiting behind it is one the guest
+                // could have acted on a whole buffer earlier.  Reading the
+                // keyboard first costs nothing and means `CTRL-C` reaches a
+                // runaway `PRINT` loop at the top of the seam that noticed it,
+                // rather than after the seam's output has been handed over.
+                let mut keys = 0usize;
+                // Drain everything waiting rather than one byte per seam, so a
+                // pasted command or a file being sent into the guest's console
+                // moves at the wire's pace instead of one byte per 20,000
+                // instructions.  Bounded so a flood cannot hold the loop here.
+                while keys < 256 {
+                    let Some(read) = poll_once(self.session_read_byte()) else {
+                        break; // nothing waiting right now
+                    };
+                    let Some(b) = read? else {
+                        return Ok(()); // disconnected
+                    };
+                    keys += 1;
+                    // Two ESCs in a row leave, the same gesture the other
+                    // emulator uses. A single ESC is passed through, because
+                    // plenty of guest software wants it.  `is_esc_key` rather
+                    // than a bare 0x1B, so a Commodore's own escape gets a user
+                    // out too.
+                    if is_esc_key(b, is_petscii) {
+                        esc_run += 1;
+                        if esc_run >= 2 {
+                            return Ok(());
+                        }
+                    } else {
+                        esc_run = 0;
+                    }
+                    machine.send_key(boot_key_for_guest(b, is_petscii, erase));
+                }
+                if keys > 0 {
+                    last_key = tokio::time::Instant::now();
+                }
+
                 let out = machine.take_output();
                 if !out.is_empty() {
                     // The guest is driving a bare serial console, so its
@@ -1223,37 +1262,6 @@ impl TelnetSession {
                         .await?;
                 }
 
-                let mut keys = 0usize;
-                // Drain everything waiting rather than one byte per seam, so a
-                // pasted command or a file being sent into the guest's console
-                // moves at the wire's pace instead of one byte per 20,000
-                // instructions.  Bounded so a flood cannot hold the loop here.
-                while keys < 256 {
-                    let Some(read) = poll_once(self.session_read_byte()) else {
-                        break; // nothing waiting right now
-                    };
-                    let Some(b) = read? else {
-                        return Ok(()); // disconnected
-                    };
-                    keys += 1;
-                    // Two ESCs in a row leave, the same gesture the other
-                    // emulator uses. A single ESC is passed through, because
-                    // plenty of guest software wants it.  `is_esc_key` rather
-                    // than a bare 0x1B, so a Commodore's own escape gets a user
-                    // out too.
-                    if is_esc_key(b, is_petscii) {
-                        esc_run += 1;
-                        if esc_run >= 2 {
-                            return Ok(());
-                        }
-                    } else {
-                        esc_run = 0;
-                    }
-                    machine.send_key(boot_key_for_guest(b, is_petscii, erase));
-                }
-                if keys > 0 {
-                    last_key = tokio::time::Instant::now();
-                }
 
                 // Service the modem at the same seam: this is where the guest's
                 // synchronous UART rings cross into async I/O.

@@ -4959,6 +4959,24 @@ pub(crate) fn is_phone_number(s: &str) -> bool {
     has_digit && all_phone
 }
 
+/// How much session output may be in flight to a dialled-in caller.
+///
+/// **A backlog is measured in seconds, not bytes.** Whatever sits in this
+/// buffer is output the caller has not seen yet, so its size is how far behind
+/// the guest's *present* their screen is allowed to fall -- and anything they
+/// type is answered from that present, not from what they are reading. One
+/// second is short enough that a break, a prompt or a `^C` looks immediate, and
+/// long enough that the writer is not woken for every character.
+///
+/// The floor keeps a very slow line from thrashing the writer a byte at a time;
+/// the ceiling stops a fast one from re-creating the original stall. Both are
+/// bounds on the same quantity, which is why this is not a byte count.
+fn session_duplex_bufsize(baud: u32) -> usize {
+    // 8N1 is ten bits on the wire per byte, start and stop included.
+    let bytes_per_sec = (baud.max(50) / 10) as usize;
+    bytes_per_sec.clamp(64, 4096)
+}
+
 /// Dial into the local Ethernet Gateway menu via an in-memory duplex bridge.
 fn dial_ethernet_gateway(state: &mut ModemState) {
     send_result(state, "CONNECT");
@@ -4966,8 +4984,24 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     apply_carrier(state, true); // assert carrier for the duration of the call
 
     // Create a duplex pair: one end for TelnetSession, the other for this thread.
-    // Large buffer to handle slow baud rates (300–9600) without data loss.
-    let (async_stream, serial_stream) = tokio::io::duplex(65536);
+    //
+    // **Sized in wire time, not in bytes.** This buffer used to be a flat
+    // 64 KB, "to handle slow baud rates without data loss" -- but a buffer
+    // cannot lose data on this side, and a large one at a slow baud rate buys
+    // *latency* instead: 65536 bytes is 68 seconds of 9600-baud wire, and
+    // thirty-six minutes at 300.
+    //
+    // That is not a throughput question, it is a control question. A booted
+    // guest runs at emulated-CPU speed, so a `PRINT` loop fills the whole
+    // buffer at once and the caller is then watching output the guest produced
+    // a minute ago. Press CTRL-C and the guest breaks *immediately* -- and the
+    // screen keeps pouring for another minute, so it reads as a dead key.
+    // Reported from an SC126, and the reason a whole investigation went hunting
+    // for a lost keystroke that had never been lost: the break was in the
+    // backlog, queued behind everything already committed to the wire.
+    // Lowering the baud makes it worse, which is the opposite of the advice
+    // that shape of bug attracts.
+    let (async_stream, serial_stream) = tokio::io::duplex(session_duplex_bufsize(state.baud));
     let (async_read, async_write) = tokio::io::split(async_stream);
 
     let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(async_write);
@@ -6164,6 +6198,46 @@ fn send_result(state: &mut ModemState, msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A session backlog is measured in seconds, not bytes.**
+    ///
+    /// This buffer was a flat 64 KB "to handle slow baud rates without data
+    /// loss". It cannot lose data on this side; what it bought was latency --
+    /// 68 seconds of 9600-baud wire, 36 minutes at 300. A booted guest fills it
+    /// at emulated-CPU speed, so the caller reads a minute-old screen and a
+    /// CTRL-C that worked perfectly looks dead, because the break is queued
+    /// behind everything already committed.
+    ///
+    /// The property is therefore a bound on *time*, at every baud -- which is
+    /// what a byte count cannot express, and why anything that slows the drain
+    /// (a lower baud, smaller writes) makes it worse rather than better.
+    #[test]
+    fn test_the_session_backlog_is_bounded_in_seconds_not_bytes() {
+        for baud in [110u32, 300, 1200, 2400, 4800, 9600, 19200, 38400, 115200] {
+            let bytes = session_duplex_bufsize(baud);
+            let secs = bytes as f64 * 10.0 / baud as f64;
+            assert!(
+                secs <= 6.0,
+                "{baud} baud: {bytes} bytes is {secs:.1} s of backlog — a caller \
+                 cannot see the effect of a keystroke for that long",
+            );
+            assert!(bytes >= 64, "{baud}: too small to write into sanely");
+        }
+
+        // The old flat size, for contrast -- and the reason a lower baud made
+        // the report worse rather than better.
+        let old = 65536.0 * 10.0;
+        assert!(old / 9600.0 > 60.0, "64 KB was over a minute at 9600");
+        assert!(
+            old / 300.0 > 30.0 * 60.0,
+            "and over half an hour at 300 baud",
+        );
+
+        // A faster line may hold more, but never without bound.
+        assert!(session_duplex_bufsize(921_600) <= 4096);
+        // And a nonsense baud still yields a usable buffer.
+        assert!(session_duplex_bufsize(0) >= 64);
+    }
 
     /// **The wire trace must never be able to quote a password.**
     ///

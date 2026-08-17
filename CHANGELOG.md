@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CTRL-C reaches a booted CP/M guest, and you can see that it did.** Reported
+  from an SC126: a BASIC `PRINT` loop could not be broken, though the same disk
+  broke normally on an Altairduino.
+
+  The keystroke was never the problem — the *backlog* was. A dialled-in session
+  was bridged with a flat 64 KB buffer, added "to handle slow baud rates without
+  data loss": a buffer cannot lose data on that side, and a large one at a slow
+  baud rate buys latency instead. 65536 bytes is **68 seconds** of 9600-baud
+  wire and **36 minutes** at 300. A booted guest runs at emulated-CPU speed, so
+  a `PRINT` loop fills the whole buffer at once and the caller is reading a
+  minute-old screen. Press CTRL-C and the guest breaks *immediately*, while the
+  screen pours for another minute — so a key that worked perfectly reads as
+  dead, and the break sits in the backlog behind everything already committed.
+
+  The bridge is now sized in **wire time** (about a second, floored and capped),
+  so the effect of a keystroke is visible about as fast as a person can notice.
+  The boot loop also reads the keyboard *before* writing the guest's output,
+  since that write blocks whenever the caller's line is slower than the guest
+  prints — which for a talkative guest on a serial line is always.
+
+  Two things this shape of bug punishes, both of which were tried first: a lower
+  baud rate and smaller writes each *reduce the drain rate*, which multiplies
+  the latency rather than relieving it. The slow screen and the dead key were
+  one symptom, not two.
+
+
 ## [0.9.3] - 2026-08-16
 
 ### Security
