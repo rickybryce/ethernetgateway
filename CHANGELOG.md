@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.3] - Unreleased
+## [0.9.3] - 2026-08-16
 
 ### Security
 
@@ -5298,8 +5298,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.2...HEAD
-[0.9.3]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.3
 [0.9.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.2
 [0.9.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.1
 [0.9.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.0
