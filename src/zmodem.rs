@@ -2944,6 +2944,56 @@ mod tests {
         files.remove(0)
     }
 
+    /// **A streaming transfer through a bridge smaller than its subpackets.**
+    ///
+    /// A dialled-in session's bridge is now sized in wire time (~960 bytes at
+    /// 9600 baud) rather than a flat 64 KB, because 64 KB is 68 seconds of
+    /// backlog and made a booted guest's CTRL-C look dead. XMODEM cannot be
+    /// hurt by that -- it is stop-and-wait, so only one block is ever in
+    /// flight. ZMODEM is the one worth testing: it *streams*, so both ends can
+    /// have data to write at once, which is the shape that deadlocks on a
+    /// bridge too small to hold what either wants to say.
+    ///
+    /// It does not deadlock, because each direction of a duplex has its own
+    /// buffer and both halves are driven by independent tasks that keep
+    /// reading. Pinned here so a future change to either cannot quietly
+    /// reintroduce the risk.
+    #[tokio::test]
+    async fn test_streaming_survives_a_bridge_smaller_than_its_subpackets() {
+        for bridge in [960usize, 128, 64] {
+            let original: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+
+            let (sender_half, receiver_half) = tokio::io::duplex(bridge);
+            let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+            let (mut r_read, mut r_write) = tokio::io::split(receiver_half);
+
+            let data = original.clone();
+            let send_task = tokio::spawn(async move {
+                let batch: [(&str, &[u8]); 1] = [("big.bin", data.as_slice())];
+                zmodem_send(&mut s_read, &mut s_write, &batch, false, false)
+                    .await
+                    .unwrap();
+            });
+            let recv_task = tokio::spawn(async move {
+                zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true)
+                    .await
+                    .unwrap()
+            });
+
+            // Bounded, so a deadlock fails the test instead of hanging the suite.
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(60), send_task).await;
+            assert!(sent.is_ok(), "bridge={bridge}: sender deadlocked");
+            sent.unwrap().unwrap();
+            let got = tokio::time::timeout(std::time::Duration::from_secs(60), recv_task).await;
+            assert!(got.is_ok(), "bridge={bridge}: receiver deadlocked");
+            let mut files = got.unwrap().unwrap();
+            assert_eq!(files.len(), 1, "bridge={bridge}: one file expected");
+            let f = files.remove(0);
+            assert_eq!(f.data.len(), original.len(), "bridge={bridge}: length changed");
+            assert_eq!(f.data, original, "bridge={bridge}: data corrupted");
+        }
+    }
+
     #[tokio::test]
     async fn test_zmodem_round_trip_short() {
         let original = b"Hello, ZMODEM!";

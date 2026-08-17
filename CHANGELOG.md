@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the latency rather than relieving it. The slow screen and the dead key were
   one symptom, not two.
 
+  **File transfers are unaffected, and that is tested rather than argued.** A
+  buffer's size cannot change how long bytes take to reach the peer — only
+  whether our writer returns before they are on the wire — and no write in any
+  transfer path is wrapped in a timeout, so a paced write has nothing to trip.
+  An XMODEM-1K block (1029 bytes on the wire) no longer fits in the bridge at
+  once, so it is pinned round-tripping through bridges of 960, 1028 and **64**
+  bytes; ZMODEM, which streams and so is the shape that could deadlock rather
+  than merely slow, is pinned the same way under a bounded timeout so a
+  deadlock fails the test instead of hanging. Only the interactive session
+  bridge is resized; the `ATDT KERMIT` bridge is untouched.
+
 
 ## [0.9.3] - 2026-08-16
 

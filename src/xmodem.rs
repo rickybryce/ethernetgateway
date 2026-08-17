@@ -1706,6 +1706,64 @@ mod tests {
         recv_task.await.unwrap().0
     }
 
+    /// Round-trip through a bridge **smaller than one block**, which is what a
+    /// dialled-in session now is.
+    ///
+    /// The session bridge used to be a flat 64 KB and is now sized in wire time
+    /// -- about 960 bytes at 9600 baud -- because 64 KB is 68 seconds of
+    /// backlog and made a booted guest's CTRL-C look dead. The worry that
+    /// change raises is file transfers: an XMODEM-1K block is 1029 bytes on the
+    /// wire, so it no longer fits in the bridge at once.
+    ///
+    /// It must still transfer byte for byte. `write_all` completes across
+    /// partial writes, and the buffer's size cannot change how long bytes take
+    /// to reach the peer -- only whether our writer returns before they are on
+    /// the wire. Nothing in the transfer paths wraps a write in a timeout, so a
+    /// paced write has nothing to trip.
+    async fn xmodem_round_trip_through_bridge(original: &[u8], bridge: usize, use_1k: bool) -> Vec<u8> {
+        let (sender_half, receiver_half) = tokio::io::duplex(bridge);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = original.to_vec();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &data,
+                false, false, false, use_1k, None,
+            )
+            .await
+            .unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false)
+                .await
+                .unwrap()
+        });
+        send_task.await.unwrap();
+        recv_task.await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn test_transfers_survive_a_bridge_smaller_than_one_block() {
+        // 9600 baud sizing, and one byte narrower than a 1K block's framing.
+        for bridge in [960usize, 1028, 64] {
+            // Multi-block, every byte value, so a lost or duplicated partial
+            // write shows up as a mismatch rather than a plausible-looking file.
+            let original: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
+
+            let got = xmodem_round_trip_through_bridge(&original, bridge, true).await;
+            assert_eq!(
+                got.len(), original.len(),
+                "bridge={bridge}: 1K transfer changed length",
+            );
+            assert_eq!(got, original, "bridge={bridge}: 1K transfer corrupted");
+
+            // And the 128-byte path, which fits even the smallest bridge.
+            let got = xmodem_round_trip_through_bridge(&original, bridge, false).await;
+            assert_eq!(got, original, "bridge={bridge}: 128-byte transfer corrupted");
+        }
+    }
+
     #[tokio::test]
     async fn test_xmodem_round_trip_small() {
         let original = b"Hello, XModem!";
