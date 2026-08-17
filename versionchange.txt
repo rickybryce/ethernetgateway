@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 0.9.3
+# Current version: 0.9.4
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -43,6 +43,22 @@ SECURITY.md             # supported-versions table.  Deliberately worded "latest
 THIRD-PARTY-NOTICES.md  # only OUR OWN "[ethernetgateway X.Y.Z]" line; every other
 #                         X.Y.Z there belongs to a third-party crate.  Regenerated
 #                         wholesale by cargo-about at release time.
+#
+#                         BUT DIFF THE REGENERATION BEFORE COMMITTING IT.  On
+#                         2026-08-17 `cargo about generate about.hbs` differed
+#                         from the committed file in exactly one way: a crate's
+#                         MIT block came out with CRLF line endings, which
+#                         cargo-about passes through from the upstream licence
+#                         file verbatim.  The text was identical -- `diff -w`
+#                         showed nothing and `diff` showed twenty-two lines that
+#                         look the same, which is how it hides.  Find it with
+#                         `cmp` and `cat -A`, not by reading.
+#
+#                         Do not import that: this repo is LF, and a CRLF that
+#                         arrives inside a generated file is the same class of
+#                         trap as the source-scanning test that went red on
+#                         Windows only.  Bump our own line by hand when the
+#                         regeneration's only other change is line endings.
 usermanual.html         # .version header, sha256 example, Kermit identity, ATI/ATI3 strings, footer
 #                         DO NOT bump the historical refs: "removed in v0.6.0", "prior to v0.6.0"
 usermanual.pdf          # regenerate from the updated HTML — same tool as before:
