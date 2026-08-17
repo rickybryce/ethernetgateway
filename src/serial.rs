@@ -621,9 +621,19 @@ enum ModemMode {
 /// An active connection preserved across a +++ escape so that ATO can resume.
 enum ActiveConnection {
     Tcp(std::net::TcpStream),
+    /// A preserved in-memory bridge call, kept across a `+++` so `ATO` can
+    /// resume it.
+    ///
+    /// **Boxed rather than `DuplexStream` halves, so the two directions can be
+    /// sized independently.** `tokio::io::duplex(n)` caps *both* directions at
+    /// `n`, and the two have opposite requirements: session-to-caller wants to
+    /// be small, because whatever sits in it is backlog the caller has not seen
+    /// yet, while caller-to-session wants headroom, because the serial thread's
+    /// write into it is on a five-second timeout that drops the call.  One
+    /// number cannot serve both.
     Duplex {
-        read: tokio::io::ReadHalf<tokio::io::DuplexStream>,
-        write: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        read: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        write: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     },
     /// A preserved master/slave relay call (SSH).  `_session` keeps the
     /// SSH connection open across a `+++` escape so ATO can resume; the
@@ -4178,7 +4188,10 @@ fn handle_return_online(state: &mut ModemState) {
             match exit {
                 OnlineExit::Escaped => {
                     state.active_connection =
-                        Some(ActiveConnection::Duplex { read, write });
+                        Some(ActiveConnection::Duplex {
+                            read: Box::new(read),
+                            write: Box::new(write),
+                        });
                     send_result(state, "OK");
                 }
                 OnlineExit::Disconnected => {
@@ -4801,7 +4814,10 @@ fn bridge_duplex_online(state: &mut ModemState, bridge: tokio::io::DuplexStream)
     state.mode = ModemMode::Command;
     match exit {
         OnlineExit::Escaped => {
-            state.active_connection = Some(ActiveConnection::Duplex { read, write });
+            state.active_connection = Some(ActiveConnection::Duplex {
+                read: Box::new(read),
+                write: Box::new(write),
+            });
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
@@ -4959,6 +4975,21 @@ pub(crate) fn is_phone_number(s: &str) -> bool {
     has_digit && all_phone
 }
 
+/// Headroom for what a dialled-in caller types, in the other direction.
+///
+/// **This one is deliberately generous, and must not be sized like the output
+/// buffer.** The serial thread writes inbound bytes with a *five-second
+/// timeout* and treats expiry as a dead call — `OnlineExit::Disconnected`,
+/// carrier dropped, `NO CARRIER` (see `online_mode_duplex`). The session does
+/// not read while it is painting, so type-ahead, a pasted command or an upload
+/// arriving during a screen paint has to fit here or the call is torn down
+/// mid-use.
+///
+/// Sizing both directions from wire time — which `tokio::io::duplex` forces,
+/// since its argument caps each — would have made that *easier* the slower the
+/// line, the same trap as the backlog it was fixing.
+const SESSION_INPUT_BUFSIZE: usize = 65536;
+
 /// How much session output may be in flight to a dialled-in caller.
 ///
 /// **A backlog is measured in seconds, not bytes.** Whatever sits in this
@@ -4971,7 +5002,10 @@ pub(crate) fn is_phone_number(s: &str) -> bool {
 /// The floor keeps a very slow line from thrashing the writer a byte at a time;
 /// the ceiling stops a fast one from re-creating the original stall. Both are
 /// bounds on the same quantity, which is why this is not a byte count.
-fn session_duplex_bufsize(baud: u32) -> usize {
+///
+/// **Output only.** See `SESSION_INPUT_BUFSIZE` for why the inbound direction
+/// cannot share this number.
+fn session_output_bufsize(baud: u32) -> usize {
     // 8N1 is ten bits on the wire per byte, start and stop included.
     let bytes_per_sec = (baud.max(50) / 10) as usize;
     bytes_per_sec.clamp(64, 4096)
@@ -5001,8 +5035,13 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     // backlog, queued behind everything already committed to the wire.
     // Lowering the baud makes it worse, which is the opposite of the advice
     // that shape of bug attracts.
-    let (async_stream, serial_stream) = tokio::io::duplex(session_duplex_bufsize(state.baud));
-    let (async_read, async_write) = tokio::io::split(async_stream);
+    // Two simplex pipes, not one duplex: `duplex(n)` caps BOTH directions at
+    // `n`, and these two want opposite things -- see the two constants above.
+    //
+    // caller -> session: keystrokes, pasted commands, an upload.  Generous.
+    let (async_read, wire_write) = tokio::io::simplex(SESSION_INPUT_BUFSIZE);
+    // session -> caller: paced, because this is the backlog the caller reads.
+    let (wire_read, async_write) = tokio::io::simplex(session_output_bufsize(state.baud));
 
     let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(async_write);
     let writer_arc: crate::telnet::SharedWriter =
@@ -5039,17 +5078,19 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
         let _ = w.shutdown().await;
     });
 
-    // Bridge serial port <-> duplex stream on this thread.
-    let (mut duplex_read, mut duplex_write) =
-        tokio::io::split(serial_stream);
-    let exit = online_mode_duplex(state, &mut duplex_read, &mut duplex_write);
+    // Bridge serial port <-> session on this thread.  The halves come from two
+    // separately sized pipes, so this reads the paced output side and writes the
+    // roomy input side.
+    let mut wire_read = wire_read;
+    let mut wire_write = wire_write;
+    let exit = online_mode_duplex(state, &mut wire_read, &mut wire_write);
 
     state.mode = ModemMode::Command;
     match exit {
         OnlineExit::Escaped => {
             state.active_connection = Some(ActiveConnection::Duplex {
-                read: duplex_read,
-                write: duplex_write,
+                read: Box::new(wire_read),
+                write: Box::new(wire_write),
             });
             send_result(state, "OK");
         }
@@ -5136,8 +5177,8 @@ fn dial_kermit_server(state: &mut ModemState) {
             // server keeps reading on its half; ATO reattaches and
             // packets flow again.
             state.active_connection = Some(ActiveConnection::Duplex {
-                read: duplex_read,
-                write: duplex_write,
+                read: Box::new(duplex_read),
+                write: Box::new(duplex_write),
             });
             send_result(state, "OK");
         }
@@ -6027,7 +6068,10 @@ fn process_peer_ring(state: &mut ModemState, call: PeerCall) {
     state.mode = ModemMode::Command;
     match exit {
         OnlineExit::Escaped => {
-            state.active_connection = Some(ActiveConnection::Duplex { read, write });
+            state.active_connection = Some(ActiveConnection::Duplex {
+                read: Box::new(read),
+                write: Box::new(write),
+            });
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
@@ -6214,7 +6258,7 @@ mod tests {
     #[test]
     fn test_the_session_backlog_is_bounded_in_seconds_not_bytes() {
         for baud in [110u32, 300, 1200, 2400, 4800, 9600, 19200, 38400, 115200] {
-            let bytes = session_duplex_bufsize(baud);
+            let bytes = session_output_bufsize(baud);
             let secs = bytes as f64 * 10.0 / baud as f64;
             assert!(
                 secs <= 6.0,
@@ -6234,9 +6278,48 @@ mod tests {
         );
 
         // A faster line may hold more, but never without bound.
-        assert!(session_duplex_bufsize(921_600) <= 4096);
+        assert!(session_output_bufsize(921_600) <= 4096);
         // And a nonsense baud still yields a usable buffer.
-        assert!(session_duplex_bufsize(0) >= 64);
+        assert!(session_output_bufsize(0) >= 64);
+    }
+
+    /// **The two directions must not share a size, and the reason is a
+    /// timeout.**
+    ///
+    /// `tokio::io::duplex(n)` caps *both* directions, which is why this bridge
+    /// is two `simplex` pipes instead. Output wants to be small — it is backlog
+    /// the caller has not read. Input wants headroom, because the serial thread
+    /// writes into it under a **five-second timeout** and treats expiry as a
+    /// dead call: carrier dropped, `NO CARRIER`, session gone. The session does
+    /// not read while it paints, so type-ahead or a pasted command arriving
+    /// during a screen paint must fit.
+    ///
+    /// Sizing input from wire time would have made that *easier the slower the
+    /// line* — at 300 baud the floor is 64 bytes — which is the same shape of
+    /// trap as the backlog being fixed in the other direction.
+    #[test]
+    fn test_the_input_side_keeps_its_headroom_at_every_baud() {
+        for baud in [110u32, 300, 1200, 9600, 115200] {
+            let out = session_output_bufsize(baud);
+            assert!(
+                SESSION_INPUT_BUFSIZE >= out * 16,
+                "{baud} baud: input {SESSION_INPUT_BUFSIZE} is not clearly roomier \
+                 than output {out} — a paste during a paint would fill it and the \
+                 5 s inbound write timeout would drop the call",
+            );
+        }
+
+        // Concretely: more than a screen's worth of type-ahead at any baud.
+        // Expressed against the largest output buffer rather than as a bare
+        // constant, both because that is the comparison that matters and
+        // because an assertion on a constant expression proves nothing.
+        let widest_output = session_output_bufsize(921_600);
+        assert!(
+            SESSION_INPUT_BUFSIZE > widest_output * 8,
+            "input {SESSION_INPUT_BUFSIZE} must dwarf the widest output buffer \
+             {widest_output}: an upload or a pasted command must not be able to \
+             fill the input pipe and trip the 5 s inbound write timeout",
+        );
     }
 
     /// **The wire trace must never be able to quote a password.**

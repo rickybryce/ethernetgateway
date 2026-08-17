@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the latency rather than relieving it. The slow screen and the dead key were
   one symptom, not two.
 
+  The two directions are sized **separately**, which needed two `simplex` pipes
+  rather than one `duplex`: `tokio::io::duplex(n)` caps each direction at `n`,
+  and they want opposite things. Output wants to be small — it is backlog the
+  caller has not read. Input wants headroom, because the serial thread writes
+  inbound bytes under a *five-second* timeout and treats expiry as a dead call
+  (carrier dropped, `NO CARRIER`). A session does not read while it paints, so
+  type-ahead or a pasted command arriving during a screen paint has to fit —
+  and sizing input from wire time would have made that easier the *slower* the
+  line, which is the same trap as the backlog itself.
+
   **File transfers are unaffected, and that is tested rather than argued.** A
   buffer's size cannot change how long bytes take to reach the peer — only
   whether our writer returns before they are on the wire — and no write in any
