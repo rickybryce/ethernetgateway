@@ -895,9 +895,20 @@ block waiting for a display server that does not exist.
 </aside>
 
 <p>
-Closing the GUI window does not stop the server — it continues running in
-headless mode. To stop the gateway, send it <span class="kbd">Ctrl+C</span>,
-<code>SIGTERM</code>, or <code>SIGHUP</code> (see chapter 15).
+Closing the GUI window does not stop the server by itself — it asks which you
+meant. <em>Leave It Running</em> closes the window and leaves every service up
+in headless mode; <em>Stop the Server and Quit</em> ends the gateway; <em>Cancel</em>
+leaves things exactly as they were. The <strong>Quit</strong> button in the window
+header opens the same dialog.
+</p>
+
+<p>
+That dialog is the only way to stop a gateway launched from a desktop icon or
+file manager: such a launch has no controlling terminal, so there is no
+<span class="kbd">Ctrl+C</span> to send. Started from a shell, the older routes
+all still work — <span class="kbd">Ctrl+C</span>, <code>SIGTERM</code>, or
+<code>SIGHUP</code> to reload (see chapter 15) — and the line the gateway prints
+when you leave it running names whichever of the two applies to your launch.
 </p>
 
 <aside class="note">

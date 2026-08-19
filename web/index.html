@@ -769,8 +769,10 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
 
                 <div class="callout callout-tip">
                     <strong>Tip:</strong> The GUI console window opens by default. Closing
-                    it does not stop the server &mdash; press <code>Ctrl-C</code> to stop.
-                    Set <code>enable_console = false</code> for headless operation.
+                    it asks what you meant &mdash; <em>Stop the Server and Quit</em> ends the
+                    gateway, <em>Leave It Running</em> keeps every service up with no window
+                    on screen. The <em>Quit</em> button in the window header opens the same
+                    dialog. Set <code>enable_console = false</code> for headless operation.
                 </div>
 
                 <div class="cat">The Setup Wizard</div>
@@ -2044,8 +2046,11 @@ relay_transport = ssh</span></code></pre>
 
                 <div class="callout callout-tip">
                     <strong>Tip:</strong> Closing the GUI window does <strong>not</strong>
-                    stop the server. It continues running in headless mode. Press
-                    <code>Ctrl-C</code> in the terminal to stop.
+                    stop the server by itself &mdash; it asks first. <em>Leave It Running</em>
+                    keeps it serving in headless mode; <em>Stop the Server and Quit</em> ends
+                    it. The <em>Quit</em> button in the window header opens the same dialog,
+                    which matters when the gateway was started from a desktop icon rather
+                    than a terminal: there is no <code>Ctrl-C</code> to press.
                 </div>
             </div>
 

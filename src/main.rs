@@ -364,10 +364,27 @@ fn main() {
         if gui_cfg.enable_console {
             // GUI blocks the main thread until the window is closed.
             gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone());
-            if !restart.load(Ordering::SeqCst) {
+            if gui::window_closed_was_a_detach(
+                restart.load(Ordering::SeqCst),
+                shutdown.load(Ordering::SeqCst),
+            ) {
                 // Window closed manually — fall through to headless wait so the server
                 // keeps running in the background until Ctrl-C / SIGTERM.
-                glog!("Console window closed. Server still running (Ctrl-C to stop).");
+                //
+                // **What to press depends on how this was launched, so ask.**
+                // The line here used to say "Ctrl-C to stop" unconditionally,
+                // which is right from a shell and unreachable from a desktop
+                // icon: the AppImage's own desktop entry sets `Terminal=false`,
+                // so the process inherits the graphical VT and there is no
+                // shell anywhere to press it in.  Printing it anyway left
+                // closing the window and relaunching as the only apparent
+                // move, and that stacks copies which bind nothing (see
+                // `bindwatch`).  `gui::window_closed_note` holds both
+                // branches, beside the dialog that says the same thing before
+                // the choice is made.
+                glog!("{}", gui::window_closed_note(std::io::IsTerminal::is_terminal(
+                    &std::io::stdout()
+                )));
             }
         }
 

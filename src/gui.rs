@@ -551,6 +551,29 @@ struct App {
     dirty: bool,
     /// Whether the Server "More..." popup is open.
     server_popup_open: bool,
+    /// Whether the "close the window, or stop the server?" dialog is open.
+    ///
+    /// **The X on the title bar is a question, not an order.**  Closing the
+    /// window leaves the server running (`main` falls through to a headless
+    /// park loop), which is right for a console launched from a shell -- the
+    /// terminal is still there and Ctrl-C still reaches us -- and a trap from a
+    /// desktop icon, where there is no terminal to press it in.  With no Quit
+    /// anywhere either, the only move the window offered was to close it and
+    /// relaunch, and a second copy binds nothing: measured on 2026-08-19, five
+    /// copies stacked up with the oldest still serving telnet and a newer one
+    /// serving the web UI, so a Save in the visible window never reached the
+    /// process that was answering.  So the close is intercepted and the
+    /// operator is asked which of the two things they meant.
+    close_prompt_open: bool,
+    /// Set when we send `Close` ourselves, so the interception lets our own
+    /// close through instead of re-asking for ever.
+    closing_deliberately: bool,
+    /// Whether this process has a terminal on stdout, captured once at
+    /// startup.  It changes nothing about what the buttons *do* -- only what
+    /// the dialog and `main`'s parting line **say**.  "Ctrl-C" is sound advice
+    /// from a shell and a dead end from a desktop icon, and printing it in the
+    /// second case is exactly what taught an operator to relaunch instead.
+    has_terminal: bool,
     /// Per-port "Serial Port — More..." popup state, indexed by
     /// `SerialPortId::index()`.  Independent so the user can have one
     /// port's popup open while editing the other's primary controls.
@@ -885,6 +908,12 @@ impl App {
             serial_ports,
             dirty: false,
             server_popup_open: false,
+            close_prompt_open: false,
+            closing_deliberately: false,
+            // Asked once, here, rather than per frame: a process does not
+            // acquire or lose a terminal while it runs, and `ui()` must not
+            // do a syscall on every repaint to render one static sentence.
+            has_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             general_popup_open: false,
@@ -3245,6 +3274,111 @@ impl App {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
+    /// Stop the server and end the process.
+    ///
+    /// **`restart` staying false is the entire difference** between this and
+    /// `save_and_restart_all`: both trip `shutdown` to unwind the server
+    /// cycle, and `main` reads `restart` afterwards to decide whether to loop
+    /// back for another one or fall out of the loop and exit.  Setting both --
+    /// the obvious copy of the line above -- is a restart, not a quit, and the
+    /// window would come straight back.
+    ///
+    /// Nothing is persisted.  An operator quitting is not an operator saving,
+    /// and a half-typed port in a field it never occurred to them to look at
+    /// must not be written on the way out.
+    fn quit(&mut self) {
+        logger::log("Quit requested — stopping the server...".into());
+        self.restart.store(false, Ordering::SeqCst);
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// The dialog behind both the title-bar X and the header's Quit button.
+    ///
+    /// **One dialog for both, because they are one question.**  The X means
+    /// "I am done with this window" and Quit means "I am done with the
+    /// gateway", and the whole defect was that the window silently answered
+    /// the first for anyone who meant the second.  Asking once, with both
+    /// outcomes named and the consequence of each spelled out, is what makes
+    /// the two intents distinguishable at the moment they differ.
+    ///
+    /// Dismissing the dialog is **Cancel**, never a choice: its own X, like a
+    /// click on Cancel, must leave the server exactly as it was.  A dialog
+    /// that stopped a server because somebody waved it away would be worse
+    /// than the trap it replaced.
+    fn draw_close_prompt(&mut self, ctx: &egui::Context, warn_frame: egui::Frame) {
+        if !self.close_prompt_open {
+            return;
+        }
+        let mut open = true;
+        let (mut quit, mut detach, mut cancel) = (false, false, false);
+        egui::Window::new(
+            egui::RichText::new("Close the window, or stop the server?")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(500.0)
+        .frame(warn_frame)
+        .show(ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                "Closing this window does not stop the gateway.  The telnet, SSH, \
+                 web and serial services keep running in the background.",
+            );
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(detached_advice(self.has_terminal)).color(AMBER));
+            ui.add_space(6.0);
+            ui.label(
+                "Stopping the server ends every telnet and SSH session in progress, \
+                 including any booted CP/M disk somebody is sitting at.",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Stop the Server and Quit")
+                            .strong()
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    quit = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Leave It Running").strong(),
+                    ))
+                    .clicked()
+                {
+                    detach = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("Cancel").strong()))
+                    .clicked()
+                {
+                    cancel = true;
+                }
+            });
+        });
+        if quit {
+            self.close_prompt_open = false;
+            self.quit();
+        } else if detach {
+            self.close_prompt_open = false;
+            // Marked as ours so the interception in `ui` lets this one
+            // through.  `main` logs what just happened once the event loop
+            // returns -- not here, or the note would be printed twice.
+            self.closing_deliberately = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if cancel || !open {
+            self.close_prompt_open = false;
+        }
+    }
+
     /// Persist config and signal both serial managers to reopen their
     /// ports with the new settings.  Leaves telnet/SSH sessions
     /// untouched.  The GUI Save button is the only call site, and it
@@ -3633,6 +3767,75 @@ fn pad_to(ui: &mut egui::Ui, target_w: f32, used_w: f32) {
 
 /// Helper: render a small button right-aligned in the current horizontal
 /// row.  Returns true if the button was clicked this frame.
+/// What leaving the server running actually costs, in the words that are true
+/// for *this* launch.  Shown in the close dialog, before the choice is made.
+///
+/// **Two sentences, because one would be wrong half the time.**  `Ctrl-C` is
+/// exactly right from a shell and a dead end from a desktop icon, where no
+/// terminal exists to press it in -- and the line that named only Ctrl-C is
+/// what taught an operator to close the window and relaunch instead, stacking
+/// five copies of which four could bind nothing.
+///
+/// **It does not offer relaunching as the way back, because that is not a way
+/// back.** A second copy is a second process: it finds the ports held by the
+/// first, binds nothing, and its window then edits a config file that the copy
+/// actually serving connections never re-reads.  Promising a reattach we do
+/// not implement would document the very trap this dialog exists to close --
+/// see `bindwatch`, and the handover this is the groundwork for.
+///
+/// Pure, and returns the string instead of logging it, so one test can hold
+/// both branches with no terminal, no window and no running server.
+fn detached_advice(has_terminal: bool) -> &'static str {
+    if has_terminal {
+        "The server keeps running and this window closes.  Ctrl-C in the \
+         terminal you started it from still stops it."
+    } else {
+        "The server keeps running and this window closes.  You did not start \
+         it from a terminal, so there is no Ctrl-C to press and nothing on \
+         screen will be able to stop it -- and launching it again does NOT \
+         reopen this window, it starts a second copy that cannot bind the \
+         ports.  You would have to stop it from a terminal, with:  \
+         pkill -x ethernetgateway"
+    }
+}
+
+/// Whether a returned `gui::run` means "the operator shut the window and left
+/// the server running" -- the only case that earns the parting note below.
+///
+/// **`restart` alone is not enough, and testing only it printed the note on
+/// the way out of a quit.** Every route out of the event loop looks identical
+/// from `main`: `gui::run` returns. Four of them arrive there --
+///
+///   * the window was closed and the server left running -> a detach;
+///   * Save and Restart -> `restart`, and the window comes back;
+///   * Quit -> `shutdown`, and the process is about to exit;
+///   * SIGINT/SIGTERM -> `shutdown`, likewise
+///
+/// -- so a note that consults `restart` alone tells somebody who just asked to
+/// stop the gateway that it is "still running", and names a `pkill` for a
+/// process that is already on its way down. Measured 2026-08-19 by clicking
+/// Quit: the note printed between "Quit requested" and "Server stopped".
+/// Ctrl-C had been doing the same thing for far longer, unnoticed because the
+/// old wording ("Ctrl-C to stop") read as plausible immediately after a Ctrl-C.
+pub fn window_closed_was_a_detach(restart: bool, shutdown: bool) -> bool {
+    !restart && !shutdown
+}
+
+/// The parting line `main` logs once the window has gone and the server has
+/// been left running.  Same two facts as [`detached_advice`], past tense.
+///
+/// Kept beside it so the pair cannot drift: they are one rule about one
+/// launch, and the reason the old single line was wrong is that it was written
+/// where only half the cases were in view.
+pub fn window_closed_note(has_terminal: bool) -> &'static str {
+    if has_terminal {
+        "Console window closed. Server still running — press Ctrl-C here to stop it."
+    } else {
+        "Console window closed. Server still running, and this launch has no terminal \
+         to press Ctrl-C in — stop it with:  pkill -x ethernetgateway"
+    }
+}
+
 fn right_aligned_small_button(ui: &mut egui::Ui, label: &str) -> bool {
     ui.with_layout(
         egui::Layout::right_to_left(egui::Align::Center),
@@ -3898,6 +4101,30 @@ impl eframe::App for App {
             return;
         }
 
+        // ── The title-bar X is a question ─────────────────────
+        // Veto the close and ask instead (see `close_prompt_open`).  Three
+        // closes must NOT be intercepted, and each would be a distinct bug:
+        //
+        //   * our own, once the operator has answered `Leave It Running`
+        //     (`closing_deliberately`) -- otherwise the answer re-opens the
+        //     question for ever and the window can never be closed at all;
+        //   * the one `ui` sends a few lines up when `shutdown` is set, which
+        //     is how a Quit, a Save-and-Restart and a SIGINT all take the
+        //     window down -- re-asking there would strand a restart with no
+        //     window and no server;
+        //   * anything arriving while the wizard owns the screen, which is why
+        //     this sits *after* that early return: the dialog is drawn from
+        //     the popup section below, so intercepting in a frame that never
+        //     reaches it would cancel the close and draw nothing -- a window
+        //     with a dead X.
+        if !self.closing_deliberately
+            && !self.shutdown.load(Ordering::SeqCst)
+            && ui.ctx().input(|i| i.viewport().close_requested())
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_prompt_open = true;
+        }
+
         self.refresh_from_global();
         self.track_window_geometry(ui.ctx());
 
@@ -3958,7 +4185,33 @@ impl eframe::App for App {
                         .color(AMBER_BRIGHT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // First in a right-to-left layout is the RIGHTMOST
+                        // widget, so this space is the window's right margin --
+                        // the one the IP label used to hold.  Without it the
+                        // button below sits flush against the glass.
                         ui.add_space(8.0);
+                        // **A visible way out, which this window did not have.**
+                        // Closing it left the server running and there was no
+                        // Quit anywhere, so from a desktop icon -- no terminal,
+                        // no Ctrl-C -- nothing on screen could stop the gateway.
+                        // In the header rather than in a "More..." popup for
+                        // exactly that reason: an operator who cannot find how
+                        // to stop a program does not go looking under Server.
+                        // It opens the same dialog as the X, so the consequence
+                        // is stated once and in one place.
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Quit").strong().color(AMBER),
+                            ))
+                            .on_hover_text(
+                                "Stop the server and close the gateway, or close \
+                                 just this window and leave it running.",
+                            )
+                            .clicked()
+                        {
+                            self.close_prompt_open = true;
+                        }
+                        ui.add_space(16.0);
                         ui.label(
                             egui::RichText::new(&self.local_ip)
                                 .color(AMBER)
@@ -4369,6 +4622,12 @@ impl eframe::App for App {
         let warn_frame = egui::Frame::window(&ctx.global_style())
             .fill(WARN_BG)
             .stroke(Stroke::new(1.5_f32, WARN_BORDER));
+
+        // Drawn first, and unconditionally when open: this is the one dialog
+        // that answers a close already vetoed in `ui` above, so a frame that
+        // set the flag and then failed to draw it would leave a window whose
+        // X does nothing.
+        self.draw_close_prompt(&ctx, warn_frame);
 
         let mut server_open = self.server_popup_open;
         // Set by the "Run setup wizard..." button inside the popup below.  It
@@ -5288,6 +5547,103 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    // ── Closing the window vs stopping the server ────────────
+
+    /// **A quit is not a restart, and `restart` is the only thing that says
+    /// so.** Both trip `shutdown` to unwind the server cycle; `main` reads
+    /// `restart` afterwards to decide whether to loop back for another cycle
+    /// or fall out and exit. Copying `save_and_restart_all`'s pair of stores
+    /// -- the obvious way to write `quit` -- yields a restart, and the window
+    /// the operator just tried to leave comes straight back. So the two are
+    /// pinned together, against each other: asserting only that `quit` sets
+    /// `shutdown` would pass for a function that restarts.
+    #[test]
+    fn test_quit_stops_the_server_where_a_restart_would_bring_it_back() {
+        let mut app = test_app();
+        app.quit();
+        assert!(app.shutdown.load(Ordering::SeqCst), "quit must unwind the server cycle");
+        assert!(
+            !app.restart.load(Ordering::SeqCst),
+            "quit must NOT arm restart — main would loop back and reopen the window"
+        );
+
+        // The positive control: the restart path sets the same shutdown flag,
+        // so shutdown alone cannot tell the two apart.
+        let mut app = test_app();
+        app.save_and_restart_all();
+        assert!(app.shutdown.load(Ordering::SeqCst));
+        assert!(
+            app.restart.load(Ordering::SeqCst),
+            "save-and-restart must arm restart — otherwise this test proves nothing"
+        );
+    }
+
+    /// The dialog and the parting line must not hand a desktop launch a key it
+    /// has no terminal to press.
+    ///
+    /// `Ctrl-C` belongs to the shell branch only. In the other branch the
+    /// process inherited the graphical VT and there is no shell anywhere, so
+    /// the note has to name something that actually works -- and must **not**
+    /// offer relaunching as the way back, because a second copy binds nothing
+    /// and edits a config the serving copy never re-reads.
+    #[test]
+    fn test_the_advice_matches_the_launch_it_is_given_to() {
+        // From a shell: Ctrl-C is the right answer and must be offered.
+        assert!(window_closed_note(true).contains("Ctrl-C"));
+        assert!(detached_advice(true).contains("Ctrl-C"));
+
+        // From a desktop icon: no terminal exists, so Ctrl-C must not be the
+        // instruction, and a real way to stop it must be named instead.
+        let note = window_closed_note(false);
+        assert!(
+            note.contains("pkill -x ethernetgateway"),
+            "the no-terminal note must name a way that works: {note}"
+        );
+        let advice = detached_advice(false);
+        assert!(advice.contains("pkill -x ethernetgateway"), "{advice}");
+        // The trap this whole dialog exists to close: relaunching is not a
+        // reattach, so the text must never suggest it is.
+        assert!(
+            !advice.to_lowercase().contains("get this window back"),
+            "must not promise a reattach we do not implement: {advice}"
+        );
+        // Both branches must actually differ -- a single sentence covering
+        // both was the original defect.
+        assert_ne!(window_closed_note(true), window_closed_note(false));
+        assert_ne!(detached_advice(true), detached_advice(false));
+    }
+
+    /// **Only one of the four ways out of the event loop is a detach.**
+    ///
+    /// `main` cannot tell them apart by the return alone, and the version that
+    /// consulted `restart` only told an operator who had just clicked Quit
+    /// that the server was "still running", with a `pkill` for a process
+    /// already exiting.  Each case is pinned, so a future flag added to one
+    /// route cannot quietly re-enter the note.
+    #[test]
+    fn test_only_a_close_that_left_the_server_up_earns_the_parting_note() {
+        // The window was closed and the server was left running.
+        assert!(window_closed_was_a_detach(false, false));
+        // Save and Restart: the window is coming straight back.
+        assert!(!window_closed_was_a_detach(true, false));
+        // Quit, and SIGINT/SIGTERM, which reach `main` identically.
+        assert!(!window_closed_was_a_detach(false, true));
+        // Both set is a restart; either flag alone must be enough to suppress.
+        assert!(!window_closed_was_a_detach(true, true));
+    }
+
+    /// The dialog starts closed, like every other popup: a modal covering the
+    /// window on launch would be its own bug.
+    #[test]
+    fn test_close_prompt_starts_closed_and_no_close_is_pending() {
+        let app = test_app();
+        assert!(!app.close_prompt_open);
+        assert!(
+            !app.closing_deliberately,
+            "a fresh window must not believe it is already on its way out"
+        );
     }
 
     // ── App::new initialization ──────────────────────────────
