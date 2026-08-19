@@ -117,6 +117,23 @@ fn main() {
         }
         glog!("Config: telnet={}, port={}, security={}, transfer_dir={}",
             cfg.telnet_enabled, cfg.telnet_port, cfg.security_enabled, cfg.transfer_dir);
+        // Warn a root session about the ownership it is about to impose on this
+        // directory, while it can still be avoided — the same trap
+        // `unreadable_config_diagnosis` explains a day later, when the files
+        // are already root's and the operator has concluded the gateway needs
+        // root.  Logged here as well as shown in the GUI banner because a root
+        // run need not have a window, and both render the one list so they
+        // cannot come to disagree.
+        {
+            let (is_root, sudo_user) = config::detect_elevation();
+            for line in config::elevation_warning_lines(
+                is_root,
+                sudo_user.as_deref(),
+                config::serial_access_group(),
+            ) {
+                glog!("NOTE: {}", line);
+            }
+        }
         if !cfg.telnet_enabled && !cfg.ssh_enabled {
             glog!("WARNING: Both telnet and SSH are disabled. No network access is possible.");
             glog!("         Enable at least one service in {}.", config::CONFIG_FILE);

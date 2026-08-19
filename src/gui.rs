@@ -585,6 +585,25 @@ struct App {
     /// no-terminal and is told to use `pkill`, which works either way; the
     /// error is one-directional on purpose.
     has_terminal: bool,
+    /// The root/sudo ownership warning, empty when there is nothing to say.
+    ///
+    /// **A banner rather than a modal**: it reports a condition that lasts as
+    /// long as the session, not an event to acknowledge, and a machine that
+    /// deliberately runs the gateway as root would be asked to click a modal
+    /// away at every launch. Built once in `new` from the one list in
+    /// `config`, which the startup log renders too, so the two cannot come to
+    /// disagree.
+    elevation_lines: Vec<String>,
+    /// Set by the banner's Dismiss button, for this window only.
+    ///
+    /// **Deliberately not a config key.** Persisting it would silence the
+    /// warning on installs that have never seen it, which is the one case it
+    /// exists for -- an operator's click is an action, not a setting (the same
+    /// reason the sample-disk offer writes no key). It also resets across a
+    /// Save and Restart, and that is right rather than sloppy: a Save is
+    /// precisely when a root session has just written `egateway.conf` as root,
+    /// so the warning has more standing after one, not less.
+    elevation_dismissed: bool,
     /// Per-port "Serial Port — More..." popup state, indexed by
     /// `SerialPortId::index()`.  Independent so the user can have one
     /// port's popup open while editing the other's primary controls.
@@ -925,6 +944,15 @@ impl App {
             // acquire or lose a terminal while it runs, and `ui()` must not
             // do a syscall on every repaint to render one static sentence.
             has_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
+            elevation_lines: {
+                let (is_root, sudo_user) = config::detect_elevation();
+                config::elevation_warning_lines(
+                    is_root,
+                    sudo_user.as_deref(),
+                    config::serial_access_group(),
+                )
+            },
+            elevation_dismissed: false,
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             general_popup_open: false,
@@ -4238,6 +4266,52 @@ impl eframe::App for App {
                     });
                 });
                 ui.add_space(4.0);
+
+                // ── Running-as-root banner ────────────────────
+                // Full width and above everything, because what it warns about
+                // is done by the act of using this window: a Save writes
+                // `egateway.conf` as root, and from then on the operator's own
+                // account cannot start the gateway at all.
+                if !self.elevation_lines.is_empty() && !self.elevation_dismissed {
+                    // Borrowed before the closure so `self` is not captured
+                    // whole; the flag is set after it returns.
+                    let lines = &self.elevation_lines;
+                    let dismissed = egui::Frame::group(ui.style())
+                        .fill(WARN_BG)
+                        .stroke(Stroke::new(1.5_f32, WARN_BORDER))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            let mut dismiss = false;
+                            for (i, line) in lines.iter().enumerate() {
+                                if i == 0 {
+                                    // The condition, and the way to put it
+                                    // away, on one row -- Dismiss belongs
+                                    // beside the headline, not below five
+                                    // lines of consequence where it reads as
+                                    // the answer to them.
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(line)
+                                                .strong()
+                                                .color(RED_ALERT),
+                                        );
+                                        if right_aligned_small_button(ui, "Dismiss") {
+                                            dismiss = true;
+                                        }
+                                    });
+                                } else {
+                                    // The consequences and the way out.
+                                    ui.label(egui::RichText::new(line).color(AMBER));
+                                }
+                            }
+                            dismiss
+                        })
+                        .inner;
+                    if dismissed {
+                        self.elevation_dismissed = true;
+                    }
+                    ui.add_space(4.0);
+                }
 
                 // ── Row 1: Server + Security ──────────────────
                 // Each frame is padded out to the taller of the row's two

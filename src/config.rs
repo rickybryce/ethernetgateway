@@ -1538,6 +1538,110 @@ fn current_owner_identity() -> (Option<u32>, Option<String>) {
     (None, None)
 }
 
+/// Whether this process is running with root's privileges, and -- when `sudo`
+/// says so -- the account that escalated.
+///
+/// **`sudo_user` is the signal that matters, not `is_root` alone.** A machine
+/// that always runs the gateway as root (a system service, a root login) is
+/// doing nothing wrong and will never hit the ownership trap: root writes the
+/// files and root reads them back. The dangerous shape is a *temporary*
+/// escalation, because the operator is coming back as themselves afterwards --
+/// and `SUDO_USER` names exactly who, which turns a vague caution into the one
+/// account to hand the files back to.
+#[cfg(unix)]
+pub fn detect_elevation() -> (bool, Option<String>) {
+    // SAFETY: see `current_owner_identity` — a no-argument libc call.
+    let is_root = unsafe { libc::geteuid() } == 0;
+    let sudo_user = std::env::var("SUDO_USER").ok().filter(|n| !n.trim().is_empty());
+    (is_root, sudo_user)
+}
+
+#[cfg(not(unix))]
+pub fn detect_elevation() -> (bool, Option<String>) {
+    (false, None)
+}
+
+/// What a root session needs to be told *before* it writes anything here.
+///
+/// **This is the same trap `unreadable_config_diagnosis` explains after the
+/// fact, warned about while it can still be avoided.** The reported failure --
+/// "the gateway will not run unless I use root" -- began with a single `sudo`
+/// run for a serial port, and by the time the operator sees the FATAL the
+/// damage is already on disk and the cause is a day behind them.
+///
+/// Empty when there is nothing to warn about, so the caller has no rule of its
+/// own to get wrong; the GUI banner and the startup log both render whatever
+/// this returns, because a warning duplicated in two places is a warning that
+/// will disagree with itself.
+/// The group a Linux system uses to gate serial devices, or `None` on a
+/// platform that does not work that way.
+///
+/// Linux only. macOS does not gate a `/dev/cu.*` behind a group, and Windows
+/// has no concept of one, so on both the advice stays general rather than
+/// naming something the operator cannot find.
+pub fn serial_access_group() -> Option<&'static str> {
+    if cfg!(target_os = "linux") { Some("dialout") } else { None }
+}
+
+pub fn elevation_warning_lines(
+    is_root: bool,
+    sudo_user: Option<&str>,
+    serial_group: Option<&str>,
+) -> Vec<String> {
+    if !is_root {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    match sudo_user {
+        Some(user) => {
+            lines.push(format!("Running as root via sudo, invoked by {user}."));
+            lines.push(format!(
+                "Anything written here is owned by root and mode 0600, including {CONFIG_FILE}, \
+                 so {user} will not be able to read it."
+            ));
+            lines.push(format!(
+                "The gateway then refuses to start for {user} at all, rather than overwrite a \
+                 config it cannot read — which looks like a program that requires root."
+            ));
+            // **The group is Linux's, so it is passed in rather than written
+            // in.** `dialout` is how Linux gates a serial device; macOS has no
+            // such group (a `/dev/cu.*` is not group-gated the same way), and
+            // naming it there would send a Mac operator looking for something
+            // that does not exist. The caller names the platform's group, or
+            // none, and the sentence adapts.
+            match serial_group {
+                Some(group) => lines.push(format!(
+                    "If root was only for a serial port, {user} does not need it: add {user} to \
+                     the {group} group and log out and back in, since a group only applies to a \
+                     new login."
+                )),
+                None => lines.push(format!(
+                    "If root was only for a serial port, {user} probably does not need it — \
+                     check that account's access to the port itself instead."
+                )),
+            }
+            lines.push(format!(
+                "To hand this directory back afterwards:  sudo chown -R {user} {CONFIG_FILE} \
+                 ethernet_ssh_host_key transfer"
+            ));
+        }
+        None => {
+            lines.push("Running as root.".to_string());
+            lines.push(format!(
+                "Anything written here is owned by root and mode 0600, including {CONFIG_FILE}."
+            ));
+            lines.push(
+                "That is fine if this machine always runs the gateway as root. If you intend to \
+                 run it as an ordinary user later, that account will not be able to read the \
+                 config and the gateway will refuse to start for it — chown this directory back \
+                 to that account first."
+                    .to_string(),
+            );
+        }
+    }
+    lines
+}
+
 /// Parse a config file into a `Config`, tolerating an unreadable file by
 /// returning defaults (with a warning).  A best-effort read that is only
 /// used by tests now — every runtime caller (startup and mid-run updates)
@@ -3850,6 +3954,36 @@ mod tests {
             ErrorKind::PermissionDenied, Some(0), Some(1000), None,
         ).join("\n");
         assert!(numeric.contains("sudo chown 1000 egateway.conf"), "{numeric}");
+    }
+
+    /// **The warning exists to prevent the FATAL, so it must name the account
+    /// that will be locked out** — and `SUDO_USER` is the only thing that knows
+    /// it. A plain root session cannot name one, and must not invent it.
+    #[test]
+    fn test_a_sudo_session_is_warned_by_name_and_a_root_session_generically() {
+        let sudo = elevation_warning_lines(true, Some("ricky"), Some("dialout")).join("\n");
+        assert!(sudo.contains("invoked by ricky"), "{sudo}");
+        // The way out of ever needing sudo here, and the way back if it is
+        // already too late.
+        assert!(sudo.contains("dialout"), "{sudo}");
+        assert!(sudo.contains("sudo chown -R ricky egateway.conf"), "{sudo}");
+
+        // Root with no sudo: still warned, but nothing is asserted about who.
+        let bare = elevation_warning_lines(true, None, Some("dialout")).join("\n");
+        assert!(!bare.is_empty());
+        assert!(bare.contains("Running as root."), "{bare}");
+        assert!(!bare.contains("chown -R "), "must not name an account it cannot know: {bare}");
+
+        // Not root: silence. An unconditional banner would nag every ordinary
+        // launch, which is every launch that is working correctly.
+        assert!(elevation_warning_lines(false, Some("ricky"), Some("dialout")).is_empty());
+        assert!(elevation_warning_lines(false, None, None).is_empty());
+
+        // No group on this platform (macOS, Windows): the sentence must not
+        // name one the operator cannot find.
+        let nogroup = elevation_warning_lines(true, Some("ricky"), None).join("\n");
+        assert!(!nogroup.contains("dialout"), "{nogroup}");
+        assert!(nogroup.contains("access to the port itself"), "{nogroup}");
     }
 
     /// The hint is a claim about *ownership*, so it must not be made when

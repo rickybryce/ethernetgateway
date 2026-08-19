@@ -116,6 +116,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would be worse than the trap it replaced. The wizard's own title-bar X is
   untouched, and a Save and Restart still returns a fresh window.
 
+- **A root or `sudo` session is warned before it writes anything, not after.**
+  The same trap the unreadable-config diagnosis explains a day late, caught
+  while it can still be avoided: a red banner across the top of the GUI, and
+  the same lines in the startup log so a root run with no window says it too.
+
+  `SUDO_USER` is the signal, not root alone. A machine that always runs the
+  gateway as root is doing nothing wrong and will never hit this — root writes
+  the files and root reads them back. A *temporary* escalation is the dangerous
+  shape, because the operator is coming back as themselves afterwards, and
+  `SUDO_USER` names exactly who: the warning says which account will be locked
+  out, that the serial port it was escalated for does not need root, and the
+  `chown` that hands the directory back. **Dismiss** puts it away for that
+  window; it is deliberately not a config key, since persisting it would
+  silence the warning on the installs that have never seen it. It returns after
+  a Save and Restart, which is right rather than sloppy — a Save is precisely
+  when a root session has just written `egateway.conf` as root.
+
+  The serial group is a parameter rather than a hardcoded `dialout`: Linux gates
+  a serial device that way, macOS does not (a `/dev/cu.*` is not group-gated),
+  so naming it on a Mac would send the operator looking for something that does
+  not exist. Windows never sees this warning at all, and that is correct rather
+  than a gap — the `0600` that causes the lockout is applied only on the unix
+  write path, so a file an elevated Windows process creates inherits the
+  folder's ACL and stays readable.
+
 
 ## [0.9.3] - 2026-08-16
 
