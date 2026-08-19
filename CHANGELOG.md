@@ -57,6 +57,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadlock fails the test instead of hanging. Only the interactive session
   bridge is resized; the `ATDT KERMIT` bridge is untouched.
 
+- **An unreadable `egateway.conf` now says why, and names a fix that keeps your
+  settings.** Reported: after using the modem feature the gateway would no
+  longer start at all unless run as root, even with the serial ports disabled,
+  on Linux Mint with the user in the `dialout` group.
+
+  One run under `sudo` does it — typically to reach a serial device before a
+  `dialout` group change has taken effect, since group membership only applies
+  to a new login session. That run leaves `egateway.conf` owned by root at mode
+  `0600`. The mode is deliberate and right: the file holds the gateway password
+  and the Groq API key. But root-owned *plus* `0600` means the operator's own
+  account cannot so much as read it, so every later launch takes the FATAL path
+  and the gateway looks like a program that requires root — true only in the
+  sense that root ignores file permissions. Disabling the serial ports cannot
+  help, because that setting lives inside the file that cannot be read.
+
+  Refusing to start is correct and unchanged: overwriting an unreadable config
+  with defaults would turn a permission blip into security-off and password
+  `changeme`. The **message** was the defect. It named no cause, and of the two
+  remedies it offered, "remove the file" discards every setting the operator
+  has while `chown` restores access and keeps them. When a permission error is
+  on a file somebody else owns, the diagnosis now says so and prints the
+  `chown`. It is withheld otherwise — a claim about ownership must not be made
+  about a corrupt file or an I/O error. Measured which state file actually does
+  this: an unreadable log, an unreadable SSH host key and an unwritable
+  `transfer/` all still start (the last logs `Permission denied` warnings and
+  binds anyway). Only `egateway.conf` is fatal.
+
+- **The line printed when the console window closes no longer contradicts what
+  just happened.** It was gated on the restart flag alone, so it announced
+  "Server still running (Ctrl-C to stop)" on the way out of a shutdown — and
+  had been doing that after every Ctrl-C, unnoticed because the wording reads
+  as plausible immediately after one. It now consults both flags, and what it
+  advises depends on the launch: Ctrl-C from a shell, and a `pkill` when the
+  process has no terminal to press it in.
+
+### Added
+
+- **Closing the GUI window asks whether you meant to stop the server, and a
+  Quit button says so out loud.** Closing the console window leaves the server
+  running, which is right from a shell — the terminal is still there and Ctrl-C
+  still reaches the process — and a trap from a desktop icon: the AppImage's own
+  desktop entry sets `Terminal=false`, so the process inherits the graphical VT
+  and no shell exists to press it in.
+
+  With no Quit control anywhere either, the only move the window offered was to
+  close it and relaunch, and **a second copy binds nothing**. Measured: five
+  copies stacked up, the oldest still serving telnet while a newer one served
+  the web UI, so a Save in the visible window never reached the process
+  answering connections — `bindwatch` had been saying exactly that in the log
+  the whole time.
+
+  The close is now vetoed and asks: *Stop the Server and Quit*, *Leave It
+  Running*, or *Cancel*. The **Quit** button sits in the window header rather
+  than under a `More...` popup, because somebody who cannot find how to stop a
+  program does not go looking under Server. Dismissing the dialog is Cancel,
+  never an answer — a modal that stopped a server because it was waved away
+  would be worse than the trap it replaced. The wizard's own title-bar X is
+  untouched, and a Save and Restart still returns a fresh window.
+
 
 ## [0.9.3] - 2026-08-16
 

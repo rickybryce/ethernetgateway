@@ -573,6 +573,17 @@ struct App {
     /// the dialog and `main`'s parting line **say**.  "Ctrl-C" is sound advice
     /// from a shell and a dead end from a desktop icon, and printing it in the
     /// second case is exactly what taught an operator to relaunch instead.
+    ///
+    /// **stdout, and deliberately not the controlling terminal.** A desktop
+    /// launch is not detached from a tty at all: measured 2026-08-19, the
+    /// AppImage's processes inherit the graphical VT (`tty2`) and `ps` reports
+    /// it, so `/dev/tty` opens and answers yes while there is no shell on that
+    /// VT to type into -- the same floating-input mistake as reading an
+    /// unclaimed port as a real answer.  The question being asked is whether
+    /// our output is going somewhere a person is watching with a shell in
+    /// front of them, and stdout is that.  A `... | tee log` pipeline reads as
+    /// no-terminal and is told to use `pkill`, which works either way; the
+    /// error is one-directional on purpose.
     has_terminal: bool,
     /// Per-port "Serial Port — More..." popup state, indexed by
     /// `SerialPortId::index()`.  Independent so the user can have one
@@ -4697,6 +4708,12 @@ impl eframe::App for App {
         if wizard_requested {
             self.wizard = Some(wizard::Wizard::new(&self.cfg));
             server_open = false;
+            // The close question dies with the screen it was asked on.  Both
+            // can be open at once -- the dialog does not block input to the
+            // popup behind it -- and the wizard's early return in `ui` means
+            // the dialog would not be drawn while it is up, then reappear
+            // when the wizard finished, asking about a click made minutes ago.
+            self.close_prompt_open = false;
         }
         self.server_popup_open = server_open;
 
