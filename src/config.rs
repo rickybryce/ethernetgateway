@@ -1388,7 +1388,19 @@ pub fn load_or_create_config() -> Config {
                     Err(()) => {
                         glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
                         glog!("       Refusing to start rather than overwrite it with");
-                        glog!("       insecure defaults. Fix or remove the file, then restart.");
+                        glog!("       insecure defaults.");
+                        // Why it happened, when we can tell — a permission
+                        // error on a file somebody else owns is almost always
+                        // the sudo-once trap.
+                        let (uid, name) = current_owner_identity();
+                        for line in unreadable_config_diagnosis(
+                            e.kind(),
+                            file_owner_uid(&path),
+                            uid,
+                            name.as_deref(),
+                        ) {
+                            glog!("{}", line);
+                        }
                         std::process::exit(1);
                     }
                 }
@@ -1435,6 +1447,95 @@ fn resolve_unreadable_existing_config(existing: Option<Config>) -> Result<Config
         Some(cfg) => Ok(cfg),
         None => Err(()),
     }
+}
+
+/// The closing lines of the FATAL above: what to actually *do* about a config
+/// file we cannot read.
+///
+/// **Refusing to start is right; "fix or remove the file" was not enough.**
+/// One cause dominates in the field and the old wording never named it: the
+/// gateway was run once under `sudo` -- typically to reach a serial device for
+/// the modem before a `dialout` group change had taken effect in the operator's
+/// session -- and that run left `egateway.conf` owned by root at mode `0600`.
+/// The mode is deliberate (the file holds the gateway password and the Groq
+/// key), but root-owned plus `0600` means the operator's own account cannot so
+/// much as read it, so every later launch hits this path and the gateway looks
+/// like a program that requires root. Reported 2026-08-19 and reproduced with
+/// the shipped AppImage; disabling the serial ports cannot help, because that
+/// setting lives inside the file that cannot be read.
+///
+/// **And of the two remedies the old line offered, one was destructive.**
+/// `remove the file` discards every setting the operator has; `chown` restores
+/// access and keeps them. So when the owner is the explanation, say so and
+/// name the non-destructive fix.
+///
+/// Pure, and takes the ids rather than reading them, so all four branches are
+/// testable on any platform -- including the Windows case, where there are no
+/// uids and the generic advice is all there is.
+fn unreadable_config_diagnosis(
+    kind: std::io::ErrorKind,
+    file_owner: Option<u32>,
+    our_uid: Option<u32>,
+    our_name: Option<&str>,
+) -> Vec<String> {
+    // Ownership only explains a *permission* error, and only when the owner is
+    // somebody else.  A corrupt file or an I/O error gets the generic advice.
+    if kind == std::io::ErrorKind::PermissionDenied
+        && let (Some(owner), Some(us)) = (file_owner, our_uid)
+        && owner != us
+    {
+        let owner_desc =
+            if owner == 0 { "root".to_string() } else { format!("uid {owner}") };
+        let us_desc = match our_name {
+            Some(n) => format!("{n} (uid {us})"),
+            None => format!("uid {us}"),
+        };
+        // Numeric when we have no name: `chown 1000` is always valid, whereas
+        // a guessed username may not be.
+        let target = our_name.map(str::to_string).unwrap_or_else(|| us.to_string());
+        return vec![
+            format!("       The file is owned by {owner_desc}, but this is running as {us_desc}."),
+            "       A single run under sudo does this. The config is written 0600".to_string(),
+            "       because it holds your password and API key, so root's copy is".to_string(),
+            "       unreadable to your own account — and every setting in it,".to_string(),
+            "       including the serial ports, is out of reach until that is fixed.".to_string(),
+            "       Fix the owner rather than deleting the file, which would discard".to_string(),
+            "       your configuration:".to_string(),
+            format!("           sudo chown {target} {CONFIG_FILE}"),
+        ];
+    }
+    vec!["       Fix or remove the file, then restart.".to_string()]
+}
+
+/// The uid owning `path`, if it can be determined.
+///
+/// `stat` needs search permission on the *directory*, not read permission on
+/// the file, so this answers even for the `0600` file we were just refused.
+#[cfg(unix)]
+fn file_owner_uid(path: impl AsRef<std::path::Path>) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path.as_ref()).ok().map(|m| m.uid())
+}
+
+#[cfg(not(unix))]
+fn file_owner_uid(_path: impl AsRef<std::path::Path>) -> Option<u32> {
+    None
+}
+
+/// This process's effective uid, and the login name if the environment offers
+/// one.  `None` off Unix, where the ownership diagnosis does not apply.
+#[cfg(unix)]
+fn current_owner_identity() -> (Option<u32>, Option<String>) {
+    // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no memory
+    // we own; it is unsafe only because it is an `extern "C"` call.
+    let uid = unsafe { libc::geteuid() };
+    let name = std::env::var("USER").ok().filter(|n| !n.trim().is_empty());
+    (Some(uid), name)
+}
+
+#[cfg(not(unix))]
+fn current_owner_identity() -> (Option<u32>, Option<String>) {
+    (None, None)
 }
 
 /// Parse a config file into a `Config`, tolerating an unreadable file by
@@ -3717,6 +3818,64 @@ pub fn lookup_dialup_number(number: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// **The reported failure was "the program will not run without root", and
+    /// the message it printed never mentioned ownership.**
+    ///
+    /// A root-owned `0600` config — left by one `sudo` run — is unreadable to
+    /// the operator's own account, so every later launch takes the FATAL path.
+    /// The advice has to name the cause and the *non-destructive* remedy:
+    /// "remove the file" throws away every setting they have.
+    #[test]
+    fn test_an_unreadable_config_owned_by_root_is_diagnosed_as_the_sudo_trap() {
+        use std::io::ErrorKind;
+        let lines = unreadable_config_diagnosis(
+            ErrorKind::PermissionDenied,
+            Some(0),      // the file belongs to root
+            Some(1000),   // we are not root
+            Some("ricky"),
+        );
+        let all = lines.join("\n");
+        assert!(all.contains("owned by root"), "{all}");
+        assert!(all.contains("ricky (uid 1000)"), "{all}");
+        assert!(all.contains("sudo chown ricky egateway.conf"), "{all}");
+        // The serial ports are why they went looking, and the reason disabling
+        // them cannot help belongs in the message.
+        assert!(all.contains("serial ports"), "{all}");
+        // Must NOT lead with the destructive option.
+        assert!(!all.contains("remove the file"), "{all}");
+
+        // With no login name, the numeric uid still yields a valid command.
+        let numeric = unreadable_config_diagnosis(
+            ErrorKind::PermissionDenied, Some(0), Some(1000), None,
+        ).join("\n");
+        assert!(numeric.contains("sudo chown 1000 egateway.conf"), "{numeric}");
+    }
+
+    /// The hint is a claim about *ownership*, so it must not be made when
+    /// ownership cannot be the explanation — otherwise it sends an operator
+    /// chasing a `chown` for a corrupt file or a genuine I/O error.
+    #[test]
+    fn test_the_ownership_hint_is_withheld_when_it_cannot_be_the_cause() {
+        use std::io::ErrorKind;
+        let generic = "       Fix or remove the file, then restart.";
+
+        // Our own file: a permission error here is not an ownership problem.
+        assert_eq!(
+            unreadable_config_diagnosis(ErrorKind::PermissionDenied, Some(1000), Some(1000), None),
+            vec![generic.to_string()],
+        );
+        // Someone else's file, but the read failed for another reason.
+        assert_eq!(
+            unreadable_config_diagnosis(ErrorKind::InvalidData, Some(0), Some(1000), None),
+            vec![generic.to_string()],
+        );
+        // No uids to compare (Windows).
+        assert_eq!(
+            unreadable_config_diagnosis(ErrorKind::PermissionDenied, None, None, None),
+            vec![generic.to_string()],
+        );
+    }
 
     /// **A default may change; somebody else's installation may not.**
     ///
