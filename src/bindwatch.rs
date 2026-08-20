@@ -35,6 +35,15 @@ struct State {
     listeners: BTreeMap<&'static str, (u16, Status)>,
     /// The summary is logged at most once per server cycle.
     reported: bool,
+    /// Which server cycle these outcomes belong to; bumped by [`reset`].
+    ///
+    /// **A Save and Restart produces the same text about a different attempt.**
+    /// The desktop banner is dismissed by the operator, and if dismissal were
+    /// tied to the text alone then a restart that failed *identically* would
+    /// stay silent -- which is the one case that matters, since the settings
+    /// they just saved are the reason they restarted. Comparing the cycle as
+    /// well makes "the same words about a new attempt" a new thing to say.
+    cycle: u64,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -52,6 +61,7 @@ pub(crate) fn reset() {
     with(|s| {
         s.listeners.clear();
         s.reported = false;
+        s.cycle = s.cycle.wrapping_add(1);
     });
 }
 
@@ -172,17 +182,22 @@ pub(crate) fn spawn_watch(timeout_ms: u64) {
 /// Answers `None` while any listener is still deciding, because a bind is
 /// asynchronous and a banner drawn a frame too early would accuse a listener
 /// that was about to succeed.
-pub(crate) fn aggregate_warning() -> Option<Vec<String>> {
-    if any_pending() {
+///
+/// The `u64` is the server cycle (see `State::cycle`), so a caller can tell the
+/// same words about a *new* attempt from the ones it has already shown.
+pub(crate) fn aggregate_warning() -> Option<(u64, Vec<String>)> {
+    let guard = state().lock().unwrap_or_else(|e| e.into_inner());
+    // Asked under the same lock as the roster it is about: a separate
+    // `any_pending()` call would answer about a state this one no longer sees.
+    if guard.listeners.values().any(|(_, st)| *st == Status::Pending) {
         return None;
     }
-    let guard = state().lock().unwrap_or_else(|e| e.into_inner());
     let entries: Vec<(&str, u16, Status)> = guard
         .listeners
         .iter()
         .map(|(name, (port, st))| (*name, *port, *st))
         .collect();
-    Some(summarize(&entries))
+    Some((guard.cycle, summarize(&entries)))
 }
 
 /// Decide what to say about a set of listener outcomes.  Pure, so the wording
@@ -322,14 +337,28 @@ mod tests {
         bound("telnet");
         assert!(aggregate_warning().is_none(), "one listener still pending");
         failed("ssh", &io::Error::from(io::ErrorKind::AddrInUse));
-        let lines = aggregate_warning().expect("both have reported");
+        let (cycle, lines) = aggregate_warning().expect("both have reported");
         // A partial failure is worth saying, and is not the total-failure text.
         let all = lines.join("\n");
         assert!(!all.is_empty(), "a failed listener must be reported");
         assert!(!all.contains("NONE of the"), "one of two bound: {all}");
+
+        // **A restart is a new attempt, even when it fails identically.** The
+        // desktop banner is dismissed by hand, so without this the same failure
+        // after a Save and Restart would stay silent -- and that is the case
+        // that matters, because the saved settings are why they restarted.
+        reset();
+        expect("telnet", 2323);
+        expect("ssh", 2222);
+        bound("telnet");
+        failed("ssh", &io::Error::from(io::ErrorKind::AddrInUse));
+        let (cycle2, lines2) = aggregate_warning().expect("reported again");
+        assert_eq!(lines2, lines, "the same failure produces the same words");
+        assert_ne!(cycle2, cycle, "...but a different cycle, or a dismissal sticks");
+
         reset();
         // Nothing configured: an answer, and an empty one.
-        assert_eq!(aggregate_warning().map(|l| l.len()), Some(0));
+        assert_eq!(aggregate_warning().map(|(_, l)| l.len()), Some(0));
     }
 
     use super::*;

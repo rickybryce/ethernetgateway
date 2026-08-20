@@ -203,7 +203,12 @@ fn main() {
                 gui_ctx.clone(),
                 Some(gui::HandoverAsk { holder_pid: pid, take_over: take_over.clone() }),
             );
-            if !asked {
+            // **The answer is read before the attempt is judged.** If the
+            // window ran long enough to be clicked, that click stands even if
+            // the event loop then died on the way out -- `take_over` is the
+            // operator's instruction, and `asked` only says whether there was
+            // an opportunity to give one.
+            if !take_over.load(Ordering::SeqCst) && !asked {
                 // **Nobody was asked, so nothing may be assumed.** With
                 // `enable_console = true` on a machine with no display, winit
                 // refuses the event loop -- and this used to fall through to

@@ -222,14 +222,20 @@ fn apply_arm_gpu_workarounds(_options: &mut eframe::NativeOptions) {}
 
 /// Whether the "this copy is serving nothing" banner is on screen.
 ///
-/// **Dismissal is tied to the text, not to a flag.** A Save and Restart re-arms
-/// every listener, so a copy that *still* binds nothing has to say so again --
-/// and a boolean would have silenced it for the life of a window whose settings
-/// reach nothing, which is the trap the banner exists to close. Comparing the
-/// text also means a warning that *changes* (one listener recovered, another
-/// did not) counts as something new to say.
-fn bind_banner_showing(warning: &[String], dismissed: &[String]) -> bool {
-    !warning.is_empty() && warning != dismissed
+/// **The text *and* the server cycle, not a flag and not the text alone.** A
+/// boolean would silence the banner for the life of a window whose settings
+/// reach nothing, which is the trap it exists to close. The text alone was the
+/// first version's bug: a Save and Restart that failed identically produced the
+/// same words, compared equal to the dismissed copy, and said nothing -- in the
+/// one case that matters, because the settings just saved are why they
+/// restarted. `bindwatch::reset` bumps the cycle on every server cycle, so the
+/// same words about a new attempt are a new thing to say, and a warning that
+/// *changes* within one cycle still counts too.
+fn bind_banner_showing(
+    warning: &(u64, Vec<String>),
+    dismissed: &(u64, Vec<String>),
+) -> bool {
+    !warning.1.is_empty() && warning != dismissed
 }
 
 /// Whether a startup failure would be *invisible* if we only logged it.
@@ -842,17 +848,22 @@ struct App {
     /// precisely when a root session has just written `egateway.conf` as root,
     /// so the warning has more standing after one, not less.
     elevation_dismissed: bool,
-    /// The aggregate bind warning, re-read on a timer, and the text the
-    /// operator dismissed.
+    /// The aggregate bind warning with the server cycle it belongs to, and what
+    /// the operator dismissed.
     ///
-    /// **Dismissal is tied to the text, not to a flag.** A Save and Restart
-    /// re-arms every listener, so a copy that still binds nothing must say so
-    /// again -- and a flag would have silenced it for the life of a window
-    /// whose settings reach nothing, which is the trap this banner exists to
-    /// close.
-    bind_warning: Vec<String>,
-    bind_warning_dismissed: Vec<String>,
+    /// **Dismissal is tied to the text *and the cycle*, not to a flag.** A flag
+    /// would silence the banner for the life of a window whose settings reach
+    /// nothing, which is the trap it exists to close. Text alone is not enough
+    /// either, and that was the first version's bug: a Save and Restart that
+    /// failed *identically* produced the same words, compared equal to the
+    /// dismissed copy, and stayed silent -- in exactly the case that matters,
+    /// since the settings just saved are why they restarted.
+    bind_warning: (u64, Vec<String>),
+    bind_warning_dismissed: (u64, Vec<String>),
     bind_warning_checked_at: Option<std::time::Instant>,
+    /// The absolute data directory, resolved once — a draw path must not make
+    /// filesystem calls, and this cannot change while the process runs.
+    data_dir: String,
     /// Per-port "Serial Port — More..." popup state, indexed by
     /// `SerialPortId::index()`.  Independent so the user can have one
     /// port's popup open while editing the other's primary controls.
@@ -1207,8 +1218,9 @@ impl App {
                 )
             },
             elevation_dismissed: false,
-            bind_warning: Vec::new(),
-            bind_warning_dismissed: Vec::new(),
+            bind_warning: (0, Vec::new()),
+            bind_warning_dismissed: (0, Vec::new()),
+            data_dir: config::data_dir_display(),
             bind_warning_checked_at: None,
             handover,
             serial_popup_open: [false, false],
@@ -1356,8 +1368,8 @@ impl App {
         self.bind_warning_checked_at = Some(std::time::Instant::now());
         // `None` means at least one listener has not reported yet: keep the
         // previous answer rather than flashing a warning at a bind in flight.
-        if let Some(lines) = crate::bindwatch::aggregate_warning() {
-            self.bind_warning = lines;
+        if let Some(report) = crate::bindwatch::aggregate_warning() {
+            self.bind_warning = report;
         }
     }
 
@@ -4715,8 +4727,11 @@ impl eframe::App for App {
                 // Above the settings for the same reason as the root banner:
                 // what it warns about is done by *using* this window.
                 if bind_banner_showing(&self.bind_warning, &self.bind_warning_dismissed) {
-                    let lines = self.bind_warning.clone();
-                    let data_dir = config::data_dir_display();
+                    let lines = self.bind_warning.1.clone();
+                    // Resolved once at construction, not here: this is a draw
+                    // path, and `data_dir_display` is a `canonicalize` syscall
+                    // that would run on every frame the banner is up.
+                    let data_dir = self.data_dir.clone();
                     let dismissed = egui::Frame::group(ui.style())
                         .fill(WARN_BG)
                         .stroke(Stroke::new(1.5_f32, WARN_BORDER))
@@ -6205,26 +6220,31 @@ mod tests {
     /// config the serving process never re-reads. Dismissing has to put the
     /// banner away without disarming it for the life of the window.
     #[test]
-    fn test_the_serving_nothing_banner_is_dismissed_by_text_not_for_ever() {
-        let warning: Vec<String> = vec!["WARNING: NONE of the 1".into(), "  nothing bound".into()];
+    fn test_the_serving_nothing_banner_is_dismissed_per_report_not_for_ever() {
+        let words: Vec<String> =
+            vec!["WARNING: NONE of the 1".into(), "  nothing bound".into()];
+        let none: (u64, Vec<String>) = (7, Vec::new());
+        let warning = (7_u64, words.clone());
         // Nothing wrong: no banner.
-        assert!(!bind_banner_showing(&[], &[]));
+        assert!(!bind_banner_showing(&none, &none));
         // Something wrong, not yet dismissed.
-        assert!(bind_banner_showing(&warning, &[]));
+        assert!(bind_banner_showing(&warning, &none));
         // Dismissed: away it goes.
         assert!(!bind_banner_showing(&warning, &warning));
-        // **A restart that still fails says it again** -- the same text arriving
-        // after a fresh `bindwatch::reset` is a new report, and this is why the
-        // dismissal is not a flag. (Modelled as the dismissal being cleared on
-        // the restart, which is what a changed report does below.)
-        let after_restart: Vec<String> =
-            vec!["WARNING: NONE of the 2".into(), "  nothing bound".into()];
+        // **The bug this pins.** A Save and Restart bumps the cycle, so the
+        // *identical* text is a new report and must be said again -- the first
+        // version compared text alone and stayed silent, in the one case that
+        // matters.
+        let after_restart = (8_u64, words.clone());
         assert!(
             bind_banner_showing(&after_restart, &warning),
-            "a different report must not inherit an old dismissal"
+            "a restart that fails identically must say so again"
         );
-        // And a listener recovering clears it without a dismissal.
-        assert!(!bind_banner_showing(&[], &warning));
+        // A warning that changes within one cycle is also new.
+        let changed = (7_u64, vec!["WARNING: NONE of the 2".into()]);
+        assert!(bind_banner_showing(&changed, &warning));
+        // And a listener recovering clears it without any dismissal.
+        assert!(!bind_banner_showing(&(8, Vec::new()), &warning));
     }
 
     /// The dialog starts closed, like every other popup: a modal covering the
