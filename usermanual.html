@@ -439,8 +439,11 @@ AppImage that ships with every release:
 
 <p>
 AppImages bundle their own libraries and run on any mainstream glibc-based
-distribution without installation. On first run the AppImage creates
-<code>egateway.conf</code> in the current working directory.
+distribution without installation. On first run it creates one folder,
+<code>ethernetgateway-data</code>, in the directory it was launched from &mdash;
+for a desktop icon, wherever that icon lives &mdash; and everything it writes
+goes inside it, including <code>egateway.conf</code>. Nothing else is written
+beside the AppImage.
 </p>
 
 <aside class="note">
@@ -566,8 +569,9 @@ handles as a graceful stop. Restart the service to pick up config changes.
 <h1 id="ch3">3. First Run &amp; Configuration File</h1>
 
 <p>
-On the very first launch the gateway looks for <code>egateway.conf</code> in the
-current working directory. If the file does not exist it is created with
+On the very first launch the gateway creates <code>ethernetgateway-data</code> in
+the directory it was launched from and looks for
+<code>ethernetgateway-data/egateway.conf</code>. If the file does not exist it is created with
 sensible defaults and a short log message is printed. On subsequent launches
 the file is read, every missing key is filled in with its default, and the file
 is rewritten so that future editors see the full set of keys and comments.
@@ -758,7 +762,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>slave_master_username</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified username.</td></tr>
         <tr><td><code>slave_master_password</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified password.</td></tr>
         <tr><td><code>relay_transport</code></td><td>string</td><td><code>ssh</code></td><td>Relay transport; only <code>ssh</code> is implemented.</td></tr>
-        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
+        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>ethernetgateway-data/transfer</code></td><td>Base directory for file transfers. A relative value is taken from the launch directory; an absolute one is used as written.</td></tr>
         <tr><td><code>place_bundled_terminals</code></td><td>bool</td><td><code>true</code></td><td>Write <code>EGT8080.COM</code> and <code>EGT80.COM</code> when they are missing. They are this gateway&rsquo;s own CP/M terminal in period assembly, compiled into the binary, and each is placed in <em>two</em> places: CP/M drive A:, where the emulator runs it, and loose in <code>transfer_dir</code>, where the file-transfer menus can send it to real hardware without starting the emulator at all. Nothing else puts them there on a fresh install. A file already present is <strong>never</strong> overwritten whatever this says &mdash; each terminal saves its settings inside its own <code>.COM</code>, so refreshing a copy would discard your configuration &mdash; so this only decides whether a <em>missing</em> one is written. Turn it off if you keep your own build, or your own <code>EGT80.COM</code> from before 0.9.2, and would rather a file you deleted stayed deleted instead of reappearing on the next restart.</td></tr>
         <tr><td><code>gui_zoom</code></td><td>string</td><td><code>auto</code></td><td>Desktop GUI display scale. <code>auto</code> follows the monitor's scale factor; a number (e.g. <code>1.0</code>, <code>1.25</code>) pins the console window's pixels-per-point so an over-reported DPI doesn't render it oversized. Clamped to 0.5&ndash;3.0.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
@@ -782,7 +786,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>cpm_mounts</code></td><td>string</td><td><em>(empty)</em></td><td>Disk images mounted on CP/M drives, as <code>A=name.dsk,C=other.dsk</code>. Values are bare filenames inside <code>CPM/images</code>, never paths. A mounted drive uses the CP/M filesystem inside the image instead of its folder; the folder&rsquo;s files are untouched and return on unmount. An image whose name carries no format prefix is identified by inspection and mounts <strong>read-only</strong>. See §8.11.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed per-block / per-subpacket protocol diagnostics (XMODEM, YMODEM, ZMODEM, Kermit, Punter).</td></tr>
         <tr><td><code>log_to_file</code></td><td>bool</td><td><code>true</code></td><td>Mirror the log to <code>log_file</code> as well as stderr and the console buffer. On by default. Configured in the General &ldquo;More&hellip;&rdquo; panel of the GUI and web UI (telnet: Other Settings &rarr; <code>L</code>). Takes effect on the next restart.</td></tr>
-        <tr><td><code>log_file</code></td><td>string</td><td><code>ethernetgateway.log</code></td><td>Active log file, relative to the working dir unless absolute. Owner-only (0600 on Unix); reopened in append mode so a restart extends it. Empty disables file logging.</td></tr>
+        <tr><td><code>log_file</code></td><td>string</td><td><code>ethernetgateway-data/ethernetgateway.log</code></td><td>Active log file, relative to the working dir unless absolute. Owner-only (0600 on Unix); reopened in append mode so a restart extends it. Empty disables file logging.</td></tr>
         <tr><td><code>log_max_size_kb</code></td><td>u64</td><td><code>1024</code></td><td>Rotate once a write would push the active file past this size. <code>0</code> disables size rotation (unbounded growth).</td></tr>
         <tr><td><code>log_max_files</code></td><td>u32</td><td><code>5</code></td><td>Rotated generations to keep; older ones are <strong>deleted</strong>. Worst-case disk use is <code>log_max_size_kb &times; (log_max_files + 1)</code> &mdash; 6&nbsp;MB with the defaults. <code>0</code> keeps no history.</td></tr>
         <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the far-end sender/receiver to start. Shared by XMODEM, XMODEM-1K, and YMODEM (same protocol code path).</td></tr>
@@ -1353,7 +1357,7 @@ After the next save the legacy keys disappear from the file.
 <p>
 Then click <em>Save and Restart Server</em>, or restart manually. On first
 start with SSH enabled, the gateway generates an Ed25519 host key and persists
-it to <code>ethernet_ssh_host_key</code> next to the binary (mode
+it to <code>ethernetgateway-data/ethernet_ssh_host_key</code> (mode
 <code>0600</code> on Unix). Subsequent starts reuse the same key so clients
 can verify the server's identity.
 </p>
@@ -1859,7 +1863,9 @@ client to a modern terminal that drag-and-drops files onto the window:
 
 <p>
 All transfers are scoped to the <code>transfer_dir</code> setting (default
-<code>transfer</code>), relative to the gateway's working directory. The
+<code>ethernetgateway-data/transfer</code>). A relative value is taken from the
+directory the gateway was launched from, and an absolute one is used as written,
+so a path you set yourself is never relocated. The
 gateway canonicalises the path on every access to prevent symlinks from
 escaping the jail, and filenames are validated to reject path traversal.
 </p>
@@ -5470,7 +5476,7 @@ numeric values fall back to the default.
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: send proactive TTYPE / NAWS / DO ECHO offers. Inert while <code>telnet_gateway_raw</code> is set (raw TCP carries no IAC layer); the control is greyed in that mode in every config surface, and saving then preserves rather than clears it.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: raw-TCP escape hatch, no IAC layer.</td></tr>
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>&ge; 1</td><td>Telnet listen port.</td></tr>
-        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>
+        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>ethernetgateway-data/transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>
         <tr><td><code>place_bundled_terminals</code></td><td>bool</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>Write <code>EGT8080.COM</code> and <code>EGT80.COM</code> into <code>transfer_dir</code> and onto CP/M drive A: when missing. Never overwrites a file that is already there.</td></tr>
         <tr><td><code>username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>Unified login username — shared by telnet, SSH, and the configuration web UI.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Detailed per-block / per-subpacket protocol logging across XMODEM, YMODEM, ZMODEM, Kermit, and Punter.</td></tr>

@@ -116,10 +116,18 @@ fn test_binary_telnet_browser_e2e() {
         Ok(())
     });
 
-    // 3. Set up an isolated config in a tmpdir.  The binary auto-
-    // creates egateway.conf in its CWD if missing; pre-writing it lets
-    // us pin telnet_port, disable GUI/SSH/auth, and point the
-    // transfer dir somewhere harmless.
+    // 3. Set up an isolated config in a tmpdir.  The binary keeps
+    // everything it creates in `ethernetgateway-data` BELOW its CWD, and
+    // auto-creates the config there if missing; pre-writing it lets us pin
+    // telnet_port, disable GUI/SSH/auth, and point the transfer dir somewhere
+    // harmless.
+    //
+    // The directory name is spelled out rather than imported because this is
+    // an integration test and the crate is a binary with no lib to import
+    // `config::DATA_DIR` from.  If it ever moves again, this test fails the
+    // way it did when it moved here: the binary ignores a config it cannot
+    // find, comes up on the default port, and the bind assertion below times
+    // out -- which is exactly the symptom a real installation would see.
     let tmp = std::env::temp_dir()
         .join(format!("xmodem_binary_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -138,7 +146,9 @@ fn test_binary_telnet_browser_e2e() {
         telnet_port,
         xfer.display()
     );
-    std::fs::write(tmp.join("egateway.conf"), &config).unwrap();
+    let data_dir = tmp.join("ethernetgateway-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join("egateway.conf"), &config).unwrap();
 
     // 4. Launch the binary.  CARGO_BIN_EXE_<crate> is a compile-time
     // env var Cargo sets for integration tests; access it via env!()

@@ -1562,7 +1562,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <div class="cat" style="margin-top:12px;">Shared</div>
                 <table class="data-table">
                     <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Transfer directory</td><td><code>transfer</code></td><td>&mdash;</td></tr>
+                    <tr><td>Transfer directory</td><td><code>ethernetgateway-data/transfer</code></td><td>&mdash;</td></tr>
                 </table>
 
                 <div class="cat" style="margin-top:12px;">XMODEM / XMODEM-1K / YMODEM</div>
@@ -1685,9 +1685,13 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
 
                 <div class="cat">Configuration File</div>
                 <p class="dim-text">
-                    The file <code>egateway.conf</code> uses a simple <code>key = value</code>
-                    format. Lines beginning with <code>#</code> are comments. The file is
-                    auto-created if missing and rewritten to ensure all keys are present.
+                    The file <code>ethernetgateway-data/egateway.conf</code> uses a simple
+                    <code>key = value</code> format. Lines beginning with <code>#</code> are
+                    comments. The file is auto-created if missing and rewritten to ensure all
+                    keys are present. Everything the gateway writes lives in that one
+                    <code>ethernetgateway-data</code> folder, created in the directory the
+                    gateway was launched from &mdash; the configuration, the log, the SSH host
+                    key and the transfer directory.
                 </p>
                 <pre><code><span class="output-text"># Ethernet Gateway Configuration
 telnet_enabled = true

@@ -92,7 +92,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advises depends on the launch: Ctrl-C from a shell, and a `pkill` when the
   process has no terminal to press it in.
 
+### Changed
+
+- **BREAKING: everything the gateway creates now lives in one
+  `ethernetgateway-data` folder.** A launch used to write straight into
+  whatever directory it was started from, which for a desktop icon is wherever
+  that icon lives: `egateway.conf`, a log, an SSH host key and a whole
+  `transfer/` tree dropped among the operator's own files. A launch now adds
+  exactly **one** entry to that directory, and everything goes inside it.
+
+  **Existing installations do not carry over, deliberately.** There is no
+  fallback and no migration: an upgrade will not find the old `egateway.conf`,
+  the old SSH host key or the old transfer directory, and will create fresh
+  ones. Moving somebody's host key and disk images automatically is the kind of
+  thing that goes wrong once and cannot be undone, so the choice is left with
+  the operator — move the old files into `ethernetgateway-data` by hand, or
+  start fresh. Note the SSH host key: a new one means every client that
+  connected before reports the host identity has changed.
+
+  The **working** directory, not the binary's — they are the same thing when
+  the binary is run from its own folder, and very different for an AppImage,
+  where the executable sits in a read-only temp mount at a fresh path every
+  launch and nothing can be written beside it. And not a folder called
+  `ethernetgateway`, which cannot work at all: that collides with the binary
+  whenever the two share a directory (`create_dir_all` fails with `File
+  exists`), and a case variant is no escape on macOS or Windows, where
+  filenames are case-insensitive.
+
+  Two settings are **defaults, not rules**: `transfer_dir` and `log_file` now
+  default inside the folder, but a value you set is used exactly as written, so
+  `transfer_dir = /mnt/bbsfiles` is never relocated. That is why they are
+  defaults rather than a resolution step — a rule that rewrote relative paths
+  would have to be idempotent or it would prefix its own output on the next
+  load.
+
 ### Added
+- **A second copy offers to take over instead of coming up useless.** Launching
+  the gateway twice in the same directory used to produce a process that
+  started fully, opened a window, offered every configuration screen, and held
+  no listener at all — while the *first* copy went on answering connections.
+  Five copies stacked up that way on 2026-08-19, the oldest still serving
+  telnet while a newer one served the web UI, so a Save in the visible window
+  never reached the process that was answering.
+
+  A launch now finds out first. It claims the directory with an OS-level lock —
+  never a PID file, which goes stale on a crash and whose PIDs get reused — and
+  a second copy is offered **Take Over** or **Quit** in a window with no server
+  behind it, naming the running copy by PID. Nothing is offered to edit there,
+  because saving settings from a window whose server was never started is how
+  the copies came to disagree in the first place.
+
+  **The handover is cooperative, not a kill.** `SIGTERM` was the obvious
+  mechanism and is wrong twice over: it does not exist on Windows, and it skips
+  the gateway's own shutdown — the broadcast that tells connected sessions the
+  server is going down, the bounded join of the serial threads, the staged
+  write of a booted disk image. The newcomer leaves a request file instead and
+  the holder, which polls for it, trips the same `shutdown` flag its own Quit
+  button uses. Identical on every platform, with no new signal plumbing.
+
+  A **headless** launch refuses instead of asking: with no window there is
+  nobody to ask, and a service started twice by accident must not stop a
+  working gateway on nobody's authority.
+
 
 - **Closing the GUI window asks whether you meant to stop the server, and a
   Quit button says so out loud.** Closing the console window leaves the server

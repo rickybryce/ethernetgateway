@@ -57,11 +57,25 @@ const WARN_BORDER: Color32 = Color32::from_rgb(0xe0, 0x3a, 0x3a);  // red border
 ///
 /// `gui_ctx` is a shared slot the app fills with its `egui::Context` on startup
 /// so the signal watcher can wake the event loop on Ctrl-C.
+/// The question a launch asks when another copy already holds the directory.
+///
+/// Passed *in* rather than discovered in the GUI: whether this process is the
+/// gateway is settled in `main` before a single listener is started, and a
+/// window that worked it out for itself could draw the editor for a server
+/// that was never going to bind.
+pub struct HandoverAsk {
+    /// The holder's PID, when it could be read — for the message only.
+    pub holder_pid: Option<u32>,
+    /// Set when the operator chooses to take the ports.
+    pub take_over: Arc<AtomicBool>,
+}
+
 pub fn run(
     cfg: Config,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
     gui_ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
+    handover: Option<HandoverAsk>,
 ) {
     // The console window renders into the desktop's X session. Launched as
     // a boot-time service, the process can start before that session has
@@ -169,7 +183,7 @@ pub fn run(
                 if cfg.open_screen_after_restart {
                     config::update_config_value("open_screen_after_restart", "false");
                 }
-                Ok(Box::new(App::new(cfg, shutdown, restart)))
+                Ok(Box::new(App::new(cfg, shutdown, restart, handover)))
             }),
         )
     }));
@@ -594,6 +608,12 @@ struct App {
     /// `config`, which the startup log renders too, so the two cannot come to
     /// disagree.
     elevation_lines: Vec<String>,
+    /// The handover question, when this launch found another copy holding the
+    /// directory.  `Some` means **no server is running behind this window** —
+    /// `main` started none — so the editor must not be drawn: it would offer
+    /// to save settings for a gateway that does not exist and show ports that
+    /// belong to the other copy.
+    handover: Option<HandoverAsk>,
     /// Set by the banner's Dismiss button, for this window only.
     ///
     /// **Deliberately not a config key.** Persisting it would silence the
@@ -815,7 +835,12 @@ impl WebScreenState {
 }
 
 impl App {
-    fn new(mut cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) -> Self {
+    fn new(
+        mut cfg: Config,
+        shutdown: Arc<AtomicBool>,
+        restart: Arc<AtomicBool>,
+        handover: Option<HandoverAsk>,
+    ) -> Self {
         // Clear the one-shot screen marker the moment it is read, and before
         // anything is opened.  A marker that survived a launch which failed to
         // open a browser would open one at every launch afterwards, which is a
@@ -953,6 +978,7 @@ impl App {
                 )
             },
             elevation_dismissed: false,
+            handover,
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             general_popup_open: false,
@@ -3331,6 +3357,97 @@ impl App {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
+    /// The screen a second copy shows instead of the editor.
+    ///
+    /// **Take Over is offered rather than done.** A launch cannot tell an
+    /// accidental double-click from a deliberate restart, and the running copy
+    /// may have a booted CP/M disk somebody is sitting at -- so the choice is
+    /// the operator's, and what it costs is stated before they make it.
+    ///
+    /// **Nothing here edits the config.** Saving from a window whose server was
+    /// never started is how five copies came to disagree about the settings in
+    /// the first place: the file changed, and the process actually answering
+    /// connections never re-read it.
+    fn draw_handover(&mut self, ui: &mut egui::Ui) {
+        let holder = match self.handover.as_ref().and_then(|h| h.holder_pid) {
+            Some(pid) => format!("another copy (process {pid})"),
+            None => "another copy".to_string(),
+        };
+        // **Inside a vertical ScrollArea, like the wizard.** The `Ui` that
+        // `eframe::App::ui` hands us is documented as having "no margin or
+        // background" and does not establish a definite width for text to wrap
+        // against: measured, labels put straight into it came out in two offset
+        // columns with each sentence split across the gap. The wizard -- the
+        // only other screen that owns this window -- wraps its content the same
+        // way, and it is also what keeps this readable in a window too short
+        // for it.
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("The gateway is already running here")
+                .strong()
+                .size(24.0)
+                .color(AMBER_BRIGHT),
+        );
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "This directory is already served by {holder}, which holds the telnet, SSH \
+                 and web ports. Two copies cannot share them."
+            ))
+            .color(AMBER)
+            .size(16.0),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(
+                "This window is not connected to it. Nothing here has been started, and no \
+                 setting saved from this window would reach the copy that is answering \
+                 connections — which is exactly how a stack of copies comes to disagree \
+                 about its own configuration.",
+            )
+            .color(AMBER_DIM)
+            .size(15.0),
+        );
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new(
+                "Take Over asks that copy to stand down — it closes its sessions the same \
+                 way its own Quit button would — and then this one takes the ports. Any \
+                 telnet or SSH session in progress ends, including a booted CP/M disk \
+                 somebody is sitting at.",
+            )
+            .color(AMBER)
+            .size(15.0),
+        );
+        ui.add_space(20.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Take Over").strong().size(16.0).color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                if let Some(h) = self.handover.as_ref() {
+                    h.take_over.store(true, Ordering::SeqCst);
+                }
+                // Ends the event loop so `main` can do the handover; the window
+                // comes back once this copy owns the ports.
+                self.shutdown.store(true, Ordering::SeqCst);
+            }
+            ui.add_space(12.0);
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Quit").strong().size(16.0)))
+                .clicked()
+            {
+                // `take_over` stays false, so `main` exits without disturbing
+                // the copy that is working.
+                self.shutdown.store(true, Ordering::SeqCst);
+            }
+        });
+        });
+    }
+
     /// The dialog behind both the title-bar X and the header's Quit button.
     ///
     /// **One dialog for both, because they are one question.**  The X means
@@ -4122,6 +4239,21 @@ impl eframe::App for App {
 
         self.poll_logs();
         self.poll_dir_pick();
+
+        // ── Another copy already holds this directory ─────────
+        // Owns the whole window, like the wizard, and is checked *before* it:
+        // a first run that is also a second copy has no business collecting
+        // settings for a server that will not be started. There is no server
+        // behind this window at all -- `main` started none -- so this screen
+        // and the two buttons on it are the only things drawn.
+        if self.handover.is_some() {
+            self.track_window_geometry(ui.ctx());
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(WIZARD_MARGIN, 0))
+                .show(ui, |ui| self.draw_handover(ui));
+            return;
+        }
 
         // First-run setup wizard: it owns the whole window while open, and
         // deliberately runs before refresh_from_global — its draft must never
@@ -5637,6 +5769,7 @@ mod tests {
             Config::default(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            None,
         )
     }
 
@@ -5756,6 +5889,7 @@ mod tests {
             Config { open_screen_after_restart: true, ..Config::default() },
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         assert!(asked.vdm_open_at.is_some(), "the marker must arm the open");
         // Not immediately: the server it is about to open is still binding.
@@ -5824,6 +5958,7 @@ mod tests {
             Config { web_enabled: true, web_port: 9123, ..Config::default() },
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            None,
         );
 
         let url = app.vdm_url();

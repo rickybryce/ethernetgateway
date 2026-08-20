@@ -31,7 +31,10 @@ cargo build --release
 ./target/release/ethernetgateway
 ```
 
-On first run a default `egateway.conf` is created in the working directory, and
+On first run the gateway creates a single folder, `ethernetgateway-data`, in the
+directory it was launched from, and everything it writes lives there — the
+configuration, the log, the SSH host key and the transfer directory. A default
+`egateway.conf` is created inside it, and
 the desktop GUI opens into a short **setup wizard**. It asks for a login, which
 servers to start, where transferred files go, and whether the machine is
 standalone or part of a master/slave pair. It ends with the commands to connect

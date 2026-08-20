@@ -45,6 +45,7 @@ mod bindwatch;
 mod config;
 mod cpm;
 mod gui;
+mod instance;
 mod kermit;
 mod logger;
 mod portcheck;
@@ -91,6 +92,106 @@ fn main() {
         shutdown_notify.clone(),
         gui_ctx.clone(),
     );
+
+    // Everything this program creates lives one level down, in
+    // `ethernetgateway-data` (see `config::DATA_DIR`).  It has to exist before
+    // the config is read, because the config is *in* it and a first launch
+    // writes it there -- and before the logger is armed, for the same reason.
+    //
+    // A failure here is fatal rather than a warning.  Every other path leads
+    // somewhere worse: `load_or_create_config` would fail to write and fall
+    // back to insecure defaults on a directory it cannot create, the log would
+    // silently go nowhere, and the SSH host key would be regenerated on every
+    // launch so clients would see the identity change each time.  Better to
+    // say which directory and why, once.
+    if let Err(e) = config::ensure_data_dir() {
+        glog!("FATAL: could not create the data directory '{}': {}", config::DATA_DIR, e);
+        glog!("       Everything the gateway writes lives there — the configuration,");
+        glog!("       the log, the SSH host key and the transfer directory.");
+        glog!("       Check that the directory this was launched from is writable.");
+        std::process::exit(1);
+    }
+
+    // ── One gateway per directory ─────────────────────────────
+    // Settled before a single listener is started, because the alternative is
+    // what shipped until now: a second copy comes up fully, opens a window,
+    // binds nothing, and then edits a config the serving copy never re-reads.
+    //
+    // The lock is held for the life of the process, so it is bound to a name
+    // here; `let _ = ` would drop it at once and let a second copy straight in.
+    let _instance_lock = match instance::acquire() {
+        Ok(instance::Instance::Acquired(lock)) => {
+            // Ours cleanly, so any request file on disk was left by a copy that
+            // died mid-handover and is asking nobody.
+            instance::clear_stale_handover_request();
+            lock
+        }
+        Ok(instance::Instance::Busy { pid }) => {
+            // The config is needed to answer one question -- is there a window
+            // to ask in -- and reading it costs nothing we would not pay in a
+            // moment anyway.
+            let cfg = config::load_or_create_config();
+            let who = match pid {
+                Some(p) => format!("another copy (process {p})"),
+                None => "another copy".to_string(),
+            };
+            glog!("The gateway is already running in this directory — {} holds the ports.", who);
+            if !cfg.enable_console {
+                // **A headless launch must not take over by itself.** With no
+                // window there is nobody to ask, and a service restarted by
+                // hand, or a second unit file started by accident, would
+                // otherwise stop a working gateway and drop its sessions on
+                // the strength of a double-click nobody made.
+                glog!("       No console window is enabled, so there is nobody to ask whether");
+                glog!("       to take over — refusing rather than stopping a running gateway.");
+                glog!("       Stop the running copy first, or set enable_console = true to be");
+                glog!("       offered the choice.");
+                std::process::exit(1);
+            }
+            // Ask, in a window with no server behind it.
+            let take_over = Arc::new(AtomicBool::new(false));
+            gui::run(
+                cfg,
+                shutdown.clone(),
+                restart.clone(),
+                gui_ctx.clone(),
+                Some(gui::HandoverAsk { holder_pid: pid, take_over: take_over.clone() }),
+            );
+            if !take_over.load(Ordering::SeqCst) {
+                glog!("Left the running copy alone.");
+                return;
+            }
+            glog!("Asking the running copy to stand down...");
+            match instance::request_handover() {
+                Ok(Some(lock)) => {
+                    // The window was closed to end the ask; clear the flag it
+                    // was closed with, or the server we are about to start
+                    // would shut down the moment it came up.
+                    shutdown.store(false, Ordering::SeqCst);
+                    restart.store(false, Ordering::SeqCst);
+                    glog!("Took over — this copy now holds the ports.");
+                    lock
+                }
+                Ok(None) => {
+                    glog!("FATAL: the running copy did not stand down in time.");
+                    glog!("       It may be wedged. Stop it and start this one again.");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    glog!("FATAL: could not ask the running copy to stand down: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            glog!("FATAL: could not claim the data directory '{}': {}", config::DATA_DIR, e);
+            glog!("       Check that it is writable.");
+            std::process::exit(1);
+        }
+    };
+
+    // Now that we own the directory, stand down for a later copy that asks.
+    instance::spawn_handover_watcher(shutdown.clone());
 
     loop {
         // Load or create config (re-read from disk on each restart)
@@ -380,7 +481,7 @@ fn main() {
 
         if gui_cfg.enable_console {
             // GUI blocks the main thread until the window is closed.
-            gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone());
+            gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone(), None);
             if gui::window_closed_was_a_detach(
                 restart.load(Ordering::SeqCst),
                 shutdown.load(Ordering::SeqCst),

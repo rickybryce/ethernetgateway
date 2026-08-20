@@ -11,8 +11,48 @@ use std::sync::Mutex;
 
 use crate::logger::glog;
 
-/// Name of the configuration file (lives next to the binary).
-pub const CONFIG_FILE: &str = "egateway.conf";
+/// The single directory everything this program creates lives in, one level
+/// below the directory it was launched from.
+///
+/// **One folder, not a scatter.** Every file used to be written straight into
+/// the working directory, which for a desktop launch is wherever the icon
+/// happens to be: an operator running the AppImage from their Desktop got
+/// `egateway.conf`, a log, an SSH host key and a `transfer/` tree dropped among
+/// their own files. Everything now goes here instead, so a launch adds exactly
+/// one entry to the directory it was started from.
+///
+/// **The working directory, not the binary's.** They are the same thing when
+/// the binary is run from its own folder, and very different for an AppImage:
+/// there the executable lives at `/tmp/.mount_XXXXXX/usr/bin/ethernetgateway`,
+/// which is read-only and a different path on every launch, so nothing can be
+/// written beside it.
+///
+/// **And not `ethernetgateway`, which cannot work.** The obvious name collides
+/// with the binary itself whenever the two share a directory -- `target/release`
+/// holds a *file* of that name, so `create_dir_all` fails with `File exists`.
+/// A case variant is no escape either, since macOS and Windows filesystems are
+/// case-insensitive and would collide just the same.
+pub const DATA_DIR: &str = "ethernetgateway-data";
+
+/// Create [`DATA_DIR`] if it is missing.
+///
+/// Called once at startup **before the config is read**, because the config
+/// lives inside it and `write_config_file` stages a temp file in the same
+/// directory.  Creating an existing directory is `Ok`, so this is safe on
+/// every launch.
+pub fn ensure_data_dir() -> std::io::Result<()> {
+    std::fs::create_dir_all(DATA_DIR)
+}
+
+/// Name of the configuration file, inside [`DATA_DIR`].
+///
+/// The folder is part of the constant rather than joined at each use, so the
+/// sixteen places that open it *and print it* are correct together: a message
+/// telling an operator to edit `egateway.conf` has to name the path where they
+/// will actually find it.  A forward slash is used deliberately -- Windows
+/// accepts it throughout `std::fs`, and one literal beats a `cfg` for a string
+/// that is also displayed.
+pub const CONFIG_FILE: &str = "ethernetgateway-data/egateway.conf";
 
 /// Path to the configuration file actually read/written at runtime.
 ///
@@ -129,7 +169,15 @@ const DEFAULT_USERNAME: &str = "admin";
 /// insecure-default warning) test against this constant rather than a
 /// duplicated string literal that could silently drift from the real default.
 pub(crate) const DEFAULT_PASSWORD: &str = "changeme";
-const DEFAULT_TRANSFER_DIR: &str = "transfer";
+/// Default transfer directory, inside [`DATA_DIR`].
+///
+/// The **default** moves; a value the operator sets is used exactly as
+/// written, relative to the working directory as before.  That is the whole
+/// reason this is a default rather than a resolution rule: `transfer_dir =
+/// /mnt/bbsfiles` must not be relocated, and a rule that rewrote relative
+/// values would have to be idempotent or it would prefix its own output on
+/// the next load.
+const DEFAULT_TRANSFER_DIR: &str = "ethernetgateway-data/transfer";
 /// Place `EGT8080.COM` and `EGT80.COM` when they are missing.
 ///
 /// **On, because the file being there is the point.** They are our own CP/M
@@ -161,8 +209,10 @@ const DEFAULT_MAX_SESSIONS: usize = 50;
 /// usually left running unattended, and the in-memory rings only hold the last
 /// 2000 lines.
 const DEFAULT_LOG_TO_FILE: bool = true;
-/// Active log file, in the binary's working directory alongside `egateway.conf`.
-const DEFAULT_LOG_FILE: &str = "ethernetgateway.log";
+/// Active log file, inside [`DATA_DIR`] alongside `egateway.conf`.  Rotations
+/// land beside it.  An operator-set path is honoured as written, exactly as
+/// with `transfer_dir`.
+const DEFAULT_LOG_FILE: &str = "ethernetgateway-data/ethernetgateway.log";
 /// Rotate once the active log reaches this size, in KB.
 const DEFAULT_LOG_MAX_SIZE_KB: u64 = 1024;
 /// Rotated generations to keep; older ones are deleted.  With the defaults the
@@ -1501,7 +1551,12 @@ fn unreadable_config_diagnosis(
             "       including the serial ports, is out of reach until that is fixed.".to_string(),
             "       Fix the owner rather than deleting the file, which would discard".to_string(),
             "       your configuration:".to_string(),
-            format!("           sudo chown {target} {CONFIG_FILE}"),
+            // The **folder**, not just this file.  A root run leaves the log
+            // and the SSH host key behind too, so fixing only the config
+            // trades the FATAL for a regenerated host key and a log that
+            // cannot be written -- and the operator would be back with a
+            // second, stranger problem.
+            format!("           sudo chown -R {target} {DATA_DIR}"),
         ];
     }
     vec!["       Fix or remove the file, then restart.".to_string()]
@@ -1620,9 +1675,12 @@ pub fn elevation_warning_lines(
                      check that account's access to the port itself instead."
                 )),
             }
+            // One directory is now the whole answer -- everything we create
+            // lives in it, so there is no list of filenames to keep in step
+            // with here (the old one had already drifted: it named `transfer`
+            // and the host key by hand).
             lines.push(format!(
-                "To hand this directory back afterwards:  sudo chown -R {user} {CONFIG_FILE} \
-                 ethernet_ssh_host_key transfer"
+                "To hand it back afterwards:  sudo chown -R {user} {DATA_DIR}"
             ));
         }
         None => {
@@ -3746,7 +3804,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
 // ─── Dialup mapping (dialup.conf) ─────────────────────────
 
 /// Name of the dialup mapping file (lives next to the binary).
-pub const DIALUP_FILE: &str = "dialup.conf";
+pub const DIALUP_FILE: &str = "ethernetgateway-data/dialup.conf";
 
 /// A single dialup mapping: phone number → host:port.
 #[derive(Debug, Clone, PartialEq)]
@@ -3942,7 +4000,7 @@ mod tests {
         let all = lines.join("\n");
         assert!(all.contains("owned by root"), "{all}");
         assert!(all.contains("ricky (uid 1000)"), "{all}");
-        assert!(all.contains("sudo chown ricky egateway.conf"), "{all}");
+        assert!(all.contains("sudo chown -R ricky ethernetgateway-data"), "{all}");
         // The serial ports are why they went looking, and the reason disabling
         // them cannot help belongs in the message.
         assert!(all.contains("serial ports"), "{all}");
@@ -3953,7 +4011,7 @@ mod tests {
         let numeric = unreadable_config_diagnosis(
             ErrorKind::PermissionDenied, Some(0), Some(1000), None,
         ).join("\n");
-        assert!(numeric.contains("sudo chown 1000 egateway.conf"), "{numeric}");
+        assert!(numeric.contains("sudo chown -R 1000 ethernetgateway-data"), "{numeric}");
     }
 
     /// **The warning exists to prevent the FATAL, so it must name the account
@@ -3966,7 +4024,7 @@ mod tests {
         // The way out of ever needing sudo here, and the way back if it is
         // already too late.
         assert!(sudo.contains("dialout"), "{sudo}");
-        assert!(sudo.contains("sudo chown -R ricky egateway.conf"), "{sudo}");
+        assert!(sudo.contains("sudo chown -R ricky ethernetgateway-data"), "{sudo}");
 
         // Root with no sudo: still warned, but nothing is asserted about who.
         let bare = elevation_warning_lines(true, None, Some("dialout")).join("\n");
@@ -4069,7 +4127,10 @@ mod tests {
         assert!(!cfg.security_enabled);
         assert_eq!(cfg.username, "admin");
         assert_eq!(cfg.password, "changeme");
-        assert_eq!(cfg.transfer_dir, "transfer");
+        // Against the constant, not a copy of it: this pair of literals is
+        // exactly what had to be chased when the data directory moved.
+        assert_eq!(cfg.transfer_dir, DEFAULT_TRANSFER_DIR);
+        assert!(cfg.transfer_dir.starts_with(DATA_DIR), "the default must live in the data dir");
         assert_eq!(cfg.max_sessions, 50);
         assert_eq!(cfg.idle_timeout_secs, 900);
         assert_eq!(cfg.groq_api_key, "");
@@ -4503,7 +4564,7 @@ mod tests {
         assert_eq!(cfg.telnet_port, 4444);
         assert!(!cfg.security_enabled);
         assert_eq!(cfg.username, "admin");
-        assert_eq!(cfg.transfer_dir, "transfer");
+        assert_eq!(cfg.transfer_dir, DEFAULT_TRANSFER_DIR);
         // SSH fields should also get defaults when missing from file
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
