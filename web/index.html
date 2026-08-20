@@ -1691,7 +1691,12 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     keys are present. Everything the gateway writes lives in that one
                     <code>ethernetgateway-data</code> folder, created in the directory the
                     gateway was launched from &mdash; the configuration, the log, the SSH host
-                    key and the transfer directory.
+                    key and the transfer directory. Started from a desktop icon that is your
+                    home folder (a desktop launch defines no working directory of its own, so
+                    the AppImage pins one rather than letting the same icon build two data
+                    folders); started from a terminal it is the directory you are standing in.
+                    The startup log names the folder it settled on as a full path, on the
+                    <code>Data directory:</code> line.
                 </p>
                 <pre><code><span class="output-text"># Ethernet Gateway Configuration
 telnet_enabled = true

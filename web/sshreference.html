@@ -640,7 +640,7 @@
                     <tr><td>Default state</td><td><code>ssh_enabled = false</code> &mdash; opt-in.</td></tr>
                     <tr><td>Default port</td><td>2222 (<code>ssh_port</code>).</td></tr>
                     <tr><td>Implementation</td><td>russh server (<code>src/ssh.rs</code>).</td></tr>
-                    <tr><td>Host key</td><td>Ed25519, auto-generated on first run, persisted to <code>ethernet_ssh_host_key</code> (OpenSSH PEM, <code>0o600</code> on Unix).</td></tr>
+                    <tr><td>Host key</td><td>Ed25519, auto-generated on first run, persisted to <code>ethernetgateway-data/ethernet_ssh_host_key</code> (OpenSSH PEM, <code>0o600</code> on Unix).</td></tr>
                     <tr><td>Authentication</td><td>Password only, against the unified <code>username</code> / <code>password</code> (shared with telnet and the web UI). Constant-time comparison.</td></tr>
                     <tr><td>Brute-force lockout</td><td>Shared per-IP map with telnet: 3 failures &rarr; 5-minute ban. <code>auth_rejection_time</code> is 1&nbsp;s.</td></tr>
                     <tr><td>Capacity</td><td>Bounded by <code>max_sessions</code>; connections over the cap are rejected at auth.</td></tr>
@@ -679,7 +679,7 @@
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="keyfiles">
                 <div class="section-title">The Three Key Files</div>
-                <p class="intro">SSH touches three on-disk files in the gateway's working directory. They are easy to confuse &mdash; here is exactly what each one is for.</p>
+                <p class="intro">SSH touches three on-disk files, all of them inside the gateway's <code>ethernetgateway-data</code> folder along with everything else it creates. They are easy to confuse &mdash; here is exactly what each one is for.</p>
                 <table class="data-table">
                     <tr><th>File</th><th>Used when</th><th>What it holds</th></tr>
                     <tr><td><code>ethernet_ssh_host_key</code></td><td>A client connects <strong>to</strong> our SSH server</td><td>The gateway's <em>own</em> SSH server host key (Ed25519 private key). This is the identity remote clients pin.</td></tr>

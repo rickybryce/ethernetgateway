@@ -57,7 +57,13 @@ const HANDOVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15)
 /// enough to be free.
 const POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-fn lock_path() -> PathBuf {
+/// Where the lock lives.
+///
+/// Public because a failure to *open* it is the one startup error that needs to
+/// name the file rather than the directory: a root-owned lock file is what a
+/// single `sudo` run leaves behind, and the diagnosis has to stat the thing it
+/// was refused (see `config::data_dir_ownership_lines`).
+pub fn lock_path() -> PathBuf {
     PathBuf::from(config::DATA_DIR).join(LOCK_FILE)
 }
 

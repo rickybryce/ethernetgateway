@@ -778,13 +778,13 @@ pub(crate) fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKe
 /// Callers that perform read-modify-write on the same file must still
 /// serialise externally (e.g. via a mutex) to avoid lost updates.
 fn atomic_write(path: &str, content: &str) -> Result<(), std::io::Error> {
-    // The data directory must exist before anything in it can be written.
+    // The directory must exist before anything in it can be written.
     // `main` creates it at startup, but relying on that alone was wrong twice
     // over: a unit test reaches this writer without going through `main` (which
     // is how the missing directory was found), and an operator can remove the
-    // folder while the gateway is running. Idempotent and cheap, so it costs a
-    // stat on a path that is almost always already there.
-    let _ = crate::config::ensure_data_dir();
+    // folder while the gateway is running.  The parent of the path we are about
+    // to write, never a constant -- see `config::ensure_parent_dir`.
+    crate::config::ensure_parent_dir(path);
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);

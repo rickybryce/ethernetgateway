@@ -44,6 +44,52 @@ pub fn ensure_data_dir() -> std::io::Result<()> {
     std::fs::create_dir_all(DATA_DIR)
 }
 
+/// Create the directory a file is about to be written into.
+///
+/// **The parent of the path, not [`DATA_DIR`].** Four writers used to call
+/// `ensure_data_dir` and then write to a `path` argument, which is only the
+/// same directory by coincidence: under `cfg(test)` the config path is
+/// redirected to the temp directory, so the guard created a folder it never
+/// used -- the config tests alone left an `ethernetgateway-data` behind in
+/// whatever directory `cargo test` ran from -- and an operator-set absolute
+/// `log_file` would be the same mistake in production. Deriving the directory
+/// from the path makes the guard true by construction rather than by
+/// coincidence. (The full suite still creates one, for a real reason: the SSH
+/// key and CP/M-layout tests write to the actual default paths.)
+///
+/// Best-effort and idempotent: the write that follows reports its own failure,
+/// and a path with no parent (a bare filename) needs no directory at all.
+pub(crate) fn ensure_parent_dir(path: &str) {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+}
+
+/// [`DATA_DIR`] as an absolute path, for the one startup line that says which
+/// one is live.
+///
+/// **A relative name cannot answer "which data directory?", and that question
+/// is now askable.** The directory is resolved against the *launch* directory,
+/// and a desktop launch does not define one: the desktop-entry spec leaves the
+/// working directory unspecified when `Path=` is absent, so the same AppImage
+/// double-clicked from a file manager and started from an application menu can
+/// land on two different trees -- two configs, two host keys, two transfer
+/// directories, and two locks that know nothing about each other (`bindwatch`'s
+/// surviving "a copy launched from a DIFFERENT directory" case, reached by
+/// accident). Every message names the path relatively, so nothing on screen or
+/// in the log could tell the two apart. This is what makes them tellable.
+///
+/// Falls back to the relative name if the directory cannot be canonicalised,
+/// which is better than saying nothing and cannot itself fail.
+pub fn data_dir_display() -> String {
+    match std::fs::canonicalize(DATA_DIR) {
+        Ok(p) => p.display().to_string(),
+        Err(_) => DATA_DIR.to_string(),
+    }
+}
+
 /// Name of the configuration file, inside [`DATA_DIR`].
 ///
 /// The folder is part of the constant rather than joined at each use, so the
@@ -1540,9 +1586,6 @@ fn unreadable_config_diagnosis(
             Some(n) => format!("{n} (uid {us})"),
             None => format!("uid {us}"),
         };
-        // Numeric when we have no name: `chown 1000` is always valid, whereas
-        // a guessed username may not be.
-        let target = our_name.map(str::to_string).unwrap_or_else(|| us.to_string());
         return vec![
             format!("       The file is owned by {owner_desc}, but this is running as {us_desc}."),
             "       A single run under sudo does this. The config is written 0600".to_string(),
@@ -1551,15 +1594,78 @@ fn unreadable_config_diagnosis(
             "       including the serial ports, is out of reach until that is fixed.".to_string(),
             "       Fix the owner rather than deleting the file, which would discard".to_string(),
             "       your configuration:".to_string(),
-            // The **folder**, not just this file.  A root run leaves the log
-            // and the SSH host key behind too, so fixing only the config
-            // trades the FATAL for a regenerated host key and a log that
-            // cannot be written -- and the operator would be back with a
-            // second, stranger problem.
-            format!("           sudo chown -R {target} {DATA_DIR}"),
+            chown_advice(us, our_name),
         ];
     }
     vec!["       Fix or remove the file, then restart.".to_string()]
+}
+
+/// The one command that undoes a `sudo` run, addressed to whoever we are.
+///
+/// **The folder, not one file.** A root run leaves the lock file, the log and
+/// the SSH host key behind as well, so fixing only the config trades the FATAL
+/// for a regenerated host key and a log that cannot be written -- and the
+/// operator is back with a second, stranger problem. Written once and shared by
+/// every message that offers it, because three copies of a `chown` line is
+/// three chances to name a different path.
+///
+/// Numeric when we have no login name: `chown 1000` is always valid, whereas a
+/// guessed username may not be.
+fn chown_advice(our_uid: u32, our_name: Option<&str>) -> String {
+    let target = our_name.map(str::to_string).unwrap_or_else(|| our_uid.to_string());
+    format!("           sudo chown -R {target} {DATA_DIR}")
+}
+
+/// Why a path *inside* the data directory is refused, when ownership explains
+/// it.  Empty when it does not, so the caller keeps no rule of its own.
+///
+/// **One directory now breaks three startup paths, and only one of them used to
+/// say why.** Everything the gateway creates lives in [`DATA_DIR`], so a single
+/// `sudo` run leaves root-owned files across all of it -- and the *first* thing
+/// a later launch touches is not the config at all, it is the instance lock.
+/// `unreadable_config_diagnosis` was written for exactly this cause and was
+/// unreachable in it: the launch died at `could not claim the data directory`,
+/// which names no cause and reads like a second copy is holding the ports.
+/// Measured 2026-08-20 with a root-owned lock file.
+///
+/// Pure, and takes the ids rather than reading them, so every branch is
+/// testable on any platform -- including the Windows case, where there are no
+/// uids and there is nothing to say.
+///
+/// `subject` names what was actually stat'd -- "the lock file", "the data
+/// directory", "its parent directory". Passed in rather than assumed, because
+/// the caller does not always get to ask about the thing it was refused: a
+/// missing lock file has no owner, so the question falls back to the directory,
+/// and a message that then said "the lock file is owned by root" would be
+/// describing a file that does not exist.
+pub(crate) fn data_dir_ownership_lines(
+    kind: std::io::ErrorKind,
+    subject: &str,
+    path_owner: Option<u32>,
+    our_uid: Option<u32>,
+    our_name: Option<&str>,
+) -> Vec<String> {
+    if kind == std::io::ErrorKind::PermissionDenied
+        && let (Some(owner), Some(us)) = (path_owner, our_uid)
+        && owner != us
+    {
+        let owner_desc = if owner == 0 { "root".to_string() } else { format!("uid {owner}") };
+        let us_desc = match our_name {
+            Some(n) => format!("{n} (uid {us})"),
+            None => format!("uid {us}"),
+        };
+        return vec![
+            format!(
+                "       {subject} is owned by {owner_desc}, but this is running as {us_desc}."
+            ),
+            "       A single run under sudo does this: everything the gateway creates".to_string(),
+            "       lives in one directory, so one root run leaves the whole of it —".to_string(),
+            "       the lock file, the configuration, the log and the transfer tree —".to_string(),
+            "       out of reach of your own account. Hand it back:".to_string(),
+            chown_advice(us, our_name),
+        ];
+    }
+    Vec::new()
 }
 
 /// The uid owning `path`, if it can be determined.
@@ -1567,20 +1673,20 @@ fn unreadable_config_diagnosis(
 /// `stat` needs search permission on the *directory*, not read permission on
 /// the file, so this answers even for the `0600` file we were just refused.
 #[cfg(unix)]
-fn file_owner_uid(path: impl AsRef<std::path::Path>) -> Option<u32> {
+pub(crate) fn file_owner_uid(path: impl AsRef<std::path::Path>) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path.as_ref()).ok().map(|m| m.uid())
 }
 
 #[cfg(not(unix))]
-fn file_owner_uid(_path: impl AsRef<std::path::Path>) -> Option<u32> {
+pub(crate) fn file_owner_uid(_path: impl AsRef<std::path::Path>) -> Option<u32> {
     None
 }
 
 /// This process's effective uid, and the login name if the environment offers
 /// one.  `None` off Unix, where the ownership diagnosis does not apply.
 #[cfg(unix)]
-fn current_owner_identity() -> (Option<u32>, Option<String>) {
+pub(crate) fn current_owner_identity() -> (Option<u32>, Option<String>) {
     // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no memory
     // we own; it is unsafe only because it is an `extern "C"` call.
     let uid = unsafe { libc::geteuid() };
@@ -1589,7 +1695,7 @@ fn current_owner_identity() -> (Option<u32>, Option<String>) {
 }
 
 #[cfg(not(unix))]
-fn current_owner_identity() -> (Option<u32>, Option<String>) {
+pub(crate) fn current_owner_identity() -> (Option<u32>, Option<String>) {
     (None, None)
 }
 
@@ -2476,13 +2582,14 @@ fn write_serial_port_section(
 /// closes the misalignment footgun where missing one slot mid-template
 /// would silently shift every subsequent field onto the wrong line.
 fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
-    // The data directory must exist before anything in it can be written.
+    // The directory must exist before anything in it can be written.
     // `main` creates it at startup, but relying on that alone was wrong twice
     // over: a unit test reaches this writer without going through `main` (which
     // is how the missing directory was found), and an operator can remove the
-    // folder while the gateway is running. Idempotent and cheap, so it costs a
-    // stat on a path that is almost always already there.
-    let _ = ensure_data_dir();
+    // folder while the gateway is running.  The parent of `path` rather than
+    // `DATA_DIR`: under `cfg(test)` this writes to a temp file, and a guard on
+    // the constant created a folder it never used -- see `ensure_parent_dir`.
+    ensure_parent_dir(path);
     let mut content = String::with_capacity(8192);
 
     content.push_str("\
@@ -4077,6 +4184,225 @@ mod tests {
             unreadable_config_diagnosis(ErrorKind::PermissionDenied, None, None, None),
             vec![generic.to_string()],
         );
+    }
+
+    /// **The lock is opened before the config is read, so the sudo trap had to
+    /// be diagnosable from there too.**
+    ///
+    /// Everything the gateway creates lives in one directory now, which means a
+    /// single root run breaks three separate startup paths -- the lock, the
+    /// config, the transfer tree -- and only the config one used to say why.
+    /// Measured 2026-08-20: with a root-owned lock file the launch died on
+    /// "could not claim the data directory", naming no cause and reading like a
+    /// second copy was holding the ports.
+    #[test]
+    fn test_a_root_owned_path_in_the_data_directory_is_diagnosed_as_the_sudo_trap() {
+        use std::io::ErrorKind;
+        let all = data_dir_ownership_lines(
+            ErrorKind::PermissionDenied,
+            "The lock file",
+            Some(0),    // root left it behind
+            Some(1000), // we are not root
+            Some("ricky"),
+        )
+        .join("\n");
+        assert!(all.contains("owned by root"), "{all}");
+        assert!(all.contains("ricky (uid 1000)"), "{all}");
+        // The one command, and the same one the other two messages give.
+        assert!(all.contains("sudo chown -R ricky ethernetgateway-data"), "{all}");
+        // Why *this* file being root's locks them out of everything.
+        assert!(all.contains("lock file"), "{all}");
+        // **The subject is the caller's to name.** A missing lock file has no
+        // owner, so the question falls back to the directory -- and the
+        // sentence must then not describe a file that does not exist.
+        let dir = data_dir_ownership_lines(
+            ErrorKind::PermissionDenied,
+            "The data directory",
+            Some(0),
+            Some(1000),
+            Some("ricky"),
+        )
+        .join("\n");
+        assert!(dir.contains("The data directory is owned by root"), "{dir}");
+        assert!(!dir.contains("lock file is owned"), "{dir}");
+
+        // No login name: a numeric uid is still a valid chown.
+        let numeric = data_dir_ownership_lines(
+            ErrorKind::PermissionDenied,
+            "The lock file",
+            Some(0),
+            Some(1000),
+            None,
+        )
+        .join("\n");
+        assert!(numeric.contains("sudo chown -R 1000 ethernetgateway-data"), "{numeric}");
+    }
+
+    /// **Empty, not vague, when ownership cannot be the explanation.** The
+    /// caller prints these after its own lines, so an ownership claim about a
+    /// full disk or a read-only mount would be a wrong answer volunteered where
+    /// no answer was needed.
+    #[test]
+    fn test_the_data_directory_ownership_lines_are_withheld_unless_they_apply() {
+        use std::io::ErrorKind;
+        let subject = "The lock file";
+        // Our own file: a permission error here is not an ownership problem.
+        assert!(
+            data_dir_ownership_lines(
+                ErrorKind::PermissionDenied,
+                subject,
+                Some(1000),
+                Some(1000),
+                None
+            )
+            .is_empty()
+        );
+        // Somebody else's, but the failure was something else entirely.
+        assert!(
+            data_dir_ownership_lines(ErrorKind::StorageFull, subject, Some(0), Some(1000), None)
+                .is_empty()
+        );
+        // No uids to compare (Windows).
+        assert!(
+            data_dir_ownership_lines(ErrorKind::PermissionDenied, subject, None, None, None)
+                .is_empty()
+        );
+    }
+
+    /// **All three messages that offer a `chown` must offer the same one.**
+    /// They were three separate string literals naming a path; the folder moved
+    /// once already, and a fourth message will be written.
+    #[test]
+    fn test_every_chown_offer_names_the_one_data_directory() {
+        use std::io::ErrorKind;
+        let expected = format!("sudo chown -R ricky {DATA_DIR}");
+        for (what, text) in [
+            (
+                "unreadable config",
+                unreadable_config_diagnosis(
+                    ErrorKind::PermissionDenied,
+                    Some(0),
+                    Some(1000),
+                    Some("ricky"),
+                )
+                .join("\n"),
+            ),
+            (
+                "refused path in the data dir",
+                data_dir_ownership_lines(
+                    ErrorKind::PermissionDenied,
+                    "The lock file",
+                    Some(0),
+                    Some(1000),
+                    Some("ricky"),
+                )
+                .join("\n"),
+            ),
+            (
+                "root warning",
+                elevation_warning_lines(true, Some("ricky"), Some("dialout")).join("\n"),
+            ),
+        ] {
+            assert!(text.contains(&expected), "{what} must offer `{expected}`: {text}");
+        }
+    }
+
+    /// **Every path the gateway writes has to be built on `DATA_DIR`, and eight
+    /// string literals cannot promise that.**
+    ///
+    /// The last review found two files that never moved when the tree did,
+    /// because the rule lived in a sentence rather than in a pattern. This is
+    /// the pattern: any literal in the source that names the data directory must
+    /// name it exactly, with a separator after it, so renaming `DATA_DIR`
+    /// fails here and names the file rather than shipping a split layout.
+    ///
+    /// Reads the source with `Path::join` from `CARGO_MANIFEST_DIR` and never
+    /// splits on line endings, because a source-scanning test is otherwise the
+    /// classic thing that passes on Linux and fails on Windows CI.
+    #[test]
+    fn test_every_data_directory_path_literal_is_built_on_the_constant() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files);
+        assert!(files.len() > 20, "the scan found almost nothing: {}", files.len());
+
+        // The consts themselves, checked by value rather than by spelling.
+        for (name, value) in [
+            ("CONFIG_FILE", CONFIG_FILE),
+            ("DEFAULT_TRANSFER_DIR", DEFAULT_TRANSFER_DIR),
+            ("DEFAULT_LOG_FILE", DEFAULT_LOG_FILE),
+            ("DIALUP_FILE", DIALUP_FILE),
+        ] {
+            assert!(
+                value.starts_with(&format!("{DATA_DIR}/")),
+                "{name} = {value:?} does not live in {DATA_DIR}"
+            );
+        }
+
+        // And every literal anywhere in the tree that mentions the folder.
+        let needle = format!("\"{DATA_DIR}");
+        let mut checked = 0usize;
+        for path in &files {
+            let body = std::fs::read_to_string(path).unwrap_or_default();
+            let mut from = 0usize;
+            while let Some(at) = body[from..].find(&needle) {
+                let start = from + at + 1; // just past the opening quote
+                let rest = &body[start + DATA_DIR.len()..];
+                let next = rest.chars().next().unwrap_or('\0');
+                assert!(
+                    next == '/' || next == '"',
+                    "{}: a literal starting \"{DATA_DIR}\" must continue with `/` or end \
+                     there, found {next:?} — a near-miss name is a second data directory",
+                    path.display()
+                );
+                checked += 1;
+                from = start + DATA_DIR.len();
+            }
+        }
+        // The positive control: a scan that found nothing would pass forever.
+        assert!(checked >= 8, "expected the known path literals, found {checked}");
+    }
+
+    /// Every `.rs` file under a directory, for the scan above.
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// **The guard has to name the directory it is about to write into.**
+    ///
+    /// Four writers called `ensure_data_dir` and then wrote to a `path`
+    /// argument -- the same directory only by coincidence. Under `cfg(test)`
+    /// the config path is redirected to the temp directory, so the guard made a
+    /// folder it never used, which is why `cargo test` left a stray
+    /// `ethernetgateway-data` in whatever directory it ran from.
+    #[test]
+    fn test_ensure_parent_dir_creates_the_directory_of_the_path_it_is_given() {
+        let base = std::env::temp_dir().join(format!("egw_parent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join("deep").join("nested").join("file.conf");
+        let as_str = target.to_string_lossy().to_string();
+
+        ensure_parent_dir(&as_str);
+        assert!(target.parent().unwrap().is_dir(), "the parent of the path must exist");
+        // And it did not invent a data directory beside the test runner.
+        assert!(!base.join(DATA_DIR).exists(), "must not create {DATA_DIR} anywhere");
+        // Writing there now succeeds, which is the point of the guard.
+        std::fs::write(&target, b"x").expect("write into the created parent");
+        // Idempotent: an existing directory is not an error.
+        ensure_parent_dir(&as_str);
+
+        // A bare filename has no parent to create and must not panic.
+        ensure_parent_dir("bare-name.txt");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// **A default may change; somebody else's installation may not.**

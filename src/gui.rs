@@ -131,42 +131,11 @@ pub fn run(
                 .with_inner_size([w as f32, h as f32]),
             None => viewport.with_inner_size([1120.0, 810.0]),
         };
-        #[allow(unused_mut)]
         let mut options = eframe::NativeOptions {
             viewport,
             ..Default::default()
         };
-
-        // ARM SBCs such as the Raspberry Pi have GPUs (e.g. VideoCore/V3D)
-        // that report several device limits below wgpu's desktop defaults
-        // (max_color_attachments, max_inter_stage_shader_variables, buffer
-        // sizes, ...). eframe's default requests the desktop limits, so
-        // device creation aborts with errors like:
-        //   "Limit 'max_color_attachments' value 8 is better than allowed 4".
-        // Rather than clamp fields one at a time, request exactly the limits
-        // the chosen adapter advertises — that satisfies every field at once
-        // and is always valid, since you can't request more than the adapter
-        // supports. egui runs fine on these (it targets WebGL2-class limits).
-        // Desktop builds are unaffected — they keep eframe's defaults.
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-        {
-            use eframe::egui_wgpu::{wgpu, WgpuSetup};
-            if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-                // Prefer the OpenGL ES backend on ARM. The Raspberry Pi's V3D
-                // Vulkan driver (Mesa) is incomplete and aborts device creation
-                // with a wgpu-hal "Requested feature is not available on this
-                // device" panic; the GLES backend is V3D's mature path. An
-                // explicit WGPU_BACKEND still wins, for debugging.
-                setup.instance_descriptor.backends =
-                    wgpu::Backends::from_env().unwrap_or(wgpu::Backends::GL);
-                // Request exactly the limits the adapter advertises (see above).
-                setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
-                    label: Some("egui wgpu device (arm)"),
-                    required_limits: adapter.limits(),
-                    ..Default::default()
-                });
-            }
-        }
+        apply_arm_gpu_workarounds(&mut options);
 
         eframe::run_native(
             "Ethernet Gateway",
@@ -192,6 +161,195 @@ pub fn run(
         Ok(Ok(())) => {}
         Ok(Err(e)) => logger::log(format!("GUI could not start: {}", e)),
         Err(_) => logger::log("GUI crashed during startup (possible graphics driver issue)".into()),
+    }
+}
+
+/// The Raspberry Pi's GPU limits, applied to whichever window is being built.
+///
+/// ARM SBCs such as the Raspberry Pi have GPUs (e.g. VideoCore/V3D) that report
+/// several device limits below wgpu's desktop defaults
+/// (`max_color_attachments`, `max_inter_stage_shader_variables`, buffer sizes,
+/// ...). eframe's default requests the desktop limits, so device creation
+/// aborts with errors like "Limit 'max_color_attachments' value 8 is better
+/// than allowed 4". Rather than clamp fields one at a time, request exactly the
+/// limits the chosen adapter advertises -- that satisfies every field at once
+/// and is always valid, since you cannot request more than the adapter
+/// supports. egui runs fine on these (it targets WebGL2-class limits). Desktop
+/// builds are unaffected: they keep eframe's defaults.
+///
+/// **A function rather than a block inside `run`, because two windows need it.**
+/// It was inline until [`show_startup_failure`] arrived, and a Pi is exactly the
+/// machine that would then have failed to draw the one window whose whole job is
+/// to say why nothing started.
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+fn apply_arm_gpu_workarounds(options: &mut eframe::NativeOptions) {
+    use eframe::egui_wgpu::{wgpu, WgpuSetup};
+    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Prefer the OpenGL ES backend on ARM. The Raspberry Pi's V3D Vulkan
+        // driver (Mesa) is incomplete and aborts device creation with a
+        // wgpu-hal "Requested feature is not available on this device" panic;
+        // the GLES backend is V3D's mature path. An explicit WGPU_BACKEND still
+        // wins, for debugging.
+        setup.instance_descriptor.backends =
+            wgpu::Backends::from_env().unwrap_or(wgpu::Backends::GL);
+        // Request exactly the limits the adapter advertises (see above).
+        setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+            label: Some("egui wgpu device (arm)"),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        });
+    }
+}
+
+#[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+fn apply_arm_gpu_workarounds(_options: &mut eframe::NativeOptions) {}
+
+/// Whether a startup failure would be *invisible* if we only logged it.
+///
+/// **A desktop launch has nowhere to print.** The AppImage's own desktop entry
+/// sets `Terminal=false`, so a fatal message on stderr goes to the session
+/// journal and the operator sees a program that does nothing when
+/// double-clicked -- measured 2026-08-20 from a read-only launch directory:
+/// exit 1, no window, nothing on screen. Started from a shell the same message
+/// is already in front of them and a second window would be noise.
+///
+/// **Asked of all three streams, not just stdout.** `window_closed_note` asks
+/// only about stdout, and being wrong there costs a wrong sentence; being wrong
+/// here costs a modal window that blocks a process until somebody closes it. So
+/// `gateway | tee log` -- stdout redirected, stdin and stderr still a terminal
+/// -- must stay silent, and it does: a window is offered only when *no* standard
+/// stream is a terminal, which is the shape of a launch with no shell behind it
+/// at all. A graphical session must also exist, or `run_native` would just fail
+/// again. Pure, with both readings passed in by [`show_startup_failure`].
+pub fn startup_failure_needs_a_window(any_stream_is_terminal: bool, have_display: bool) -> bool {
+    !any_stream_is_terminal && have_display
+}
+
+/// Whether any standard stream is a terminal -- i.e. whether there is a shell
+/// in front of this process that a printed message would reach.
+fn any_std_stream_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+        || std::io::stdout().is_terminal()
+        || std::io::stderr().is_terminal()
+}
+
+/// Whether this platform has a graphical session to draw on.
+///
+/// On Unix that is a question with an answer -- an X or Wayland display in the
+/// environment -- and on Windows and macOS the window server is always there.
+fn have_graphical_session() -> bool {
+    #[cfg(unix)]
+    {
+        let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+        set("DISPLAY") || set("WAYLAND_DISPLAY")
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// A window whose only job is to say why the gateway did not start.
+///
+/// **The counterpart to the close dialog, at the other end of the launch.**
+/// That one exists because closing the window and stopping the server are
+/// different acts; this one exists because a fatal error and a silent
+/// disappearance look identical from a desktop icon. Both are the same lesson:
+/// a message the operator cannot reach teaches them nothing.
+///
+/// It draws the lines it is given -- the caller has already logged them, so the
+/// two cannot disagree -- and offers one button. There is no server behind it
+/// and nothing on it edits anything. Returns as soon as the window closes; a
+/// caller that cannot start is expected to exit straight afterwards.
+///
+/// Does nothing at all when the text has somewhere better to go (see
+/// [`startup_failure_needs_a_window`]), so a service, a shell launch and a
+/// headless Pi are unaffected.
+pub fn show_startup_failure(headline: &str, lines: &[String]) {
+    if !startup_failure_needs_a_window(any_std_stream_is_terminal(), have_graphical_session()) {
+        return;
+    }
+    let mut options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(format!("Ethernet Gateway v{} — cannot start", env!("CARGO_PKG_VERSION")))
+            .with_inner_size([760.0, 420.0])
+            .with_min_inner_size([480.0, 300.0]),
+        ..Default::default()
+    };
+    apply_arm_gpu_workarounds(&mut options);
+    let notice = FatalNotice {
+        headline: headline.to_string(),
+        lines: lines.to_vec(),
+        theme_applied: false,
+    };
+    // Swallowed rather than reported: this *is* the error path. A window that
+    // cannot open leaves the log line as the only word on the subject, which is
+    // where we started, and `catch_unwind` keeps a graphics-driver panic from
+    // replacing the operator's diagnosis with a backtrace.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eframe::run_native(
+            "Ethernet Gateway",
+            options,
+            Box::new(|_cc| Ok(Box::new(notice))),
+        )
+    }));
+}
+
+/// The fatal-notice window's state: what to say, and nothing else.
+struct FatalNotice {
+    headline: String,
+    lines: Vec<String>,
+    /// The theme is applied on the first frame, once the renderer is up —
+    /// the same one-shot the editor does.
+    theme_applied: bool,
+}
+
+impl eframe::App for FatalNotice {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BG_DARKEST.to_normalized_gamma_f32()
+    }
+
+    // `ui`, not `update`: this eframe build hands an app a `Ui` rather than a
+    // `Context`, exactly as the editor's own impl does.  The `Ui` has no margin
+    // of its own -- the same trap the handover screen documents -- so the
+    // content sits inside a `ScrollArea` with explicit spacing.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.theme_applied {
+            apply_theme(ui.ctx());
+            self.theme_applied = true;
+        }
+        let ctx = ui.ctx().clone();
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(WIZARD_MARGIN, 0))
+            .show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new(&self.headline).strong().size(22.0).color(RED_ALERT),
+                );
+                ui.add_space(14.0);
+                for line in &self.lines {
+                    // The log lines carry the indentation that lines them up
+                    // under a `FATAL:` prefix; in a window that is just a
+                    // ragged left edge, so it is trimmed here rather than the
+                    // caller keeping two copies of the same text.
+                    let text = line.trim_end();
+                    if text.trim().is_empty() {
+                        ui.add_space(8.0);
+                    } else {
+                        ui.label(egui::RichText::new(text.trim_start()).size(15.0).color(AMBER));
+                    }
+                }
+                ui.add_space(22.0);
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("Close").strong().size(16.0)))
+                    .clicked()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            });
     }
 }
 
@@ -5856,6 +6014,32 @@ mod tests {
         assert!(!window_closed_was_a_detach(false, true));
         // Both set is a restart; either flag alone must be enough to suppress.
         assert!(!window_closed_was_a_detach(true, true));
+    }
+
+    /// **A fatal message the operator cannot read is the same defect as the X
+    /// that answered a question nobody asked.**
+    ///
+    /// Measured 2026-08-20: launched from a directory it could not write, the
+    /// gateway printed a FATAL to stderr and exited 1 with no window at all --
+    /// and the AppImage's own desktop entry sets `Terminal=false`, so from an
+    /// icon that text goes to the session journal and the operator sees a
+    /// program that does nothing. A window is the only place left to say it.
+    ///
+    /// The gate is deliberately conservative in the other direction. Being
+    /// wrong about a terminal in `detached_advice` costs a wrong sentence;
+    /// being wrong here costs a modal window blocking a process nobody is
+    /// watching, so **every** standard stream has to be non-terminal before one
+    /// is offered -- `gateway | tee log` still has a shell behind it.
+    #[test]
+    fn test_a_window_is_offered_only_when_the_text_has_nowhere_else_to_go() {
+        // The desktop-icon case: no shell anywhere, a session to draw on.
+        assert!(startup_failure_needs_a_window(false, true));
+        // A shell is watching — the lines are already on screen.
+        assert!(!startup_failure_needs_a_window(true, true));
+        // A headless server or a service: nothing to draw on, so the log is
+        // the only word on the subject and must stay the only attempt.
+        assert!(!startup_failure_needs_a_window(false, false));
+        assert!(!startup_failure_needs_a_window(true, false));
     }
 
     /// The dialog starts closed, like every other popup: a modal covering the

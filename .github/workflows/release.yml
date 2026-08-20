@@ -149,6 +149,21 @@ jobs:
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
+          # Everything the gateway creates lives in `ethernetgateway-data`
+          # BELOW THE WORKING DIRECTORY, and a desktop launch does not define
+          # one: the desktop-entry spec leaves it undefined when `Path=` is
+          # absent (and `Path=` takes a literal, so it cannot say "$HOME").
+          # Left alone, the same AppImage double-clicked from a file manager and
+          # started from an application menu can land on two different data
+          # directories -- two configs, two SSH host keys, two transfer trees,
+          # and two per-directory locks that know nothing about each other.
+          #
+          # So pin it, but only when there is no shell behind us: a launch from
+          # a terminal names its own working directory deliberately (the repo's
+          # own harnesses do exactly that) and must keep it.
+          if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] && [ -d "${HOME}" ]; then
+            cd "${HOME}" || exit 1
+          fi
           exec "${HERE}/usr/bin/ethernetgateway" "$@"
           EOF
           chmod +x AppDir/AppRun

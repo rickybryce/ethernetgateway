@@ -131,13 +131,13 @@ pub fn start_ssh_server(
 /// the PID component prevents two instances in the same working
 /// directory from doing the same.
 fn atomic_write_private_key(path: &str, contents: &[u8]) -> std::io::Result<()> {
-    // The data directory must exist before anything in it can be written.
+    // The directory must exist before anything in it can be written.
     // `main` creates it at startup, but relying on that alone was wrong twice
     // over: a unit test reaches this writer without going through `main` (which
     // is how the missing directory was found), and an operator can remove the
-    // folder while the gateway is running. Idempotent and cheap, so it costs a
-    // stat on a path that is almost always already there.
-    let _ = crate::config::ensure_data_dir();
+    // folder while the gateway is running.  The parent of the path we are about
+    // to write, never a constant -- see `config::ensure_parent_dir`.
+    crate::config::ensure_parent_dir(path);
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
@@ -1121,9 +1121,19 @@ impl russh::server::Handler for SshHandler {
 mod tests {
     use super::*;
 
+    /// The name **and** the folder it is composed from.
+    ///
+    /// Pinning the literal to itself is not the guarantee wanted: the whole
+    /// point of the data-directory move is that everything the gateway creates
+    /// is under one folder, so the assertion has to be against
+    /// `config::DATA_DIR` rather than against a second copy of its spelling.
     #[test]
     fn test_host_key_file_constant() {
         assert_eq!(SSH_HOST_KEY_FILE, "ethernetgateway-data/ethernet_ssh_host_key");
+        assert_eq!(
+            SSH_HOST_KEY_FILE,
+            format!("{}/ethernet_ssh_host_key", crate::config::DATA_DIR)
+        );
     }
 
     // The key-permission warning is a warn-only helper; verify it runs without
@@ -1203,9 +1213,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Name and folder, for the reason given on `test_host_key_file_constant`.
     #[test]
     fn test_gateway_client_key_file_constant() {
         assert_eq!(GATEWAY_CLIENT_KEY_FILE, "ethernetgateway-data/ethernet_gateway_ssh_key");
+        assert_eq!(
+            GATEWAY_CLIENT_KEY_FILE,
+            format!("{}/ethernet_gateway_ssh_key", crate::config::DATA_DIR)
+        );
     }
 
     /// The generator is expected to produce an Ed25519 keypair whose

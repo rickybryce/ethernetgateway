@@ -160,6 +160,20 @@ pub fn file_logging_enabled(cfg: &crate::config::Config) -> bool {
     file_policy_from(cfg).is_some()
 }
 
+/// Whether the log file is wanted but **not currently open** -- the sink is
+/// paused, retrying after a failed open or write.
+///
+/// **A policy being on is not a file being open, and the startup banner needs
+/// the second question.** [`file_logging_enabled`] answers the first, which is
+/// what the config surfaces want ("should there be a log file"). The banner
+/// asked it too and announced the path unconditionally, so a launch in a
+/// directory it could not write printed two contradictory lines in a row --
+/// `Warning: could not open log file ... Permission denied` and then `Logging
+/// to ...` (measured 2026-08-20). The warning is the true one.
+pub fn file_logging_is_paused() -> bool {
+    matches!(&*file_sink().lock().unwrap_or_else(|e| e.into_inner()), Sink::Paused { .. })
+}
+
 /// One-line description of what the current log settings will do on disk.
 ///
 /// Shown under the log controls in the web and GUI config panels.  Shared rather

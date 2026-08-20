@@ -1502,13 +1502,13 @@ pub(crate) fn load_bookmarks() -> Vec<Bookmark> {
 
 /// Save bookmarks to the bookmarks file. Returns true on success.
 fn save_bookmarks(bookmarks: &[Bookmark]) -> bool {
-    // The data directory must exist before anything in it can be written.
+    // The directory must exist before anything in it can be written.
     // `main` creates it at startup, but relying on that alone was wrong twice
     // over: a unit test reaches this writer without going through `main` (which
     // is how the missing directory was found), and an operator can remove the
-    // folder while the gateway is running. Idempotent and cheap, so it costs a
-    // stat on a path that is almost always already there.
-    let _ = crate::config::ensure_data_dir();
+    // folder while the gateway is running.  The parent of the path we are about
+    // to write, never a constant -- see `config::ensure_parent_dir`.
+    crate::config::ensure_parent_dir(BOOKMARKS_FILE);
     let content: String = bookmarks
         .iter()
         .map(|b| {

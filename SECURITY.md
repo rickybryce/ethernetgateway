@@ -71,7 +71,10 @@ Out of scope:
 
 - **Sensitive files** (`egateway.conf`, `dialup.conf`, `gateway_hosts`,
   `ethernet_ssh_host_key`, `ethernet_gateway_ssh_key`) are written with
-  mode `0o600` on Unix.  Windows users should place the binary in a
+  mode `0o600` on Unix.  All of them live in the `ethernetgateway-data`
+  folder the gateway creates below its launch directory, so the folder's
+  own permissions matter too: one run under `sudo` leaves the whole of it
+  owned by root and locks the operator's own account out of it.  Windows users should place the binary in a
   per-user folder for equivalent NTFS ACL protection.
 - **Credential comparison** is constant-time on both telnet and SSH.
 - **Brute-force lockout** is shared across telnet and SSH: 3 failed

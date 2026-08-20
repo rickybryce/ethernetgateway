@@ -11,6 +11,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The sudo-ownership trap could no longer say what it was.** 0.9.4's own
+  diagnosis -- the one that names `sudo chown -R <you> ethernetgateway-data`
+  instead of "remove the file" -- became unreachable in the case it was written
+  for. Everything the gateway creates lives in one directory now, so a single
+  root run leaves *all* of it root-owned, and the first thing a later launch
+  touches is not the config: it is the instance lock. The launch died on
+  `FATAL: could not claim the data directory ... Permission denied`, which names
+  no cause and reads like a second copy is holding the ports, sending the
+  operator hunting a process that cannot exist. Measured with a root-owned lock
+  file.
+
+  All three paths a root run breaks -- the lock, the launch directory itself and
+  the transfer tree -- now share one ownership diagnosis
+  (`config::data_dir_ownership_lines`), and every message that offers a `chown`
+  builds it from the same helper, pinned by a test that asserts all three agree.
+  The lock's own wording says outright that this is *not* the two-copies case,
+  because a second copy started here is offered a handover and never reaches it.
+
+- **A fatal startup error is now visible from a desktop launch.** Started from a
+  directory it cannot write, the gateway printed its FATAL to stderr and exited
+  1 -- and the AppImage's own desktop entry sets `Terminal=false`, so from an
+  icon that text goes to the session journal and the operator sees a program
+  that does nothing when double-clicked. Measured 2026-08-20: exit 1, no window,
+  nothing on screen. The three fatal startup paths now also draw the same lines
+  in a small window (`gui::show_startup_failure`), and the message names the
+  launch directory **absolutely**, since "the directory this was launched from"
+  is not somewhere an operator can go and look without being told which one.
+
+  Offered only when *no* standard stream is a terminal and a graphical session
+  exists: being wrong about a terminal in the parting note costs a wrong
+  sentence, while being wrong here would cost a modal window blocking a process
+  nobody is watching, so `gateway | tee log` stays silent.
+
+- **Which data directory you get no longer depends on how you launched.**
+  `ethernetgateway-data` is resolved against the *working* directory, and a
+  desktop launch does not define one -- the desktop-entry spec leaves it
+  undefined when `Path=` is absent, and `Path=` takes a literal so it cannot say
+  `$HOME`. The same AppImage double-clicked from a file manager and started from
+  an application menu could therefore land on two different trees: two configs,
+  two SSH host keys, two transfer directories, and two per-directory locks that
+  know nothing about each other -- `bindwatch`'s surviving "a copy launched from
+  a DIFFERENT directory" case, reached by accident rather than by choice. The
+  AppImage's `AppRun` now pins the working directory to `$HOME`, but **only when
+  no standard stream is a terminal**, so a deliberate launch from a shell (the
+  repo's own harnesses do exactly that) keeps the directory it was given. And
+  because nothing on screen or in the log could tell two trees apart, startup
+  now logs the data directory once, as an absolute path.
+
+- **A writer's directory guard named a constant instead of the path it was about
+  to write.** Four writers called `ensure_data_dir` and then wrote to a `path`
+  argument -- the same directory only by coincidence. Under `cfg(test)` the
+  config path is redirected to a temp file, so the guard created a folder it
+  never used: the config tests alone left an `ethernetgateway-data` behind in
+  whatever directory `cargo test` ran from, and now leave nothing (measured).
+  One `config::ensure_parent_dir(path)` replaces all four. The full suite still
+  creates one, but for an honest reason -- the SSH key and CP/M-layout tests
+  write to the real default paths, which is what those paths are.
+
+- **The startup banner announced a log file that had failed to open.** In a
+  directory it could not write, the log read `Warning: could not open log file
+  ... Permission denied` and then, on the very next line, `Logging to ...`. The
+  banner asked whether a log file was *wanted*; it now asks the sink whether one
+  is *open* (`logger::file_logging_is_paused`) and says so when it is not.
+
+- **Documentation that had drifted with the data-directory move**: the manual's
+  appendix table still gave `log_file`'s default as `ethernetgateway.log` while
+  its other table had the new path (found by diffing every key documented twice
+  -- the two tables now agree); the SSH reference still placed the three key
+  files "in the gateway's working directory"; `SECURITY.md` listed the sensitive
+  files without saying that the folder's own ownership is what locks an operator
+  out of them; and the wizard's troubleshooting note still looked for
+  `egateway.conf` beside the binary.
+
+  Every path literal that names the data directory is now pinned to `DATA_DIR`
+  by a source-scanning test rather than to a second copy of its spelling -- the
+  last pass found two files that never moved because the rule lived in a
+  sentence and not in a pattern. Mutation-checked both ways: renaming the
+  constant fails the test, and a near-miss literal in another module fails it by
+  name.
+
 - **CTRL-C reaches a booted CP/M guest, and you can see that it did.** Reported
   from an SC126: a BASIC `PRINT` loop could not be broken, though the same disk
   broke normally on an Altairduino.

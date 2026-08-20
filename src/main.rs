@@ -105,12 +105,51 @@ fn main() {
     // launch so clients would see the identity change each time.  Better to
     // say which directory and why, once.
     if let Err(e) = config::ensure_data_dir() {
-        glog!("FATAL: could not create the data directory '{}': {}", config::DATA_DIR, e);
-        glog!("       Everything the gateway writes lives there — the configuration,");
-        glog!("       the log, the SSH host key and the transfer directory.");
-        glog!("       Check that the directory this was launched from is writable.");
+        let mut lines = vec![
+            "       Everything the gateway writes lives there — the configuration,".to_string(),
+            "       the log, the SSH host key and the transfer directory.".to_string(),
+            "       Check that the directory this was launched from is writable:".to_string(),
+            // **Named absolutely, because from a desktop icon nobody knows what
+            // it is.** The working directory is whatever the launcher handed us
+            // -- the desktop-entry spec leaves it undefined without `Path=` --
+            // so "the directory this was launched from" is not a place the
+            // operator can go and look at without being told which one.
+            format!(
+                "           {}",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "(unknown)".to_string())
+            ),
+        ];
+        // The launch directory is the one that refused us, so that is what the
+        // ownership question is about -- not the folder we failed to make.
+        let (uid, name) = config::current_owner_identity();
+        lines.extend(config::data_dir_ownership_lines(
+            e.kind(),
+            "The launch directory",
+            config::file_owner_uid("."),
+            uid,
+            name.as_deref(),
+        ));
+        let headline =
+            format!("FATAL: could not create the data directory '{}': {}", config::DATA_DIR, e);
+        glog!("{}", headline);
+        for line in &lines {
+            glog!("{}", line);
+        }
+        // **And say it where it can be read.** From a desktop icon there is no
+        // terminal, so every line above lands in the session journal and the
+        // operator sees a program that does nothing when double-clicked.
+        gui::show_startup_failure(&headline, &lines);
         std::process::exit(1);
     }
+
+    // Which data directory, absolutely, once.  The path is resolved against the
+    // *launch* directory and a desktop launch does not define one, so the same
+    // AppImage can land on two different trees -- and every other message names
+    // it relatively, which cannot tell them apart.  See
+    // `config::data_dir_display`.
+    glog!("Data directory: {}", config::data_dir_display());
 
     // ── One gateway per directory ─────────────────────────────
     // Settled before a single listener is started, because the alternative is
@@ -184,8 +223,50 @@ fn main() {
             }
         }
         Err(e) => {
-            glog!("FATAL: could not claim the data directory '{}': {}", config::DATA_DIR, e);
-            glog!("       Check that it is writable.");
+            // **This is not the two-copies case, and must not read like it.**
+            // A second copy from this directory arrives as `Busy` and is
+            // offered a handover; reaching here means the lock *file* could not
+            // be opened at all. The cause that dominates is ownership: a single
+            // `sudo` run leaves a root-owned lock, and the launch used to die
+            // on "could not claim the data directory", which names no cause and
+            // sends the operator hunting a process that does not exist. The
+            // diagnosis written for exactly this trap was two commits old and
+            // unreachable in it, because the lock is opened before the config
+            // is read (measured 2026-08-20).
+            let lock = instance::lock_path();
+            let mut lines = vec![
+                "       This is not another copy holding the ports — one started here".to_string(),
+                "       would have been offered a handover instead of this. The lock".to_string(),
+                "       file itself could not be opened.".to_string(),
+            ];
+            let (uid, name) = config::current_owner_identity();
+            // The file when it exists, the directory when it does not: a
+            // missing lock means the refusal was the directory's.
+            let (subject, owner) = if lock.exists() {
+                ("The lock file", config::file_owner_uid(&lock))
+            } else {
+                ("The data directory", config::file_owner_uid(config::DATA_DIR))
+            };
+            let ownership =
+                config::data_dir_ownership_lines(e.kind(), subject, owner, uid, name.as_deref());
+            // **Always leave the operator something to do.** When ownership is
+            // not the explanation there is still a mode, a read-only mount or a
+            // full disk, and a message that names a cause it cannot confirm and
+            // nothing else is worse than the blunt line it replaced.
+            if ownership.is_empty() {
+                lines.push(
+                    "       Check the file's permissions and that the volume is writable."
+                        .to_string(),
+                );
+            } else {
+                lines.extend(ownership);
+            }
+            let headline = format!("FATAL: could not open '{}': {}", lock.display(), e);
+            glog!("{}", headline);
+            for line in &lines {
+                glog!("{}", line);
+            }
+            gui::show_startup_failure(&headline, &lines);
             std::process::exit(1);
         }
     };
@@ -207,14 +288,27 @@ fn main() {
         // because the file is appended to across restarts and the build that
         // wrote a given stretch of it is the first thing a reader needs.
         if logger::file_logging_enabled(&cfg) {
-            glog!(
-                "Logging to {} — v{} (rotate at {} KB, keep {} old, max {} KB on disk)",
-                cfg.log_file.trim(),
-                env!("CARGO_PKG_VERSION"),
-                cfg.log_max_size_kb,
-                cfg.log_max_files,
-                logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),
-            );
+            // **Wanted is not open.** `configure_file_logging` has already
+            // warned if the file could not be opened, and announcing the path
+            // anyway put a flat contradiction on the next line: `could not open
+            // log file ... Permission denied` followed by `Logging to ...`.
+            // The sink itself is asked, so the banner cannot disagree with it.
+            if logger::file_logging_is_paused() {
+                glog!(
+                    "Not logging to {} yet — it could not be opened; stderr and the console \
+                     hold the log until a retry succeeds.",
+                    cfg.log_file.trim(),
+                );
+            } else {
+                glog!(
+                    "Logging to {} — v{} (rotate at {} KB, keep {} old, max {} KB on disk)",
+                    cfg.log_file.trim(),
+                    env!("CARGO_PKG_VERSION"),
+                    cfg.log_max_size_kb,
+                    cfg.log_max_files,
+                    logger::max_disk_kb(cfg.log_max_size_kb, cfg.log_max_files),
+                );
+            }
         }
         glog!("Config: telnet={}, port={}, security={}, transfer_dir={}",
             cfg.telnet_enabled, cfg.telnet_port, cfg.security_enabled, cfg.transfer_dir);
@@ -272,9 +366,44 @@ fn main() {
         // this lands — so nothing waits on it.
         router::probe_in_background();
 
-        // Create transfer directory if it doesn't exist
+        // Create transfer directory if it doesn't exist.
+        //
+        // The third path a single root run breaks: the default transfer
+        // directory lives inside the data directory now, so this fails for the
+        // same reason the lock and the config do, and it used to fail with no
+        // cause named and nothing on screen from a desktop launch.
         if let Err(e) = std::fs::create_dir_all(&cfg.transfer_dir) {
-            glog!("Error: could not create transfer directory '{}': {}", cfg.transfer_dir, e);
+            let headline = format!(
+                "FATAL: could not create the transfer directory '{}': {}",
+                cfg.transfer_dir, e
+            );
+            let (uid, name) = config::current_owner_identity();
+            // The parent is what refused us -- the directory we could not make
+            // has no owner to ask about.
+            let parent = std::path::Path::new(&cfg.transfer_dir)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let mut lines = config::data_dir_ownership_lines(
+                e.kind(),
+                "Its parent directory",
+                config::file_owner_uid(&parent),
+                uid,
+                name.as_deref(),
+            );
+            // As with the lock: never only a cause, and never no advice.
+            if lines.is_empty() {
+                lines.push(
+                    "       Check that its parent directory is writable by this account."
+                        .to_string(),
+                );
+            }
+            glog!("{}", headline);
+            for line in &lines {
+                glog!("{}", line);
+            }
+            gui::show_startup_failure(&headline, &lines);
             std::process::exit(1);
         }
 
