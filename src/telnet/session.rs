@@ -182,16 +182,12 @@ impl TelnetSession {
         // If TTYPE already identified the client, skip the manual prompt.
         // `detect_method` records how the terminal type was decided, for
         // the gateway-debug terminal diagnostic emitted below.
-        let detect_method;
-        if self.ttype_matched {
+        let detect_method = if self.ttype_matched {
             self.erase_char = match self.terminal_type {
                 TerminalType::Petscii => 0x14,
                 _ => DEFAULT_ERASE_CHAR,
             };
-            detect_method = format!(
-                "telnet TTYPE \"{}\"",
-                self.ttype_raw.as_deref().unwrap_or("?")
-            );
+            format!("telnet TTYPE \"{}\"", self.ttype_raw.as_deref().unwrap_or("?"))
         } else {
             self.send_raw(b"\r\n").await?;
             self.send_raw(DETECT_PROMPT.as_bytes()).await?;
@@ -256,12 +252,12 @@ impl TelnetSession {
                 0x08 | 0x7F => TerminalType::Ansi,
                 _ => TerminalType::Ascii,
             };
-            detect_method = format!(
+            format!(
                 "BACKSPACE key 0x{:02x}{}",
                 byte,
                 if can_be_erase_char(byte) { "" } else { " (space: not used as erase)" }
-            );
-        }
+            )
+        };
 
         let type_name = match self.terminal_type {
             TerminalType::Petscii => "PETSCII (Commodore 64)",

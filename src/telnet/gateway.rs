@@ -2205,10 +2205,9 @@ impl TelnetSession {
                     match n {
                         Ok(0) => break,
                         Ok(n) => {
-                            let raw_slice: &[u8];
-                            if raw {
+                            let raw_slice: &[u8] = if raw {
                                 // No IAC parsing — bytes are user data straight through.
-                                raw_slice = &remote_buf[..n];
+                                &remote_buf[..n]
                             } else {
                                 data_from_remote.clear();
                                 replies_to_remote.clear();
@@ -2219,8 +2218,8 @@ impl TelnetSession {
                                     if remote_writer.write_all(&replies_to_remote).await.is_err() { break; }
                                     if remote_writer.flush().await.is_err() { break; }
                                 }
-                                raw_slice = &data_from_remote[..];
-                            }
+                                &data_from_remote[..]
+                            };
                             // As above: ANSI is filtered too, for a completed
                             // window title and nothing else.
                             let data: &[u8] = {

@@ -552,7 +552,7 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
     let mut live = 0usize;
     let mut other = 0usize;
 
-    for e in dir.chunks_exact(32) {
+    for e in dir.as_chunks::<32>().0 {
         // Free, in either spelling.
         if e[0] == 0xE5 {
             continue;
@@ -594,7 +594,7 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
         // from the same `wide_blocks` the mount will use, not a second reading
         // of the rule.
         let nums: Vec<u16> = if params.wide_blocks {
-            e[16..32].chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect()
+            e[16..32].as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p)).collect()
         } else {
             e[16..32].iter().map(|&b| b as u16).collect()
         };

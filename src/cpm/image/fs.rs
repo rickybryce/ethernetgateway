@@ -1126,9 +1126,11 @@ impl ImageFs {
 fn decode_blocks(raw: &RawEntry, params: &Params) -> Vec<u16> {
     if params.wide_blocks {
         raw[16..32]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(params.map_slots)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .map(|p| u16::from_le_bytes(*p))
             .collect()
     } else {
         raw[16..32].iter().take(params.map_slots).map(|&b| b as u16).collect()
@@ -1142,8 +1144,8 @@ fn decode_blocks(raw: &RawEntry, params: &Params) -> Vec<u16> {
 /// blocks, which is the worst thing this module could do.
 fn encode_blocks(raw: &mut RawEntry, blocks: &[u16], params: &Params) {
     if params.wide_blocks {
-        for (slot, &b) in raw[16..32].chunks_exact_mut(2).zip(blocks) {
-            slot.copy_from_slice(&b.to_le_bytes());
+        for (slot, &b) in raw[16..32].as_chunks_mut::<2>().0.iter_mut().zip(blocks) {
+            *slot = b.to_le_bytes();
         }
     } else {
         for (slot, &b) in raw[16..32].iter_mut().zip(blocks) {
