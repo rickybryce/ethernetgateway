@@ -70,13 +70,16 @@ pub struct HandoverAsk {
     pub take_over: Arc<AtomicBool>,
 }
 
+/// Returns whether a window actually ran. Only the handover ask needs the
+/// answer -- it uses this window to put a question, and a launch that never
+/// opened one has not been answered.
 pub fn run(
     cfg: Config,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
     gui_ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
     handover: Option<HandoverAsk>,
-) {
+) -> bool {
     // The console window renders into the desktop's X session. Launched as
     // a boot-time service, the process can start before that session has
     // finished writing its display auth cookie, so a premature connect
@@ -157,10 +160,23 @@ pub fn run(
         )
     }));
 
+    // **Whether a window ran is the caller's business, not just the log's.**
+    // `main` uses this window to *ask a question* on the handover path, and a
+    // launch that never opened one has not been answered -- it used to fall
+    // straight through to "Left the running copy alone", which is what a
+    // deliberate Quit prints, and exited 0. Measured on a display-less machine
+    // with `enable_console = true`: winit refused the event loop, nobody was
+    // asked, and the exit status said success.
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => logger::log(format!("GUI could not start: {}", e)),
-        Err(_) => logger::log("GUI crashed during startup (possible graphics driver issue)".into()),
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            logger::log(format!("GUI could not start: {}", e));
+            false
+        }
+        Err(_) => {
+            logger::log("GUI crashed during startup (possible graphics driver issue)".into());
+            false
+        }
     }
 }
 
@@ -204,6 +220,18 @@ fn apply_arm_gpu_workarounds(options: &mut eframe::NativeOptions) {
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
 fn apply_arm_gpu_workarounds(_options: &mut eframe::NativeOptions) {}
 
+/// Whether the "this copy is serving nothing" banner is on screen.
+///
+/// **Dismissal is tied to the text, not to a flag.** A Save and Restart re-arms
+/// every listener, so a copy that *still* binds nothing has to say so again --
+/// and a boolean would have silenced it for the life of a window whose settings
+/// reach nothing, which is the trap the banner exists to close. Comparing the
+/// text also means a warning that *changes* (one listener recovered, another
+/// did not) counts as something new to say.
+fn bind_banner_showing(warning: &[String], dismissed: &[String]) -> bool {
+    !warning.is_empty() && warning != dismissed
+}
+
 /// Whether a startup failure would be *invisible* if we only logged it.
 ///
 /// **A desktop launch has nowhere to print.** The AppImage's own desktop entry
@@ -236,15 +264,24 @@ fn any_std_stream_is_terminal() -> bool {
 
 /// Whether this platform has a graphical session to draw on.
 ///
-/// On Unix that is a question with an answer -- an X or Wayland display in the
-/// environment -- and on Windows and macOS the window server is always there.
+/// **`DISPLAY` is X11's question, not Unix's.** The first version asked it under
+/// `cfg(unix)` -- and macOS *is* unix, sets neither `DISPLAY` nor
+/// `WAYLAND_DISPLAY`, and has a window server that is always there. So on the
+/// one platform in the release matrix where a double-clicked binary is the
+/// normal way to start it, the window that exists for exactly that launch could
+/// never appear. `aarch64-apple-darwin` is a shipped target, so this was a real
+/// hole and not a theoretical one; it is the same shape as every other trap in
+/// this file that Linux cannot see.
+///
+/// Windows and macOS therefore answer yes unconditionally, and the environment
+/// is consulted only where it is the actual mechanism.
 fn have_graphical_session() -> bool {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         set("DISPLAY") || set("WAYLAND_DISPLAY")
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         true
     }
@@ -266,7 +303,12 @@ fn have_graphical_session() -> bool {
 /// Does nothing at all when the text has somewhere better to go (see
 /// [`startup_failure_needs_a_window`]), so a service, a shell launch and a
 /// headless Pi are unaffected.
-pub fn show_startup_failure(headline: &str, lines: &[String]) {
+pub fn show_startup_failure(
+    headline: &str,
+    lines: &[String],
+    shutdown: Arc<AtomicBool>,
+    gui_ctx: crate::GuiCtxSlot,
+) {
     if !startup_failure_needs_a_window(any_std_stream_is_terminal(), have_graphical_session()) {
         return;
     }
@@ -282,6 +324,7 @@ pub fn show_startup_failure(headline: &str, lines: &[String]) {
         headline: headline.to_string(),
         lines: lines.to_vec(),
         theme_applied: false,
+        shutdown,
     };
     // Swallowed rather than reported: this *is* the error path. A window that
     // cannot open leaves the log line as the only word on the subject, which is
@@ -291,7 +334,17 @@ pub fn show_startup_failure(headline: &str, lines: &[String]) {
         eframe::run_native(
             "Ethernet Gateway",
             options,
-            Box::new(|_cc| Ok(Box::new(notice))),
+            Box::new(move |cc| {
+                // **Registered, or a signal cannot reach this window.** The
+                // signal watcher closes the GUI by sending `Close` through this
+                // slot and nudging a repaint; with nothing in it, `SIGTERM` set
+                // the flag and nothing happened -- measured, the process was
+                // still alive four seconds later and stayed alive. A startup
+                // failure that cannot be killed by a signal is worse than the
+                // silent exit it replaced.
+                *gui_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cc.egui_ctx.clone());
+                Ok(Box::new(notice))
+            }),
         )
     }));
 }
@@ -303,6 +356,9 @@ struct FatalNotice {
     /// The theme is applied on the first frame, once the renderer is up —
     /// the same one-shot the editor does.
     theme_applied: bool,
+    /// Set by SIGINT/SIGTERM (and by nothing else on this path), so the window
+    /// closes on a signal like every other window this program opens.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl eframe::App for FatalNotice {
@@ -320,6 +376,10 @@ impl eframe::App for FatalNotice {
             self.theme_applied = true;
         }
         let ctx = ui.ctx().clone();
+        // A signal ends this window, exactly as it ends the editor's.
+        if self.shutdown.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         egui::Frame::NONE
             .inner_margin(egui::Margin::symmetric(WIZARD_MARGIN, 0))
             .show(ui, |ui| {
@@ -782,6 +842,17 @@ struct App {
     /// precisely when a root session has just written `egateway.conf` as root,
     /// so the warning has more standing after one, not less.
     elevation_dismissed: bool,
+    /// The aggregate bind warning, re-read on a timer, and the text the
+    /// operator dismissed.
+    ///
+    /// **Dismissal is tied to the text, not to a flag.** A Save and Restart
+    /// re-arms every listener, so a copy that still binds nothing must say so
+    /// again -- and a flag would have silenced it for the life of a window
+    /// whose settings reach nothing, which is the trap this banner exists to
+    /// close.
+    bind_warning: Vec<String>,
+    bind_warning_dismissed: Vec<String>,
+    bind_warning_checked_at: Option<std::time::Instant>,
     /// Per-port "Serial Port — More..." popup state, indexed by
     /// `SerialPortId::index()`.  Independent so the user can have one
     /// port's popup open while editing the other's primary controls.
@@ -1136,6 +1207,9 @@ impl App {
                 )
             },
             elevation_dismissed: false,
+            bind_warning: Vec::new(),
+            bind_warning_dismissed: Vec::new(),
+            bind_warning_checked_at: None,
             handover,
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
@@ -1264,6 +1338,29 @@ impl App {
     /// Check whether a backgrounded folder-picker has delivered a result.
     /// If the user chose a folder, copy it into `transfer_dir`; if they
     /// cancelled (or the picker failed), just drop the pending state.
+    /// Re-read the aggregate bind outcome, at most once a second.
+    ///
+    /// **On a timer rather than per frame, and never latched.** A bind is
+    /// asynchronous, so the answer is not available on the first frames; and a
+    /// Save and Restart re-arms every listener, so a one-shot check would go on
+    /// showing a stale verdict -- or, worse, having decided "all bound" once,
+    /// never notice that the restarted copy binds nothing.
+    fn poll_bind_warning(&mut self) {
+        let due = match self.bind_warning_checked_at {
+            None => true,
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(1),
+        };
+        if !due {
+            return;
+        }
+        self.bind_warning_checked_at = Some(std::time::Instant::now());
+        // `None` means at least one listener has not reported yet: keep the
+        // previous answer rather than flashing a warning at a bind in flight.
+        if let Some(lines) = crate::bindwatch::aggregate_warning() {
+            self.bind_warning = lines;
+        }
+    }
+
     fn poll_dir_pick(&mut self) {
         let Some(rx) = &self.pending_dir_pick else { return };
         match rx.try_recv() {
@@ -4397,6 +4494,7 @@ impl eframe::App for App {
 
         self.poll_logs();
         self.poll_dir_pick();
+        self.poll_bind_warning();
 
         // ── Another copy already holds this directory ─────────
         // Owns the whole window, like the wizard, and is checked *before* it:
@@ -4599,6 +4697,64 @@ impl eframe::App for App {
                         .inner;
                     if dismissed {
                         self.elevation_dismissed = true;
+                    }
+                    ui.add_space(4.0);
+                }
+
+                // ── "This copy is serving nothing" banner ─────
+                // The one failure the instance lock cannot catch: a copy
+                // launched from a *different* directory claims its own lock
+                // quite legitimately and binds nothing, because another copy --
+                // or a systemd unit serving from its own WorkingDirectory --
+                // already holds the ports. Everything on this window then works
+                // except the part that matters: a Save reaches a config the
+                // serving process never re-reads. That was the original
+                // five-stacked-copies defect, and it survived the lock by the
+                // one route the lock is per-directory about.
+                //
+                // Above the settings for the same reason as the root banner:
+                // what it warns about is done by *using* this window.
+                if bind_banner_showing(&self.bind_warning, &self.bind_warning_dismissed) {
+                    let lines = self.bind_warning.clone();
+                    let data_dir = config::data_dir_display();
+                    let dismissed = egui::Frame::group(ui.style())
+                        .fill(WARN_BG)
+                        .stroke(Stroke::new(1.5_f32, WARN_BORDER))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            let mut dismiss = false;
+                            for (i, line) in lines.iter().enumerate() {
+                                let text = line.trim_start();
+                                if i == 0 {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(text).strong().color(RED_ALERT),
+                                        );
+                                        if right_aligned_small_button(ui, "Dismiss") {
+                                            dismiss = true;
+                                        }
+                                    });
+                                } else {
+                                    ui.label(egui::RichText::new(text).color(AMBER));
+                                }
+                            }
+                            // **Which directory this window is editing.** In the
+                            // cross-directory case the two copies have two
+                            // configs, and naming the one in front of the
+                            // operator is what makes "this Save will not reach
+                            // it" concrete rather than abstract.
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "This window edits {data_dir} — not whatever the serving \
+                                     copy is reading."
+                                ))
+                                .color(AMBER_DIM),
+                            );
+                            dismiss
+                        })
+                        .inner;
+                    if dismissed {
+                        self.bind_warning_dismissed = self.bind_warning.clone();
                     }
                     ui.add_space(4.0);
                 }
@@ -6040,6 +6196,35 @@ mod tests {
         // the only word on the subject and must stay the only attempt.
         assert!(!startup_failure_needs_a_window(false, false));
         assert!(!startup_failure_needs_a_window(true, false));
+    }
+
+    /// **The banner must come back after a restart that still binds nothing.**
+    ///
+    /// This is the case the whole feature exists for: a copy launched from a
+    /// different directory keeps a full editor window whose Save reaches a
+    /// config the serving process never re-reads. Dismissing has to put the
+    /// banner away without disarming it for the life of the window.
+    #[test]
+    fn test_the_serving_nothing_banner_is_dismissed_by_text_not_for_ever() {
+        let warning: Vec<String> = vec!["WARNING: NONE of the 1".into(), "  nothing bound".into()];
+        // Nothing wrong: no banner.
+        assert!(!bind_banner_showing(&[], &[]));
+        // Something wrong, not yet dismissed.
+        assert!(bind_banner_showing(&warning, &[]));
+        // Dismissed: away it goes.
+        assert!(!bind_banner_showing(&warning, &warning));
+        // **A restart that still fails says it again** -- the same text arriving
+        // after a fresh `bindwatch::reset` is a new report, and this is why the
+        // dismissal is not a flag. (Modelled as the dismissal being cleared on
+        // the restart, which is what a changed report does below.)
+        let after_restart: Vec<String> =
+            vec!["WARNING: NONE of the 2".into(), "  nothing bound".into()];
+        assert!(
+            bind_banner_showing(&after_restart, &warning),
+            "a different report must not inherit an old dismissal"
+        );
+        // And a listener recovering clears it without a dismissal.
+        assert!(!bind_banner_showing(&[], &warning));
     }
 
     /// The dialog starts closed, like every other popup: a modal covering the

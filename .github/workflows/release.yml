@@ -161,7 +161,15 @@ jobs:
           # So pin it, but only when there is no shell behind us: a launch from
           # a terminal names its own working directory deliberately (the repo's
           # own harnesses do exactly that) and must keep it.
-          if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] && [ -d "${HOME}" ]; then
+          #
+          # And never move away from a data directory that is already here. The
+          # tty test alone was too blunt: `nohup ./Ethernet_Gateway.AppImage
+          # >log 2>&1 &` from /srv/gateway has no terminal on any stream either,
+          # and relocating a deliberate launch's data to $HOME would be exactly
+          # the split this pin exists to prevent. An existing folder is the
+          # operator's answer to the question, so it wins.
+          if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] \
+             && [ ! -d ethernetgateway-data ] && [ -d "${HOME}" ]; then
             cd "${HOME}" || exit 1
           fi
           exec "${HERE}/usr/bin/ethernetgateway" "$@"

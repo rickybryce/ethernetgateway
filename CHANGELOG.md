@@ -11,6 +11,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A copy that is serving nothing now says so in its own window.** The instance
+  lock closed the same-directory case, but the case it cannot close is a copy
+  launched from a *different* directory -- a desktop icon while a systemd unit
+  serves from its own `WorkingDirectory`. That copy claims its own lock quite
+  legitimately, comes up with a full editor window, and binds nothing: every
+  setting saved from it reaches a config the serving process never re-reads,
+  which is the original five-stacked-copies defect arriving by the one route the
+  lock is per-directory about. The aggregate bind warning is now drawn across the
+  top of the GUI as well as logged -- one renderer, so the two cannot disagree --
+  and it names the data directory that window is editing, which is what makes
+  "this Save will not reach it" concrete. Dismissal is tied to the *text*, not a
+  flag, so a Save and Restart that still binds nothing says so again.
+
+- **Ownership advice no longer tells an operator to break a service.** The
+  diagnosis assumed the other owner was root-from-`sudo` and ended with
+  `chown -R you ethernetgateway-data` whatever the uid was -- but the shipped
+  systemd unit runs as `User=ethernetgateway` out of `/var/lib/ethernetgateway`,
+  so an operator running the binary by hand in that directory was told to take
+  the running service's files away from it. Both diagnoses now split on uid 0:
+  root gets the sudo story and the chown, any other owner is named as another
+  account's installation and told to run as that account or from a directory of
+  its own. Verified live against a directory owned by a service uid.
+
+- **The fatal startup window could not be closed by a signal, and never appeared
+  on macOS.** Two defects in the window added earlier in this cycle. It
+  registered no egui context, so the signal watcher had nothing to send `Close`
+  to -- measured: `SIGTERM`, still alive four seconds later, and it stayed alive.
+  And its display check asked for `DISPLAY`/`WAYLAND_DISPLAY` under `cfg(unix)`,
+  which macOS *is*, while setting neither: on the one platform in the release
+  matrix where double-clicking is the normal way to start it, the window that
+  exists for exactly that launch could never open. It now honours `shutdown` like
+  every other window here, and only Linux/BSD consult the environment.
+
+- **A launch that could not ask reported success.** With `enable_console = true`
+  on a machine with no display, a second copy called `gui::run`, winit refused
+  the event loop, and the launch fell through to "Left the running copy alone"
+  -- the line a deliberate *Quit* prints -- and exited 0. A service manager or a
+  script then read success from a launch that did nothing. `gui::run` now reports
+  whether a window ran, and a copy that never got to ask exits non-zero saying
+  so. The headless refusal's advice was also corrected: it recommended
+  `enable_console = true` flatly, which for a service is a setting that fails a
+  different way.
+
+- **A fifth writer had no directory guard.** The pass that gave four writers
+  `ensure_parent_dir` missed `save_dialup_mappings`, because it is a second copy
+  of `write_config_file`'s atomic-write pattern in the same file rather than a
+  call to it -- and no test wrote that file, which is why nothing caught it. It
+  is now split into `write_dialup_file(path, entries)` so it can be tested at all
+  (no `chdir`, which would move every other test's relative paths), and the test
+  covers the guard, the 0600 mode and the absence of a leftover temp file. The
+  log's own `open_log` gained the same guard, but **only inside the data
+  directory** -- the first attempt applied it to every log path and broke
+  `test_failed_retry_backs_off_further`, which was right to break: `Sink::Paused`
+  exists for the volume that has not finished mounting at boot, and creating a
+  directory on an unmounted mount point puts the log on the underlying
+  filesystem where the real volume then shadows it. Waiting is correct for an
+  operator's path; recreating is correct for ours, and the two halves of that
+  rule now pin each other.
+
+- **`Data directory:` printed Windows' verbatim prefix.** `canonicalize` returns
+  `\\?\C:\...`, and this is the one line the manual tells operators to read
+  when they want to know which data directory a copy is using -- a path they do
+  not recognise cannot answer that. Stripped, except for the `\\?\UNC\` form,
+  where stripping would leave a path that names nothing.
+
+- **The AppImage pin was too blunt.** Pinning `$HOME` whenever no stream is a
+  terminal also caught `nohup ./Ethernet_Gateway.AppImage >log 2>&1 &` from a
+  deliberate directory. It now never moves away from an `ethernetgateway-data`
+  that is already there: an existing folder is the operator's answer to the
+  question.
+
+- **Documentation for two copies and for a service.** The manual quoted
+  `bindwatch`'s *old* wording, from before the lock landed, so its troubleshooting
+  section described a cause the program no longer names. It now quotes the current
+  text and explains what a same-directory second copy does instead (offer a
+  handover, or refuse and exit non-zero when headless), plus what taking over
+  from a systemd-managed copy leaves behind: the unit exits 0, so
+  `Restart=on-failure` does not restart it, `systemctl status` shows it inactive,
+  and a later `systemctl start` meets the headless refusal until the manual copy
+  is stopped. The shipped unit file documents the same three outcomes where an
+  operator installing it will see them. All of it measured end to end: holder
+  stands down, exits 0, newcomer binds and passes its own port check.
+
 - **The sudo-ownership trap could no longer say what it was.** 0.9.4's own
   diagnosis -- the one that names `sudo chown -R <you> ethernetgateway-data`
   instead of "remove the file" -- became unreachable in the case it was written

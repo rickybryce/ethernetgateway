@@ -271,9 +271,34 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
     open_log(&policy.path, true)
 }
 
+/// May we create the directory this log file lives in?
+///
+/// **Only inside our own folder.** The default log is in the data directory, and
+/// there "the folder is not there" is the same event as for the config and the
+/// SSH keys -- every other writer recreates it, and a log that did not would sit
+/// paused for ever against a directory nothing else was going to make.
+///
+/// But an **operator-set** path must be left alone, and not out of tidiness:
+/// `Sink::Paused` exists precisely because "a log directory that does not exist
+/// yet, or a volume that has not finished mounting at boot, is exactly the case
+/// that fixes itself a minute later". Creating a directory on a mount point that
+/// has not mounted yet writes the log to the underlying filesystem and then has
+/// it shadowed when the real volume arrives -- turning a transient into a silent
+/// wrong answer. Waiting is the correct behaviour there, so the guard is scoped
+/// to the one directory we own.
+///
+/// A relative default (`ethernetgateway-data/ethernetgateway.log`) matches; an
+/// absolute path never does, which is the conservative direction.
+fn may_create_log_dir(path: &Path) -> bool {
+    path.starts_with(crate::config::DATA_DIR)
+}
+
 /// Open (or create) the log.  Owner-only on Unix: log lines name hosts, ports
 /// and usernames, the same privacy reasoning as the config and dialup files.
 fn open_log(path: &Path, truncate: bool) -> std::io::Result<std::fs::File> {
+    if may_create_log_dir(path) {
+        crate::config::ensure_parent_dir(path);
+    }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
     if truncate {
@@ -993,6 +1018,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **We make our own folder, and never the operator's.**
+    ///
+    /// The default log is inside the data directory, so a folder an operator
+    /// removed mid-run must come back -- every other writer there recreates it,
+    /// and a log that did not would stay paused against a directory nothing was
+    /// going to make. An operator-set path is the opposite case, and the reason
+    /// is not tidiness: `Sink::Paused` exists for the volume that has not
+    /// finished mounting, and creating a directory on an unmounted mount point
+    /// puts the log on the underlying filesystem where the real volume will
+    /// shadow it. `test_failed_retry_backs_off_further` is the other half of
+    /// this rule -- it depends on an absolute temp path staying uncreatable.
+    #[test]
+    fn test_the_log_directory_is_created_only_inside_our_own_data_directory() {
+        assert!(may_create_log_dir(Path::new(
+            "ethernetgateway-data/ethernetgateway.log"
+        )));
+        assert!(may_create_log_dir(Path::new("ethernetgateway-data/logs/deep/x.log")));
+        // An operator's own path, absolute or relative: left for them (or for
+        // the mount) to provide.
+        assert!(!may_create_log_dir(Path::new("/var/log/egw/gateway.log")));
+        assert!(!may_create_log_dir(Path::new("logs/gateway.log")));
+        assert!(!may_create_log_dir(Path::new("gateway.log")));
+
+        // And end to end: a missing directory under ours is created and opened.
+        let base = std::env::temp_dir().join(format!("eg_logdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let inside = Path::new(crate::config::DATA_DIR).join(format!(
+            "logtest_{}/deep/x.log",
+            std::process::id()
+        ));
+        let file = open_log(&inside, false);
+        assert!(file.is_ok(), "a log inside our own folder must open: {file:?}");
+        drop(file);
+        assert!(inside.exists());
+        let _ = std::fs::remove_dir_all(inside.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A retry that fails backs off further instead of hammering the disk, and

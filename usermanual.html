@@ -5131,21 +5131,51 @@ On startup the gateway now says so plainly when nothing came up:
 
 <pre><code>WARNING: NONE of the 4 configured listener(s) could bind (Kermit 2424, SSH 2222, telnet 2323, web 8080).
          This process is serving no network connections at all.
-         The ports are already in use — another copy of the gateway is
-         almost certainly still running and holding them, which means
-         anything you connect to is being served by that older copy.
+         The ports are already in use, and it is not another copy started
+         from this directory — that one would have been offered a handover
+         instead of getting this far. Most likely a copy launched from a
+         DIFFERENT directory (each one claims its own), or another program
+         entirely. Whatever holds them is what your clients are reaching.
          Check:  pgrep -a -x ethernetgateway     (and: ss -ltnp | grep &lt;port&gt;)
          Stop it with:  pkill -x ethernetgateway   then start this one again.</code></pre>
 
 <p>
-Almost always this is exactly what it says: a second copy of the gateway was
-started without stopping the first. The consequence is worth spelling out,
-because it is genuinely confusing &mdash; the older copy still holds the ports,
-so everything you telnet or SSH into is being served by <em>it</em>, running
-whatever binary and configuration it started with. A rebuild, a new setting, or
-a <em>Save and Restart</em> in the newer copy changes nothing you can see. On
-Linux the underlying error is <code>os error 98</code>.
+The consequence is worth spelling out, because it is genuinely confusing
+&mdash; the copy that holds the ports is the one serving everything you telnet
+or SSH into, running whatever binary and configuration <em>it</em> started with.
+A rebuild, a new setting, or a <em>Save and Restart</em> in this copy changes
+nothing you can see. On Linux the underlying error is <code>os error 98</code>.
+The desktop GUI says so across the top of its window as well, and names the data
+directory that window is editing &mdash; the quickest way to see that the two
+copies are reading two different configuration files.
 </p>
+
+<p>
+<strong>A second copy from the <em>same</em> directory cannot get this far.</strong>
+Each launch claims its directory with a lock before it starts anything, so the
+second one never reaches a bind. What happens instead depends on whether it has
+a window: with the GUI enabled it offers <em>Take Over</em> &mdash; the running
+copy stands down through its own shutdown, closing sessions with the usual
+goodbye, and this one takes the ports &mdash; or <em>Quit</em>; headless, it
+refuses and exits non-zero, naming the process id that holds them, because a
+service restarted by accident must never stop a working gateway on nobody's
+authority. So the warning above means the other copy is somewhere else: a
+different folder, or a service with its own <code>WorkingDirectory</code>.
+</p>
+
+<aside class="note">
+<span class="label">Taking over from a service</span>
+If the copy you take over from was started by systemd, it stands down and exits
+<em>successfully</em> &mdash; so with the shipped unit's
+<code>Restart=on-failure</code> systemd does not bring it back, and
+<code>systemctl status</code> shows the unit inactive while your manual copy
+holds the ports. A later <code>systemctl start</code> then meets the headless
+refusal above, retrying five times over a minute before the unit is marked
+failed, until the manual copy is stopped. If you meant to replace the service
+for good, <code>systemctl disable --now</code> it; if you only wanted to see its
+configuration, use the web UI or the telnet menu against the running copy rather
+than starting a second one.
+</aside>
 
 <ul>
     <li><strong>Find it:</strong> <code>pgrep -a -x ethernetgateway</code> lists

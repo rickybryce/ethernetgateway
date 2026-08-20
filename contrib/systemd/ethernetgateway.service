@@ -44,6 +44,30 @@ ExecStart=/usr/local/bin/ethernetgateway
 ; zero-downtime reload, but the service stays up on fresh config.
 ExecReload=/bin/kill -HUP $MAINPID
 
+; ── One gateway per directory ─────────────────────────────
+; The gateway claims WorkingDirectory with an OS-level lock, so a second copy
+; started from the SAME directory never reaches a bind.  What it does next
+; depends on whether it has a window:
+;
+;   * Headless (enable_console = false, as a service should be): it refuses and
+;     exits 1, naming the process id that holds the ports.  Under the policy
+;     below that is 5 retries over 60 s and then a failed unit -- which is the
+;     intended outcome, not a bug: it must never stop a working gateway on the
+;     strength of a start nobody asked for.
+;   * With a window: it OFFERS the operator "Take Over".  If they accept, THIS
+;     service stands down through its own shutdown path and exits 0 -- so
+;     Restart=on-failure will not bring it back, and `systemctl status` shows it
+;     inactive while an unmanaged copy holds the ports.  `systemctl start` then
+;     lands on the headless refusal above until that copy is stopped.
+;     (With Restart=always instead, systemd WOULD bring it straight back into
+;     that refusal and retry until the start limit -- another reason the policy
+;     below is on-failure.)
+;
+; A copy started from a DIFFERENT directory is a separate installation with its
+; own lock: it comes up, binds nothing (the ports are taken), and says so in its
+; own log and in a banner across its window.  That is the one case the lock
+; cannot catch, so the warning is what carries it.
+
 ; ── Restart policy ────────────────────────────────────────
 Restart=on-failure
 RestartSec=5s

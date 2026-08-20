@@ -159,6 +159,32 @@ pub(crate) fn spawn_watch(timeout_ms: u64) {
     });
 }
 
+/// The aggregate warning as lines, or empty when there is nothing to say.
+///
+/// **The same renderer the log uses, so a banner cannot disagree with it.** The
+/// GUI needs this because the *cross-directory* case survives everything the
+/// instance lock fixed: a copy launched from a different directory (a desktop
+/// icon while a systemd unit serves from `/var/lib/ethernetgateway`, say) claims
+/// its own lock quite legitimately, comes up with a full editor window, and
+/// binds nothing -- which is exactly the "editing a config the serving copy
+/// never re-reads" trap, reached the one way the lock cannot catch.
+///
+/// Answers `None` while any listener is still deciding, because a bind is
+/// asynchronous and a banner drawn a frame too early would accuse a listener
+/// that was about to succeed.
+pub(crate) fn aggregate_warning() -> Option<Vec<String>> {
+    if any_pending() {
+        return None;
+    }
+    let guard = state().lock().unwrap_or_else(|e| e.into_inner());
+    let entries: Vec<(&str, u16, Status)> = guard
+        .listeners
+        .iter()
+        .map(|(name, (port, st))| (*name, *port, *st))
+        .collect();
+    Some(summarize(&entries))
+}
+
 /// Decide what to say about a set of listener outcomes.  Pure, so the wording
 /// and — more importantly — the "when do we shout" rule are testable without
 /// binding a socket.  Returns the lines to log, empty when all is well.
@@ -277,6 +303,35 @@ fn how_to_check() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// **A banner drawn while a bind is still in flight would accuse a listener
+    /// that was about to succeed.** The GUI polls this every second from the
+    /// first frame, long before the listeners have reported, so "not yet" has to
+    /// be a different answer from "all well".
+    #[test]
+    fn test_the_aggregate_warning_withholds_an_answer_while_a_bind_is_pending() {
+        // **The registry is global, so this test has to hold the same guard the
+        // other mutating test does.** Without it two tests race the map and one
+        // reads a key the other just cleared -- which is exactly how CI failed
+        // on macOS once while Linux passed on scheduling luck. See
+        // `registry_guard`.
+        let _guard = registry_guard();
+        reset();
+        expect("telnet", 2323);
+        expect("ssh", 2222);
+        assert!(aggregate_warning().is_none(), "two listeners pending");
+        bound("telnet");
+        assert!(aggregate_warning().is_none(), "one listener still pending");
+        failed("ssh", &io::Error::from(io::ErrorKind::AddrInUse));
+        let lines = aggregate_warning().expect("both have reported");
+        // A partial failure is worth saying, and is not the total-failure text.
+        let all = lines.join("\n");
+        assert!(!all.is_empty(), "a failed listener must be reported");
+        assert!(!all.contains("NONE of the"), "one of two bound: {all}");
+        reset();
+        // Nothing configured: an answer, and an empty one.
+        assert_eq!(aggregate_warning().map(|l| l.len()), Some(0));
+    }
+
     use super::*;
 
     const IN_USE: Status = Status::Failed { in_use: true };

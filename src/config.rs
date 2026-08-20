@@ -59,8 +59,8 @@ pub fn ensure_data_dir() -> std::io::Result<()> {
 ///
 /// Best-effort and idempotent: the write that follows reports its own failure,
 /// and a path with no parent (a bare filename) needs no directory at all.
-pub(crate) fn ensure_parent_dir(path: &str) {
-    if let Some(parent) = std::path::Path::new(path).parent()
+pub(crate) fn ensure_parent_dir(path: impl AsRef<std::path::Path>) {
+    if let Some(parent) = path.as_ref().parent()
         && !parent.as_os_str().is_empty()
     {
         let _ = std::fs::create_dir_all(parent);
@@ -85,8 +85,28 @@ pub(crate) fn ensure_parent_dir(path: &str) {
 /// which is better than saying nothing and cannot itself fail.
 pub fn data_dir_display() -> String {
     match std::fs::canonicalize(DATA_DIR) {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => strip_verbatim_prefix(&p.display().to_string()),
         Err(_) => DATA_DIR.to_string(),
+    }
+}
+
+/// Drop Windows' `\\?\` verbatim prefix from a canonicalised path.
+///
+/// **`canonicalize` on Windows returns a path no operator recognises.** It
+/// yields `\\?\C:\Users\...`, which is correct, accepted by the API and
+/// wrong for a message -- and this particular message is the one the manual now
+/// tells people to read when they want to know which data directory a copy is
+/// using. A path they do not recognise cannot answer that question.
+///
+/// Pure and unconditional, so it is testable from any platform: the prefix
+/// cannot occur in a Unix path, so stripping it there is a no-op rather than a
+/// `cfg`.  A UNC path (`\\?\UNC\server\share`) becomes `UNC\server\share`
+/// under a naive strip, so that form keeps its prefix -- a wrong path is worse
+/// than an ugly one.
+fn strip_verbatim_prefix(path: &str) -> String {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => path.to_string(),
     }
 }
 
@@ -1580,14 +1600,28 @@ fn unreadable_config_diagnosis(
         && let (Some(owner), Some(us)) = (file_owner, our_uid)
         && owner != us
     {
-        let owner_desc =
-            if owner == 0 { "root".to_string() } else { format!("uid {owner}") };
         let us_desc = match our_name {
             Some(n) => format!("{n} (uid {us})"),
             None => format!("uid {us}"),
         };
+        // Root is the sudo trap and gets the chown; any other owner is another
+        // account's installation -- the shipped systemd unit runs as its own
+        // service user -- and telling an operator to chown *that* would break
+        // whatever is using it.  Same split as `data_dir_ownership_lines`.
+        if owner != 0 {
+            return vec![
+                format!(
+                    "       The file is owned by uid {owner}, but this is running as {us_desc}."
+                ),
+                "       That is another account's configuration — a gateway running as its"
+                    .to_string(),
+                "       own service user keeps its files exactly like this. Run as that"
+                    .to_string(),
+                "       account, or start this copy from a directory of your own.".to_string(),
+            ];
+        }
         return vec![
-            format!("       The file is owned by {owner_desc}, but this is running as {us_desc}."),
+            format!("       The file is owned by root, but this is running as {us_desc}."),
             "       A single run under sudo does this. The config is written 0600".to_string(),
             "       because it holds your password and API key, so root's copy is".to_string(),
             "       unreadable to your own account — and every setting in it,".to_string(),
@@ -1649,20 +1683,39 @@ pub(crate) fn data_dir_ownership_lines(
         && let (Some(owner), Some(us)) = (path_owner, our_uid)
         && owner != us
     {
-        let owner_desc = if owner == 0 { "root".to_string() } else { format!("uid {owner}") };
         let us_desc = match our_name {
             Some(n) => format!("{n} (uid {us})"),
             None => format!("uid {us}"),
         };
+        // **Root is the sudo trap; any other owner is somebody else's install.**
+        // The first version told the sudo story whatever the owner's uid was,
+        // and ended with a `chown` -- which for a directory belonging to a
+        // *service account* is advice that breaks the service. The shipped
+        // systemd unit runs as `User=ethernetgateway` out of
+        // `/var/lib/ethernetgateway`, so an operator who runs the binary by hand
+        // in that directory hits exactly this, and must not be told to take the
+        // service's files away from it.
+        if owner == 0 {
+            return vec![
+                format!("       {subject} is owned by root, but this is running as {us_desc}."),
+                "       A single run under sudo does this: everything the gateway creates"
+                    .to_string(),
+                "       lives in one directory, so one root run leaves the whole of it —"
+                    .to_string(),
+                "       the lock file, the configuration, the log and the transfer tree —"
+                    .to_string(),
+                "       out of reach of your own account. Hand it back:".to_string(),
+                chown_advice(us, our_name),
+            ];
+        }
         return vec![
-            format!(
-                "       {subject} is owned by {owner_desc}, but this is running as {us_desc}."
-            ),
-            "       A single run under sudo does this: everything the gateway creates".to_string(),
-            "       lives in one directory, so one root run leaves the whole of it —".to_string(),
-            "       the lock file, the configuration, the log and the transfer tree —".to_string(),
-            "       out of reach of your own account. Hand it back:".to_string(),
-            chown_advice(us, our_name),
+            format!("       {subject} is owned by uid {owner}, but this is running as {us_desc}."),
+            "       That is another account's data directory, not one this account".to_string(),
+            "       left behind — a gateway running as its own service user keeps its"
+                .to_string(),
+            "       files exactly like this. Run as that account, or start this copy".to_string(),
+            "       from a directory of your own; changing the owner would take the".to_string(),
+            "       directory away from whatever is using it.".to_string(),
         ];
     }
     Vec::new()
@@ -4009,6 +4062,20 @@ fn parse_dialup_mappings(content: &str) -> Vec<DialupEntry> {
 
 /// Save all dialup mappings to `dialup.conf`.
 pub fn save_dialup_mappings(entries: &[DialupEntry]) {
+    if let Err(e) = write_dialup_file(DIALUP_FILE, entries) {
+        glog!("Warning: could not write {}: {}", DIALUP_FILE, e);
+    }
+}
+
+/// Write the mapping file at `path`, atomically and owner-only.
+///
+/// **Split out so it can be tested at all.** This was one function writing a
+/// relative constant, which is why the missing directory guard below went
+/// unnoticed for a release: nothing could exercise it without writing into the
+/// developer's own data directory or changing the process's working directory
+/// out from under every other test. `write_config_file` already had this shape;
+/// this is the same rule reaching its second copy.
+fn write_dialup_file(path: &str, entries: &[DialupEntry]) -> std::io::Result<()> {
     let mut content = String::from(
         "# Dialup Mapping\n\
          #\n\
@@ -4029,6 +4096,14 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
             entry.port
         ));
     }
+    // **The fifth writer of a file in the data directory.** The pass that gave
+    // the other four a directory guard missed this one, because it is a second
+    // copy of `write_config_file`'s atomic-write pattern living in the same
+    // file rather than a call to it -- and no test writes this file, so nothing
+    // caught it. Without this, an operator who removes the folder while the
+    // gateway is running loses the next dialup mapping they save to "No such
+    // file or directory".
+    ensure_parent_dir(path);
     // Same atomic + owner-only-from-creation pattern as
     // `write_config_file` above.  Setting mode 0o600 *before* rename
     // means the final path is never visible at default-umask
@@ -4038,7 +4113,7 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-    let tmp = format!("{}.{}.{}.tmp", DIALUP_FILE, std::process::id(), seq);
+    let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
 
     // fsync before rename (see `write_config_file`): a rename only makes the
     // directory entry atomic, not the data blocks, so a crash between write
@@ -4053,7 +4128,7 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
             .mode(0o600)
             .open(&tmp)
             .and_then(|mut f| f.write_all(content.as_bytes()).and_then(|()| f.sync_all()))
-            .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE))
+            .and_then(|()| std::fs::rename(&tmp, path))
     };
     #[cfg(not(unix))]
     let write_result = std::fs::File::create(&tmp)
@@ -4061,12 +4136,13 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
             use std::io::Write;
             f.write_all(content.as_bytes()).and_then(|()| f.sync_all())
         })
-        .and_then(|()| std::fs::rename(&tmp, DIALUP_FILE));
+        .and_then(|()| std::fs::rename(&tmp, path));
 
     if let Err(e) = write_result {
-        glog!("Warning: could not write {}: {}", DIALUP_FILE, e);
         let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    Ok(())
 }
 
 /// Normalize a phone number to digits only for comparison.
@@ -4238,6 +4314,66 @@ mod tests {
         assert!(numeric.contains("sudo chown -R 1000 ethernetgateway-data"), "{numeric}");
     }
 
+    /// **A service account is not the sudo trap, and must not be offered a
+    /// `chown`.**
+    ///
+    /// The shipped systemd unit runs as `User=ethernetgateway` out of
+    /// `/var/lib/ethernetgateway`, so an operator who runs the binary by hand in
+    /// that directory hits a permission error whose owner is a service account,
+    /// not root. The first version told the sudo story for every owner and
+    /// ended with `chown -R me` -- which would take the directory away from the
+    /// running service. Both diagnoses now split on uid 0.
+    #[test]
+    fn test_a_service_accounts_directory_is_not_diagnosed_as_the_sudo_trap() {
+        use std::io::ErrorKind;
+        let service = data_dir_ownership_lines(
+            ErrorKind::PermissionDenied,
+            "The lock file",
+            Some(998), // a service user, not root
+            Some(1000),
+            Some("ricky"),
+        )
+        .join("\n");
+        assert!(service.contains("owned by uid 998"), "{service}");
+        // The two things it must NOT say.
+        assert!(!service.contains("chown"), "must not offer to take it over: {service}");
+        assert!(!service.contains("sudo"), "sudo did not cause this: {service}");
+        // And it has to say what to do instead.
+        assert!(service.contains("service user"), "{service}");
+
+        // The config diagnosis splits the same way, for the same reason.
+        let cfg_service = unreadable_config_diagnosis(
+            ErrorKind::PermissionDenied,
+            Some(998),
+            Some(1000),
+            Some("ricky"),
+        )
+        .join("\n");
+        assert!(!cfg_service.contains("chown"), "{cfg_service}");
+        assert!(cfg_service.contains("service user"), "{cfg_service}");
+
+        // Root still gets the sudo story and the chown, both files.
+        for text in [
+            data_dir_ownership_lines(
+                ErrorKind::PermissionDenied,
+                "The lock file",
+                Some(0),
+                Some(1000),
+                Some("ricky"),
+            )
+            .join("\n"),
+            unreadable_config_diagnosis(
+                ErrorKind::PermissionDenied,
+                Some(0),
+                Some(1000),
+                Some("ricky"),
+            )
+            .join("\n"),
+        ] {
+            assert!(text.contains("sudo chown -R ricky ethernetgateway-data"), "{text}");
+        }
+    }
+
     /// **Empty, not vague, when ownership cannot be the explanation.** The
     /// caller prints these after its own lines, so an ownership claim about a
     /// full disk or a read-only mount would be a wrong answer volunteered where
@@ -4401,6 +4537,90 @@ mod tests {
 
         // A bare filename has no parent to create and must not panic.
         ensure_parent_dir("bare-name.txt");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The path in the one message that tells an operator which data
+    /// directory is live must be one they recognise.**
+    ///
+    /// `canonicalize` on Windows returns `\\?\C:\...`, which is correct and
+    /// unrecognisable. Tested on every platform because the function is pure and
+    /// unconditional -- the prefix cannot occur in a Unix path, so there is
+    /// nothing to `cfg`.
+    #[test]
+    fn test_the_data_directory_path_is_shown_without_windows_verbatim_prefix() {
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Users\ricky\ethernetgateway-data"),
+                   r"C:\Users\ricky\ethernetgateway-data");
+        // A Unix path is untouched, which is why this needs no cfg.
+        assert_eq!(
+            strip_verbatim_prefix("/home/ricky/ethernetgateway-data"),
+            "/home/ricky/ethernetgateway-data"
+        );
+        // **A UNC path keeps its prefix**: stripping it would leave
+        // `UNC\server\share`, which names nothing. A wrong path is worse than
+        // an ugly one.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share\ethernetgateway-data"),
+            r"\\?\UNC\server\share\ethernetgateway-data"
+        );
+        // Nothing to strip, nothing changed.
+        assert_eq!(strip_verbatim_prefix(r"C:\gateway"), r"C:\gateway");
+        assert_eq!(strip_verbatim_prefix(""), "");
+        // And the live answer is never the verbatim form.
+        assert!(!data_dir_display().starts_with(r"\\?\"), "{}", data_dir_display());
+    }
+
+    /// **The fifth writer.** The pass that gave four writers a directory guard
+    /// missed `save_dialup_mappings`, because it is a second copy of
+    /// `write_config_file`'s atomic-write pattern in the same file rather than a
+    /// call to it -- and no test wrote this file, so nothing caught it. An
+    /// operator who removes the folder while the gateway runs would lose the
+    /// next mapping they saved.
+    ///
+    /// Runs in a temp working directory, because the file path is a relative
+    /// constant: writing it from the repo would touch the developer's own
+    /// mappings, and removing the data directory under a parallel test run
+    /// would break whatever else is writing in it.
+    ///
+    /// No `chdir`: changing the process's working directory would move every
+    /// *other* test's relative paths at the same time. `write_dialup_file` takes
+    /// the path for exactly that reason.
+    #[test]
+    fn test_saving_a_dialup_mapping_creates_the_directory_it_writes_into() {
+        let base = std::env::temp_dir().join(format!("egw_dialup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // A path whose directory does not exist, as after an operator removes
+        // the data folder while the gateway is running.
+        let target = base.join("ethernetgateway-data").join("dialup.conf");
+        let path = target.to_string_lossy().to_string();
+
+        write_dialup_file(
+            &path,
+            &[DialupEntry {
+                number: "5551234".into(),
+                host: "bbs.example.com".into(),
+                port: 23,
+            }],
+        )
+        .expect("the guard must create the directory and the write must succeed");
+
+        let body = std::fs::read_to_string(&target).expect("written");
+        assert!(body.contains("5551234 = bbs.example.com:23"), "{body}");
+        // Owner-only, like the config: the file names hosts the operator dials.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the mapping file must not be world-readable");
+        }
+        // No temp file left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "atomic write left a .tmp behind");
 
         let _ = std::fs::remove_dir_all(&base);
     }

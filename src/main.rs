@@ -140,7 +140,7 @@ fn main() {
         // **And say it where it can be read.** From a desktop icon there is no
         // terminal, so every line above lands in the session journal and the
         // operator sees a program that does nothing when double-clicked.
-        gui::show_startup_failure(&headline, &lines);
+        gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());
         std::process::exit(1);
     }
 
@@ -183,19 +183,41 @@ fn main() {
                 // the strength of a double-click nobody made.
                 glog!("       No console window is enabled, so there is nobody to ask whether");
                 glog!("       to take over — refusing rather than stopping a running gateway.");
-                glog!("       Stop the running copy first, or set enable_console = true to be");
-                glog!("       offered the choice.");
+                glog!("       Stop the running copy first; its process id is above.");
+                // **`enable_console = true` is not advice for a service.** This
+                // is the message a systemd operator reads in the journal, and
+                // that key only offers the choice where there is a desktop to
+                // draw the question on -- with no display the launch would fail
+                // a different way instead. So the condition is stated rather
+                // than the key being recommended flatly.
+                glog!("       Setting enable_console = true offers the choice instead, but only");
+                glog!("       on a launch with a desktop to draw the question on.");
                 std::process::exit(1);
             }
             // Ask, in a window with no server behind it.
             let take_over = Arc::new(AtomicBool::new(false));
-            gui::run(
+            let asked = gui::run(
                 cfg,
                 shutdown.clone(),
                 restart.clone(),
                 gui_ctx.clone(),
                 Some(gui::HandoverAsk { holder_pid: pid, take_over: take_over.clone() }),
             );
+            if !asked {
+                // **Nobody was asked, so nothing may be assumed.** With
+                // `enable_console = true` on a machine with no display, winit
+                // refuses the event loop -- and this used to fall through to
+                // "Left the running copy alone", the line a deliberate Quit
+                // prints, and exit 0. A service manager or a script then reads
+                // success from a launch that did nothing at all, which is worse
+                // than the headless refusal one config key away (measured
+                // 2026-08-20).
+                glog!("FATAL: no window could be opened, so there was nobody to ask whether");
+                glog!("       to take over. The running copy has not been touched.");
+                glog!("       Stop it first if you meant to replace it, or set");
+                glog!("       enable_console = false to be refused without the attempt.");
+                std::process::exit(1);
+            }
             if !take_over.load(Ordering::SeqCst) {
                 glog!("Left the running copy alone.");
                 return;
@@ -266,7 +288,7 @@ fn main() {
             for line in &lines {
                 glog!("{}", line);
             }
-            gui::show_startup_failure(&headline, &lines);
+            gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());
             std::process::exit(1);
         }
     };
@@ -403,7 +425,7 @@ fn main() {
             for line in &lines {
                 glog!("{}", line);
             }
-            gui::show_startup_failure(&headline, &lines);
+            gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());
             std::process::exit(1);
         }
 
@@ -609,8 +631,11 @@ fn main() {
         });
 
         if gui_cfg.enable_console {
-            // GUI blocks the main thread until the window is closed.
-            gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone(), None);
+            // GUI blocks the main thread until the window is closed.  The
+            // return value says whether a window ran, which only the handover
+            // ask above needs: here a failed GUI is not fatal -- the server is
+            // already up, and the launch falls through to the headless wait.
+            let _ = gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone(), None);
             if gui::window_closed_was_a_detach(
                 restart.load(Ordering::SeqCst),
                 shutdown.load(Ordering::SeqCst),
