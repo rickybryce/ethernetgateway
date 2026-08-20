@@ -35,5 +35,18 @@ ethernetgatewaylogo.png.orig
 # CP/M emulator runtime state: drive folders and the operator's disk images.
 # Runtime data, and images are often large and third-party.
 transfer/CPM/
+
+# Everything the gateway creates now lives here (see config::DATA_DIR), so the
+# whole folder is runtime state and none of it is ever tracked.
+#
+# **A pattern with a slash in it is anchored, and stops matching when the thing
+# it names moves down a level.** The bare-filename rules above (`egateway.conf`,
+# `ethernet_gateway_ssh_key`, ...) match at any depth and kept working when the
+# layout moved -- which is the only reason a generated private key was not
+# committed. `transfer/CPM/` has a slash, so it matched only at the repo root:
+# the moment the tree moved to `ethernetgateway-data/transfer/CPM/`, a
+# `git add -A` swept in 3133 lines of generated disk-manifest text. Ignoring
+# the directory itself is the rule that cannot come apart the same way.
+/ethernetgateway-data/
 diskcontrollerplan.md
 EGT8080/tools/__pycache__/
