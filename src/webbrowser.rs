@@ -10,8 +10,13 @@ use std::io::Read;
 
 use crate::logger::glog;
 
-/// Bookmarks file, stored next to the binary.
-const BOOKMARKS_FILE: &str = "bookmarks.txt";
+/// Bookmarks file, inside the data directory (see `config::DATA_DIR`).
+///
+/// It used to say "next to the binary" and be exactly that, which is what
+/// the one-folder move exists to end.  Missed in the first pass: the doc
+/// comment named the old location, so grepping for the *paths* found it and
+/// grepping for the rule would not have.
+const BOOKMARKS_FILE: &str = "ethernetgateway-data/bookmarks.txt";
 /// Maximum number of bookmarks.
 const MAX_BOOKMARKS: usize = 100;
 
@@ -1497,6 +1502,13 @@ pub(crate) fn load_bookmarks() -> Vec<Bookmark> {
 
 /// Save bookmarks to the bookmarks file. Returns true on success.
 fn save_bookmarks(bookmarks: &[Bookmark]) -> bool {
+    // The data directory must exist before anything in it can be written.
+    // `main` creates it at startup, but relying on that alone was wrong twice
+    // over: a unit test reaches this writer without going through `main` (which
+    // is how the missing directory was found), and an operator can remove the
+    // folder while the gateway is running. Idempotent and cheap, so it costs a
+    // stat on a path that is almost always already there.
+    let _ = crate::config::ensure_data_dir();
     let content: String = bookmarks
         .iter()
         .map(|b| {

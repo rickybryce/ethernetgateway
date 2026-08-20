@@ -131,6 +131,13 @@ pub fn start_ssh_server(
 /// the PID component prevents two instances in the same working
 /// directory from doing the same.
 fn atomic_write_private_key(path: &str, contents: &[u8]) -> std::io::Result<()> {
+    // The data directory must exist before anything in it can be written.
+    // `main` creates it at startup, but relying on that alone was wrong twice
+    // over: a unit test reaches this writer without going through `main` (which
+    // is how the missing directory was found), and an operator can remove the
+    // folder while the gateway is running. Idempotent and cheap, so it costs a
+    // stat on a path that is almost always already there.
+    let _ = crate::config::ensure_data_dir();
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);

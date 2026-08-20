@@ -154,6 +154,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nobody to ask, and a service started twice by accident must not stop a
   working gateway on nobody's authority.
 
+  Two files were missed in the first pass of the folder move and are now inside
+  it as well: `gateway_hosts` (the accumulated known-host fingerprints for
+  outbound SSH) and `bookmarks.txt` for the text browser — whose own doc comment
+  said "stored next to the binary", so grepping for paths found it where
+  grepping for the rule would not have. And every writer of a file in that
+  folder now ensures the folder exists rather than trusting `main` to have done
+  it: a unit test reaches those writers without going through `main`, which is
+  how the gap was found, and an operator can delete the folder while the gateway
+  is running.
+
 
 - **Closing the GUI window asks whether you meant to stop the server, and a
   Quit button says so out loud.** Closing the console window leaves the server

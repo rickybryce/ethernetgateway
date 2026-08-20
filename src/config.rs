@@ -2476,6 +2476,13 @@ fn write_serial_port_section(
 /// closes the misalignment footgun where missing one slot mid-template
 /// would silently shift every subsequent field onto the wrong line.
 fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
+    // The data directory must exist before anything in it can be written.
+    // `main` creates it at startup, but relying on that alone was wrong twice
+    // over: a unit test reaches this writer without going through `main` (which
+    // is how the missing directory was found), and an operator can remove the
+    // folder while the gateway is running. Idempotent and cheap, so it costs a
+    // stat on a path that is almost always already there.
+    let _ = ensure_data_dir();
     let mut content = String::with_capacity(8192);
 
     content.push_str("\
@@ -2611,7 +2618,10 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv_str(&mut content, "password", &cfg.password);
     content.push('\n');
 
-    content.push_str("# Directory for file transfers (relative to working directory)\n");
+    content.push_str("# Directory for file transfers.  A relative path is taken from the directory
+# the gateway was launched from, so the default sits inside the one
+# ethernetgateway-data folder with everything else it creates.  An absolute
+# path is used exactly as written and is never relocated.\n");
     write_kv_str(&mut content, "transfer_dir", &cfg.transfer_dir);
     content.push_str("\
 # place_bundled_terminals: write EGT8080.COM and EGT80.COM when they are

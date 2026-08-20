@@ -229,20 +229,42 @@ pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>) {
         // against a gateway that had agreed to stand down.
         let mut standing_down = false;
         loop {
-            if handover_path().exists() {
+            let asked = handover_path().exists();
+            if asked {
                 // Removed *before* the flag: the newcomer watches for our
                 // lock, not for this file, and a request left on disk would be
                 // read as an instruction by whoever holds the directory next.
                 let _ = std::fs::remove_file(handover_path());
                 glog!("Another copy of the gateway asked to take over — standing down.");
-                standing_down = true;
             }
-            if standing_down {
+            let assert_shutdown;
+            (standing_down, assert_shutdown) = watcher_pass(asked, standing_down);
+            if assert_shutdown {
                 shutdown.store(true, Ordering::SeqCst);
             }
             std::thread::sleep(POLL);
         }
     });
+}
+
+/// One pass of the watcher's decision: given whether a request is on disk and
+/// whether we have already been asked, should we be asserting `shutdown`?
+///
+/// **Pulled out so the fix has a test.** The defect it encodes was found live,
+/// not by reading, and had no cover: the watcher used to return as soon as
+/// `shutdown` was set, which every Save and Restart sets, so it died on the
+/// first restart and the gateway silently stopped answering handover requests
+/// for the rest of its life.
+///
+/// Two properties, and both are the fix. It takes **no shutdown flag** -- a
+/// pass cannot decide to stop watching, because that is what went wrong. And
+/// once asked it keeps asserting, `asked` being false thereafter: the request
+/// file is consumed on the first pass that sees it, so a version that only set
+/// the flag once would lose the request to a restart cycle clearing it in
+/// between.
+fn watcher_pass(asked: bool, standing_down: bool) -> (bool, bool) {
+    let standing_down = standing_down || asked;
+    (standing_down, standing_down)
 }
 
 #[cfg(test)]
@@ -258,6 +280,26 @@ mod tests {
         // And they are distinct files; one path used for both would make a
         // request indistinguishable from the lock itself.
         assert_ne!(lock_path(), handover_path());
+    }
+
+    /// **A watcher pass can never decide to stop watching, and never forgets.**
+    ///
+    /// The live defect this replaces: the watcher returned as soon as
+    /// `shutdown` was set -- set by every Save and Restart -- so it died on the
+    /// first restart and the gateway answered no handover request afterwards.
+    #[test]
+    fn test_the_watcher_keeps_asking_once_asked_and_never_stands_down_unasked() {
+        // Nobody has asked: do not shut a working gateway down.
+        assert_eq!(watcher_pass(false, false), (false, false));
+        // Asked: start standing down.
+        assert_eq!(watcher_pass(true, false), (true, true));
+        // **The fix.** The request file is consumed by the pass that saw it, so
+        // every later pass has `asked == false` -- and must still assert, or a
+        // restart cycle clearing `shutdown` in between would swallow the
+        // request and the newcomer would wait out its timeout.
+        assert_eq!(watcher_pass(false, true), (true, true));
+        // Asked twice is not different from asked once.
+        assert_eq!(watcher_pass(true, true), (true, true));
     }
 
     /// **The wait has to outlast a healthy shutdown, or a working handover
