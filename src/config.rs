@@ -5863,15 +5863,31 @@ mod tests {
 
     /// A failed file write is reported (not silently swallowed), so an
     /// explicit Save can tell the user persistence did not happen.
+    ///
+    /// **The unwritable path is a file used as a directory, not a missing one.**
+    /// This used to point at `/nonexistent-egw-dir-xyz/egateway.conf` and relied
+    /// on the *parent not existing* -- which stopped being a failure the moment
+    /// the writer began creating its parent (`ensure_parent_dir`), and passed on
+    /// Linux anyway only because the filesystem root is not writable by the test
+    /// user. On a Windows runner the drive root *is* writable, so the directory
+    /// was created, the write succeeded, and the assertion failed -- found by CI
+    /// on 2026-08-20, green on Linux. A path whose parent is a regular file
+    /// cannot be created on any platform, so the premise no longer depends on
+    /// where the test happens to run.
     #[test]
     fn test_write_config_file_reports_failure() {
         let cfg = Config::default();
-        // Parent directory does not exist → the atomic tmp open/rename fails.
-        let bad = "/nonexistent-egw-dir-xyz/egateway.conf";
+        let blocker =
+            std::env::temp_dir().join(format!("egw_not_a_dir_{}", std::process::id()));
+        std::fs::write(&blocker, b"a file, not a directory").expect("seed the blocker");
+        let bad = blocker.join("egateway.conf");
         assert!(
-            write_config_file(bad, &cfg).is_err(),
-            "writing under a non-existent directory must return Err"
+            write_config_file(&bad.to_string_lossy(), &cfg).is_err(),
+            "writing under a path whose parent is a file must return Err"
         );
+        // And nothing was left behind next to it.
+        assert!(!bad.exists());
+        let _ = std::fs::remove_file(&blocker);
     }
 
     /// Reading a config file with `serial_a_mode = console` (case-
