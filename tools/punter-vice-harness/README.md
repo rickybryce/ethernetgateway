@@ -8,7 +8,7 @@ program speaks Punter, so the peer is **NovaTerm** running on an emulated C64
   VICE x64sc                tcpser                     ethernetgateway
   NovaTerm + SwiftLink  ──►  ip232 :25232  ──telnet──►  telnet :2323
   ACIA @ $DE00               (Hayes modem,              (headless, verbose,
-                              dial 1 = gateway)          transfer_dir = run/transfer)
+                              dial 1 = gateway)          transfer_dir under run/ethernetgateway-data)
 ```
 
 tcpser auto-negotiates telnet + RFC 856 binary, and the gateway turns on IAC
@@ -38,7 +38,8 @@ VICE 3.7+ (`x64sc`) must be installed.
 
 Starts the gateway and tcpser in the background and launches VICE in the
 foreground (close VICE to stop everything). A runtime dir `run/` is created
-(gitignored) holding the live config and `run/transfer/`. Watch the live trace:
+(gitignored) holding the live config and transfer dir under
+`run/ethernetgateway-data/`. Watch the live trace:
 
 ```sh
 tail -f gateway.log      # gateway side (verbose per-block Punter log)
@@ -60,8 +61,8 @@ You can also run the pieces separately (in order): `./start-gateway.sh`,
    `10 PRINT "PUNTER OK"`) or `TESTDATA.SEQ`, start NovaTerm's Punter receive.
    Then on the C64: `LOAD"HELLO.PRG",8` / `RUN` → prints `PUNTER OK`.
 5. **Upload (C64 → gateway):** choose upload, enter a filename, send from
-   NovaTerm via Punter. It lands in `run/transfer/`; verify with
-   `xxd run/transfer/<name>`.
+   NovaTerm via Punter. It lands in `run/ethernetgateway-data/transfer/`; verify with
+   `xxd run/ethernetgateway-data/transfer/<name>`.
 
 ## Sample payloads (`payloads/`)
 

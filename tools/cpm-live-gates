@@ -115,13 +115,16 @@ if [ -d "$Z80PACK" ]; then
   # Banked CP/M 3: the disk that needs the MMU *and* DMA through it.
   export CPM_CPM3_IMAGE="$Z80PACK/cpm3-1.dsk"
 fi
-export CPM_LIVE_BASE="$REPO/transfer/CPM"
+# Everything the gateway creates now lives in `ethernetgateway-data` below
+# its launch directory (config::DATA_DIR), so running it from the repo root
+# puts the CP/M tree here rather than in $REPO/transfer.
+export CPM_LIVE_BASE="$REPO/ethernetgateway-data/transfer/CPM"
 # The pristine repo name, not a renamed copy.  This folder used to hold
 # hand-renamed images (`altair8_cpm22.dsk` was this file) and the prefix was
 # doing nothing a gate needed: an unprefixed image whose filesystem checks out
 # mounts read-write just the same.  Renaming the corpus only hid which path was
 # being exercised.
-export CPM_DUMP_IMAGE="$REPO/transfer/CPM/images/DISK01.DSK"
+export CPM_DUMP_IMAGE="$REPO/ethernetgateway-data/transfer/CPM/images/DISK01.DSK"
 export CPM_DUMP_FILE=PIP.COM
 # The CPU exerciser: 8080PRE if it has been extracted from z80pack's
 # i8080tests.dsk (cpmcp -f ibm-3740), otherwise the gate skips itself.

@@ -30,14 +30,16 @@ User=ethernetgateway
 Group=ethernetgateway
 
 ; ── Paths ─────────────────────────────────────────────────
-; WorkingDirectory is where egateway.conf, gateway_hosts, and the SSH
-; host/client keys will be created and maintained.  It should be owned
-; by the service user with mode 0750 or tighter.
+; WorkingDirectory is where the gateway creates its `ethernetgateway-data`
+; folder, and everything it maintains lives inside that: egateway.conf,
+; gateway_hosts, the SSH host/client keys, the log and the transfer dir.
+; It should be owned by the service user with mode 0750 or tighter.
 WorkingDirectory=/var/lib/ethernetgateway
 ExecStart=/usr/local/bin/ethernetgateway
 
 ; Reload semantics: the binary handles SIGHUP as a config reload — it
-; re-reads egateway.conf and restarts its listeners.  Active sessions are
+; re-reads ethernetgateway-data/egateway.conf and restarts its listeners.
+; Active sessions are
 ; ended (with a goodbye broadcast), so this is a brief bounce rather than a
 ; zero-downtime reload, but the service stays up on fresh config.
 ExecReload=/bin/kill -HUP $MAINPID
@@ -76,9 +78,9 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
 
-; Allow writing only to the working directory (which contains
-; egateway.conf, the transfer dir, and the SSH keys).  Everything else
-; is read-only.
+; Allow writing only to the working directory (the gateway creates
+; ethernetgateway-data inside it, holding the config, the transfer dir and
+; the SSH keys).  Everything else is read-only.
 ReadWritePaths=/var/lib/ethernetgateway
 
 ; Allow binding low ports (telnet 23 / SSH 22) if the operator chose

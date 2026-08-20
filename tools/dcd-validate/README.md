@@ -82,7 +82,8 @@ dmesg | grep -i ttyUSB | tail          # e.g. ttyUSB0 (gateway), ttyUSB1 (observ
 
 ## 4. Gateway config for the test
 
-In the gateway's `egateway.conf` (the working dir you launch it from), set
+In the gateway's `ethernetgateway-data/egateway.conf` (below the directory you
+launch it from), set
 **Port A** to modem mode on adapter A, with the carrier proxy on:
 
 ```ini

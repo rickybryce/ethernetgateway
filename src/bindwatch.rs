@@ -196,16 +196,31 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
             "         This process is serving no network connections at all.".to_string(),
         );
         if any_in_use {
+            // **A second copy started HERE can no longer reach a bind at all.**
+            // The instance lock (see `instance`) catches it first and offers a
+            // handover, so the old wording -- "another copy is almost certainly
+            // still running" -- now names the one cause this can no longer be.
+            // What is left is a copy running from a *different* directory, since
+            // the lock is per-directory and two of them know nothing about each
+            // other, or a program that is not this one at all.
             out.push(
-                "         The ports are already in use — another copy of the gateway is"
+                "         The ports are already in use, and it is not another copy started"
                     .to_string(),
             );
             out.push(
-                "         almost certainly still running and holding them, which means"
+                "         from this directory — that one would have been offered a handover"
                     .to_string(),
             );
             out.push(
-                "         anything you connect to is being served by that older copy."
+                "         instead of getting this far. Most likely a copy launched from a"
+                    .to_string(),
+            );
+            out.push(
+                "         DIFFERENT directory (each one claims its own), or another program"
+                    .to_string(),
+            );
+            out.push(
+                "         entirely. Whatever holds them is what your clients are reaching."
                     .to_string(),
             );
             out.extend(how_to_check());
@@ -219,7 +234,11 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
         ));
         if any_in_use {
             out.push(
-                "         The port is already in use — check for another copy of the gateway."
+                "         The port is already in use — check for a gateway started from a"
+                    .to_string(),
+            );
+            out.push(
+                "         different directory, or another program holding that port."
                     .to_string(),
             );
             out.extend(how_to_check());
@@ -274,8 +293,17 @@ mod tests {
         .is_empty());
     }
 
-    /// The case this module exists for: a second copy of the gateway holding
-    /// every port.  The message has to name the cause, not just the symptom.
+    /// The case this module exists for: something else holding every port.
+    ///
+    /// **The cause it names had to change when the instance lock landed.** A
+    /// second copy started from *this* directory can no longer reach a bind --
+    /// `instance::acquire` catches it and offers a handover -- so blaming that
+    /// would send the operator hunting for a process that cannot exist. What
+    /// remains is a copy launched from a different directory, since the lock is
+    /// per-directory, or a program that is not this one. The test pins the new
+    /// cause *and* that the ruled-out one is explicitly ruled out, because a
+    /// message that merely stopped mentioning it would read as vaguer rather
+    /// than more accurate.
     #[test]
     fn test_all_listeners_in_use_names_the_other_copy() {
         let lines = summarize(&[
@@ -287,7 +315,12 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("NONE of the 4"), "{text}");
         assert!(text.contains("serving no network connections"), "{text}");
-        assert!(text.contains("another copy of the gateway"), "{text}");
+        // Rules out the case the lock now prevents...
+        assert!(text.contains("not another copy started"), "{text}");
+        assert!(text.contains("this directory"), "{text}");
+        // ...and names the two that remain.
+        assert!(text.contains("DIFFERENT directory"), "{text}");
+        assert!(text.contains("another program"), "{text}");
         // Every failing port is named, so the operator can see which is which.
         for port in ["2222", "2323", "2424", "8080"] {
             assert!(text.contains(port), "port {port} missing from: {text}");

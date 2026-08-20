@@ -15,17 +15,21 @@ if [ ! -x "$BIN" ]; then
 fi
 
 RUN="$HERE/run"
-mkdir -p "$RUN/transfer"
+# The gateway keeps everything in `ethernetgateway-data` below the directory
+# it is launched from, so the seeded config and payloads have to go there or
+# it comes up on its defaults instead of this harness's settings.
+DATA="$RUN/ethernetgateway-data"
+mkdir -p "$DATA/transfer"
 # Seed the runtime config once (the gateway rewrites it in place on launch).
-[ -f "$RUN/egateway.conf" ] || cp "$HERE/egateway.harness.conf" "$RUN/egateway.conf"
+[ -f "$DATA/egateway.conf" ] || cp "$HERE/egateway.harness.conf" "$DATA/egateway.conf"
 # Seed download samples without clobbering anything already there.
 for f in "$HERE"/payloads/*; do
     base="$(basename "$f")"
-    [ -f "$RUN/transfer/$base" ] || cp "$f" "$RUN/transfer/$base"
+    [ -f "$DATA/transfer/$base" ] || cp "$f" "$DATA/transfer/$base"
 done
 
 cd "$RUN"
-echo "Gateway: telnet 127.0.0.1:2323, transfer_dir=$RUN/transfer, verbose on"
+echo "Gateway: telnet 127.0.0.1:2323, transfer_dir=$DATA/transfer, verbose on"
 echo "Log: $HERE/gateway.log"
 # Use process substitution (not a `| tee` pipeline) so `exec` replaces THIS
 # shell with the gateway — the script's PID then *is* the gateway, so the

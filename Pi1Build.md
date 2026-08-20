@@ -187,12 +187,14 @@ ssh ricky@<PI_IP> chmod +x /home/ricky/ethernet-gateway
 
 ## Step 5 — Generate and adjust the config
 
-Let the binary create its own `egateway.conf`, then disable the desktop GUI
-(there is no display on a headless Pi):
+Let the binary create its own config, then disable the desktop GUI (there is
+no display on a headless Pi). Everything the gateway writes lives in
+`ethernetgateway-data`, created in the directory it is launched from:
 
 ```sh
 ssh ricky@<PI_IP> 'cd /home/ricky && timeout 5 ./ethernet-gateway; \
-  sed -i "s/^enable_console = true/enable_console = false/" egateway.conf'
+  sed -i "s/^enable_console = true/enable_console = false/" \
+    ethernetgateway-data/egateway.conf'
 ```
 
 `enable_console = false` stops the binary from attempting to open the egui
@@ -200,7 +202,7 @@ window on boot. (Even with it left on, the gateway falls back to headless mode,
 but it logs a harmless GUI error each start.)
 
 Enable other features (SSH server, serial ports, master-slave slave uplink,
-etc.) by editing `egateway.conf` as usual.
+etc.) by editing `ethernetgateway-data/egateway.conf` as usual.
 
 ## Step 6 — Install the systemd service
 

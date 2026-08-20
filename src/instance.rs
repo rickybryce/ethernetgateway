@@ -213,18 +213,32 @@ pub fn clear_stale_handover_request() {
 /// exits, releasing the ports and the lock for the copy that asked.
 pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>) {
     std::thread::spawn(move || {
+        // **Must outlive a restart, and must keep asserting once asked.**
+        //
+        // The first version returned as soon as `shutdown` was set, which is
+        // set by every Save and Restart -- so the watcher died on the first
+        // restart and the gateway silently stopped answering handover requests
+        // for the rest of its life. `main`'s signal watcher already carries
+        // this exact lesson in its comment ("Loops to survive server restarts
+        // (flag resets to false between cycles)"); this had to learn it twice.
+        //
+        // And once a handover has been asked for, the flag is re-asserted on
+        // every pass rather than set once. A restart cycle clears `shutdown`
+        // between server cycles, so a request that arrived in that window
+        // would otherwise be wiped and the newcomer would wait out its timeout
+        // against a gateway that had agreed to stand down.
+        let mut standing_down = false;
         loop {
-            if shutdown.load(Ordering::SeqCst) {
-                return;
-            }
             if handover_path().exists() {
-                // Removed *before* the flag: the newcomer is watching for our
+                // Removed *before* the flag: the newcomer watches for our
                 // lock, not for this file, and a request left on disk would be
                 // read as an instruction by whoever holds the directory next.
                 let _ = std::fs::remove_file(handover_path());
                 glog!("Another copy of the gateway asked to take over — standing down.");
+                standing_down = true;
+            }
+            if standing_down {
                 shutdown.store(true, Ordering::SeqCst);
-                return;
             }
             std::thread::sleep(POLL);
         }
