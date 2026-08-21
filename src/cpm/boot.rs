@@ -322,6 +322,14 @@ pub struct MountContext {
     board: Option<&'static str>,
     /// The booted image's size, which is what [`Self::slot`] asks the board by.
     boot_len: Option<u64>,
+    /// The file name of the disk that will boot, when one will.
+    ///
+    /// **Slot 0 is reserved, not empty, and no screen used to say by what.** The
+    /// mount screens showed `(drive folder)` in the first row beside a note
+    /// reading "the booted disk is here" -- two statements that contradict each
+    /// other, neither naming the disk. An operator reasonably reads the row as a
+    /// place their boot disk should have appeared (reported 2026-08-21).
+    boot_name: Option<String>,
 }
 
 impl MountContext {
@@ -346,7 +354,16 @@ impl MountContext {
         };
         let board = boot_len
             .and_then(|len| super::boot_machine::BootMachine::board_for(Some(&machine), len));
-        MountContext { naming, machine, board, boot_len }
+        // The *resolved* target's name, never the configured string: a key
+        // naming a deleted image runs the emulator, and a screen that named it
+        // as the occupant of slot 0 would be describing a machine nobody gets.
+        let boot_name = match &target {
+            BootTarget::Image(path) => {
+                path.file_name().map(|n| n.to_string_lossy().to_string())
+            }
+            _ => None,
+        };
+        MountContext { naming, machine, board, boot_len, boot_name }
     }
 
     /// Can an image of this size be reached by whatever is going to run?
@@ -397,6 +414,33 @@ impl MountContext {
         self.board
     }
 
+    /// The disk that will boot, by name, when one will.
+    ///
+    /// For the surfaces that show slot 0 as a control: an empty selector reads
+    /// as a free drive, and this is what it is holding instead.
+    pub fn boot_disk_name(&self) -> Option<&str> {
+        self.boot_name.as_deref()
+    }
+
+    /// What slot 0 should say on a mount screen, in one sentence.
+    ///
+    /// **One text for three surfaces**, like [`super::uart::UART_CHOICES`] and
+    /// the printer's labels: telnet, the web UI and the desktop all show this
+    /// row, and the previous wording ("the booted disk is here") was written
+    /// three times and named the disk in none of them.
+    ///
+    /// `None` when the emulator runs, where slot 0 is an ordinary drive.
+    pub fn boot_slot_note(&self) -> Option<String> {
+        if !self.booting() {
+            return None;
+        }
+        Some(match &self.boot_name {
+            Some(name) => format!("{name} boots here"),
+            // Booting, but the name could not be read: still not a free drive.
+            None => "the booted disk is here".to_string(),
+        })
+    }
+
     /// Is a disk booting at all?
     ///
     /// From the naming, not from whether a board could be named: those are
@@ -408,6 +452,29 @@ impl MountContext {
         self.naming == SlotNaming::Boards
     }
 }
+
+/// Why an image mounted on `A:` is not reachable while a disk boots.
+///
+/// **Said where the mount is made, not only where the boot starts.** The mount
+/// screens let an image be put on `A:` with a disk set to boot, and the only
+/// notice was a line printed by `plan_boot_disks` at boot time -- by which point
+/// the operator has left the screen where they could have chosen differently.
+/// Slot 0 belongs to the disk being booted, so anything else there is held but
+/// unreachable.
+// A hyphen, not an em dash: these strings reach `send()` on a telnet session,
+// where an ASCII terminal writes the UTF-8 bytes untouched and a three-byte
+// dash counts as one column. `test_no_operator_facing_string_is_non_ascii`
+// holds it, and caught this one.
+pub const BEHIND_BOOT_DISK: &str = "behind the boot disk - the guest cannot reach it";
+
+/// The same warning inside a PETSCII row.
+///
+/// **Two spellings, one place.** A C64 line is 40 columns and this note shares
+/// its row with an indent, so the long form cannot be used there -- but a second
+/// wording invented at the call site is how two surfaces come to describe one
+/// state differently. Both live here, next to each other, where a change to one
+/// is visibly a change to the other.
+pub const BEHIND_BOOT_DISK_SHORT: &str = "behind the boot disk - unreachable";
 
 /// What CP/M is *actually* going to run for a given configuration.
 ///
@@ -1188,6 +1255,62 @@ pub(crate) mod tests {
         assert!(on_floppy.accepts(floppy.len() as u64), "its own board");
         assert!(!on_floppy.accepts(hd_len), "a hard disk is on another board");
         assert_ne!(on_floppy.slot(1), "B:", "a booted machine has no drive letters");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Slot 0 is reserved, and the screens have to say by what.**
+    ///
+    /// Reported 2026-08-21: with `CP/M runs: Boot HDSK04.DSK` the mount dialog's
+    /// first row showed `(drive folder)` beside a note reading "the booted disk
+    /// is here" — two statements that contradict each other, and neither naming
+    /// the disk. The operator reasonably read the row as a place the boot disk
+    /// should have appeared.
+    ///
+    /// The note is one text for three surfaces, and it comes from the **resolved**
+    /// target: a `cpm_boot_image` naming a disk that is gone runs the emulator,
+    /// where slot 0 is an ordinary drive and there is nothing to reserve.
+    #[test]
+    fn test_slot_zero_names_the_disk_that_reserved_it() {
+        let dir = std::env::temp_dir().join(format!("egw_boot_slot0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Under `CPM/`, because that is where `boot_target` looks.
+        let images = super::super::image::images_dir(&super::super::layout::cpm_dir(
+            &dir.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("floppy.dsk"), bootable_image()).unwrap();
+
+        // The emulator: slot 0 is A:, and there is no reservation to report.
+        let emu = MountContext::resolve(&dir.to_string_lossy(), "", "auto");
+        assert_eq!(emu.boot_slot_note(), None);
+        assert_eq!(emu.boot_disk_name(), None);
+
+        // A disk booting: the note names it, and the name is available on its
+        // own for a surface that shows slot 0 as a control.
+        let booting = MountContext::resolve(&dir.to_string_lossy(), "floppy.dsk", "auto");
+        assert!(booting.booting());
+        assert_eq!(booting.boot_disk_name(), Some("floppy.dsk"));
+        let note = booting.boot_slot_note().expect("a booting disk reserves slot 0");
+        assert!(note.contains("floppy.dsk"), "the note must name the disk: {note:?}");
+        assert!(note.contains("boots here"), "{note:?}");
+
+        // **A setting is not an outcome.** A key naming a disk that is not there
+        // runs the emulator, so nothing has reserved slot 0 and the screens must
+        // not claim otherwise.
+        let gone = MountContext::resolve(&dir.to_string_lossy(), "vanished.dsk", "auto");
+        assert!(!gone.booting());
+        assert_eq!(gone.boot_slot_note(), None);
+        assert_eq!(gone.boot_disk_name(), None);
+
+        // Both spellings of the "behind the boot disk" warning exist, and the
+        // narrow one fits a C64 row with its indent.
+        assert!(BEHIND_BOOT_DISK.contains("behind the boot disk"));
+        assert!(BEHIND_BOOT_DISK_SHORT.contains("behind the boot disk"));
+        assert!(
+            BEHIND_BOOT_DISK_SHORT.chars().count() + 5 <= 40,
+            "{BEHIND_BOOT_DISK_SHORT:?} plus a five-column indent must fit a PETSCII row"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

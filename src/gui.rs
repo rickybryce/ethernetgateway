@@ -898,6 +898,12 @@ struct App {
     /// allocations per repaint of a window that is usually just sitting open.
     /// egui redraws on its own schedule, so "per frame" is not a bounded cost.
     cpm_slot_labels: Vec<String>,
+    /// What slot 0 holds while a disk boots, and the disk's name on its own.
+    ///
+    /// Both from [`crate::cpm::boot::MountContext`], so the mount dialog's first
+    /// row cannot say something different from the slot column beside it.
+    cpm_boot_slot_note: Option<String>,
+    cpm_boot_slot_name: String,
     /// What [`App::cpm_slot_labels`] was computed from: the draft, and whether
     /// a boot image is configured (which decides whether slots are named for a
     /// board at all).
@@ -1232,6 +1238,8 @@ impl App {
             cpm_fetch_note: String::new(),
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
             cpm_slot_labels: Vec::new(),
+            cpm_boot_slot_note: None,
+            cpm_boot_slot_name: String::new(),
             cpm_slot_labels_from: (Vec::new(), false, String::new(), String::new()),
             cpm_boot_cache_warmed: false,
             cpm_boot_label_cache: None,
@@ -1870,6 +1878,13 @@ impl App {
             };
             self.cpm_slot_labels_from = labels_key;
         }
+        // Slot 0's occupant, from the same context as the slot names so the two
+        // cannot disagree.  Cached alongside the labels because it comes from
+        // the same key -- and because `boot_slot_note` resolves the boot target,
+        // which reads the disk, and a draw path must not do that per frame.
+        self.cpm_boot_slot_note = ctx.boot_slot_note();
+        self.cpm_boot_slot_name =
+            ctx.boot_disk_name().map(str::to_string).unwrap_or_else(|| "(booted disk)".to_string());
 
         // These strings are single-line on purpose: a Rust line continuation
         // inside them is easy to lose in editing, and what is left behind is a
@@ -1962,16 +1977,27 @@ impl App {
                                 ui.label(format!("{letter} :"));
                             },
                         );
+                        let current_now = self
+                            .cpm_mount_draft
+                            .get(idx)
+                            .cloned()
+                            .unwrap_or_default();
+                        // **Slot 0 is reserved while a disk boots, and an empty
+                        // selector reads as a free drive.** So it shows the disk
+                        // that has reserved it and cannot be changed — until
+                        // something *is* mounted there, when it stays editable:
+                        // a mount left behind the boot disk has to be removable
+                        // without first clearing `cpm_boot_image`.
+                        let reserved_for_boot =
+                            drive0 == 0 && booting && current_now.is_empty();
                         // A drive in use cannot be changed — the control is
                         // disabled and says why, rather than accepting a choice
                         // that would then be refused on Save.
-                        ui.add_enabled_ui(busy.is_none(), |ui| {
-                            let current = self
-                                .cpm_mount_draft
-                                .get(idx)
-                                .cloned()
-                                .unwrap_or_default();
-                            let shown = if current.is_empty() {
+                        ui.add_enabled_ui(busy.is_none() && !reserved_for_boot, |ui| {
+                            let current = current_now.clone();
+                            let shown = if reserved_for_boot {
+                                self.cpm_boot_slot_name.clone()
+                            } else if current.is_empty() {
                                 "(drive folder)".to_string()
                             } else {
                                 current.clone()
@@ -2021,17 +2047,58 @@ impl App {
                             ui.label(label);
                         }
                         if drive0 == 0 {
-                            ui.label(if booting {
-                                "(the booted disk is here)"
-                            } else {
-                                "(A: hides the terminals while mounted)"
-                            });
+                            // One text for three surfaces, and it names the disk
+                            // (see `MountContext::boot_slot_note`).
+                            match &self.cpm_boot_slot_note {
+                                Some(note) => {
+                                    ui.label(format!("({note})"));
+                                    // A mount underneath a boot disk is kept but
+                                    // unreachable, and saying so here beats
+                                    // saying it at boot time, on another screen.
+                                    if !current_now.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                crate::cpm::boot::BEHIND_BOOT_DISK,
+                                            )
+                                            .color(AMBER_BRIGHT),
+                                        );
+                                    }
+                                }
+                                None => {
+                                    ui.label("(A: hides the terminals while mounted)");
+                                }
+                            }
                         }
                         ui.end_row();
                     }
                 }
                     });
             });
+
+        // **What is actually running, which no mount row can show.** A booted
+        // image is not on one of our drives at all -- it is its board's slot 0,
+        // and the guest's own operating system decides what to call it -- so it
+        // gets its own list. The telnet screen has had this since 0.9.2; this
+        // one and the web page showed nothing, so an image could be offered
+        // above, refused on Save as "being run by a booted session", and
+        // accounted for nowhere (reported 2026-08-21).
+        let booted = crate::cpm::image::registry::booted_to_report();
+        if !booted.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Booted:").color(AMBER_BRIGHT));
+            for name in &booted {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(name).color(AMBER));
+                    ui.label(egui::RichText::new("(running)").color(AMBER_DIM));
+                });
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Running its own operating system — not on a drive of ours, and not                      mountable while it runs.",
+                )
+                .color(AMBER_DIM),
+            );
+        }
 
         ui.add_space(6.0);
         ui.separator();

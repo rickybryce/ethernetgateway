@@ -13,30 +13,7 @@
 
 use super::*;
 use crate::cpm::image;
-
-/// The booted images that are **not** already on the list above.
-///
-/// Two registry tables answer two different questions, and an image can be in
-/// both. `boot_loans` records a *drive* a boot borrowed — which happens when
-/// the image was mounted first, because the boot rewrites the file and the
-/// mount has to go out of service. `booted_image_names` records an *image* a
-/// session is running, mounted or not.
-///
-/// So a disk that was mounted and then booted is in both, and the screen said
-/// so twice: once as `B: name (booted)` with its slot, and again under
-/// `Booted:`. The block's own doc had the scope right all along — "an image
-/// that was booted *without* being mounted first appears in none of the tables
-/// above" — and the code did not implement that clause.
-///
-/// Its own function so the clause is testable. Inline it was four lines that
-/// read like a formality and would be simplified away by the next person to
-/// touch this screen.
-fn booted_not_already_lent(booted: Vec<String>, lent: &[(u8, String)]) -> Vec<String> {
-    booted
-        .into_iter()
-        .filter(|n| !lent.iter().any(|(_, name)| name == n))
-        .collect()
-}
+use crate::cpm::image::registry::booted_not_already_lent;
 
 impl TelnetSession {
     /// The `CPM/` container this gateway is configured for.
@@ -196,6 +173,24 @@ impl TelnetSession {
             let naming = ctx.naming.clone();
             let lent = image::registry::boot_loans();
             let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
+            // **Which disk holds slot 0**, from the same context as the slot
+            // names.  Outside the `any` branch on purpose: with a disk set to
+            // boot and nothing mounted -- the ordinary case -- the screen
+            // otherwise said only "No images mounted." and never mentioned the
+            // disk that has slot 0, which is the state that prompted the
+            // question (reported 2026-08-21).  One text for three surfaces, see
+            // `MountContext::boot_slot_note`.
+            if let Some(note) = ctx.boot_slot_note() {
+                let width = if self.terminal_type == TerminalType::Petscii { 26 } else { 58 };
+                self.send_line("  Booting:").await?;
+                self.send_line(&format!(
+                    "   {} {}",
+                    self.cyan(&ctx.slot(0)),
+                    self.dim(&truncate_to_width(&note, width)),
+                ))
+                .await?;
+                self.send_line("").await?;
+            }
             if any {
                 self.send_line(match naming {
                     crate::cpm::boot::SlotNaming::Drives => "  Mounted:",
@@ -233,6 +228,18 @@ impl TelnetSession {
                         self.dim(&busy),
                     ))
                     .await?;
+                    // Slot 0 belongs to the disk being booted, so a mount on A:
+                    // is held but unreachable.  Said here, where it can still be
+                    // changed, rather than only in the boot screen's notes after
+                    // the operator has left.  Its own row: at 40 columns it does
+                    // not fit beside a filename.
+                    if i == 0 && ctx.booting() {
+                        self.send_line(&format!(
+                            "     {}",
+                            self.dim(crate::cpm::boot::BEHIND_BOOT_DISK_SHORT),
+                        ))
+                        .await?;
+                    }
                 }
                 for (drive0, name) in &lent {
                     // From the context, not from the file: it is in a booted
@@ -249,8 +256,17 @@ impl TelnetSession {
                     .await?;
                 }
             } else {
-                self.send_line(&format!("  {}", self.dim("No images mounted.")))
-                    .await?;
+                // "No *other*" when a disk has slot 0: plain "No images
+                // mounted." beside a Booting: line reads as a contradiction.
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim(if ctx.booting() {
+                        "No other images mounted."
+                    } else {
+                        "No images mounted."
+                    })
+                ))
+                .await?;
             }
 
             // Booted images, listed *separately* and without a drive letter.
@@ -834,6 +850,30 @@ impl TelnetSession {
 #[cfg(test)]
 mod tests {
     use super::booted_not_already_lent;
+
+    /// **Every mount surface must account for a booted image.**
+    ///
+    /// The rule and its filter lived here, in the telnet module, while the
+    /// desktop dialog and the web page listed nothing — so the surface that
+    /// answered "what is running?" was the one an operator on a C64 was least
+    /// likely to be using, and on the other two an image could be offered,
+    /// refused on Save as "being run by a booted session", and accounted for
+    /// nowhere (reported 2026-08-21). The function now lives in the registry;
+    /// this holds that all three surfaces ask it.
+    #[test]
+    fn test_every_mount_surface_reports_a_booted_image() {
+        for (surface, src) in [
+            ("telnet", include_str!("cpm_mount_ui.rs")),
+            ("desktop", include_str!("../gui.rs")),
+            ("web", include_str!("../webserver.rs")),
+        ] {
+            assert!(
+                src.contains("booted_to_report") || src.contains("booted_not_already_lent"),
+                "the {surface} mount screen never asks which images are booted"
+            );
+        }
+    }
+
 
     /// **An image that was mounted and then booted is listed once, not twice.**
     ///

@@ -389,6 +389,41 @@ pub fn drive_holding(filename: &str) -> Option<u8> {
     boot_loans().into_iter().find(|(_, n)| n == filename).map(|(d, _)| d)
 }
 
+/// The booted images that are **not** already on a mount list.
+///
+/// Two registry tables answer two different questions, and an image can be in
+/// both. [`boot_loans`] records a *drive* a boot borrowed -- which happens when
+/// the image was mounted first, because the boot rewrites the file and the mount
+/// has to go out of service. [`booted_image_names`] records an *image* a session
+/// is running, mounted or not.
+///
+/// So a disk that was mounted and then booted is in both, and a screen listing
+/// both said so twice: once as `B: name (booted)` with its slot, and again under
+/// `Booted:`. A disk booted *without* having been mounted first is in none of
+/// the mount tables at all, and a screen that showed nothing for it was offering
+/// that image, refusing it with "being run by a booted session", and accounting
+/// for the refusal nowhere.
+///
+/// Its own function so the clause is testable -- inline it was four lines that
+/// read like a formality. **Here rather than in the telnet module**, which is
+/// where it used to live while the desktop and web mount screens showed no
+/// booted images at all: the one surface that answered "what is running?" was
+/// the one an operator on a C64 was least likely to be using.
+pub fn booted_not_already_lent(booted: Vec<String>, lent: &[(u8, String)]) -> Vec<String> {
+    booted
+        .into_iter()
+        .filter(|n| !lent.iter().any(|(_, name)| name == n))
+        .collect()
+}
+
+/// The booted images a mount screen still has to account for, ready to show.
+///
+/// The two calls the surfaces would otherwise make in the wrong order, in one
+/// place: what is booted, minus what a lent drive already lists.
+pub fn booted_to_report() -> Vec<String> {
+    booted_not_already_lent(booted_image_names(), &boot_loans())
+}
+
 /// Is this drive lent to a booted session?
 pub fn is_lent(drive0: u8) -> bool {
     lock!(borrowed()).contains_key(&drive0)

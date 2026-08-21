@@ -2469,9 +2469,25 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             .get(drive0 as usize)
             .and_then(|u| u.describe())
             .or_else(|| held.clone());
-        let disabled = if busy.is_some() { " disabled" } else { "" };
+        // **Slot 0 is reserved while a disk boots.** Empty, it shows the disk
+        // holding it and is not selectable; with something mounted it stays
+        // editable, because a mount left behind the boot disk must be removable
+        // without first clearing `cpm_boot_image`.  A disabled `select` submits
+        // nothing, which `apply_cpm_mount_form` reads as "keep whatever is
+        // there" -- and there is nothing there, so the two agree.
+        let reserved_for_boot = drive0 == 0 && booting && mounted.is_none();
+        let disabled = if busy.is_some() || reserved_for_boot { " disabled" } else { "" };
 
-        let mut opts = String::from("<option value=\"\">(drive folder)</option>");
+        // A reserved slot shows what reserved it, selected, so the control is not
+        // an empty box beside a note saying it is occupied.
+        let mut opts = if reserved_for_boot {
+            format!(
+                "<option value=\"\" selected>{}</option>",
+                html_escape(ctx.boot_disk_name().unwrap_or("(booted disk)"))
+            )
+        } else {
+            String::from("<option value=\"\">(drive folder)</option>")
+        };
         for name in &images {
             let sel = if mounted.map(|m| m.filename.as_str()) == Some(name.as_str()) {
                 " selected"
@@ -2548,11 +2564,25 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             ));
         }
         if drive0 == 0 {
-            note.push_str(if booting {
-                " <span class=\"sub\">the booted disk is here</span>"
-            } else {
-                " <span class=\"sub\">A: hides the terminals while mounted</span>"
-            });
+            // One text for three surfaces, and it names the disk (see
+            // `MountContext::boot_slot_note`).
+            match ctx.boot_slot_note() {
+                Some(n) => {
+                    note.push_str(&format!(" <span class=\"sub\">{}</span>", html_escape(&n)));
+                    // A mount underneath the boot disk is kept but unreachable.
+                    // Said here, where it can still be changed, rather than only
+                    // at boot time on another screen.
+                    if mounted.is_some() {
+                        note.push_str(&format!(
+                            " <span class=\"warn\">{}</span>",
+                            html_escape(crate::cpm::boot::BEHIND_BOOT_DISK)
+                        ));
+                    }
+                }
+                None => note.push_str(
+                    " <span class=\"sub\">A: hides the terminals while mounted</span>",
+                ),
+            }
         }
         rows.push_str(&format!(
             "<div class=\"row\"><span class=\"label drive\">{letter} :</span>\
@@ -2562,6 +2592,27 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             opts,
             note
         ));
+    }
+    // **What is actually running, which no mount row can show.** A booted image
+    // is not on one of our drives at all -- it is its board's slot 0, and the
+    // guest's own operating system decides what to call it -- so it belongs in
+    // its own list rather than folded into the drive letters above. The telnet
+    // screen has carried this since 0.9.2; the web page and the desktop showed
+    // nothing, so an image could be offered here, refused on Save as "being run
+    // by a booted session", and accounted for nowhere (reported 2026-08-21).
+    let booted = crate::cpm::image::registry::booted_to_report();
+    if !booted.is_empty() {
+        rows.push_str("<div class=\"row\"><span class=\"label drive\">Booted:</span><span>");
+        for name in &booted {
+            rows.push_str(&format!(
+                "{} <span class=\"sub\">(running)</span><br>",
+                html_escape(name)
+            ));
+        }
+        rows.push_str(
+            "<span class=\"sub\">Running its own operating system — not on a drive of \
+             ours, and not mountable while it runs.</span></span></div>",
+        );
     }
 
     let intro = if images.is_empty() && hidden_images > 0 {
@@ -6134,6 +6185,56 @@ mod tests {
             page.contains("data-target=\"more-cpm-disks\""),
             "nothing opens the mount modal"
         );
+    }
+
+    /// **Slot 0 is reserved while a disk boots, and the row has to say by what.**
+    ///
+    /// Reported 2026-08-21: the first row showed an empty picker beside a note
+    /// reading "the booted disk is here", naming nothing. Now the note names the
+    /// disk, the picker shows it and is not selectable — and a mount left
+    /// underneath keeps its picker (it has to be removable without clearing
+    /// `cpm_boot_image` first) while gaining the warning that the guest cannot
+    /// reach it.
+    #[test]
+    fn test_the_first_mount_row_names_the_disk_that_boots_there() {
+        let dir = std::env::temp_dir().join(format!("egw_web_slot0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let images = crate::cpm::image::images_dir(&crate::cpm::layout::cpm_dir(
+            &dir.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("boots.dsk"), crate::cpm::boot::tests::bootable_image()).unwrap();
+
+        // The emulator: an ordinary drive, and the old note stands.
+        let emu = Config {
+            transfer_dir: dir.to_string_lossy().to_string(),
+            cpm_boot_image: String::new(),
+            ..Config::default()
+        };
+        let html = render_cpm_disks_modal(&emu);
+        assert!(html.contains("A: hides the terminals while mounted"), "the emulator note");
+        assert!(!html.contains("boots here"), "nothing is booting");
+
+        // A disk booting: the note names it and the picker is not selectable.
+        let booting = Config { cpm_boot_image: "boots.dsk".into(), ..emu.clone() };
+        let html = render_cpm_disks_modal(&booting);
+        assert!(html.contains("boots.dsk boots here"), "slot 0 must name its occupant: {html:.0}");
+        let row = html
+            .split("<div class=\"row\">")
+            .find(|r| r.contains("cpm_mount_a"))
+            .expect("an A: row");
+        assert!(
+            row.contains("<select name=\"cpm_mount_a\" disabled>"),
+            "the reserved picker must not be selectable: {row}"
+        );
+        assert!(
+            row.contains(">boots.dsk</option>"),
+            "the reserved picker must show what reserved it: {row}"
+        );
+        // The old contradiction must be gone.
+        assert!(!row.contains("(drive folder)"), "a reserved slot is not a free drive: {row}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The mount screen must be able to make a disk as well as mount one — it

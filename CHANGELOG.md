@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The mount screens now name the disk that has slot 0.** Reported: with
+  `CP/M runs: Boot HDSK04.DSK`, the first mount row showed `(drive folder)` next
+  to a note reading "the booted disk is here" — two statements that contradict
+  each other, and neither naming the disk. A boot disk is deliberately *not* a
+  mount (one file cannot be both; the guest owns the format and rewrites the file
+  when it leaves), so slot 0 is **reserved for** it rather than filled by it —
+  but nothing on the screen said by what, so the row read as a drive the operator
+  had failed to fill.
+
+  Slot 0 now names its occupant on all three surfaces, from one text
+  (`MountContext::boot_slot_note`) and from the **resolved** boot target, so a
+  setting naming a disk that is gone runs the emulator and claims nothing. The
+  desktop and web pickers show that disk and are not selectable while it is
+  empty; with something mounted underneath they stay editable — a mount left
+  behind the boot disk has to be removable without first clearing
+  `cpm_boot_image` — and gain the warning that the guest cannot reach it, said
+  where it can still be changed rather than only in the boot screen's notes
+  afterwards. The telnet screen gained a `Booting:` line, and says "No *other*
+  images mounted" when a disk has slot 0, because the old wording read as a
+  contradiction beside it.
+
+- **The desktop and web mount screens now list booted images at all.** The
+  telnet screen has had a `Booted:` section since 0.9.2 — an image booted without
+  having been mounted first is in none of the mount tables, so without it a disk
+  could be offered, refused on Save as "being run by a booted session", and
+  accounted for nowhere. The other two surfaces showed nothing, which left the
+  one surface that answered "what is running?" as the one a C64 operator was
+  least likely to be using. The filter moved from the telnet module into
+  `registry::booted_to_report`, and a test holds that all three surfaces ask it.
+
 - **The CP/M printer screen told a C64 the wrong place to look, and then cut the
   answer off.** The three `cpm_printer` labels ended in `transfer/printer/` --
   which stopped being a real path when the transfer directory moved under
