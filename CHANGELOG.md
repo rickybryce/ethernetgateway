@@ -26,9 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `peer`) until the far end actually answers, and still sent at accept for
   `menu` and `kermit`, where the master *is* the far end and accepting is the
   whole answer. Its absence then means what the slave needs it to mean: no call,
-  report `NO CARRIER`. That covers every failure past the old hello point at
-  once — the two `allow_peer_dial` gates, connection refused, the answer
-  timeout, a peer port that is unregistered or is a Kermit port. The slave waits
+  report `NO CARRIER`. That covers the failures the master itself observes — the
+  two `allow_peer_dial` gates, connection refused, the onward-dial answer
+  timeout, a local peer port that is unregistered, not dialable, or never
+  answers its ring. **One case is deliberately not covered**: a peer-dial across
+  the *crossbar* to another slave's port, where the master hands the hello over
+  as soon as it claims that slave's registration channel. Claiming is not
+  answering — the far slave then rings its own device and, if nobody picks up,
+  simply drops the channel without telling the master — so a crossbar call to an
+  unanswered device is still `CONNECT` followed by `NO CARRIER`. Closing that
+  needs the far slave to report back, which *is* a framing change and would move
+  `RELAY_PROTOCOL_VERSION`. The slave waits
   longer for the hello when it asked for a dial, since the master is holding it
   across its own answer wait, and the outer connect budget grows to match so a
   slow dial is not reported as a network fault.

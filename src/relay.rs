@@ -335,6 +335,22 @@ where
     if let Some((ip, label)) = parse_remote_peer_addr(&addr) {
         match claim_remote_peer(ip, &label).await {
             Some(mut remote) => {
+                // **The one place the hello still runs ahead of the answer.**
+                // Everywhere else it means "the far end picked up"; here it can
+                // only mean "the far slave's registration channel was claimed",
+                // because claiming is a map removal and one activate byte.
+                // That slave then rings its *own* device and bridges only if it
+                // answers -- and on "ring not answered" it drops the channel
+                // without telling us, so the caller sees CONNECT then NO
+                // CARRIER, which is exactly the defect this design removed
+                // everywhere else.
+                //
+                // Left as it is deliberately: closing it needs the far slave to
+                // send back an answered/not-answered signal, and a new byte on
+                // this wire is a framing change -- it would move
+                // RELAY_PROTOCOL_VERSION and force both ends of every deployed
+                // pair to upgrade together, which the version check enforces by
+                // refusing skew outright. Recorded rather than half-fixed.
                 glog!("Relay: peer-dial crossbar to {}@{}", label, ip);
                 answer_and_bridge(&mut relay, &mut remote).await;
             }
