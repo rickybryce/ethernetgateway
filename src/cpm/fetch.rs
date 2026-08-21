@@ -224,7 +224,7 @@ impl Report {
     /// and the callers used to print the first three verbatim — the same
     /// sentence three times over, ~200 characters saying one thing, on a
     /// screen that may be 40 columns wide.  Grouping says it once and counts
-    /// the rest, which is both shorter and more informative: "34 disks: <err>"
+    /// the rest, which is both shorter and more informative: `34 disks: <err>`
     /// tells you the network is down, where three named disks suggested three
     /// unlucky files.
     ///

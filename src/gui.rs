@@ -2695,11 +2695,20 @@ impl App {
         // reason the ports' is: to inspect or repair one without booting CP/M.
         ui.horizontal(|ui| {
             ui.label("CP/M modem profile (AT&W):");
-            ui.checkbox(&mut self.cfg.cpm_emu_modem.echo, "Echo")
+            // Labelled exactly as the serial ports' own AT block above is, and
+            // as the web UI and the telnet modem screen are. They were bare
+            // ("Echo", "Verbose", "Quiet") here while the identical three
+            // checkboxes eight hundred lines away said "Echo (E1)" — in the
+            // same window, for the same setting, with a comment right above
+            // claiming this block exists "for the same reason the ports' is".
+            // The AT letter is the part an operator matches against the manual
+            // and against what the guest typed, so it belongs in the label
+            // rather than only in a tooltip nobody hovers.
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.echo, "Echo (E1)")
                 .on_hover_text("ATE1 — the modem echoes the command line");
-            ui.checkbox(&mut self.cfg.cpm_emu_modem.verbose, "Verbose")
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.verbose, "Verbose (V1)")
                 .on_hover_text("ATV1 — word result codes rather than digits");
-            ui.checkbox(&mut self.cfg.cpm_emu_modem.quiet, "Quiet")
+            ui.checkbox(&mut self.cfg.cpm_emu_modem.quiet, "Quiet (Q1)")
                 .on_hover_text("ATQ1 — suppress result codes entirely");
         });
         ui.horizontal(|ui| {

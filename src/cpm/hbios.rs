@@ -149,7 +149,7 @@ pub fn is_idle_status_poll(cpm: &Cpm, func: u8) -> bool {
     func == FN_IST && cpm.modem_rx_len() == 0
 }
 
-/// Service one [`Stop::Hbios`] call against the virtual modem.
+/// Service one [`super::Stop::Hbios`] call against the virtual modem.
 ///
 /// Synchronous by design — every supported function is a ring operation or a
 /// constant, so the async driver needs no special handling beyond honouring

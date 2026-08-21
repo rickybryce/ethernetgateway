@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.4] - Unreleased
 
+### Fixed
+
+- **The desktop labelled the same Hayes toggle two different ways in one
+  window.** The serial ports' advanced panel says `Echo (E1)` / `Verbose (V1)` /
+  `Quiet (Q1)`; the CP/M virtual modem's block, eight hundred lines away, said a
+  bare `Echo` / `Verbose` / `Quiet` and put the AT letter in a tooltip — under a
+  comment claiming that block exists "for the same reason the ports' is". The AT
+  letter is what an operator matches against the manual and against what the
+  guest typed, so it belongs in the label. All three surfaces now agree on those
+  three, and a test pins it: whole-file matching would have passed on the serial
+  block alone, so it checks the CP/M checkboxes themselves. The longer fields
+  are deliberately left to differ, since telnet has 40 columns and the web has a
+  form row.
+
+- **A doc comment pointed at a function that does not exist.**
+  `cpm_emu.rs` sent a reader to `TelnetSession::cpmemu_place_egt80` for how the
+  bundled terminals are placed; there is no such method and no `cpmemu_place*`
+  anything — the real one is `place_bundled_terminals`. Found by running
+  `cargo doc`, which also caught two comments rendering wrongly: a literal
+  `<err>` and `<label>`-style placeholders read as HTML tags, and a `Stop::Hbios`
+  link that could not resolve from its module.
+
 ### Added
 
 - **Telnet can edit the CP/M virtual modem's saved Hayes profile.** The six

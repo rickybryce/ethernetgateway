@@ -5861,6 +5861,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **One Hayes setting, one label, on every surface that shows it.**
+    ///
+    /// `ATE`, `ATV` and `ATQ` are edited in four places — the serial ports'
+    /// advanced panel and the CP/M virtual modem's profile, each on the
+    /// desktop, the web UI and (since the modem screen was added) telnet. The
+    /// AT letter is what an operator matches against the manual and against
+    /// what the guest actually typed, so it belongs in the label.
+    ///
+    /// It drifted in the place hardest to notice: *within one window*. The
+    /// desktop said `Echo (E1)` for a serial port and a bare `Echo` for the
+    /// CP/M modem eight hundred lines away, with a comment over the second
+    /// claiming it exists "for the same reason the ports' is". That is the
+    /// third time in this series that a comment argued for a parity the code
+    /// did not have — the web block's "the same fields the serial ports expose"
+    /// and `run_master_relay_dial`'s note about CONNECT were the others — so it
+    /// is worth a test rather than another careful sentence.
+    ///
+    /// Scoped to the three labels that carry an AT letter and no width
+    /// pressure. The longer fields are deliberately *not* pinned: telnet has 40
+    /// columns and says `Result (X)`, the web has a form row and says
+    /// `Result-code level (X)`, and forcing those to one spelling would break
+    /// the narrow surface to tidy the wide one.
+    #[test]
+    fn test_the_hayes_toggles_are_labelled_the_same_on_every_surface() {
+        let surfaces = [
+            ("desktop", include_str!("gui.rs")),
+            ("web", include_str!("webserver.rs")),
+            ("telnet", include_str!("telnet/config_ui.rs")),
+        ];
+        for (name, src) in surfaces {
+            for label in ["Echo (E1)", "Verbose (V1)", "Quiet (Q1)"] {
+                assert!(
+                    src.contains(label),
+                    "{name} does not label the toggle {label:?} the way the others do"
+                );
+            }
+        }
+
+        // The desktop is the one that drifted, and it drifted by having *two*
+        // spellings at once — so a whole-file `contains` would have passed on
+        // the serial block alone. Require the CP/M checkboxes themselves to
+        // carry the letter.
+        let gui = include_str!("gui.rs");
+        for (field, label) in [
+            ("cpm_emu_modem.echo", "Echo (E1)"),
+            ("cpm_emu_modem.verbose", "Verbose (V1)"),
+            ("cpm_emu_modem.quiet", "Quiet (Q1)"),
+        ] {
+            let at = gui
+                .find(&format!("cfg.{field},"))
+                .unwrap_or_else(|| panic!("the {field} checkbox is gone"));
+            let line_end = gui[at..].find('\n').map(|n| at + n).unwrap_or(gui.len());
+            assert!(
+                gui[at..line_end].contains(label),
+                "the CP/M {field} checkbox must be labelled {label:?}, like the serial one"
+            );
+        }
+    }
+
     /// **The manual's sample configuration must be a real default config.**
     ///
     /// The manual prints a `# Ethernet Gateway Configuration` block as "what

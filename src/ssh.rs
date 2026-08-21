@@ -518,7 +518,7 @@ impl SshHandler {
     /// **Mode-agnostic, and the wire cannot say otherwise.** `serial-register`
     /// carries only the port label, so this end never learns whether the slave
     /// port is in console or modem mode -- both register here, exactly as
-    /// [`crate::relay::REMOTE_PORTS`] documents. The log line said "console
+    /// `relay::REMOTE_PORTS` documents. The log line said "console
     /// port" for either, which has been wrong for every modem port since they
     /// began registering (2026-07-26) -- and modem is the default mode, so it
     /// was wrong for the common case. Say what is known instead.

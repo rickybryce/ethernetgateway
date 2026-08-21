@@ -204,7 +204,7 @@ pub(in crate::telnet) const CPM_NOTE_8080: &str = "8080 selected.  Run EGT8080."
 
 /// EGT8080, the gateway's own CP/M terminal, carried inside the binary and
 /// placed on drive A: and in the transfer directory when the drive folders are
-/// created (see [`TelnetSession::cpmemu_place_egt80`]).  `include_bytes!` means
+/// created (see [`place_bundled_terminals`]).  `include_bytes!` means
 /// a release ships one file and the terminal is simply *there* when someone
 /// first opens the emulator, rather than being something to find and upload.
 ///
