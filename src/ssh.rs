@@ -991,15 +991,34 @@ impl russh::server::Handler for SshHandler {
             return Err(e);
         }
         // §9 handshake: write the relay hello (magic + protocol version) as
-        // the first bytes on the accepted channel, before any menu/onward-
-        // dial data, so the slave distinguishes an accepted relay from a
-        // refused-but-open channel and detects a version skew.
-        if let Err(e) = session.data(
-            channel,
-            bytes::Bytes::copy_from_slice(&crate::relay::RELAY_HELLO),
-        ) {
-            self.session_count.fetch_sub(1, Ordering::SeqCst);
-            return Err(e);
+        // the first bytes on the accepted channel, before any menu data, so
+        // the slave distinguishes an accepted relay from a refused-but-open
+        // channel and detects a version skew.
+        //
+        // **But only where accepting IS the answer.** For a `menu` or `kermit`
+        // target this master is itself the far end, so the channel being up is
+        // the whole result. A `dial` or `peer` target still has a call to
+        // place, and the slave turns the hello straight into a modem `CONNECT`
+        // with carrier asserted -- so sending it here told the device a call
+        // was up before anything had been dialled, and every failure past this
+        // point (refused by `allow_peer_dial`, connection refused, answer
+        // timeout, peer port unregistered or not dialable) reached the device
+        // as CONNECT followed by NO CARRIER. Measured 2026-08-21 on a live
+        // pair, in both the refused and the unreachable-host cases.
+        //
+        // Those two targets get their hello from `answer_and_bridge` once the
+        // far end is actually up, so its absence means what the slave needs it
+        // to mean: no call, answer NO CARRIER. The slave waits longer for it
+        // when it asked for a dial (`relay::hello_wait`).
+        let master_is_the_far_end = dial_target.is_none() && peer_target.is_none();
+        if master_is_the_far_end {
+            if let Err(e) = session.data(
+                channel,
+                bytes::Bytes::copy_from_slice(&crate::relay::RELAY_HELLO),
+            ) {
+                self.session_count.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
         }
         match (&dial_target, &peer_target) {
             (None, None) if kermit_target => glog!(

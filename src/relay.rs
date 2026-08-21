@@ -128,12 +128,19 @@ where
         return;
     }
 
-    // Bound the onward connect like the local modem's `dial_tcp` does: a
-    // relayed device sits at CONNECT (the slave reports success as soon as
-    // the relay hello arrives) while an SSH session-cap slot stays held, so
-    // an unbounded `connect()` to a down/firewalled host would pin both for
-    // the full OS SYN-retry window (~2 min on Linux).  Cap it at
-    // RELAY_PEER_ANSWER_WAIT and report NO CARRIER (drop the relay) on timeout.
+    // Bound the onward connect like the local modem's `dial_tcp` does: the
+    // device is sitting at a dial with an SSH session-cap slot held, so an
+    // unbounded `connect()` to a down/firewalled host would pin both for the
+    // full OS SYN-retry window (~2 min on Linux).  Cap it at
+    // RELAY_PEER_ANSWER_WAIT and drop the relay on timeout, which the slave
+    // reads as NO CARRIER.
+    //
+    // This comment used to say the device "sits at CONNECT (the slave reports
+    // success as soon as the relay hello arrives)" -- true at the time, and the
+    // defect: the hello was the *acceptance*, so every dial failure reached the
+    // device as CONNECT then NO CARRIER.  The hello is now withheld until the
+    // call is up (see `RELAY_HELLO`), so the wait below is a device waiting for
+    // a dial result, which is what a modem does.
     let connect = tokio::net::TcpStream::connect((host.as_str(), port));
     let mut tcp = match tokio::time::timeout(RELAY_PEER_ANSWER_WAIT, connect).await {
         Ok(Ok(s)) => s,
@@ -152,6 +159,8 @@ where
         }
     };
     glog!("Relay: onward dial connected to {}:{}", host, port);
+    // The hello goes out HERE, not at accept: it is what the slave turns into
+    // CONNECT, and until this line there was no call.
 
     // `copy_bidirectional` pipes both directions and handles half-close
     // correctly: when one side hits EOF it shuts down the other's write
@@ -159,7 +168,7 @@ where
     // a BBS (or device) that closes its send side isn't dropped (the
     // earlier `select!` cancelled the losing direction mid-copy and could
     // truncate the last bytes of a relayed transfer).
-    let _ = tokio::io::copy_bidirectional(&mut relay, &mut tcp).await;
+    answer_and_bridge(&mut relay, &mut tcp).await;
     let _ = relay.shutdown().await;
 }
 
@@ -277,7 +286,7 @@ where
         match crate::serial::request_cpm_call(RELAY_PEER_ANSWER_WAIT).await {
             Ok(mut b) => {
                 glog!("Relay: peer-dial bridged to local CP/M endpoint");
-                let _ = tokio::io::copy_bidirectional(&mut relay, &mut b).await;
+                answer_and_bridge(&mut relay, &mut b).await;
             }
             Err(o) => glog!("Relay: peer-dial to CP/M endpoint failed: {:?}", o),
         }
@@ -312,7 +321,7 @@ where
         match bridge {
             Ok(mut b) => {
                 glog!("Relay: peer-dial bridged to local Port {}", target.label());
-                let _ = tokio::io::copy_bidirectional(&mut relay, &mut b).await;
+                answer_and_bridge(&mut relay, &mut b).await;
             }
             Err(why) => glog!("Relay: peer-dial to Port {} failed: {}", target.label(), why),
         }
@@ -327,7 +336,7 @@ where
         match claim_remote_peer(ip, &label).await {
             Some(mut remote) => {
                 glog!("Relay: peer-dial crossbar to {}@{}", label, ip);
-                let _ = tokio::io::copy_bidirectional(&mut relay, &mut remote).await;
+                answer_and_bridge(&mut relay, &mut remote).await;
             }
             None => glog!("Relay: peer-dial target {}@{} not registered", label, ip),
         }
@@ -531,13 +540,75 @@ pub const RELAY_PROTOCOL_VERSION: u8 = 1;
 ///     reliably signals refusal.
 ///  2. **Version skew.** A mismatched version byte fails with a clear
 ///     "upgrade the older gateway" message rather than a garbled session.
+///
+/// **When it is sent depends on the target, and that is the third purpose.**
+/// For [`RelayTarget::Menu`] and [`RelayTarget::Kermit`] the master is itself
+/// the far end, so accepting the channel *is* the answer and the hello goes out
+/// at accept. For [`RelayTarget::Dial`] and [`RelayTarget::Peer`] the master
+/// still has to place a call, and the slave turns this byte sequence straight
+/// into a modem `CONNECT` with carrier asserted — so sending it at accept told
+/// the device a call was up before anything had been dialled. Measured
+/// 2026-08-21: `ATDT` through a master to an unreachable host answered
+/// `CONNECT 19200` and then `NO CARRIER`, and did the same when the master
+/// refused the dial outright on `allow_peer_dial`. `CONNECT` to a modem means
+/// carrier; vintage terminal software and BBS scripts act on it. For those two
+/// targets the hello is now written only once the call is up (see
+/// [`answer_and_bridge`]), so its absence means exactly what the slave needs:
+/// no call, answer `NO CARRIER`.
+///
+/// The bytes are unchanged, so this is not a framing change and
+/// [`RELAY_PROTOCOL_VERSION`] does not move. The one skew that matters is an
+/// **old slave against a new master** on a dial that succeeds slowly: the old
+/// slave gives up at its fixed 5 s. A dial that fails, or one that succeeds
+/// promptly, behaves the same or better on both.
 pub const RELAY_HELLO: [u8; 4] = [b'E', b'G', b'R', RELAY_PROTOCOL_VERSION];
 
-/// How long the slave waits for the master's [`RELAY_HELLO`] after the exec
-/// before concluding the master refused the channel.  Short — a real master
-/// writes the hello immediately on accept; only a refusing/incompatible
-/// master leaves the channel silent.
+/// How long the slave waits for the master's [`RELAY_HELLO`] when the master
+/// answers at accept — [`RelayTarget::Menu`], [`RelayTarget::Kermit`] and a
+/// `serial-register`.  Short: a real master writes the hello immediately, and
+/// only a refusing or incompatible one leaves the channel silent.
 const RELAY_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the slave waits for the hello when it asked the master to **place
+/// a call** — the master withholds it until the far end answers, so this has
+/// to cover the master's own [`RELAY_PEER_ANSWER_WAIT`] with a little slack for
+/// the round trip. Too short here does not merely mis-report: the slave would
+/// say `NO CARRIER` while the master went on to connect, leaving a live call
+/// nobody is holding.
+const RELAY_HELLO_TIMEOUT_DIALING: std::time::Duration =
+    RELAY_PEER_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
+
+/// The hello wait for a given target — see [`RELAY_HELLO`] for why they differ.
+fn hello_wait(target: &RelayTarget) -> std::time::Duration {
+    match target {
+        RelayTarget::Dial { .. } | RelayTarget::Peer { .. } => RELAY_HELLO_TIMEOUT_DIALING,
+        RelayTarget::Menu | RelayTarget::Kermit => RELAY_HELLO_TIMEOUT,
+    }
+}
+
+/// Tell the slave the call is up, then bridge the two halves.
+///
+/// **One function, because the hello and the bridge must not come apart.** The
+/// dialing targets have four success sites between them (an onward TCP dial, a
+/// local port, the CP/M endpoint, and the crossbar to another slave) and a
+/// great many failure sites. Writing the hello at each success site by hand is
+/// the arrangement where a fifth one added later silently forgets it and hangs
+/// the slave until its timeout — so a caller that bridges gets the hello by
+/// construction, and a caller that refuses simply never calls this.
+async fn answer_and_bridge<S, B>(relay: &mut S, other: &mut B)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    // Flushed before any payload: the slave reads exactly these four bytes
+    // before handing the stream to the bridge, so they must not sit in a
+    // buffer behind the far end's banner.
+    if relay.write_all(&RELAY_HELLO).await.is_err() || relay.flush().await.is_err() {
+        return;
+    }
+    let _ = tokio::io::copy_bidirectional(relay, other).await;
+}
 
 /// A live slave→master relay: the SSH client session (kept alive for the
 /// duration of the call — dropping it tears the connection down) and the
@@ -611,7 +682,15 @@ pub async fn connect_master_relay(
     target: &RelayTarget,
     port_label: &str,
 ) -> Result<MasterRelay, RelayConnectError> {
-    connect_relay_exec(host, port, username, password, &target.exec_command(port_label)).await
+    connect_relay_exec(
+        host,
+        port,
+        username,
+        password,
+        &target.exec_command(port_label),
+        hello_wait(target),
+    )
+    .await
 }
 
 /// Connect to the master and register a port as available (§9 #12).  The
@@ -634,6 +713,7 @@ pub async fn connect_master_register(
         username,
         password,
         &format!("serial-register {}", port_label),
+        RELAY_HELLO_TIMEOUT,
     )
     .await
 }
@@ -646,10 +726,18 @@ async fn connect_relay_exec(
     username: &str,
     password: &str,
     exec_command: &str,
+    hello_wait: std::time::Duration,
 ) -> Result<MasterRelay, RelayConnectError> {
+    // The outer budget has to cover the hello wait, or a dialing target would
+    // be cut off by this timeout before its own wait expired -- and reported as
+    // a *network* failure (brisk retry) rather than the refusal it is.  Written
+    // as connect + whatever the hello wait exceeds the default by, so the
+    // paths that answer at accept keep exactly the budget they had.
+    let budget = RELAY_CONNECT_TIMEOUT
+        .saturating_add(hello_wait.saturating_sub(RELAY_HELLO_TIMEOUT));
     match tokio::time::timeout(
-        RELAY_CONNECT_TIMEOUT,
-        connect_master_relay_inner(host, port, username, password, exec_command),
+        budget,
+        connect_master_relay_inner(host, port, username, password, exec_command, hello_wait),
     )
     .await
     {
@@ -671,6 +759,7 @@ async fn connect_master_relay_inner(
     username: &str,
     password: &str,
     exec_command: &str,
+    hello_wait: std::time::Duration,
 ) -> Result<MasterRelay, RelayConnectError> {
     // Keepalive (§9 #15): without it a silently-dropped relay link (master
     // powered off, cable pulled, NAT idle-eviction) isn't noticed until the
@@ -779,7 +868,7 @@ async fn connect_master_relay_inner(
     // channel to the caller.  This is what distinguishes an ACCEPTED relay
     // from a refused-but-open channel (russh `exec()` returns Ok even on
     // the master's `channel_failure`) and catches a protocol-version skew.
-    read_relay_hello(&mut stream).await?;
+    read_relay_hello(&mut stream, hello_wait).await?;
     Ok(MasterRelay {
         _session: session,
         stream,
@@ -793,13 +882,16 @@ async fn connect_master_relay_inner(
 ///   declining relays / standalone / an older build with no relay handler);
 /// - wrong magic ⇒ `Refused` (not our relay protocol on this channel);
 /// - version mismatch ⇒ `Refused`, with an explicit upgrade message.
-async fn read_relay_hello<R>(stream: &mut R) -> Result<(), RelayConnectError>
+async fn read_relay_hello<R>(
+    stream: &mut R,
+    wait: std::time::Duration,
+) -> Result<(), RelayConnectError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
     let mut hello = [0u8; RELAY_HELLO.len()];
-    match tokio::time::timeout(RELAY_HELLO_TIMEOUT, stream.read_exact(&mut hello)).await {
+    match tokio::time::timeout(wait, stream.read_exact(&mut hello)).await {
         Ok(Ok(_)) => {}
         Ok(Err(_)) => {
             return Err(RelayConnectError::Refused(
@@ -812,10 +904,10 @@ where
         }
         Err(_) => {
             return Err(RelayConnectError::Refused(format!(
-                "timed out after {}s waiting for the master's relay hello — \
-                 relays disabled / standalone / allow_relay_kermit off for a \
-                 Kermit port / incompatible master?",
-                RELAY_HELLO_TIMEOUT.as_secs()
+                "no answer after {}s — the master did not take the call \
+                 (dial refused or unreachable), or relays are disabled / \
+                 standalone / allow_relay_kermit off / incompatible master",
+                wait.as_secs()
             )));
         }
     }

@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A relayed `ATDT` answered `CONNECT` before the master had dialled
+  anything.** The slave turns the relay hello straight into a modem `CONNECT`
+  with carrier asserted, and the master sent that hello when it *accepted the
+  channel* — before placing the call. So every onward-dial failure reached the
+  attached device as `CONNECT` followed immediately by `NO CARRIER`, with DCD
+  raised in between. Measured on a live master/slave pair: a dial refused by
+  `allow_peer_dial` and a dial to a host with nothing listening both did it, the
+  second with the gate switched **on** — so this was never a configuration
+  problem, and no reordering of config gates could have fixed it. `CONNECT` to a
+  modem means carrier is up; vintage terminal software and BBS scripts act on it.
+
+  The hello is now withheld for the two targets that place a call (`dial` and
+  `peer`) until the far end actually answers, and still sent at accept for
+  `menu` and `kermit`, where the master *is* the far end and accepting is the
+  whole answer. Its absence then means what the slave needs it to mean: no call,
+  report `NO CARRIER`. That covers every failure past the old hello point at
+  once — the two `allow_peer_dial` gates, connection refused, the answer
+  timeout, a peer port that is unregistered or is a Kermit port. The slave waits
+  longer for the hello when it asked for a dial, since the master is holding it
+  across its own answer wait, and the outer connect budget grows to match so a
+  slow dial is not reported as a network fault.
+
+  The bytes are unchanged, so this is not a framing change and
+  `RELAY_PROTOCOL_VERSION` does not move. The one skew that matters is an old
+  slave against a new master on a dial that succeeds slowly, where the old slave
+  gives up at its fixed 5 s; a dial that fails, or one that succeeds promptly,
+  behaves the same or better on both.
+
+  Every success path writes the hello through one `answer_and_bridge` helper
+  rather than by hand, because the dialing targets have four of them and a fifth
+  added later would otherwise hang a slave until its timeout. Eight relay
+  transfer tests now consume the hello as the slave does: two (XMODEM, Kermit)
+  failed when it moved onto that wire, and six passed only because their
+  handshakes rescan for a start byte — the six were the more useful finding.
+
 - **A refused Kermit relay was reported to the slave as a working one, and
   retried once a second for ever.** `RELAY_HELLO` is the master saying
   *accepted* — it exists so a slave can tell an accepted relay from a

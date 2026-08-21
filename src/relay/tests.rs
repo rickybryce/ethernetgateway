@@ -118,7 +118,7 @@ fn test_relay_hello_bytes() {
 async fn test_read_relay_hello_accepts_valid() {
     let (mut master, mut slave) = tokio::io::duplex(64);
     master.write_all(&super::RELAY_HELLO).await.unwrap();
-    assert!(super::read_relay_hello(&mut slave).await.is_ok());
+    assert!(super::read_relay_hello(&mut slave, super::RELAY_HELLO_TIMEOUT).await.is_ok());
 }
 
 /// A refusing master accepts the channel-open but never writes the hello,
@@ -129,7 +129,7 @@ async fn test_read_relay_hello_accepts_valid() {
 async fn test_read_relay_hello_eof_is_refused() {
     let (master, mut slave) = tokio::io::duplex(64);
     drop(master); // master refused: channel open, no hello, then closed
-    match super::read_relay_hello(&mut slave).await {
+    match super::read_relay_hello(&mut slave, super::RELAY_HELLO_TIMEOUT).await {
         Err(RelayConnectError::Refused(_)) => {}
         other => panic!("expected Refused on missing hello, got {:?}", other),
     }
@@ -141,7 +141,7 @@ async fn test_read_relay_hello_eof_is_refused() {
 async fn test_read_relay_hello_version_mismatch() {
     let (mut master, mut slave) = tokio::io::duplex(64);
     master.write_all(b"EGR\x63").await.unwrap(); // magic OK, version 99
-    match super::read_relay_hello(&mut slave).await {
+    match super::read_relay_hello(&mut slave, super::RELAY_HELLO_TIMEOUT).await {
         Err(RelayConnectError::Refused(m)) => {
             assert!(m.contains("version mismatch"), "got: {}", m)
         }
@@ -155,10 +155,32 @@ async fn test_read_relay_hello_version_mismatch() {
 async fn test_read_relay_hello_bad_magic() {
     let (mut master, mut slave) = tokio::io::duplex(64);
     master.write_all(b"\r\nPr").await.unwrap(); // e.g. a telnet prompt
-    match super::read_relay_hello(&mut slave).await {
+    match super::read_relay_hello(&mut slave, super::RELAY_HELLO_TIMEOUT).await {
         Err(RelayConnectError::Refused(_)) => {}
         other => panic!("expected Refused on bad magic, got {:?}", other),
     }
+}
+
+/// Consume the relay hello on the device side, exactly as the slave does.
+///
+/// **A relayed onward dial now announces the answered call with the hello**
+/// (see [`super::RELAY_HELLO`]): for a dialing target the master withholds it
+/// until the far end is actually up, so it is the slave's evidence that there
+/// is a call — `dial_master_relay` reads these four bytes and only then reports
+/// `CONNECT` and hands the wire to the device.
+///
+/// A test that splits the relay stream and runs a file-transfer protocol
+/// straight off it is standing where the *device* stands but skipping what the
+/// slave does, so the protocol reads four bytes of framing as payload. When the
+/// hello moved onto this wire, XMODEM and Kermit failed here and ZMODEM,
+/// Punter and the others passed — their handshakes rescan for a start byte, so
+/// they absorbed it. Six tests passing for that reason is worse than the two
+/// that failed, because leniency is not correctness and the next protocol may
+/// have neither. All eight consume it.
+async fn take_relay_hello<R: tokio::io::AsyncRead + Unpin>(r: &mut R) {
+    super::read_relay_hello(r, super::RELAY_HELLO_TIMEOUT)
+        .await
+        .expect("a connected onward dial must announce itself with the relay hello");
 }
 
 /// Read from `dev` into `acc` until `needle` appears in the accumulated
@@ -812,12 +834,33 @@ async fn test_master_relay_dial_pipes_both_ways() {
         addr.port(),
     ));
 
-    // Device → master → BBS → master → device.
+    // **The hello comes first, and only once the BBS answered.** For a dialing
+    // target the hello is the CONNECT the slave reports to its device, so its
+    // position is the contract: before this, the master must have nothing to
+    // say. Read it with `read_relay_hello`, exactly as the slave does -- which
+    // also means a stray or malformed hello fails here rather than being
+    // absorbed into the data.
+    //
+    // This assertion is the point of the test now. It used to scan the whole
+    // stream for "PING" as a subsequence, so when the hello was moved onto this
+    // wire the four new leading bytes went unnoticed and the test still passed.
+    let hello = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::read_relay_hello(&mut d_read, super::RELAY_HELLO_TIMEOUT),
+    )
+    .await;
+    assert!(
+        matches!(hello, Ok(Ok(()))),
+        "a connected onward dial must announce itself with the relay hello: {hello:?}"
+    );
+
+    // Device → master → BBS → master → device.  After the hello the wire is
+    // payload only, so the echo must arrive with nothing in front of it.
     d_write.write_all(b"PING").await.unwrap();
     let mut got = Vec::new();
     let echoed = tokio::time::timeout(Duration::from_secs(5), async {
         let mut buf = [0u8; 64];
-        while !got.windows(4).any(|w| w == b"PING") {
+        while got.len() < 4 {
             match d_read.read(&mut buf).await {
                 Ok(0) => return false,
                 Ok(n) => got.extend_from_slice(&buf[..n]),
@@ -830,6 +873,13 @@ async fn test_master_relay_dial_pipes_both_ways() {
     assert!(
         matches!(echoed, Ok(true)),
         "onward-dial should echo PING back through the relay; got {:?}",
+        String::from_utf8_lossy(&got)
+    );
+    assert_eq!(
+        &got[..4],
+        b"PING",
+        "the echo must start the payload -- nothing may precede it once the \
+         hello has been read: {:?}",
         String::from_utf8_lossy(&got)
     );
 
@@ -872,6 +922,65 @@ async fn test_master_relay_dial_refused_without_allow_peer_dial() {
     assert!(
         accepted.is_err(),
         "refused onward-dial must NOT open a connection to the target"
+    );
+
+    let _ = d_write.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// **A dial that is allowed but does not connect must still send no hello.**
+///
+/// The refusal test above covers the *config* gate. This covers the case that
+/// no reordering of config gates could ever fix, and the one that was measured
+/// on a live master/slave pair on 2026-08-21: with `allow_peer_dial` ON and a
+/// target that nothing is listening on, the device saw `CONNECT 19200` and then
+/// `NO CARRIER`. The hello was the master's *acceptance* of the relay channel,
+/// which the slave turns straight into CONNECT with carrier asserted -- so it
+/// went out before a single TCP SYN, and every dial failure looked to the
+/// device like a call that had come up and instantly dropped.
+///
+/// `CONNECT` to a modem means carrier is up; vintage terminal software and BBS
+/// scripts act on it. The only correct answer to a dial that did not connect is
+/// silence on this channel, which the slave reports as `NO CARRIER`.
+#[tokio::test]
+async fn test_a_dial_that_fails_sends_no_hello() {
+    let _peer_dial = enable_peer_dial().await;
+
+    // Bind a port and drop it, so the address is well-formed and dead. Asking
+    // the OS for the port rather than hard-coding one keeps this from failing
+    // on a machine where the guessed port happens to be in use.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (master_end, device_end) = tokio::io::duplex(8192);
+    let (mut d_read, mut d_write) = tokio::io::split(device_end);
+
+    let dialer = tokio::spawn(run_master_relay_dial(
+        master_end,
+        "127.0.0.1".to_string(),
+        addr.port(),
+    ));
+
+    // Nothing at all on the wire, then EOF -- not four bytes of hello.
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(10), d_read.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "a failed dial must close the relay without announcing a call; got {read:?}"
+    );
+
+    // And the slave's own reader agrees: this is a refusal, so the modem says
+    // NO CARRIER.  Asserting through `read_relay_hello` rather than on the byte
+    // count is what ties this test to the behaviour the device actually gets.
+    let (dead_master, mut dead_slave) = tokio::io::duplex(64);
+    drop(dead_master);
+    assert!(
+        matches!(
+            super::read_relay_hello(&mut dead_slave, super::RELAY_HELLO_TIMEOUT).await,
+            Err(RelayConnectError::Refused(_))
+        ),
+        "no hello must classify as Refused, which is what becomes NO CARRIER"
     );
 
     let _ = d_write.shutdown().await;
@@ -975,6 +1084,7 @@ async fn test_relay_onward_dial_xmodem_upload() {
     let data = payload.clone();
     let sender = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::xmodem::xmodem_send(&mut r, &mut w, &data, false, false, false, false, None).await
     });
     let receiver = tokio::spawn(async move {
@@ -1015,6 +1125,7 @@ async fn test_relay_onward_dial_xmodem_download() {
     });
     let receiver = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::xmodem::xmodem_receive(&mut r, &mut w, false, false, false).await
     });
 
@@ -1052,6 +1163,7 @@ async fn test_relay_onward_dial_ymodem_upload() {
             mode: None,
         };
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::xmodem::xmodem_send(&mut r, &mut w, &data, false, false, false, true, Some(hdr)).await
     });
     let receiver = tokio::spawn(async move {
@@ -1093,6 +1205,7 @@ async fn test_relay_onward_dial_zmodem_upload() {
     let data = payload.clone();
     let sender = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::zmodem::zmodem_send(&mut r, &mut w, &[("relay.bin", &data)], false, false).await
     });
     let receiver = tokio::spawn(async move {
@@ -1131,6 +1244,7 @@ async fn test_relay_onward_dial_zmodem_download() {
     });
     let receiver = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::zmodem::zmodem_receive(&mut r, &mut w, false, false, |_, _, _| true).await
     });
 
@@ -1169,6 +1283,7 @@ async fn test_relay_onward_dial_kermit_upload() {
             mode: None,
         };
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::kermit::kermit_send(&mut r, &mut w, &[file], false, false, false).await
     });
     let receiver = tokio::spawn(async move {
@@ -1205,6 +1320,7 @@ async fn test_relay_onward_dial_punter_upload() {
     let data = payload.clone();
     let sender = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::punter::punter_send(
             &mut r,
             &mut w,
@@ -1250,6 +1366,7 @@ async fn test_relay_onward_dial_zmodem_large() {
     let data = payload.clone();
     let sender = tokio::spawn(async move {
         let (mut r, mut w) = tokio::io::split(device_end);
+        take_relay_hello(&mut r).await;
         crate::zmodem::zmodem_send(&mut r, &mut w, &[("large.bin", &data)], false, false).await
     });
     let receiver = tokio::spawn(async move {
