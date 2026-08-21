@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A refused Kermit relay was reported to the slave as a working one, and
+  retried once a second for ever.** `RELAY_HELLO` is the master saying
+  *accepted* — it exists so a slave can tell an accepted relay from a
+  refused-but-open channel, because russh's `exec()` returns `Ok` either way.
+  `allow_relay_kermit` (off by default) was read in `run_master_relay_kermit`,
+  which runs *after* the channel is acknowledged, after the hello, and after
+  the "accepted serial relay" log line — so the one gate still outstanding was
+  the one behind the handshake meant to report it.
+
+  Measured on a live master/slave pair: the slave logged `CONNECTED — the
+  master's Kermit server is on this wire; files live on the master`, repeated
+  that in its link summary, then read EOF and took it for a dropped link.
+  Because the *connect* had succeeded it reset its attempt counter and backoff
+  every cycle, so instead of one deduped outage line and the 60 s
+  `RECONNECT_BACKOFF_REFUSED` it reconnected about once a second indefinitely,
+  writing a log line on both machines each round. The gate now sits with the
+  other refusals, ahead of the hello, and the slave's existing `Refused`
+  handling does the rest. A source-scanning test pins the ordering, since
+  `exec_request` needs a live russh session no unit test can build. The
+  slave-side message also now lists `allow_relay_kermit` among the causes it
+  offers — it could not name the one that was actually in force.
+
+- **A registered slave port was logged as a "console port" whatever mode it was
+  in.** `serial-register` carries only the port label, so the master never
+  learns the mode; both console and modem ports register through it, as the
+  registry documents. Modem ports began registering in 0.9.2 and modem is the
+  default, so the common case was the mislabelled one. It now says "serial
+  port", which is what the wire actually supports.
+
 - **The images-folder readme never mentioned that the gateway can fetch the
   disks for you.** Reported: `CPM/images/readme.txt` reads as though the only
   way to get disks is to go to GitHub and copy files in by hand. It was written

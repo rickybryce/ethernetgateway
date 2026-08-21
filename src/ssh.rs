@@ -509,11 +509,19 @@ impl Drop for SshHandler {
 }
 
 impl SshHandler {
-    /// Register a console-mode remote port (`serial-register <port>`,
-    /// §9 #12).  Gated like the relay path (master + accept_relays + a
-    /// known peer IP) and counted against the session cap (a registered
-    /// idle port holds a slot until it disconnects).  The channel is held
-    /// idle in the global registry; the Serial Gateway picker claims it.
+    /// Register a remote slave port (`serial-register <port>`, §9 #12).
+    /// Gated like the relay path (master + accept_relays + a known peer IP)
+    /// and counted against the session cap (a registered idle port holds a
+    /// slot until it disconnects).  The channel is held idle in the global
+    /// registry; the Serial Gateway picker claims it.
+    ///
+    /// **Mode-agnostic, and the wire cannot say otherwise.** `serial-register`
+    /// carries only the port label, so this end never learns whether the slave
+    /// port is in console or modem mode -- both register here, exactly as
+    /// [`crate::relay::REMOTE_PORTS`] documents. The log line said "console
+    /// port" for either, which has been wrong for every modem port since they
+    /// began registering (2026-07-26) -- and modem is the default mode, so it
+    /// was wrong for the common case. Say what is known instead.
     async fn register_console_port(
         &mut self,
         channel: russh::ChannelId,
@@ -572,7 +580,7 @@ impl SshHandler {
             return Err(e);
         }
         glog!(
-            "SSH: registered remote console port {} from {}",
+            "SSH: registered remote serial port {} from {}",
             label,
             slave_ip
         );
@@ -909,6 +917,36 @@ impl russh::server::Handler for SshHandler {
                 self.peer_addr,
                 cfg.gateway_role,
                 cfg.master_accept_relays
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        // **A refusal must happen before the hello, or the handshake lies.**
+        // `allow_relay_kermit` used to be read inside `run_master_relay_kermit`
+        // -- after `channel_success`, after `RELAY_HELLO`, and after the
+        // "accepted serial relay" log line. The hello exists precisely so the
+        // slave "distinguishes an accepted relay from a refused-but-open
+        // channel", so evaluating the one remaining gate behind it defeated it
+        // for this target alone. Measured on a live pair (2026-08-21): the
+        // slave logged `CONNECTED -- the master's Kermit server is on this
+        // wire; files live on the master`, said the same thing in its link
+        // summary, then took the EOF as a dropped link -- and because the
+        // connect had *succeeded* it reset `attempt` and the backoff every
+        // cycle, giving one reconnect per second for ever instead of the
+        // 60 s `RECONNECT_BACKOFF_REFUSED`, with a fresh log line on both
+        // machines each time. A refusal reported as a success is worse than a
+        // refusal: the operator is told the thing they configured is working.
+        //
+        // Refused here, the slave's existing `Refused` classification does the
+        // rest -- one deduped outage line, a 60 s retry, and a message that
+        // says the master is declining relays.
+        if kermit_target && !crate::relay::kermit_relay_allowed(&cfg) {
+            glog!(
+                "SSH: refused serial-relay from {:?} (port {}, kermit server: \
+                 allow_relay_kermit=false)",
+                self.peer_addr,
+                port_label
             );
             session.channel_failure(channel)?;
             return Ok(());
@@ -1604,6 +1642,71 @@ mod tests {
             "the over-count is the accepted behaviour: 2 slots for 1 relay"
         );
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// **Every relay refusal must be decided before the hello goes out.**
+    ///
+    /// `RELAY_HELLO` is the master saying *accepted* -- its whole purpose is to
+    /// let the slave "distinguish an accepted relay from a refused-but-open
+    /// channel", because russh's `exec()` returns `Ok` even on a
+    /// `channel_failure`. `allow_relay_kermit` was read in
+    /// `run_master_relay_kermit`, which runs *after* `channel_success`, the
+    /// hello, and the "accepted serial relay" log line -- so the one gate left
+    /// behind the handshake was the one the handshake could not report.
+    ///
+    /// Measured on a live master/slave pair (2026-08-21): the slave logged
+    /// `CONNECTED -- the master's Kermit server is on this wire; files live on
+    /// the master`, repeated it in its link summary, then read EOF and treated
+    /// it as a dropped link. Because the *connect* had succeeded it reset
+    /// `attempt` and the backoff each time, so instead of one deduped line and
+    /// the 60 s `RECONNECT_BACKOFF_REFUSED` it reconnected about once a second
+    /// for ever, writing a line on both machines each round.
+    ///
+    /// A source scan, for the reason
+    /// [`test_relay_channel_slot_is_on_top_of_auth_slot`] gives: `exec_request`
+    /// needs a live `russh::server::Session` a unit test cannot build. What is
+    /// being asserted is an *ordering within one function*, which is a property
+    /// of the text, so the text is what gets read.
+    #[test]
+    fn test_a_relay_is_refused_before_the_hello_is_written() {
+        let src = include_str!("ssh.rs");
+        let body = src
+            .split_once("async fn exec_request(")
+            .expect("exec_request must still exist")
+            .1;
+        // Bound the scan to this function, so a later `RELAY_HELLO` elsewhere
+        // in the file cannot satisfy or break it by accident.
+        let body = body.split_once("\n    async fn ").map(|(b, _)| b).unwrap_or(body);
+        // **Comment lines are dropped, or the test reads its own prose.** The
+        // first draft matched the `RELAY_HELLO` inside the explanatory comment
+        // above the gate -- which sits *before* the gate, so the test failed on
+        // correct code. Same reason `identify.rs`'s non-ASCII scan skips
+        // comments: the property is about the code, and the prose beside it
+        // says the same words on purpose.
+        let body: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = body.as_str();
+
+        let hello = body
+            .find("RELAY_HELLO")
+            .expect("exec_request must still write the relay hello");
+        let gate = body
+            .find("kermit_relay_allowed")
+            .expect("exec_request must decide the Kermit gate itself, not leave it to the task");
+        assert!(
+            gate < hello,
+            "the allow_relay_kermit gate is at byte {gate} and the hello at {hello}: a refusal \
+             decided after the hello is reported to the slave as a successful connection"
+        );
+
+        // The other two refusals are already ahead of it; keep them there.
+        for earlier in ["master_accept_relays", "try_claim_slot"] {
+            let at = body.find(earlier).unwrap_or_else(|| panic!("{earlier} gate is gone"));
+            assert!(at < hello, "the {earlier} gate must also precede the hello");
+        }
     }
 
     /// A locked-out IP is rejected even with correct credentials, and the

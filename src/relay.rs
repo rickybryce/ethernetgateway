@@ -184,6 +184,19 @@ pub const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::fro
 /// that authenticated to this master over SSH, and `master_accept_relays` is
 /// already required), but it still hands a remote wire unauthenticated read and
 /// write access to the transfer directory, so the operator opts in.
+/// May this master serve its Kermit server to a slave port?
+///
+/// **One predicate, because the answer is needed in two places and the
+/// *order* is what went wrong.** The refusal has to be decided in `ssh.rs`
+/// *before* [`RELAY_HELLO`] goes out -- a hello is the master saying "accepted",
+/// and a gate evaluated after it turns a refusal into a slave that reports
+/// success and reconnects once a second for ever. [`run_master_relay_kermit`]
+/// keeps asking too, as a backstop for any caller that is not the SSH exec
+/// path; both read this, so the two cannot drift apart on what the rule is.
+pub fn kermit_relay_allowed(cfg: &crate::config::Config) -> bool {
+    cfg.allow_relay_kermit
+}
+
 pub async fn run_master_relay_kermit<S>(mut relay: S, port_label: String, peer: Option<IpAddr>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -191,7 +204,9 @@ where
     use tokio::io::AsyncWriteExt;
 
     let cfg = crate::config::get_config();
-    if !cfg.allow_relay_kermit {
+    // Backstop only: the SSH exec path refuses this before the hello, which is
+    // the refusal an operator actually meets.  See `kermit_relay_allowed`.
+    if !kermit_relay_allowed(&cfg) {
         glog!(
             "Relay: Kermit server for slave port {} refused (allow_relay_kermit=false)",
             port_label
@@ -789,15 +804,17 @@ where
         Ok(Err(_)) => {
             return Err(RelayConnectError::Refused(
                 "master accepted the channel but sent no relay hello — it is \
-                 refusing relays (not a master, master_accept_relays off, at \
-                 capacity) or is an incompatible build"
+                 refusing relays (not a master, master_accept_relays off, \
+                 allow_relay_kermit off for a Kermit port, at capacity) or is \
+                 an incompatible build"
                     .to_string(),
             ));
         }
         Err(_) => {
             return Err(RelayConnectError::Refused(format!(
                 "timed out after {}s waiting for the master's relay hello — \
-                 relays disabled / standalone / incompatible master?",
+                 relays disabled / standalone / allow_relay_kermit off for a \
+                 Kermit port / incompatible master?",
                 RELAY_HELLO_TIMEOUT.as_secs()
             )));
         }
