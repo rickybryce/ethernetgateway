@@ -3026,7 +3026,7 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
     let body = &src[start..end];
 
-    let hint = "Press E, C, D, U, I, B, P, G, or Q.";
+    let hint = "Press E, C, D, M, U, I, B, P, G, or Q.";
     assert!(body.contains(hint), "the error hint changed: it must list every key");
     // `G` is shown only while the images folder is empty — a conditional row,
     // because this screen is at its 22-row budget and the offer replaces the
@@ -3034,7 +3034,11 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     // hinted unconditionally, which is the safe direction: a key that works
     // when it is not shown costs nothing, and one that is shown and does not
     // work is the drift this test exists for.
-    for key in ["E", "C", "U", "D", "I", "B", "P", "G"] {
+    //
+    // `D` is now the same shape for a different reason: it moved to the modem
+    // screen when the Hayes profile needed a home and this one had no spare
+    // row, and it is still accepted here so an operator's habit keeps working.
+    for key in ["E", "C", "U", "M", "I", "B", "P", "G"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -3045,6 +3049,99 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
         );
         assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
     }
+
+    // `D` is no longer *displayed* here but must still be accepted and hinted,
+    // so an operator who learned it before it moved keeps working. Pinning its
+    // absence from the display is the half that matters: putting it back would
+    // put this screen over its 22-row budget again, and the row-count test
+    // above counts an arithmetic model rather than the real `send_line` calls,
+    // so it would not notice.
+    assert!(
+        !body.contains("self.cyan(\"D\")"),
+        "D moved to the modem screen; displaying it here again exceeds 22 rows"
+    );
+    assert!(body.contains("\"d\" => "), "D must still be accepted where it used to live");
+    assert!(hint.contains('D'), "a key that still works must stay in the hint");
+}
+
+/// The CP/M modem-profile screen: header(3) + blank + port + blank + 7 actions
+/// + blank + Back + prompt = 16.
+///
+/// The fourth screen split off the CP/M settings menu, and the reason is the
+/// one the row-count test above states: that menu is exactly on the 22-row
+/// PETSCII budget, so a new question brings its own screen. This one swapped
+/// `D` out rather than adding a row, so the parent is unchanged in size.
+///
+/// The state sits *in* the action rows (`E  Echo (E1)  ON`) rather than in a
+/// status block above them, which is what keeps this at 16 — printing six
+/// values twice would have cost six rows to say nothing new.
+#[test]
+fn test_cpm_modem_settings_row_count() {
+    let header = 3;
+    let port = 1 + 1; // blank + the port this profile belongs to
+    let actions = 1 + 7; // blank + E, V, T, X, C, S, D
+    let footer = 1 + 1 + 1; // blank + Back + prompt
+    let rows = header + port + actions + footer;
+    assert_eq!(rows, 16, "the CP/M modem screen is {rows} rows");
+    assert!(rows <= 22, "CP/M modem settings is {rows} rows, exceeds 22");
+}
+
+/// Every key that screen displays is handled and hinted, and every field of
+/// the saved profile is reachable.
+///
+/// **The point of the screen is completeness**, so the second half matters more
+/// than the first: `CpmModemProfile` has six fields, the web UI and the desktop
+/// have always edited all six, and telnet edited none. A screen that reached
+/// five would be the same defect with a smaller number.
+#[test]
+fn test_cpm_modem_settings_reaches_every_field_of_the_profile() {
+    let src = include_str!("config_ui.rs");
+    let start = src
+        .find("pub(in crate::telnet) async fn cpm_modem_settings")
+        .expect("the fn");
+    let end = src[start..]
+        .find("pub(in crate::telnet) async fn cpm_printer_settings")
+        .expect("the next fn")
+        + start;
+    let body = &src[start..end];
+
+    let hint = "Press E, V, T, X, C, S, D, or Q.";
+    assert!(body.contains(hint), "the error hint must list every key");
+    for key in ["E", "V", "T", "X", "C", "S", "D"] {
+        assert!(
+            body.contains(&format!("self.cyan(\"{key}\")")),
+            "{key} must be a displayed menu item"
+        );
+        assert!(
+            body.contains(&format!("\"{}\" => ", key.to_ascii_lowercase())),
+            "{key} is displayed but never handled"
+        );
+        assert!(hint.contains(key), "{key} is displayed but missing from the hint");
+    }
+
+    // Every persisted field of the profile is written by some key here. The
+    // config keys are the honest list: they are what the web UI edits and what
+    // `AT&W` saves, so a field added to `CpmModemProfile` shows up as a key
+    // this screen does not mention.
+    for key in [
+        "cpm_emu_echo",
+        "cpm_emu_verbose",
+        "cpm_emu_quiet",
+        "cpm_emu_x_code",
+        "cpm_emu_dcd_mode",
+        "cpm_emu_s_regs",
+    ] {
+        assert!(
+            body.contains(key),
+            "{key} is part of the saved profile but this screen cannot set it"
+        );
+    }
+
+    // `Q` is Back on every screen in this file, which is why quiet is `T`.
+    assert!(
+        !body.contains("self.cyan(\"Q\")"),
+        "Q is Back here; a Quiet toggle bound to it would shadow the way out"
+    );
 }
 
 /// The CP/M printer screen: header(3) + blank + 2 status + blank + up to 3

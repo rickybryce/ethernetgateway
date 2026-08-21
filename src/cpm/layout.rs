@@ -225,10 +225,10 @@ Mounting puts the image on one of the sixteen CP/M drives.  You keep the
 gateway's own CP/M, its A> prompt and its terminals; the drive you mount on
 reads and writes the filesystem inside the image instead of its folder.
 
-  Telnet or SSH   main menu C (Configuration), then O (Other Settings),
-                  then E (CP/M settings), then I (Mount/unmount disk
-                  images), then M (Mount an image).  Pick a drive
-                  letter, then a file.  N makes a blank disk instead.
+  Telnet or SSH   C (Configuration), C (CP/M Settings), then I
+                  (Mount/unmount disk images), then M (Mount an image).
+                  Pick a drive letter, then a file.  N makes a blank
+                  disk instead.
   Web UI          the \"AI, Browser, Weather & CP/M - More...\" panel, then
                   the \"Mount CP/M Drives\" button.
   Desktop         the \"Mount CP/M Drives...\" button, which opens a window
@@ -1007,6 +1007,35 @@ mod tests {
         assert!(
             !text.contains("These are MITS 88-DCDD floppies"),
             "the prose must not narrow what the list says"
+        );
+    }
+
+    /// **The readme's telnet route to the CP/M screen must be one route.**
+    ///
+    /// It gave two. The mounting section said `C (Configuration)`, then
+    /// `O (Other Settings)`, then `E (CP/M settings)`; the boot section, forty
+    /// lines later, said `C (Configuration), C (CP/M Settings)`. The second is
+    /// what the menu does -- measured by driving it -- so the first sent an
+    /// operator into Other Settings, where there is no CP/M entry at all and
+    /// `E` is not a key. It had presumably been right once and outlived a menu
+    /// reshuffle, which is exactly what a second copy of a route does.
+    ///
+    /// Pinned as *absence of the stale phrasing* plus *both sections naming the
+    /// same two keys*, because the failure was disagreement rather than a wrong
+    /// value: a test asserting only that the right path appears would have
+    /// passed the whole time the wrong one sat above it.
+    #[test]
+    fn test_the_readme_gives_one_route_to_the_cpm_screen() {
+        let text = images_readme();
+        assert!(
+            !text.contains("O (Other Settings)"),
+            "the CP/M screen is reached with C from Configuration; Other Settings has no CP/M entry"
+        );
+        let route = "C (Configuration), C (CP/M Settings)";
+        let hits = text.matches(route).count();
+        assert!(
+            hits >= 2,
+            "both the mounting and the boot section must name the same route, found {hits}"
         );
     }
 

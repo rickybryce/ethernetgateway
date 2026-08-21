@@ -9,7 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.4] - Unreleased
 
+### Added
+
+- **Telnet can edit the CP/M virtual modem's saved Hayes profile.** The six
+  values the guest stores with `AT&W` — `ATE` echo, `ATV` verbose, `ATQ` quiet,
+  `ATX` result level, `AT&C` DCD and the S-registers — were editable in the web
+  UI and on the desktop, and in telnet only *written* when the guest saved them.
+  So the one surface a C64 or an SC126 actually reaches was the one that could
+  not repair a profile, and a guest that had stored `ATQ1` came up silent with
+  no way back but to know that and undo it from inside the emulator, or to edit
+  `egateway.conf` by hand.
+
+  The CP/M settings screen sits exactly on the 22-row PETSCII budget, so the
+  rule its row-count test states applies: a new question brings its own screen.
+  `M` opens **CP/M Modem Profile** (16 rows) and takes `D`, *Default modem
+  port*, with it — a rare one-shot, where `U`'s port cycling is the key an
+  operator reaches for, so the swap is one for one and the parent screen is
+  unchanged in size. `D` still works if pressed on the parent, the same courtesy
+  `G` gets. Each value sits in its own action row rather than in a status block
+  above them, which is what keeps the new screen to 16.
+
+  Verified on a live 40-column PETSCII session: every row fits, the toggles
+  persist to the config file, and `X`/`&C` cycle within the ranges the
+  emulator's own AT parser accepts.
+
 ### Fixed
+
+- **The images readme gave two different telnet routes to the CP/M screen.**
+  The mounting section said `C (Configuration)`, then `O (Other Settings)`, then
+  `E (CP/M settings)`; the boot section forty lines below said
+  `C (Configuration), C (CP/M Settings)`. The second is what the menu does, so
+  the first walked an operator into Other Settings, which has no CP/M entry and
+  no `E` key. Found by driving the menu rather than reading it. A test now pins
+  that both sections name the same two keys and that the stale phrasing is gone
+  — the failure was self-disagreement, so asserting only that the correct route
+  appears would have passed the entire time the wrong one sat above it.
 
 - **A relayed `ATDT` answered `CONNECT` before the master had dialled
   anything.** The slave turns the relay hello straight into a modem `CONNECT`

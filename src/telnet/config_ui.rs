@@ -720,9 +720,26 @@ impl TelnetSession {
                 self.cyan("U")
             ))
             .await?;
+            // **The AT profile needed a home and this screen has no spare row.**
+            // The saved Hayes state (E/V/Q/X/&C/S) was editable in the web UI
+            // and on the desktop (the "AI, Browser, Weather & CP/M - More..."
+            // popup) but nowhere in telnet, which only *persisted* it when the
+            // guest ran `AT&W` -- so the one surface a C64 or an SC126 actually
+            // reaches was the one that could not repair a profile. This screen
+            // sits exactly on the 22-row PETSCII budget, so the rule its
+            // row-count test states applies: a new question brings its own
+            // screen.
+            //
+            // `D` is what moved, and it is the right one to move: it is a rare
+            // one-shot ("put the port back to the default"), where `U` is the
+            // cycling key an operator actually reaches for. Swapping one for
+            // one keeps the row count identical. `D` still works if pressed
+            // here -- the same courtesy `G` gets, since a key that works while
+            // unlisted costs nothing and one that is listed and dead is the
+            // drift the key test exists to catch.
             self.send_line(&format!(
-                "  {}  Default modem port (pairs with EGT8080)",
-                self.cyan("D")
+                "  {}  Modem profile and default port",
+                self.cyan("M")
             ))
             .await?;
             self.send_line(&format!(
@@ -793,6 +810,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "m" => self.cpm_modem_settings().await?,
                 "u" => {
                     // Cycle to the next virtual-modem port profile.
                     let keys: Vec<&str> =
@@ -825,7 +843,7 @@ impl TelnetSession {
                 _ => {
                     // Every displayed key belongs in this hint; I and B were
                     // each missing from it once.
-                    self.show_error("Press E, C, D, U, I, B, P, G, or Q.").await?;
+                    self.show_error("Press E, C, D, M, U, I, B, P, G, or Q.").await?;
                 }
             }
         }
@@ -986,6 +1004,159 @@ impl TelnetSession {
     /// than one on each parent, because the pair only makes sense read together:
     /// the port does nothing unless the format is on, and saying so needs a row
     /// neither parent had.
+    /// The CP/M virtual modem's saved Hayes profile — the `AT&W` state.
+    ///
+    /// **Parity, not a new feature.** These six values (`ATE`, `ATV`, `ATQ`,
+    /// `ATX`, `AT&C` and the S-registers) have always been persisted and have
+    /// always been editable in the web UI; telnet only wrote them when the
+    /// guest saved, and the desktop showed nothing. A profile is exactly the
+    /// thing an operator needs to *repair* from outside — a guest that stored
+    /// `ATQ1` answers nothing on its next boot, and the only way back was to
+    /// know that and undo it from inside the emulator, or hand-edit the config
+    /// file. Same reasoning as the serial ports' own advanced panel, which all
+    /// three surfaces have had for far longer.
+    ///
+    /// The state lives in the action rows rather than a status block above
+    /// them: this is a screen of toggles, and printing each value twice would
+    /// have cost six rows for nothing. Sixteen rows, so there is room here for
+    /// the flow/DTR pair if the virtual modem ever grows them.
+    pub(in crate::telnet) async fn cpm_modem_settings(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+            let m = &cfg.cpm_emu_modem;
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("CP/M MODEM PROFILE")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            // The port this profile belongs to, for context — it is cycled with
+            // `U` on the screen above, not here, so it is shown and not offered.
+            let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };
+            self.send_line(&format!(
+                "  Port:  {}",
+                self.amber(&truncate_to_width(
+                    crate::cpm::uart::uart_description(&cfg.cpm_emu_uart),
+                    w
+                ))
+            ))
+            .await?;
+            self.send_line("").await?;
+
+            // A 14-column label field puts every value in one column on a
+            // 40-column screen: two indent + key + two = 5, plus 14, leaves 21
+            // for the value, which only the S-registers can fill.
+            let on = |b: bool| if b { "ON" } else { "off" };
+            self.send_line(&format!(
+                "  {}  {:<14}{}",
+                self.cyan("E"),
+                "Echo (E1)",
+                self.amber(on(m.echo))
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  {:<14}{}",
+                self.cyan("V"),
+                "Verbose (V1)",
+                self.amber(on(m.verbose))
+            ))
+            .await?;
+            // `T` for quiet, because `Q` is Back on every screen here.
+            self.send_line(&format!(
+                "  {}  {:<14}{}",
+                self.cyan("T"),
+                "Quiet (Q1)",
+                self.amber(on(m.quiet))
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  {:<14}{}",
+                self.cyan("X"),
+                "Result (X)",
+                self.amber(&m.x_code.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  {:<14}{}",
+                self.cyan("C"),
+                "DCD (&C)",
+                self.amber(&m.dcd_mode.to_string())
+            ))
+            .await?;
+            // Blank means the power-on values, which is a real answer and not
+            // an empty field — say so rather than printing nothing.
+            let sregs = if m.s_regs.trim().is_empty() {
+                self.dim("(power-on)")
+            } else {
+                // 20, not the 21 the arithmetic allows: the five-column prefix
+                // plus a 14-column label plus 21 is exactly 40, and every other
+                // truncated row on these screens stops one short of the C64's
+                // last column rather than filling it.  Measured at 40 before
+                // this was trimmed.
+                let sw = if self.terminal_type == TerminalType::Petscii { 20 } else { 55 };
+                self.amber(&truncate_to_width(&m.s_regs, sw))
+            };
+            self.send_line(&format!("  {}  {:<14}{}", self.cyan("S"), "S-registers", sregs))
+                .await?;
+            self.send_line(&format!(
+                "  {}  {}",
+                self.cyan("D"),
+                "Default modem port"
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
+                .await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/modem"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            // One helper for the three booleans and the two cycles: every one of
+            // them is "write the next value and redraw", and writing that out
+            // five times is how two of them come to disagree about clamping.
+            let set = |key: &'static str, value: String| async move {
+                tokio::task::spawn_blocking(move || {
+                    config::update_config_value(key, &value);
+                })
+                .await
+                .ok();
+            };
+
+            match input.as_str() {
+                "e" => set("cpm_emu_echo", (!m.echo).to_string()).await,
+                "v" => set("cpm_emu_verbose", (!m.verbose).to_string()).await,
+                "t" => set("cpm_emu_quiet", (!m.quiet).to_string()).await,
+                // The same ranges the emulator's own AT parser accepts, so a
+                // value set here can never be one the guest would reject.
+                "x" => set("cpm_emu_x_code", ((m.x_code + 1) % 5).to_string()).await,
+                "c" => set("cpm_emu_dcd_mode", ((m.dcd_mode + 1) % 2).to_string()).await,
+                "s" => {
+                    self.other_set_field(
+                        "S-registers S0..S27 (blank = power-on)",
+                        "cpm_emu_s_regs",
+                        &m.s_regs,
+                        false,
+                    )
+                    .await?;
+                }
+                "d" => set("cpm_emu_uart", crate::cpm::uart::DEFAULT_UART.to_string()).await,
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press E, V, T, X, C, S, D, or Q.").await?;
+                }
+            }
+        }
+    }
+
     pub(in crate::telnet) async fn cpm_printer_settings(&mut self) -> Result<(), std::io::Error> {
         loop {
             let cfg = config::get_config();
