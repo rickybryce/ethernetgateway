@@ -756,16 +756,21 @@
 
                 <div class="cat">First Run</div>
                 <p class="dim-text">
-                    When launched for the first time, Ethernet Gateway creates a configuration
-                    file (<code>egateway.conf</code>) and the <code>transfer/</code> directory
-                    automatically.
+                    When launched for the first time, Ethernet Gateway creates a single
+                    <code>ethernetgateway-data</code> folder in the directory it was launched
+                    from, and puts the configuration file, the log and the transfer directory
+                    inside it. The <code>Data directory:</code> line names that folder as a
+                    full path &mdash; deliberately, since every other message names it
+                    relatively and two copies started from different directories could not
+                    otherwise be told apart.
                 </p>
                 <pre><code><span class="prompt-char">$</span> ./ethernetgateway
 <span class="output-text">Ethernet Gateway v0.9.4
 Author: Ricky Bryce
 
-Created default configuration: egateway.conf
-Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></code></pre>
+Data directory: /home/you/ethernetgateway-data
+Logging to ethernetgateway-data/ethernetgateway.log &mdash; v0.9.4 (rotate at 1024 KB, keep 5 old, max 6144 KB on disk)
+Config: telnet=true, port=2323, security=false, transfer_dir=ethernetgateway-data/transfer</span></code></pre>
 
                 <div class="callout callout-tip">
                     <strong>Tip:</strong> The GUI console window opens by default. Closing
@@ -1704,7 +1709,7 @@ telnet_port = 2323
 security_enabled = false
 username = admin
 password = changeme
-transfer_dir = transfer
+transfer_dir = ethernetgateway-data/transfer
 max_sessions = 50
 idle_timeout_secs = 900
 ssh_enabled = false
@@ -1713,12 +1718,12 @@ web_enabled = false
 web_port = 8080
 groq_api_key =
 browser_homepage = http://telnetbible.com
-weather_zip =
+weather_location =
 verbose = false
 enable_console = true
 setup_wizard_completed = false   # the setup wizard runs while this is false
 log_to_file = true               # also write the log to a file, not just stderr
-log_file = ethernetgateway.log
+log_file = ethernetgateway-data/ethernetgateway.log
 log_max_size_kb = 1024           # rotate at this size; 0 = never rotate
 log_max_files = 5                # older generations are DELETED (0 = keep none)
 

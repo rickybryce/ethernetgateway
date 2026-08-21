@@ -5861,6 +5861,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **The manual's sample configuration must be a real default config.**
+    ///
+    /// The manual prints a `# Ethernet Gateway Configuration` block as "what
+    /// you get on first launch", and it is hand-maintained, so it drifts every
+    /// time a default moves. It has now done so twice. The 0.9.4 data-directory
+    /// move left `transfer_dir = transfer` and `log_file = ethernetgateway.log`
+    /// in it -- both a directory level short, in the very section whose prose
+    /// explains that everything moved -- and `weather_zip` was still there, the
+    /// legacy spelling of `weather_location`, still accepted by the parser but
+    /// no longer what anybody should be taught to write. A sweep at the time
+    /// caught the same class of error in the manual's `<tr>` rows and missed
+    /// these, because this block is a `<pre><code>`: the scan looked at tables.
+    ///
+    /// So the scan is the file, not the markup. Every `key = value` line in the
+    /// manual is compared against a config file this code really wrote from
+    /// [`Config::default`] -- the same bytes an operator's first launch
+    /// produces. A default that changes without the manual following it fails
+    /// here.
+    ///
+    /// Deliberately one-directional: the manual is an *excerpt* and is allowed
+    /// to omit keys (it shows about thirty of eighty). What it may not do is
+    /// state one and be wrong. Compare with
+    /// `telnet::tests::test_manual_describes_weather_as_worldwide`, which pins
+    /// one prose claim; this pins every value.
+    #[test]
+    fn test_the_manual_sample_config_matches_the_real_defaults() {
+        let dir = std::env::temp_dir().join(format!("egw_manual_cfg_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("defaults.conf");
+        write_config_file(path.to_str().unwrap(), &Config::default()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        // What the gateway really writes, key -> value.
+        let mut real: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for line in written.lines() {
+            let line = line.trim();
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                real.insert(k.trim(), v.trim());
+            }
+        }
+        assert!(real.len() > 50, "the writer emitted only {} keys", real.len());
+
+        let manual = include_str!("../web/index.html").replace("\r\n", "\n");
+        // The sample block, not the whole page: prose elsewhere legitimately
+        // mentions a key beside a value that is an example rather than the
+        // default ("set web_port = 9000", say).
+        let block = manual
+            .split_once("# Ethernet Gateway Configuration")
+            .expect("the manual must still carry a sample configuration block")
+            .1
+            .split_once("</code></pre>")
+            .expect("the sample block must be closed")
+            .0;
+
+        let mut checked = 0usize;
+        let mut wrong = Vec::new();
+        for line in block.lines() {
+            // Strip the manual's trailing `#` annotations and any stray markup.
+            let text = line.split('<').next().unwrap_or("").trim();
+            let text = text.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = text.split_once('=') else { continue };
+            let (k, v) = (k.trim(), v.trim());
+            if !k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                continue;
+            }
+            let Some(&actual) = real.get(k) else {
+                // A key the writer does not emit is a key the manual invented
+                // or one that has been removed -- `weather_zip` was exactly
+                // this, and the parser still accepting it is what hid it.
+                wrong.push(format!("{k}: the manual documents it, the gateway writes no such key"));
+                continue;
+            };
+            checked += 1;
+            if actual != v {
+                wrong.push(format!("{k}: manual says {v:?}, a default config says {actual:?}"));
+            }
+        }
+
+        assert!(checked >= 20, "only matched {checked} keys -- the scan has stopped finding the block");
+        assert!(
+            wrong.is_empty(),
+            "the manual's sample configuration disagrees with the real defaults:\n  {}",
+            wrong.join("\n  ")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
     /// A failed file write is reported (not silently swallowed), so an
     /// explicit Save can tell the user persistence did not happen.
     ///

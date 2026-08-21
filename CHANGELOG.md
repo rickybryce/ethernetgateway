@@ -11,6 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The images-folder readme never mentioned that the gateway can fetch the
+  disks for you.** Reported: `CPM/images/readme.txt` reads as though the only
+  way to get disks is to go to GitHub and copy files in by hand. It was written
+  before the downloader existed and never followed it — the feature shipped,
+  all three disk screens grew a "Download sample disks" button, and
+  `web/cpmreference.html` gained a paragraph about it, while the one file
+  sitting *in the images folder*, which is the first thing anybody looking at an
+  empty folder reads, went on sending them to fetch 34 disks manually.
+
+  `WHERE TO GET IMAGES` now leads with the offer and names where it is on each
+  of the three surfaces. The disk count, the total size and the repository list
+  are **rendered from the manifest the downloader really reads** rather than
+  typed into prose — the same rule this file already applied to the format
+  table, and the half that rots is always the one a human maintains beside a
+  list the code maintains. z80pack is called out as the collection the offer
+  does *not* cover, with a test that fails if it ever joins. Existing readmes
+  refresh themselves on next launch (verified live), because this file is
+  instructions rather than an operator's own work.
+
+- **The manual's sample configuration disagreed with the real defaults.** The
+  0.9.4 data-directory move left `transfer_dir = transfer` and
+  `log_file = ethernetgateway.log` in it — both one directory level short, in
+  the very section whose prose explains that everything moved — and
+  `weather_zip` was still listed, the legacy spelling of `weather_location`
+  that the parser still accepts and nobody should now be taught to write. The
+  sweep that caught this class at the time looked at the manual's `<tr>` rows
+  and missed these, because this block is a `<pre><code>`.
+
+  The manual's first-launch example was stale the same way: it claimed the
+  gateway creates `egateway.conf` and `transfer/`, and omitted both the
+  `Data directory:` and `Logging to` lines that 0.9.4 added. It now matches what
+  the binary actually prints. `test_the_manual_sample_config_matches_the_real_
+  defaults` compares every `key = value` line in the manual against a config
+  file written from `Config::default()` — so the scan is the file rather than
+  the markup, and a default that moves without the manual following it fails.
+
+- **CLAUDE.md still described booting as read-only.** `cpm_boot_writable` has
+  defaulted to `true` since 0.9.3; the guidance file said the opposite for two
+  releases, which is the costlier place for that claim to be wrong because it is
+  what steers work on the feature.
+
 - **The mount screens now name the disk that has slot 0.** Reported: with
   `CP/M runs: Boot HDSK04.DSK`, the first mount row showed `(drive folder)` next
   to a note reading "the booted disk is here" — two statements that contradict

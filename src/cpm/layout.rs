@@ -362,8 +362,47 @@ WHERE TO GET IMAGES
 -------------------
 
 The gateway ships no disk images.  They are not ours to distribute; the
-collections below are maintained by other people, under their own terms,
-and are worth getting from the source.
+collections below are maintained by other people, under their own terms.
+
+THE GATEWAY CAN FETCH MOST OF THEM FOR YOU, so the rest of this section is
+only needed for the ones it does not cover.  Every disk screen offers to
+download the sample disks:
+
+  Telnet or SSH   the mount screen's  D  option
+  Web UI          the \"Download sample disks\" button
+  Desktop         the \"Download sample disks\" button
+
+",
+    );
+    // The count, the size and the repositories are rendered from the manifest
+    // the downloader actually reads, never typed out here -- the same rule as
+    // the format table above, and for the same reason.  This section named no
+    // download at all until 2026-08-21: the feature shipped, three screens grew
+    // a button, and the file sitting next to the disks went on sending the
+    // operator to GitHub by hand.  A sentence a human maintains beside a list
+    // the code maintains is the half that rots.
+    let all = super::fetch::catalogue();
+    let megabytes = all.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+    s.push_str(&format!(
+        "\
+That brings {} disks and about {:.0} MB into this folder: the ones this
+gateway is known to run, fetched on your behalf from
+",
+        all.len(),
+        megabytes
+    ));
+    for repo in super::fetch::source_repos() {
+        s.push_str(&format!("    {repo}\n"));
+    }
+    s.push_str(
+        "\
+pinned to a commit and checked against a recorded SHA-256, so what arrives
+is what was tested.  Disks carrying no boot program of their own are left
+out.  Nothing already in this folder is overwritten - a disk you have
+edited, or put here yourself under the same name, is kept.
+
+Those are the collections marked below.  z80pack is not part of the offer
+and is still worth fetching by hand:
 
   z80pack - Udo Munk
     https://github.com/udo-munk/z80pack
@@ -373,7 +412,7 @@ and are worth getting from the source.
     All are 256,256 bytes; the CP/M ones are the ibm3740 layout this
     gateway reads, and the rest (UCSD p-System) boot but do not mount.
 
-  Altair 8800 Simulator - David Hansel
+  Altair 8800 Simulator - David Hansel            (in the download)
     https://github.com/dhansel/Altair8800
     The  disks  folder holds the MITS Altair, Tarbell and Cromemco
     collections.  All of them boot, and all but the BASIC and DOS ones
@@ -381,7 +420,7 @@ and are worth getting from the source.
     the three CDISKnn are Cromemco - single density, and the two
     double-density formats added by measuring the disks themselves.
 
-  Altair-Duino-Disks - J.P. McNeely
+  Altair-Duino-Disks - J.P. McNeely               (in the download)
     https://github.com/jpmcneely/AltairDuino-Disks
     Hard-disk images for the Altair-Duino, including BASIC, COBOL and
     dBase II.  These are the altairhd format.
@@ -968,6 +1007,77 @@ mod tests {
         assert!(
             !text.contains("These are MITS 88-DCDD floppies"),
             "the prose must not narrow what the list says"
+        );
+    }
+
+    /// **The readme must offer the download the gateway actually has.**
+    ///
+    /// Reported 2026-08-21. `WHERE TO GET IMAGES` sent the operator to GitHub to
+    /// copy files in by hand, and had done since before the downloader existed:
+    /// the feature shipped, all three disk screens grew a "Download sample
+    /// disks" button, `web/cpmreference.html` gained a paragraph about it, and
+    /// the one file sitting *in the images folder* — the first thing anybody
+    /// looking at an empty folder reads — never mentioned it.
+    ///
+    /// The same shape as the format table two tests up, and the same fix: the
+    /// count, the size and the repository list are rendered from
+    /// [`super::super::fetch`], so the offer cannot describe a downloader other
+    /// than the one that runs. What is asserted here is the part prose still
+    /// owns — that the section names the offer at all, and names the surfaces
+    /// it is on.
+    #[test]
+    fn test_readme_offers_the_download_the_gateway_has() {
+        let text = images_readme();
+
+        // The offer, and the three places it is made.  A reader on any one
+        // surface must find their own.
+        // **Scoped to the section, not to the file.** Each of these three
+        // surface names appears two or three times in this readme already (the
+        // mount instructions and the boot instructions both list all three), so
+        // a whole-file `contains` passes with the download block gutted -- which
+        // it did, when the first version of this test was mutation-checked by
+        // replacing the Web UI line with "the mount panel". Cut the block out
+        // and ask it directly.
+        let block = text
+            .split_once("download the sample disks:")
+            .map(|(_, rest)| rest.split_once("\nThat brings").map(|(b, _)| b).unwrap_or(rest))
+            .expect("the download offer must be a findable section");
+        assert!(
+            block.contains("Download sample disks"),
+            "the offer must name the button by the label the screens really use: {block:?}"
+        );
+        for surface in ["Telnet or SSH", "Web UI", "Desktop"] {
+            assert!(
+                block.contains(surface),
+                "the download offer must tell a {surface} reader where the button is: {block:?}"
+            );
+        }
+
+        // Rendered from the manifest, so the numbers cannot drift from it.
+        let all = super::super::fetch::catalogue();
+        assert!(!all.is_empty(), "a manifest with no disks would make the offer a lie");
+        assert!(
+            text.contains(&format!("brings {} disks", all.len())),
+            "the disk count must come from the catalogue ({})",
+            all.len()
+        );
+
+        // Every repository the downloader really fetches from is named.  Adding
+        // a source without documenting it fails here.
+        for repo in super::super::fetch::source_repos() {
+            assert!(text.contains(&repo), "the download does not name its source {repo}");
+        }
+
+        // z80pack is *not* in the offer, and the readme must not fold it in:
+        // an operator told the button covers it would wait for disks that never
+        // arrive.
+        assert!(
+            text.contains("z80pack is not part of the offer"),
+            "the one collection the download does not cover must say so"
+        );
+        assert!(
+            !super::super::fetch::source_repos().iter().any(|r| r.contains("z80pack")),
+            "if z80pack ever joins the download, the sentence above is wrong"
         );
     }
 
