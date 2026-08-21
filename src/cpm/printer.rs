@@ -64,7 +64,8 @@ pub const PRINTER_TEXT: &str = "text";
 /// Text rather than `odt` because it is the format that cannot disappoint: any
 /// editor opens it, it is what most CP/M printing actually is, and an operator
 /// who wants the formatting that overstrike carries — bold and underline — can
-/// say so. Both write into `transfer/printer/`, never onto a CP/M drive.
+/// say so. Both write into a `printer` folder inside the transfer directory,
+/// never onto a CP/M drive.
 pub const DEFAULT_PRINTER: &str = PRINTER_TEXT;
 
 /// The choices for `cpm_printer`, `(value, label)`.
@@ -72,13 +73,27 @@ pub const DEFAULT_PRINTER: &str = PRINTER_TEXT;
 /// One list for telnet, web and the desktop, the way
 /// [`super::uart::UART_CHOICES`] serves the virtual modem — so the three
 /// cannot offer different answers.
+/// **A shared label must fit the narrowest surface that shows it, and these are
+/// shown on a C64.** The telnet screen renders this value through
+/// `truncate_to_width` at **26 columns** on PETSCII, so a longer label does not
+/// wrap -- it silently loses its tail. These three used to end in
+/// `transfer/printer/`, which put the one thing the operator needed (where the
+/// document went) exactly where a 40-column client cuts -- and which stopped
+/// being true anyway when the transfer directory moved under
+/// `ethernetgateway-data`. A literal path in a shared label can only ever be
+/// right for one `transfer_dir`, and it was not even right for the default.
+///
+/// So the label names the *format* and nothing else. Where the document lands is
+/// said once per surface, from the live setting: the telnet screen's note rows,
+/// the web hint and the desktop's hover text all describe a `printer` folder
+/// inside the transfer directory.
+/// `test_the_printer_screen_labels_survive_a_40_column_client` holds the width
+/// and, more importantly, that no two labels truncate to the same text -- two
+/// settings that read identically on a C64 are worse than a lost tail.
 pub const PRINTER_CHOICES: &[(&str, &str)] = &[
-    // `transfer/printer/`, with both slashes: it is a path, and written as
-    // "transfer printer/" it read as a description of a folder rather than the
-    // place to go and find the document.
-    (PRINTER_OFF, "Off - printer output goes to the screen"),
-    (PRINTER_ODT, "OpenDocument (.odt) in transfer/printer/"),
-    (PRINTER_TEXT, "Plain text (.txt) in transfer/printer/"),
+    (PRINTER_OFF, "Off - to the screen"),
+    (PRINTER_ODT, "OpenDocument (.odt) file"),
+    (PRINTER_TEXT, "Plain text (.txt) file"),
 ];
 
 /// A printer board a *booted* disk can drive: where its data register lives.
@@ -140,7 +155,9 @@ pub const DEFAULT_PRINTER_PORT: &str = "altair_c";
 /// ever disagrees says so instead of quietly printing nonsense.
 pub const PORT_CHOICES: &[PrinterPort] = &[PrinterPort {
     key: "altair_c",
-    label: "Altair line printer, data 03h (BASIC's 'C')",
+    // Name then port, inside 26 columns: see `PRINTER_CHOICES` for why the tail
+    // of a label is not a safe place to keep something the operator needs.
+    label: "Altair line printer - 03h",
     data: 0x03,
     auto_lf: true,
 }];
@@ -151,7 +168,7 @@ pub const PORT_CHOICES: &[PrinterPort] = &[PrinterPort {
 /// [`PRINTER_CHOICES`] is one list: this label was hand-copied into the telnet
 /// screen, the web page and the desktop, and three copies of a string are three
 /// chances to describe the same setting differently.
-pub const PORT_OFF_LABEL: &str = "No printer on a booted disk";
+pub const PORT_OFF_LABEL: &str = "No printer on booted disk";
 
 /// The label for a `cpm_printer` value, falling back to the `off` one.
 ///
@@ -189,9 +206,9 @@ pub const DEFAULT_PRINTER_AUTOLF: &str = AUTOLF_AUTO;
 
 /// The choices for `cpm_printer_autolf`, `(value, label)`.
 pub const AUTOLF_CHOICES: &[(&str, &str)] = &[
-    (AUTOLF_AUTO, "Auto - what the printer expects"),
-    (AUTOLF_ON, "On - a bare CR ends the line"),
-    (AUTOLF_OFF, "Off - a bare CR overprints"),
+    (AUTOLF_AUTO, "Auto - what it expects"),
+    (AUTOLF_ON, "On - bare CR ends the line"),
+    (AUTOLF_OFF, "Off - bare CR overprints"),
 ];
 
 /// Should a bare CR advance the paper, given the setting and the printer's own

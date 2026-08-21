@@ -592,7 +592,7 @@ pub(crate) fn is_esc_key(byte: u8, petscii: bool) -> bool {
     byte == 0x1B || (petscii && byte == 0x5F)
 }
 
-use crate::webbrowser::truncate_to_width;
+use crate::webbrowser::{truncate_path_to_width, truncate_to_width};
 
 /// Return the private (RFC 1918 / link-local / ULA) IPv4 and IPv6
 /// addresses of this machine, excluding loopback.

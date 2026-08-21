@@ -865,7 +865,7 @@ impl TelnetSession {
             let path_shown = if cfg.log_file.trim().is_empty() {
                 self.dim("(not set)")
             } else {
-                self.amber(&truncate_to_width(&cfg.log_file, path_w))
+                self.amber(&truncate_path_to_width(&cfg.log_file, path_w))
             };
             self.send_line(&format!("  File:      {}", path_shown)).await?;
             let size_shown = if cfg.log_max_size_kb == 0 {
@@ -1030,14 +1030,20 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.dim("Printer output goes to your"))).await?;
                 self.send_line(&format!("  {}", self.dim("screen, as it always has."))).await?;
             } else {
-                // Names the folder: the operator has to go somewhere to fetch
-                // this, and "the transfer folder" would send them to the root,
-                // where it is not.  The widths of every fixed row on this screen
-                // are held by `test_cpm_printer_screen_literals_fit_petscii`
-                // rather than by a number in a comment here.
-                self.send_line(&format!("  {}", self.dim("A document lands in your"))).await?;
-                self.send_line(&format!("  {}", self.dim("transfer/printer/ folder, 5s"))).await?;
-                self.send_line(&format!("  {}", self.dim("after the last character."))).await?;
+                // Names the folder, because the operator has to go somewhere to
+                // fetch this and "the transfer folder" would send them to the
+                // root, where it is not.  **Not spelled `transfer/printer/`**:
+                // that read as a path from the launch directory, and since the
+                // tree moved under `ethernetgateway-data` it was one -- a wrong
+                // one.  The folder's name is the part that is always true; which
+                // transfer directory it sits in is the operator's own setting,
+                // shown on the file-transfer screen.  The widths of every fixed
+                // row here are held by
+                // `test_cpm_printer_screen_literals_fit_petscii`.
+                self.send_line(&format!("  {}", self.dim("A document lands in the"))).await?;
+                self.send_line(&format!("  {}", self.dim("printer/ folder of your"))).await?;
+                self.send_line(&format!("  {}", self.dim("transfer dir, 5s after the"))).await?;
+                self.send_line(&format!("  {}", self.dim("last character."))).await?;
             }
             self.send_line("").await?;
             self.send_line(&format!("  {}  Cycle where printing goes", self.cyan("P"))).await?;

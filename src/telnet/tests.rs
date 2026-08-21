@@ -3182,6 +3182,129 @@ fn test_cpm_printer_screen_literals_fit_petscii() {
     );
 }
 
+/// **A path row must show the end of the path, not the beginning.**
+///
+/// The transfer screens and the log-file row render a path through a 26-column
+/// PETSCII budget. Right-truncating it spends every one of those columns on the
+/// constant base and hides the only part that answers the question the row is
+/// there to answer — and the data-directory move made the base 30 columns on its
+/// own, so a C64 operator saw the same `ethernetgateway-data/tr...` at the root
+/// and three levels down.
+///
+/// Same lesson as `cpm_runs_row`'s `(missing)` marker: when what is new sits at
+/// the end of the line, a naive truncation deletes exactly it.
+#[test]
+fn test_a_path_row_keeps_its_tail_on_a_40_column_screen() {
+    use crate::webbrowser::{truncate_path_to_width, truncate_to_width};
+    const PETSCII_PATH_W: usize = 26;
+
+    // The shipped default, at the root and inside a sub-directory — read from
+    // `Config::default()` so the test moves with the default rather than
+    // carrying a second copy of it.
+    let base = crate::config::Config::default().transfer_dir;
+    let root = format!("{base}/");
+    let deep = format!("{base}/CPM/images/");
+
+    // The old behaviour is the bug, pinned so the two cannot be confused: at
+    // this width the head-truncation is *identical* for both.
+    assert_eq!(
+        truncate_to_width(&root, PETSCII_PATH_W),
+        truncate_to_width(&deep, PETSCII_PATH_W),
+        "the head of these two paths is the same — which is why keeping the head is wrong"
+    );
+
+    // The fix: different, and each ends in the part that identifies it.
+    let root_shown = truncate_path_to_width(&root, PETSCII_PATH_W);
+    let deep_shown = truncate_path_to_width(&deep, PETSCII_PATH_W);
+    assert_ne!(root_shown, deep_shown);
+    assert!(root_shown.ends_with("transfer/"), "{root_shown:?}");
+    assert!(deep_shown.ends_with("/CPM/images/"), "{deep_shown:?}");
+    for shown in [&root_shown, &deep_shown] {
+        assert!(shown.chars().count() <= PETSCII_PATH_W, "{shown:?} is too wide");
+        assert!(shown.starts_with("..."), "an elided front must say so: {shown:?}");
+    }
+
+    // A path that fits is untouched — no ellipsis for its own sake.
+    assert_eq!(truncate_path_to_width("transfer/", PETSCII_PATH_W), "transfer/");
+    // And the degenerate widths cannot panic.
+    assert_eq!(truncate_path_to_width("abcdef", 3), "...");
+    assert_eq!(truncate_path_to_width("abcdef", 0), "");
+    // Multi-byte input truncates on a char boundary, like its sibling.
+    let wide = "ünïcödé/påth/ïs/löng/ënöügh/tö/cüt/";
+    assert!(truncate_path_to_width(wide, PETSCII_PATH_W).chars().count() <= PETSCII_PATH_W);
+}
+
+/// **A label shown on a C64 must survive a C64.**
+///
+/// The printer screen renders each value through `truncate_to_width` at 26
+/// columns on PETSCII, so a label longer than that does not wrap — it silently
+/// loses its tail. Three of these labels used to end in `transfer/printer/`,
+/// which put the one thing the operator needed (where the document goes) exactly
+/// where the cut falls, and which the data-directory move made wrong anyway. The
+/// fixed rows on that screen were already guarded
+/// (`test_cpm_printer_screen_literals_fit_petscii`); the *values* were not, and
+/// that is the gap this closes.
+///
+/// The width is read out of `config_ui.rs` rather than written here, so the two
+/// cannot drift apart — the same reason the row-fitting test scans the source.
+///
+/// The distinctness assertion is the one that matters most: a lost tail is a
+/// nuisance, but two settings that render as the *same text* on a C64 make the
+/// screen a liar about which one is selected.
+#[test]
+fn test_the_printer_screen_labels_survive_a_40_column_client() {
+    let src = include_str!("config_ui.rs").replace('\r', "");
+    let start = src.find("pub(in crate::telnet) async fn cpm_printer_settings").expect("the fn");
+    let body = &src[start..];
+    // `let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 60 };`
+    let marker = "TerminalType::Petscii { ";
+    let at = body.find(marker).expect("the screen's PETSCII value width");
+    let rest = &body[at + marker.len()..];
+    let width: usize = rest[..rest.find(' ').expect("a number then a space")]
+        .parse()
+        .expect("the width is a number");
+    assert!((20..=40).contains(&width), "{width} is not a plausible value column");
+
+    let mut sets: Vec<(&str, Vec<&str>)> = Vec::new();
+    sets.push((
+        "cpm_printer",
+        crate::cpm::printer::PRINTER_CHOICES.iter().map(|(_, l)| *l).collect(),
+    ));
+    sets.push((
+        "cpm_printer_autolf",
+        crate::cpm::printer::AUTOLF_CHOICES.iter().map(|(_, l)| *l).collect(),
+    ));
+    let mut boards: Vec<&str> = vec![crate::cpm::printer::PORT_OFF_LABEL];
+    boards.extend(crate::cpm::printer::PORT_CHOICES.iter().map(|p| p.label));
+    sets.push(("cpm_printer_port", boards));
+
+    for (key, labels) in &sets {
+        assert!(!labels.is_empty(), "{key} offers nothing");
+        for label in labels {
+            let cols = label.chars().count();
+            assert!(
+                cols <= width,
+                "{key}: {label:?} is {cols} columns and loses its tail at {width} \
+                 on a 40-column client — say it shorter, or say it in the note rows"
+            );
+        }
+        // Distinct *after* the cut, which is the property a C64 actually sees.
+        let mut seen: Vec<String> = Vec::new();
+        for label in labels {
+            let cut: String = label.chars().take(width).collect();
+            assert!(
+                !seen.contains(&cut),
+                "{key}: two labels both render as {cut:?} at {width} columns"
+            );
+            seen.push(cut);
+        }
+    }
+
+    // A positive control: the scan really found the lists it thinks it did.
+    assert_eq!(sets.len(), 3);
+    assert!(sets.iter().map(|(_, l)| l.len()).sum::<usize>() >= 7);
+}
+
 /// Every key the CP/M printer screen displays must also be one it handles and
 /// one its error hint names — the same three-way drift the CP/M settings screen
 /// suffered twice, guarded the same way.

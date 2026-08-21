@@ -11,6 +11,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The CP/M printer screen told a C64 the wrong place to look, and then cut the
+  answer off.** The three `cpm_printer` labels ended in `transfer/printer/` --
+  which stopped being a real path when the transfer directory moved under
+  `ethernetgateway-data`, and which a literal in a *shared* label could never be
+  right about anyway, since the folder follows whatever `transfer_dir` the
+  operator set. Worse, the telnet screen renders that value through a 26-column
+  budget on PETSCII, so the path was exactly the part a 40-column client dropped:
+  a C64 read `OpenDocument (.odt) in tra`. Measured on a live session.
+
+  The labels now name the format only (`OpenDocument (.odt) file`), and every
+  surface says where the document lands from the live setting -- the telnet note
+  rows, the web hint and the desktop's hover text all already described "a
+  `printer` folder inside the transfer directory", so the *documentation was
+  right and the code had drifted from it*, the reverse of the last three passes.
+  The board and bare-CR labels were shortened for the same reason (`Altair line
+  printer - 03h` keeps the port that `data 03h (BASIC's 'C')` lost at column 26).
+  A new test holds the rule: every label in those three lists must fit the width
+  the screen actually renders it at -- read out of the screen's own source, so
+  the two cannot drift -- and no two may truncate to the same text, because two
+  settings that read identically on a C64 are worse than a lost tail.
+
+- **A path row now shows the end of the path.** `Dir:`, `Current:`, `In:`,
+  `Now in:` and the log-file row truncate a path into 26-30 PETSCII columns, and
+  they kept the *head* -- so after the data directory move, whose default base is
+  30 columns on its own, a C64 operator changing directory saw
+  `ethernetgateway-data/tr...` at the root and three levels down, the same text
+  either way. The base is a setting they chose and can read on the configuration
+  screen; what a path row is for is the part that changes. `truncate_path_to_width`
+  drops the front instead (`...tgateway-data/transfer/CPM/`), and the test pins
+  the old behaviour as the bug: at that width the head-truncation of the root and
+  of a sub-directory are byte-for-byte identical. Same lesson as `cpm_runs_row`'s
+  `(missing)` marker -- when what is new sits at the end of the line, a naive
+  truncation deletes exactly it.
+
 - **A copy that is serving nothing now says so in its own window.** The instance
   lock closed the same-directory case, but the case it cannot close is a copy
   launched from a *different* directory -- a desktop icon while a systemd unit

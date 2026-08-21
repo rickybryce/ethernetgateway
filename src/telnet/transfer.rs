@@ -22,7 +22,7 @@ impl TelnetSession {
         } else {
             60
         };
-        let dir_str = truncate_to_width(&self.transfer_dir_display(), max_dir);
+        let dir_str = truncate_path_to_width(&self.transfer_dir_display(), max_dir);
         self.send_line(&format!("  Dir: {}", self.amber(&dir_str)))
             .await?;
         self.send_line("").await?;
@@ -2132,7 +2132,7 @@ impl TelnetSession {
             56
         };
         let dir_str =
-            truncate_to_width(&self.transfer_dir_display(), max_dir);
+            truncate_path_to_width(&self.transfer_dir_display(), max_dir);
         self.send_line(&format!(
             "  Current: {}",
             self.amber(&dir_str)
@@ -2244,7 +2244,7 @@ impl TelnetSession {
         } else {
             56
         };
-        let dir_str = truncate_to_width(&self.transfer_dir_display(), max_dir);
+        let dir_str = truncate_path_to_width(&self.transfer_dir_display(), max_dir);
         self.send_line(&format!("  In: {}", self.amber(&dir_str)))
             .await?;
         self.send_line("").await?;
@@ -2307,7 +2307,7 @@ impl TelnetSession {
                 self.transfer_subdir = format!("{}/{}", self.transfer_subdir, name);
             }
             if self.verify_transfer_path() {
-                let disp = truncate_to_width(&self.transfer_dir_display(), max_dir);
+                let disp = truncate_path_to_width(&self.transfer_dir_display(), max_dir);
                 self.send_line(&format!("  {} {}", self.dim("Now in:"), self.amber(&disp)))
                     .await?;
             } else {

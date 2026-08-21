@@ -1138,6 +1138,38 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     }
 }
 
+/// Fit a **path** into `max_width` columns by dropping the front, not the tail.
+///
+/// **A path's tail is the part that changes.** The base is a directory the
+/// operator chose once and can read on the configuration screen; what they are
+/// looking at a path row to learn is which sub-directory they are in, or which
+/// file it is. [`truncate_to_width`] keeps the head, which for a path means
+/// every row shows the same constant prefix and hides the answer.
+///
+/// It became visible when the data directory moved: the default transfer
+/// directory went from `transfer/` to `ethernetgateway-data/transfer/`, which is
+/// 30 columns of constant, and the PETSCII path rows allow 26. A C64 operator
+/// changing directory saw `ethernetgateway-data/tr...` before and after the
+/// change — the same text at the root and three levels down. Measured on a live
+/// session, not reasoned.
+///
+/// Cut exactly rather than at a component boundary: rounding to the next `/`
+/// would spend columns unpredictably, and on the narrowest screen every column
+/// is the difference between showing the sub-directory and not. The leading
+/// `...` is what says the front was dropped.
+pub(crate) fn truncate_path_to_width(s: &str, max_width: usize) -> String {
+    if s.chars().count() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let keep = max_width - 3;
+    let count = s.chars().count();
+    let tail: String = s.chars().skip(count - keep).collect();
+    format!("...{}", tail)
+}
+
 /// Return `true` if the DOM nests deeper than `limit` element levels.
 /// Iterative (explicit stack) so it never recurses, and short-circuits as
 /// soon as the limit is exceeded — safe on adversarially deep trees.
